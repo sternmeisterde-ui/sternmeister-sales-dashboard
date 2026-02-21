@@ -658,7 +658,7 @@ export default function Dashboard() {
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
                     {isLoadingAI && activeTab === "ai_calls" ? (
-                      <tr><td colSpan={activeTab === "real_calls" ? 7 : 6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
+                      <tr><td colSpan={6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">
