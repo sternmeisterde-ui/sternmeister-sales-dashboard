@@ -1,36 +1,111 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🎯 Sternmeister Sales Dashboard
 
-## Getting Started
+Современный дашборд для руководителей отделов продаж с интеграцией Kommo CRM и AI-анализом звонков.
 
-First, run the development server:
+![Next.js](https://img.shields.io/badge/Next.js-16-black)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-38bdf8)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-00D9FF)
 
-```bash
+## 📋 Описание
+
+Дашборд предназначен для мониторинга и анализа работы двух отделов продаж:
+- **Госники (B2G)** - работа с государственными организациями
+- **Коммерсы (B2B)** - работа с коммерческими компаниями
+
+## ✨ Основные функции
+
+### 📊 Общий дашборд
+- Карточки ключевых метрик (выручка, лучший менеджер, звонки, время на линии)
+- Графики динамики звонков по отделам
+- Дневной/недельный/месячный рост показателей
+
+### 📞 Реальные звонки
+- Таблица всех звонков с детальной информацией
+- Поиск по менеджерам в реальном времени
+- Фильтрация по периоду (календарь с выбором диапазона дат)
+- Модальные окна с:
+  - Транскрипцией разговора (форматированный диалог)
+  - AI-анализом и скорингом (0-100%)
+- Интеграция с Kommo CRM (прямые ссылки на сделки)
+
+### 🤖 AI Ролевые звонки
+- Анализ тренировочных звонков с AI-агентом
+- Детальная обратная связь по каждому звонку
+- Оценка по критериям (цветовая кодировка: красный/желтый/зеленый)
+- Рекомендации для улучшения навыков
+
+### 👤 Досье менеджера
+- Модальное окно с полной статистикой менеджера
+- Фильтры по периоду (неделя/месяц/все время)
+- Фильтр по минимальной оценке
+- Автоматический расчет всех метрик
+
+## 🛠 Технологический стек
+
+- **Next.js 16** - App Router, Server Components
+- **TypeScript 5** - Типизация
+- **Tailwind CSS 4** - Стилизация
+- **Drizzle ORM** - База данных
+- **Neon PostgreSQL** - Serverless БД
+- **Docker** - Контейнизация
+
+## 🚀 Быстрый старт
+
+### Локальная разработка
+
+\`\`\`bash
+# Клонируйте репозиторий
+git clone https://github.com/sternmeisterde-ui/sternmeister-sales-dashboard.git
+cd sternmeister-sales-dashboard
+
+# Установите зависимости
+npm install
+
+# Настройте .env.local
+cp .env.example .env.local
+
+# Запустите dev сервер
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+\`\`\`
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Запуск с Docker
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+\`\`\`bash
+# Production
+npm run docker:up
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+# Development с локальной БД
+npm run docker:dev
+\`\`\`
 
-## Learn More
+Подробнее см. [DOCKER.md](./DOCKER.md)
 
-To learn more about Next.js, take a look at the following resources:
+## 📁 Структура проекта
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+\`\`\`
+├── src/
+│   ├── app/              # Next.js App Router
+│   │   ├── api/          # API Routes
+│   │   └── page.tsx      # Главная страница
+│   └── lib/
+│       ├── db/           # База данных
+│       └── mockData.ts   # Тестовые данные
+├── docker-compose.yml    # Docker конфигурация
+├── DOCKER.md            # Docker документация
+└── todo.md              # План разработки
+\`\`\`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🔌 Интеграции
 
-## Deploy on Vercel
+- ✅ Neon PostgreSQL (подключено)
+- 🔄 Kommo CRM (планируется)
+- 🔄 AI Сервисы (планируется)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 📝 License
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Proprietary - All rights reserved
+
+---
+
+**Built with ❤️ using Next.js and Claude AI**
