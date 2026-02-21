@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Next.js Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      # Database connection (using Neon by default)
+      - DATABASE_URL=${DATABASE_URL}
+    env_file:
+      - .env.local
+    restart: unless-stopped
+    networks:
+      - sternmeister-network
+
+  # Optional: Local PostgreSQL for development
+  # Uncomment if you want to use local database instead of Neon
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: sternmeister-postgres
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     POSTGRES_DB: sternmeister_db
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: postgres
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - sternmeister-network
+  #   restart: unless-stopped
+
+networks:
+  sternmeister-network:
+    driver: bridge
+
+# volumes:
+#   postgres-data:
