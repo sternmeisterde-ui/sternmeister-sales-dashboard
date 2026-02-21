@@ -15,7 +15,7 @@ docker-compose up --build
 ```
 
 2. **Access the application:**
-- Dashboard: http://localhost:3000
+- Dashboard: http://localhost:3008
 
 3. **Stop the application:**
 ```bash
@@ -39,7 +39,7 @@ npm run db:push
 ```
 
 3. **Access services:**
-- Dashboard: http://localhost:3000
+- Dashboard: http://localhost:3008
 - PostgreSQL: localhost:5432
   - Database: `sternmeister_dev`
   - User: `postgres`
@@ -72,7 +72,7 @@ docker build -t sternmeister-dashboard .
 
 ### Run Container Manually
 ```bash
-docker run -p 3000:3000 --env-file .env.local sternmeister-dashboard
+docker run -p 3000:3008 --env-file .env.local sternmeister-dashboard
 ```
 
 ### View Logs
@@ -114,10 +114,10 @@ docker-compose -f docker-compose.dev.yml up postgres
 ## Troubleshooting
 
 ### Port Already in Use
-If port 3000 is already in use:
+If port 3008 is already in use:
 ```bash
-# Find process using port 3000
-lsof -ti:3000
+# Find process using port 3008
+lsof -ti:3008
 
 # Kill the process
 kill -9 <PID>
@@ -126,7 +126,7 @@ kill -9 <PID>
 Or change the port in `docker-compose.yml`:
 ```yaml
 ports:
-  - "3001:3000"  # Map to different host port
+  - "3001:3008"  # Map to different host port
 ```
 
 ### Database Connection Issues

@@ -30,9 +30,10 @@ services:
       target: deps
     command: npm run dev
     ports:
-      - "3000:3000"
+      - "3008:3008"
     environment:
       - NODE_ENV=development
+      - PORT=3008
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/sternmeister_dev
       - WATCHPACK_POLLING=true
     volumes:

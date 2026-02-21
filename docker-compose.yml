@@ -7,9 +7,10 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3008:3008"
     environment:
       - NODE_ENV=production
+      - PORT=3008
       # Database connection (using Neon by default)
       - DATABASE_URL=${DATABASE_URL}
     env_file:
