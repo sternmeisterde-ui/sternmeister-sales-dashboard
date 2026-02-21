@@ -649,14 +649,16 @@ export default function Dashboard() {
                       <th className="px-5 py-3 font-semibold">Время & Дата</th>
                       <th className="px-5 py-3 font-semibold text-center">Длительность</th>
                       <th className="px-5 py-3 font-semibold text-center">Транскрибация</th>
-                      <th className="px-5 py-3 font-semibold text-center">CRM</th>
+                      {activeTab === "real_calls" && (
+                        <th className="px-5 py-3 font-semibold text-center">CRM</th>
+                      )}
                       <th className="px-5 py-3 font-semibold text-center">AI Оценка</th>
                       <th className="px-5 py-3 font-semibold text-center">Аудио</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
                     {isLoadingAI && activeTab === "ai_calls" ? (
-                      <tr><td colSpan={7} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
+                      <tr><td colSpan={activeTab === "real_calls" ? 7 : 6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">
@@ -675,11 +677,13 @@ export default function Dashboard() {
                             <FileText className="w-3.5 h-3.5" />
                           </button>
                         </td>
-                        <td className="px-5 py-3 text-center">
-                          <a href={call.kommoUrl} target="_blank" rel="noreferrer" className="inline-block p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all shadow-inner border border-cyan-500/20">
-                            <Activity className="w-3.5 h-3.5" />
-                          </a>
-                        </td>
+                        {activeTab === "real_calls" && (
+                          <td className="px-5 py-3 text-center">
+                            <a href={call.kommoUrl} target="_blank" rel="noreferrer" className="inline-block p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all shadow-inner border border-cyan-500/20">
+                              <Activity className="w-3.5 h-3.5" />
+                            </a>
+                          </td>
+                        )}
                         <td className="px-5 py-3">
                           <div className="flex justify-center items-center">
                             <button onClick={() => { setSelectedCall(call); setCallModalType("scoring"); }} className={`relative flex items-center justify-center w-9 h-9 rounded-full border-[2px] cursor-pointer hover:scale-110 transition-transform ${call.score >= 66 ? "border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.3)] text-emerald-400" :
