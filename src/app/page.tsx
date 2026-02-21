@@ -281,14 +281,14 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Госники (B2G)
+              Коммерсы (B2B)
             </button>
             <button
               onClick={() => setActiveDepartment("b2b")}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2B)
+              Госники (B2G)
             </button>
           </div>
 
