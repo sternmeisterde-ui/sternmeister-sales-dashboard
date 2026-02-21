@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Next.js Application
   app:
@@ -9,12 +7,10 @@ services:
     ports:
       - "3008:3008"
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=${NODE_ENV:-production}
       - PORT=3008
-      # Database connection (using Neon by default)
       - DATABASE_URL=${DATABASE_URL}
-    env_file:
-      - .env.local
+      - NEXT_TELEMETRY_DISABLED=1
     restart: unless-stopped
     networks:
       - sternmeister-network
