@@ -342,167 +342,6 @@ export default function Dashboard() {
             </button>
           </div>
 
-          <div className="flex items-center gap-3 text-xs w-full sm:w-auto relative">
-            <button
-              onClick={() => setIsFilterOpen(!isFilterOpen)}
-              className={`border hover:bg-white/10 rounded-xl px-4 py-2 text-slate-300 flex items-center gap-2 transition-colors relative ${isFilterOpen ? "bg-white/10 border-blue-500/50" : "bg-slate-800/40 border-white/5"
-                }`}
-            >
-              <Filter className="w-3.5 h-3.5 text-blue-400" />
-              <span>Фильтры и Дата</span>
-              {activeDateFilter.start && activeDateFilter.end && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-              )}
-            </button>
-
-            {/* FILTER DROPDOWN */}
-            {isFilterOpen && (
-              <div className="absolute top-12 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2">
-                <div>
-                  <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <Calendar className="w-3.5 h-3.5 text-blue-400" /> Выбрать период
-                  </label>
-
-                  {/* Calendar Header */}
-                  <div className="flex items-center justify-between mb-3">
-                    <button
-                      onClick={() => {
-                        const newMonth = new Date(calendarMonth);
-                        newMonth.setMonth(newMonth.getMonth() - 1);
-                        setCalendarMonth(newMonth);
-                      }}
-                      className="p-1 hover:bg-white/5 rounded-lg transition-colors"
-                    >
-                      <ChevronRight className="w-4 h-4 rotate-180 text-slate-400" />
-                    </button>
-                    <span className="text-xs font-bold text-white">
-                      {calendarMonth.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}
-                    </span>
-                    <button
-                      onClick={() => {
-                        const newMonth = new Date(calendarMonth);
-                        newMonth.setMonth(newMonth.getMonth() + 1);
-                        setCalendarMonth(newMonth);
-                      }}
-                      className="p-1 hover:bg-white/5 rounded-lg transition-colors"
-                    >
-                      <ChevronRight className="w-4 h-4 text-slate-400" />
-                    </button>
-                  </div>
-
-                  {/* Calendar Grid */}
-                  <div className="grid grid-cols-7 gap-1 mb-2">
-                    {['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'].map((day) => (
-                      <div key={day} className="text-center text-[10px] font-semibold text-slate-500 py-1">
-                        {day}
-                      </div>
-                    ))}
-                    {(() => {
-                      const { daysInMonth, firstDayOfMonth } = getDaysInMonth(calendarMonth);
-                      const days = [];
-
-                      // Empty cells before first day
-                      for (let i = 0; i < firstDayOfMonth; i++) {
-                        days.push(<div key={`empty-${i}`} className="aspect-square" />);
-                      }
-
-                      // Days of month
-                      for (let day = 1; day <= daysInMonth; day++) {
-                        const date = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), day);
-                        const isStart = isSameDay(date, dateRange.start);
-                        const isEnd = isSameDay(date, dateRange.end);
-                        const inRange = dateRange.start && dateRange.end && isInRange(date, dateRange.start, dateRange.end);
-
-                        days.push(
-                          <button
-                            key={day}
-                            onClick={() => {
-                              if (!dateRange.start || (dateRange.start && dateRange.end)) {
-                                setDateRange({ start: date, end: null });
-                              } else if (date >= dateRange.start) {
-                                setDateRange({ ...dateRange, end: date });
-                              } else {
-                                setDateRange({ start: date, end: dateRange.start });
-                              }
-                            }}
-                            className={`aspect-square flex items-center justify-center text-[11px] rounded-lg transition-all ${
-                              isStart || isEnd
-                                ? 'bg-blue-500 text-white font-bold'
-                                : inRange
-                                ? 'bg-blue-500/20 text-blue-300'
-                                : 'text-slate-300 hover:bg-white/5'
-                            }`}
-                          >
-                            {day}
-                          </button>
-                        );
-                      }
-
-                      return days;
-                    })()}
-                  </div>
-
-                  {/* Selected Range Display */}
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-800/50 rounded-lg px-2 py-1.5 mb-3">
-                    <span>
-                      {dateRange.start ? dateRange.start.toLocaleDateString('ru-RU') : 'Начало'}
-                    </span>
-                    <span className="text-slate-600">→</span>
-                    <span>
-                      {dateRange.end ? dateRange.end.toLocaleDateString('ru-RU') : 'Конец'}
-                    </span>
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => {
-                        setActiveDateFilter(dateRange);
-                        setIsFilterOpen(false);
-                      }}
-                      disabled={!dateRange.start || !dateRange.end}
-                      className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-semibold py-2 rounded-lg transition-colors"
-                    >
-                      Применить
-                    </button>
-                    <button
-                      onClick={() => {
-                        setDateRange({ start: null, end: null });
-                        setActiveDateFilter({ start: null, end: null });
-                      }}
-                      className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold py-2 rounded-lg transition-colors"
-                    >
-                      Сбросить
-                    </button>
-                  </div>
-                </div>
-
-                <div className="h-px w-full bg-white/5" />
-
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                      <BarChart3 className="w-3.5 h-3.5 text-blue-400" /> AI Скоринг от:
-                    </label>
-                    <span className="font-bold text-blue-400">{scoreFilter}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={scoreFilter}
-                    onChange={(e) => setScoreFilter(parseInt(e.target.value))}
-                    className="w-full accent-blue-500 cursor-pointer mb-1"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-500 font-medium">
-                    <span>0%</span>
-                    <span>50%</span>
-                    <span>100%</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
         </header>
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}
@@ -696,8 +535,8 @@ export default function Dashboard() {
               </div>
 
               {/* Stats Row: compact KPIs left + wide manager list right */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                {/* Left column: 2 compact KPI cards stacked */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch">
+                {/* Left column: KPI cards stacked */}
                 <div className="flex flex-col gap-3">
                   {/* KPI: Average Score */}
                   <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
@@ -824,6 +663,113 @@ export default function Dashboard() {
                       >
                         <X className="w-3 h-3" />
                       </button>
+                    )}
+                  </div>
+
+                  {/* Filter & Date button */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setIsFilterOpen(!isFilterOpen)}
+                      className={`border hover:bg-white/10 rounded-lg px-3 py-1.5 text-slate-300 flex items-center gap-2 transition-colors relative ${isFilterOpen ? "bg-white/10 border-blue-500/50" : "bg-slate-800/40 border-white/5"}`}
+                    >
+                      <Filter className="w-3.5 h-3.5 text-blue-400" />
+                      <span className="text-xs">Фильтры</span>
+                      {activeDateFilter.start && activeDateFilter.end && (
+                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                      )}
+                    </button>
+
+                    {isFilterOpen && (
+                      <div className="absolute top-10 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2">
+                        <div>
+                          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <Calendar className="w-3.5 h-3.5 text-blue-400" /> Выбрать период
+                          </label>
+
+                          <div className="flex items-center justify-between mb-3">
+                            <button
+                              onClick={() => {
+                                const newMonth = new Date(calendarMonth);
+                                newMonth.setMonth(newMonth.getMonth() - 1);
+                                setCalendarMonth(newMonth);
+                              }}
+                              className="p-1 hover:bg-white/5 rounded-lg transition-colors"
+                            >
+                              <ChevronRight className="w-4 h-4 rotate-180 text-slate-400" />
+                            </button>
+                            <span className="text-xs font-bold text-white">
+                              {calendarMonth.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}
+                            </span>
+                            <button
+                              onClick={() => {
+                                const newMonth = new Date(calendarMonth);
+                                newMonth.setMonth(newMonth.getMonth() + 1);
+                                setCalendarMonth(newMonth);
+                              }}
+                              className="p-1 hover:bg-white/5 rounded-lg transition-colors"
+                            >
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-7 gap-1 mb-2">
+                            {['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'].map((day) => (
+                              <div key={day} className="text-center text-[10px] font-semibold text-slate-500 py-1">{day}</div>
+                            ))}
+                            {(() => {
+                              const { daysInMonth, firstDayOfMonth } = getDaysInMonth(calendarMonth);
+                              const days = [];
+                              for (let i = 0; i < firstDayOfMonth; i++) {
+                                days.push(<div key={`empty-${i}`} className="aspect-square" />);
+                              }
+                              for (let day = 1; day <= daysInMonth; day++) {
+                                const date = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), day);
+                                const isStart = isSameDay(date, dateRange.start);
+                                const isEnd = isSameDay(date, dateRange.end);
+                                const inRange = dateRange.start && dateRange.end && isInRange(date, dateRange.start, dateRange.end);
+                                days.push(
+                                  <button
+                                    key={day}
+                                    onClick={() => {
+                                      if (!dateRange.start || (dateRange.start && dateRange.end)) {
+                                        setDateRange({ start: date, end: null });
+                                      } else if (date >= dateRange.start) {
+                                        setDateRange({ ...dateRange, end: date });
+                                      } else {
+                                        setDateRange({ start: date, end: dateRange.start });
+                                      }
+                                    }}
+                                    className={`aspect-square flex items-center justify-center text-[11px] rounded-lg transition-all ${
+                                      isStart || isEnd ? 'bg-blue-500 text-white font-bold' :
+                                      inRange ? 'bg-blue-500/20 text-blue-300' :
+                                      'text-slate-300 hover:bg-white/5'
+                                    }`}
+                                  >{day}</button>
+                                );
+                              }
+                              return days;
+                            })()}
+                          </div>
+
+                          <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-800/50 rounded-lg px-2 py-1.5 mb-3">
+                            <span>{dateRange.start ? dateRange.start.toLocaleDateString('ru-RU') : 'Начало'}</span>
+                            <span className="text-slate-600">→</span>
+                            <span>{dateRange.end ? dateRange.end.toLocaleDateString('ru-RU') : 'Конец'}</span>
+                          </div>
+
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => { setActiveDateFilter(dateRange); setIsFilterOpen(false); }}
+                              disabled={!dateRange.start || !dateRange.end}
+                              className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-semibold py-2 rounded-lg transition-colors"
+                            >Применить</button>
+                            <button
+                              onClick={() => { setDateRange({ start: null, end: null }); setActiveDateFilter({ start: null, end: null }); }}
+                              className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold py-2 rounded-lg transition-colors"
+                            >Сбросить</button>
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
