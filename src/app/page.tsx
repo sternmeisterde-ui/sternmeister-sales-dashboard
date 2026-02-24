@@ -210,6 +210,7 @@ export default function Dashboard() {
 
     const periodCalls = allCalls.filter(call => {
       if (!managerNames.has(call.name)) return false;
+      if (call.score <= 0) return false; // Исключаем звонки с нулевым скорингом
       const callDate = parseCallDate(call.date);
       return callDate >= periodStart && callDate <= now;
     });
@@ -227,7 +228,7 @@ export default function Dashboard() {
         ? Math.round(mCalls.reduce((sum, c) => sum + c.score, 0) / count)
         : 0;
       return { name: m.name, avgScore: avg, count };
-    }).sort((a, b) => b.avgScore - a.avgScore);
+    }).sort((a, b) => b.count - a.count);
 
     return { avgScore, totalCalls: totalRoleplays, perManager };
   })();
@@ -727,6 +728,58 @@ export default function Dashboard() {
                     </div>
                     <span className="text-2xl font-black text-white">{callsDashStats.totalCalls}</span>
                   </div>
+
+                  {/* KPI: Best by Score */}
+                  {(() => {
+                    const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.avgScore - a.avgScore)[0];
+                    return (
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex flex-col gap-1">
+                        <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
+                          Лучший по качеству
+                        </span>
+                        {best ? (
+                          <>
+                            <span className="text-sm font-bold text-white truncate">{best.name}</span>
+                            <div className="flex items-center gap-2">
+                              <span className={`text-lg font-black ${
+                                best.avgScore >= 66 ? "text-emerald-400" :
+                                best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                              }`}>{best.avgScore}%</span>
+                              <span className="text-[10px] text-slate-500">{best.count} {activeTab === "ai_calls" ? "рол." : "зв."}</span>
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-xs text-slate-500">Нет данных</span>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* KPI: Best by Count */}
+                  {(() => {
+                    const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.count - a.count)[0];
+                    return (
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex flex-col gap-1">
+                        <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
+                          Лучший по количеству
+                        </span>
+                        {best ? (
+                          <>
+                            <span className="text-sm font-bold text-white truncate">{best.name}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg font-black text-white">{best.count} <span className="text-xs font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
+                              <span className={`text-sm font-bold ${
+                                best.avgScore >= 66 ? "text-emerald-400" :
+                                best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                              }`}>{best.avgScore}%</span>
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-xs text-slate-500">Нет данных</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Right column: Per-Manager Scores (2/3 width) */}
@@ -739,8 +792,8 @@ export default function Dashboard() {
                       {callsDashStats.perManager.map((m) => (
                         <div key={m.name} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
                           <span className="text-sm text-slate-200 truncate mr-3">{m.name}</span>
-                          <div className="flex items-center gap-3 shrink-0">
-                            <span className="text-xs text-slate-500">{m.count} {activeTab === "ai_calls" ? "рол." : "зв."}</span>
+                          <div className="flex items-center gap-4 shrink-0">
+                            <span className="text-sm font-bold text-white">{m.count} <span className="text-xs font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
                             <span className={`text-sm font-bold min-w-[40px] text-right ${
                               m.avgScore >= 66 ? "text-emerald-400" :
                               m.avgScore >= 41 ? "text-amber-400" :
