@@ -63,7 +63,7 @@ export default function Dashboard() {
   const [callModalType, setCallModalType] = useState<"transcript" | "scoring">("transcript");
   const [selectedManager, setSelectedManager] = useState<ManagerStat | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
-  const [scoreFilter, setScoreFilter] = useState(80);
+  const [scoreFilter, setScoreFilter] = useState(0);
   const [dateRange, setDateRange] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [calendarMonth, setCalendarMonth] = useState(new Date());
@@ -128,13 +128,16 @@ export default function Dashboard() {
   useEffect(() => {
     if (!selectedManager) return;
 
-    const calls = aiCalls.filter(call => call.name === selectedManager.name);
+    // All calls for this manager, excluding 0-score (unscored/failed calls)
+    const scoredCalls = aiCalls.filter(
+      call => call.name === selectedManager.name && call.score > 0
+    );
 
     // Apply period filter
     const now = new Date();
-    now.setHours(23, 59, 59, 999); // конец сегодняшнего дня
+    now.setHours(23, 59, 59, 999);
 
-    const filteredByPeriod = calls.filter(call => {
+    const filteredByPeriod = scoredCalls.filter(call => {
       const callDate = parseCallDate(call.date);
 
       if (managerPeriod === "week") {
@@ -151,19 +154,20 @@ export default function Dashboard() {
       return true; // all
     });
 
-    // Apply score filter
-    const filteredCalls = filteredByPeriod.filter(call => call.score >= managerMinScore);
+    const totalInPeriod = filteredByPeriod.length;
 
-    setManagerCalls(filteredCalls);
+    // Apply min score filter
+    const filtered = filteredByPeriod.filter(call => call.score >= managerMinScore);
 
-    // Calculate stats
-    const totalCalls = filteredCalls.length;
-    const avgScore = totalCalls > 0
-      ? Math.round(filteredCalls.reduce((sum, c) => sum + c.score, 0) / totalCalls)
+    setManagerCalls(filtered);
+
+    // Calculate stats from filtered calls
+    const avgScore = filtered.length > 0
+      ? Math.round(filtered.reduce((sum, c) => sum + c.score, 0) / filtered.length)
       : 0;
 
-    // Рассчитать ОБЩЕЕ время (сумму) вместо среднего
-    const totalSeconds = filteredCalls.reduce((sum, c) => {
+    // Рассчитать ОБЩЕЕ время (сумму)
+    const totalSeconds = filtered.reduce((sum, c) => {
       const [min, sec] = c.callDuration.split(':').map(Number);
       return sum + (min * 60 + sec);
     }, 0);
@@ -173,12 +177,12 @@ export default function Dashboard() {
     const totalDuration = `${totalMin} мин ${totalSec} сек`;
 
     setManagerStats({
-      totalCalls,
+      totalCalls: totalInPeriod,
       avgScore,
       avgDuration: totalDuration,
-      filteredCalls: totalCalls,
+      filteredCalls: filtered.length,
     });
-  }, [selectedManager, managerPeriod, managerMinScore, aiCalls, activeTab]);
+  }, [selectedManager, managerPeriod, managerMinScore, aiCalls]);
 
   // Dashboard stats for calls tabs (managers only, no ROPs/admins)
   const callsDashStats = (() => {
@@ -255,12 +259,14 @@ export default function Dashboard() {
     return true;
   });
 
-  // Update manager stats based on filtered calls
+  // Update manager stats based on scored calls (excluding 0-score)
   const filteredManagers = aiManagers.map(manager => {
-    const managerCalls = filteredCalls.filter(call => call.name === manager.name);
+    const scoredManagerCalls = aiCalls.filter(
+      call => call.name === manager.name && call.score > 0
+    );
     return {
       ...manager,
-      totalCalls: managerCalls.length
+      totalCalls: scoredManagerCalls.length
     };
   });
 
@@ -331,7 +337,7 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2B)
+              Коммерсы (B2C)
             </button>
             <button
               onClick={() => setActiveDepartment("b2b")}
@@ -1083,7 +1089,7 @@ export default function Dashboard() {
               </h4>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div>
-                  <p className="text-xs text-slate-400 mb-1">Всего звонков</p>
+                  <p className="text-xs text-slate-400 mb-1">Всего с оценкой</p>
                   <p className="text-lg font-bold text-white">{managerStats.totalCalls}</p>
                 </div>
                 <div>
@@ -1097,7 +1103,7 @@ export default function Dashboard() {
                   <p className="text-lg font-bold text-white">{managerStats.avgDuration}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-1">Отфильтровано</p>
+                  <p className="text-xs text-slate-400 mb-1">После фильтра</p>
                   <p className="text-lg font-bold text-blue-400">{managerStats.filteredCalls}</p>
                 </div>
               </div>
