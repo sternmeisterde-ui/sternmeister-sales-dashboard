@@ -5,7 +5,16 @@ export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const department = searchParams.get("department") as "b2g" | "b2b" || "b2g";
-    const type = searchParams.get("type") || "calls"; // "calls" или "managers"
+    const type = searchParams.get("type") || "all";
+
+    // Возвращаем оба набора данных за один запрос
+    if (type === "all") {
+      const [calls, managers] = await Promise.all([
+        getAIRoleCalls(department),
+        getManagerStats(department),
+      ]);
+      return NextResponse.json({ success: true, data: { calls, managers } });
+    }
 
     if (type === "managers") {
       const managers = await getManagerStats(department);

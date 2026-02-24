@@ -56,6 +56,9 @@ export default function Dashboard() {
   const [aiManagers, setAiManagers] = useState<ManagerStat[]>([]);
   const [isLoadingAI, setIsLoadingAI] = useState(true);
 
+  // Client-side cache per department
+  const [dataCache, setDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
+
   // UI States
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
@@ -83,17 +86,30 @@ export default function Dashboard() {
     filteredCalls: 0,
   });
 
-  // Load calls data from API
+  // Load calls data from API (single request + client cache)
   useEffect(() => {
+    // Если есть в кеше — показываем мгновенно
+    if (dataCache[activeDepartment]) {
+      setAiCalls(dataCache[activeDepartment].calls);
+      setAiManagers(dataCache[activeDepartment].managers);
+      setIsLoadingAI(false);
+      return;
+    }
+
     setIsLoadingAI(true);
 
-    Promise.all([
-      fetch(`/api/calls?department=${activeDepartment}&type=calls`).then(r => r.json()),
-      fetch(`/api/calls?department=${activeDepartment}&type=managers`).then(r => r.json())
-    ])
-      .then(([callsRes, managersRes]) => {
-        if (callsRes.success) setAiCalls(callsRes.data);
-        if (managersRes.success) setAiManagers(managersRes.data);
+    fetch(`/api/calls?department=${activeDepartment}&type=all`)
+      .then(r => r.json())
+      .then(res => {
+        if (res.success) {
+          setAiCalls(res.data.calls);
+          setAiManagers(res.data.managers);
+          // Сохраняем в кеш
+          setDataCache(prev => ({
+            ...prev,
+            [activeDepartment]: { calls: res.data.calls, managers: res.data.managers }
+          }));
+        }
       })
       .catch(error => {
         console.error("Error loading calls:", error);

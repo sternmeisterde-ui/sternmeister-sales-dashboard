@@ -59,58 +59,61 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
   });
 }
 
-// Получить статистику менеджеров
+// Получить статистику менеджеров (2 запроса вместо N+1)
 export async function getManagerStats(departmentType: DepartmentType) {
   const { calls, users } = getTables(departmentType);
 
-  const allUsers = await db
-    .select({
+  // Параллельно: все пользователи + все звонки (2 запроса вместо N+1)
+  const [allUsers, allCalls] = await Promise.all([
+    db.select({
       id: users.id,
       name: users.name,
       telegramUsername: users.telegramUsername,
       role: users.role,
-    })
-    .from(users)
-    .where(eq(users.isActive, true));
+    }).from(users).where(eq(users.isActive, true)),
 
-  const stats = await Promise.all(
-    allUsers.map(async (user) => {
-      const userCalls = await db
-        .select({
-          duration: calls.durationSeconds,
-          score: calls.score,
-        })
-        .from(calls)
-        .where(eq(calls.userId, user.id));
+    db.select({
+      userId: calls.userId,
+      duration: calls.durationSeconds,
+      score: calls.score,
+    }).from(calls),
+  ]);
 
-      const totalCalls = userCalls.length;
-      const avgScore = totalCalls > 0
-        ? Math.round(
-            (userCalls.reduce((acc, c) => acc + (c.score || 0), 0) / totalCalls) * 10
-          ) // Конвертируем в 0-100
-        : 0;
-      const avgDuration = totalCalls > 0
-        ? Math.round(userCalls.reduce((acc, c) => acc + (c.duration || 0), 0) / totalCalls)
-        : 0;
+  // Группировка звонков по userId в JS
+  const callsByUser = new Map<string, typeof allCalls>();
+  for (const call of allCalls) {
+    const existing = callsByUser.get(call.userId) || [];
+    existing.push(call);
+    callsByUser.set(call.userId, existing);
+  }
 
-      const minutes = Math.floor(avgDuration / 60);
-      const seconds = avgDuration % 60;
-      const avgDurationFormatted = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return allUsers.map(user => {
+    const userCalls = callsByUser.get(user.id) || [];
+    const totalCalls = userCalls.length;
+    const avgScore = totalCalls > 0
+      ? Math.round(
+          (userCalls.reduce((acc, c) => acc + (c.score || 0), 0) / totalCalls) * 10
+        )
+      : 0;
+    const avgDuration = totalCalls > 0
+      ? Math.round(userCalls.reduce((acc, c) => acc + (c.duration || 0), 0) / totalCalls)
+      : 0;
 
-      return {
-        id: user.id,
-        name: user.name,
-        avatarUrl: `https://i.pravatar.cc/150?u=${user.telegramUsername || user.id}`,
-        totalCalls,
-        avgScore,
-        avgDuration: avgDurationFormatted,
-        conversionRate: "N/A",
-        role: user.role,
-      };
-    })
-  );
+    const minutes = Math.floor(avgDuration / 60);
+    const seconds = avgDuration % 60;
+    const avgDurationFormatted = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 
-  return stats;
+    return {
+      id: user.id,
+      name: user.name,
+      avatarUrl: `https://i.pravatar.cc/150?u=${user.telegramUsername || user.id}`,
+      totalCalls,
+      avgScore,
+      avgDuration: avgDurationFormatted,
+      conversionRate: "N/A",
+      role: user.role,
+    };
+  });
 }
 
 // Вспомогательная функция для форматирования даты
