@@ -733,24 +733,17 @@ export default function Dashboard() {
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.avgScore - a.avgScore)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex flex-col gap-1">
-                        <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
-                          Лучший по качеству
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по качеству</span>
+                          <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
+                        </div>
+                        <span className={`text-2xl font-black shrink-0 ${
+                          best && best.avgScore >= 66 ? "text-emerald-400" :
+                          best && best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                        }`}>
+                          {best ? `${best.avgScore}%` : "—"}
                         </span>
-                        {best ? (
-                          <>
-                            <span className="text-sm font-bold text-white truncate">{best.name}</span>
-                            <div className="flex items-center gap-2">
-                              <span className={`text-lg font-black ${
-                                best.avgScore >= 66 ? "text-emerald-400" :
-                                best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
-                              }`}>{best.avgScore}%</span>
-                              <span className="text-[10px] text-slate-500">{best.count} {activeTab === "ai_calls" ? "рол." : "зв."}</span>
-                            </div>
-                          </>
-                        ) : (
-                          <span className="text-xs text-slate-500">Нет данных</span>
-                        )}
                       </div>
                     );
                   })()}
@@ -759,24 +752,14 @@ export default function Dashboard() {
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.count - a.count)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex flex-col gap-1">
-                        <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
-                          Лучший по количеству
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по количеству</span>
+                          <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
+                        </div>
+                        <span className="text-2xl font-black text-white shrink-0">
+                          {best ? best.count : "—"}
                         </span>
-                        {best ? (
-                          <>
-                            <span className="text-sm font-bold text-white truncate">{best.name}</span>
-                            <div className="flex items-center gap-2">
-                              <span className="text-lg font-black text-white">{best.count} <span className="text-xs font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
-                              <span className={`text-sm font-bold ${
-                                best.avgScore >= 66 ? "text-emerald-400" :
-                                best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
-                              }`}>{best.avgScore}%</span>
-                            </div>
-                          </>
-                        ) : (
-                          <span className="text-xs text-slate-500">Нет данных</span>
-                        )}
                       </div>
                     );
                   })()}
