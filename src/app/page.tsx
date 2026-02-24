@@ -701,48 +701,48 @@ export default function Dashboard() {
                 ))}
               </div>
 
-              {/* Stats Row */}
+              {/* Stats Row: compact KPIs left + wide manager list right */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                {/* Card 1: Average Score */}
-                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Средний балл отдела</span>
-                  <div className="flex items-baseline gap-2">
-                    <span className={`text-3xl font-black ${
+                {/* Left column: 2 compact KPI cards stacked */}
+                <div className="flex flex-col gap-3">
+                  {/* KPI: Average Score */}
+                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Ср. балл отдела</span>
+                    <span className={`text-2xl font-black ${
                       callsDashStats.avgScore >= 66 ? "text-emerald-400" :
                       callsDashStats.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
                     }`}>
                       {callsDashStats.avgScore}%
                     </span>
-                    <span className="text-xs text-slate-500">только менеджеры</span>
+                  </div>
+
+                  {/* KPI: Total Calls */}
+                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
+                        {activeTab === "ai_calls" ? "Ролевок" : "Звонков"}
+                      </span>
+                      <span className="text-[10px] text-slate-500">
+                        {aiDashPeriod === "day" ? "за сегодня" : aiDashPeriod === "week" ? "за неделю" : "за месяц"}
+                      </span>
+                    </div>
+                    <span className="text-2xl font-black text-white">{callsDashStats.totalCalls}</span>
                   </div>
                 </div>
 
-                {/* Card 2: Total Calls */}
-                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
-                    {activeTab === "ai_calls" ? "Ролевок сыграно" : "Звонков совершено"}
-                  </span>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-3xl font-black text-white">{callsDashStats.totalCalls}</span>
-                    <span className="text-xs text-slate-500">
-                      {aiDashPeriod === "day" ? "за сегодня" : aiDashPeriod === "week" ? "за неделю" : "за месяц"}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Card 3: Per-Manager Scores */}
-                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2 max-h-[180px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold sticky top-0 bg-slate-900/80 backdrop-blur-sm pb-1">Оценки менеджеров</span>
-                  <div className="flex flex-col gap-1.5">
-                    {callsDashStats.perManager.length === 0 ? (
-                      <span className="text-xs text-slate-500">Нет данных за период</span>
-                    ) : (
-                      callsDashStats.perManager.map((m) => (
-                        <div key={m.name} className="flex items-center justify-between text-xs">
-                          <span className="text-slate-300 truncate mr-3">{m.name}</span>
+                {/* Right column: Per-Manager Scores (2/3 width) */}
+                <div className="lg:col-span-2 glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Оценки менеджеров</span>
+                  {callsDashStats.perManager.length === 0 ? (
+                    <span className="text-sm text-slate-500">Нет данных за период</span>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+                      {callsDashStats.perManager.map((m) => (
+                        <div key={m.name} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
+                          <span className="text-sm text-slate-200 truncate mr-3">{m.name}</span>
                           <div className="flex items-center gap-3 shrink-0">
-                            <span className="text-[10px] text-slate-500">{m.count} зв.</span>
-                            <span className={`font-bold min-w-[36px] text-right ${
+                            <span className="text-xs text-slate-500">{m.count} {activeTab === "ai_calls" ? "рол." : "зв."}</span>
+                            <span className={`text-sm font-bold min-w-[40px] text-right ${
                               m.avgScore >= 66 ? "text-emerald-400" :
                               m.avgScore >= 41 ? "text-amber-400" :
                               m.count === 0 ? "text-slate-600" : "text-rose-400"
@@ -751,9 +751,9 @@ export default function Dashboard() {
                             </span>
                           </div>
                         </div>
-                      ))
-                    )}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
