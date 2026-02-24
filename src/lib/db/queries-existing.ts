@@ -6,11 +6,11 @@ import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 export type DepartmentType = "b2g" | "b2b";
 
 // Получить таблицы по типу отдела
-// R1 таблицы → Госники (B2G), D1 таблицы → Коммерсы (B2B)
+// R1 таблицы → Коммерсы (B2B), D1 таблицы → Госники (B2G)
 function getTables(departmentType: DepartmentType) {
   return departmentType === "b2g"
-    ? { calls: r1Calls, users: r1Users }  // Госники используют R1
-    : { calls: d1Calls, users: d1Users };  // Коммерсы используют D1
+    ? { calls: r1Calls, users: r1Users }  // Коммерсы используют R1
+    : { calls: d1Calls, users: d1Users };  // Госники используют D1
 }
 
 // Получить все AI ролевые звонки для отдела

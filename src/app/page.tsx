@@ -83,9 +83,9 @@ export default function Dashboard() {
     filteredCalls: 0,
   });
 
-  // Load AI Role Calls data from API
+  // Load calls data from API for both tabs
   useEffect(() => {
-    if (activeTab === "ai_calls") {
+    if (activeTab === "ai_calls" || activeTab === "real_calls") {
       setIsLoadingAI(true);
 
       Promise.all([
@@ -97,8 +97,7 @@ export default function Dashboard() {
           if (managersRes.success) setAiManagers(managersRes.data);
         })
         .catch(error => {
-          console.error("Error loading AI calls:", error);
-          // Fallback to mock data on error
+          console.error("Error loading calls:", error);
           setAiCalls(mockCalls);
           setAiManagers(mockManagers);
         })
@@ -133,7 +132,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!selectedManager) return;
 
-    const allCalls = activeTab === "ai_calls" ? aiCalls : mockCalls;
+    const allCalls = !isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls;
     const calls = allCalls.filter(call => call.name === selectedManager.name);
 
     // Apply period filter
@@ -188,8 +187,8 @@ export default function Dashboard() {
 
   // Dashboard stats for calls tabs (managers only, no ROPs/admins)
   const callsDashStats = (() => {
-    const allCalls = activeTab === "ai_calls" ? aiCalls : mockCalls;
-    const managers = (activeTab === "ai_calls" && !isLoadingAI ? aiManagers : mockManagers)
+    const allCalls = !isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls;
+    const managers = (!isLoadingAI && aiManagers.length > 0 ? aiManagers : mockManagers)
       .filter(m => !m.role || m.role === "manager");
     const managerNames = new Set(managers.map(m => m.name));
 
@@ -234,7 +233,7 @@ export default function Dashboard() {
   })();
 
   // Filter calls by date range and search query
-  const filteredCalls = (activeTab === "ai_calls" ? aiCalls : mockCalls).filter(call => {
+  const filteredCalls = (!isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls).filter(call => {
     // Filter by date range
     if (activeDateFilter.start && activeDateFilter.end) {
       const callDate = parseCallDate(call.date);
@@ -262,7 +261,7 @@ export default function Dashboard() {
   });
 
   // Update manager stats based on filtered calls
-  const filteredManagers = (activeTab === "ai_calls" && !isLoadingAI ? aiManagers : mockManagers).map(manager => {
+  const filteredManagers = (!isLoadingAI && aiManagers.length > 0 ? aiManagers : mockManagers).map(manager => {
     const managerCalls = filteredCalls.filter(call => call.name === manager.name);
     return {
       ...manager,
