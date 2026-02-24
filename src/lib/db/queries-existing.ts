@@ -48,7 +48,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       avatarUrl: `https://i.pravatar.cc/150?u=${call.userTelegramUsername || call.userId}`,
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
       date: formatDate(call.startedAt),
-      score: call.score ? call.score * 10 : 0, // Конвертируем из 1-10 в 0-100 для UI
+      score: call.score || 0, // Оценка уже в шкале 0-100
       audioUrl: "#", // TODO: добавить реальный URL аудио
       kommoUrl: "#",
       transcript: call.transcript || "",
@@ -92,7 +92,7 @@ export async function getManagerStats(departmentType: DepartmentType) {
     const totalCalls = userCalls.length;
     const avgScore = totalCalls > 0
       ? Math.round(
-          (userCalls.reduce((acc, c) => acc + (c.score || 0), 0) / totalCalls) * 10
+          userCalls.reduce((acc, c) => acc + (c.score || 0), 0) / totalCalls
         )
       : 0;
     const avgDuration = totalCalls > 0
@@ -147,7 +147,7 @@ function parseEvaluationJson(evaluationJson: any) {
     id: `block-${index}`,
     name: criterion.name || `Критерий ${index + 1}`,
     score: criterion.score || 0,
-    maxScore: 10,
+    maxScore: 100,
     feedback: criterion.feedback || "",
   }));
 }

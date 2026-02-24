@@ -40,7 +40,7 @@ export const d1Calls = pgTable("d1_calls", {
       feedback: string;
     }>;
   }>(),
-  score: integer("score"), // 1-10
+  score: integer("score"), // 0-100
   mistakes: text("mistakes"),
   recommendations: text("recommendations"),
   grokSessionId: text("grok_session_id"),
@@ -87,7 +87,7 @@ export const r1Calls = pgTable("r1_calls", {
       feedback: string;
     }>;
   }>(),
-  score: integer("score"), // 1-10
+  score: integer("score"), // 0-100
   mistakes: text("mistakes"),
   recommendations: text("recommendations"),
   grokSessionId: text("grok_session_id"),
