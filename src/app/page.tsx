@@ -539,7 +539,7 @@ export default function Dashboard() {
                 {/* Left column: KPI cards stacked */}
                 <div className="flex flex-col gap-3">
                   {/* KPI: Average Score */}
-                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
                     <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Ср. балл отдела</span>
                     <span className={`text-2xl font-black ${
                       callsDashStats.avgScore >= 66 ? "text-emerald-400" :
@@ -550,7 +550,7 @@ export default function Dashboard() {
                   </div>
 
                   {/* KPI: Total Calls */}
-                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
                     <div className="flex flex-col">
                       <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
                         {activeTab === "ai_calls" ? "Ролевок" : "Звонков"}
@@ -566,7 +566,7 @@ export default function Dashboard() {
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.avgScore - a.avgScore)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
                         <div className="flex flex-col min-w-0">
                           <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по качеству</span>
                           <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
@@ -585,7 +585,7 @@ export default function Dashboard() {
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.count - a.count)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between">
+                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
                         <div className="flex flex-col min-w-0">
                           <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по количеству</span>
                           <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
