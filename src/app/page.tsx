@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { mockCalls, salesTrendData, businessMetrics, mockManagers, ManagerStat, ManagerCall, dailyMetrics } from "@/lib/mockData";
+import { salesTrendData, businessMetrics, ManagerStat, ManagerCall, dailyMetrics } from "@/lib/mockData";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -54,7 +54,7 @@ export default function Dashboard() {
   // API Data States
   const [aiCalls, setAiCalls] = useState<ManagerCall[]>([]);
   const [aiManagers, setAiManagers] = useState<ManagerStat[]>([]);
-  const [isLoadingAI, setIsLoadingAI] = useState(false);
+  const [isLoadingAI, setIsLoadingAI] = useState(true);
 
   // UI States
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -83,27 +83,23 @@ export default function Dashboard() {
     filteredCalls: 0,
   });
 
-  // Load calls data from API for both tabs
+  // Load calls data from API
   useEffect(() => {
-    if (activeTab === "ai_calls" || activeTab === "real_calls") {
-      setIsLoadingAI(true);
+    setIsLoadingAI(true);
 
-      Promise.all([
-        fetch(`/api/calls?department=${activeDepartment}&type=calls`).then(r => r.json()),
-        fetch(`/api/calls?department=${activeDepartment}&type=managers`).then(r => r.json())
-      ])
-        .then(([callsRes, managersRes]) => {
-          if (callsRes.success) setAiCalls(callsRes.data);
-          if (managersRes.success) setAiManagers(managersRes.data);
-        })
-        .catch(error => {
-          console.error("Error loading calls:", error);
-          setAiCalls(mockCalls);
-          setAiManagers(mockManagers);
-        })
-        .finally(() => setIsLoadingAI(false));
-    }
-  }, [activeDepartment, activeTab]);
+    Promise.all([
+      fetch(`/api/calls?department=${activeDepartment}&type=calls`).then(r => r.json()),
+      fetch(`/api/calls?department=${activeDepartment}&type=managers`).then(r => r.json())
+    ])
+      .then(([callsRes, managersRes]) => {
+        if (callsRes.success) setAiCalls(callsRes.data);
+        if (managersRes.success) setAiManagers(managersRes.data);
+      })
+      .catch(error => {
+        console.error("Error loading calls:", error);
+      })
+      .finally(() => setIsLoadingAI(false));
+  }, [activeDepartment]);
 
   // Parse date from Russian format (Сегодня, Вчера, DD.MM)
   const parseCallDate = (dateStr: string): Date => {
@@ -132,8 +128,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!selectedManager) return;
 
-    const allCalls = !isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls;
-    const calls = allCalls.filter(call => call.name === selectedManager.name);
+    const calls = aiCalls.filter(call => call.name === selectedManager.name);
 
     // Apply period filter
     const now = new Date();
@@ -187,9 +182,8 @@ export default function Dashboard() {
 
   // Dashboard stats for calls tabs (managers only, no ROPs/admins)
   const callsDashStats = (() => {
-    const allCalls = !isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls;
-    const managers = (!isLoadingAI && aiManagers.length > 0 ? aiManagers : mockManagers)
-      .filter(m => !m.role || m.role === "manager");
+    const allCalls = aiCalls;
+    const managers = aiManagers.filter(m => !m.role || m.role === "manager");
     const managerNames = new Set(managers.map(m => m.name));
 
     const now = new Date();
@@ -234,7 +228,7 @@ export default function Dashboard() {
   })();
 
   // Filter calls by date range and search query
-  const filteredCalls = (!isLoadingAI && aiCalls.length > 0 ? aiCalls : mockCalls).filter(call => {
+  const filteredCalls = aiCalls.filter(call => {
     // Filter by date range
     if (activeDateFilter.start && activeDateFilter.end) {
       const callDate = parseCallDate(call.date);
@@ -262,7 +256,7 @@ export default function Dashboard() {
   });
 
   // Update manager stats based on filtered calls
-  const filteredManagers = (!isLoadingAI && aiManagers.length > 0 ? aiManagers : mockManagers).map(manager => {
+  const filteredManagers = aiManagers.map(manager => {
     const managerCalls = filteredCalls.filter(call => call.name === manager.name);
     return {
       ...manager,
@@ -851,7 +845,7 @@ export default function Dashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
-                    {isLoadingAI && activeTab === "ai_calls" ? (
+                    {isLoadingAI ? (
                       <tr><td colSpan={6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
