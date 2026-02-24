@@ -27,6 +27,7 @@ export interface ManagerStat {
     avgScore: number;
     avgDuration: string;
     conversionRate: string;
+    role?: string;
 }
 
 // 📌 ЗАГЛУШКИ ДЛЯ ГРАФИКОВ

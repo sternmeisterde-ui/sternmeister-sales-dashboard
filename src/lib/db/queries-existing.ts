@@ -105,6 +105,7 @@ export async function getManagerStats(departmentType: DepartmentType) {
         avgScore,
         avgDuration: avgDurationFormatted,
         conversionRate: "N/A",
+        role: user.role,
       };
     })
   );

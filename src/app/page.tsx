@@ -3,8 +3,9 @@
 import { useState, useEffect } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, FileText, Activity, Users, DollarSign,
-  Clock, Command, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, TrendingUp, ClipboardList
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, TrendingUp, ClipboardList
 } from "lucide-react";
+import Image from "next/image";
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { mockCalls, salesTrendData, businessMetrics, mockManagers, ManagerStat, ManagerCall, dailyMetrics } from "@/lib/mockData";
 
@@ -67,6 +68,9 @@ export default function Dashboard() {
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [searchQuery, setSearchQuery] = useState("");
+
+  // AI Dashboard period filter
+  const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("day");
 
   // Manager filter states
   const [managerPeriod, setManagerPeriod] = useState<"week" | "month" | "all">("month");
@@ -182,6 +186,53 @@ export default function Dashboard() {
     });
   }, [selectedManager, managerPeriod, managerMinScore, aiCalls, activeTab]);
 
+  // Dashboard stats for calls tabs (managers only, no ROPs/admins)
+  const callsDashStats = (() => {
+    const allCalls = activeTab === "ai_calls" ? aiCalls : mockCalls;
+    const managers = (activeTab === "ai_calls" && !isLoadingAI ? aiManagers : mockManagers)
+      .filter(m => !m.role || m.role === "manager");
+    const managerNames = new Set(managers.map(m => m.name));
+
+    const now = new Date();
+    now.setHours(23, 59, 59, 999);
+
+    let periodStart = new Date(now);
+    if (aiDashPeriod === "day") {
+      periodStart.setHours(0, 0, 0, 0);
+    } else if (aiDashPeriod === "week") {
+      periodStart = new Date(now);
+      periodStart.setDate(periodStart.getDate() - 7);
+      periodStart.setHours(0, 0, 0, 0);
+    } else {
+      periodStart = new Date(now);
+      periodStart.setDate(periodStart.getDate() - 30);
+      periodStart.setHours(0, 0, 0, 0);
+    }
+
+    const periodCalls = allCalls.filter(call => {
+      if (!managerNames.has(call.name)) return false;
+      const callDate = parseCallDate(call.date);
+      return callDate >= periodStart && callDate <= now;
+    });
+
+    const totalRoleplays = periodCalls.length;
+    const avgScore = totalRoleplays > 0
+      ? Math.round(periodCalls.reduce((sum, c) => sum + c.score, 0) / totalRoleplays)
+      : 0;
+
+    // Per-manager breakdown
+    const perManager = managers.map(m => {
+      const mCalls = periodCalls.filter(c => c.name === m.name);
+      const count = mCalls.length;
+      const avg = count > 0
+        ? Math.round(mCalls.reduce((sum, c) => sum + c.score, 0) / count)
+        : 0;
+      return { name: m.name, avgScore: avg, count };
+    }).sort((a, b) => b.avgScore - a.avgScore);
+
+    return { avgScore, totalCalls: totalRoleplays, perManager };
+  })();
+
   // Filter calls by date range and search query
   const filteredCalls = (activeTab === "ai_calls" ? aiCalls : mockCalls).filter(call => {
     // Filter by date range
@@ -195,6 +246,11 @@ export default function Dashboard() {
       if (!(callDate >= startOfDay && callDate <= endOfDay)) {
         return false;
       }
+    }
+
+    // Filter by minimum score
+    if (call.score < scoreFilter) {
+      return false;
     }
 
     // Filter by search query
@@ -212,7 +268,7 @@ export default function Dashboard() {
       ...manager,
       totalCalls: managerCalls.length
     };
-  }).filter(manager => manager.totalCalls > 0);
+  });
 
   // Close modals
   const closeModal = () => {
@@ -232,8 +288,8 @@ export default function Dashboard() {
         }`}>
         <div className="flex items-center justify-between w-full">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
-              <Command className="w-5 h-5 text-white" />
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0">
+              <Image src="/logo.png" alt="Logo" width={40} height={40} className="rounded-xl" />
             </div>
             {isSidebarOpen && (
               <div>
@@ -603,13 +659,103 @@ export default function Dashboard() {
                   onClick={() => setSelectedManager(manager)}
                   className="glass-panel flex-shrink-0 flex items-center gap-3 p-3 pr-6 rounded-2xl border border-white/5 hover:border-blue-500/30 transition-all text-left group"
                 >
-                  <img src={manager.avatarUrl} alt={manager.name} className="w-10 h-10 rounded-full border border-blue-500/20" />
                   <div>
-                    <h4 className="font-semibold text-slate-100 text-xs group-hover:text-blue-300">{manager.name}</h4>
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-slate-100 text-xs group-hover:text-blue-300">{manager.name}</h4>
+                      {manager.role && (
+                        <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md ${
+                          manager.role === 'rop' ? 'bg-amber-500/20 text-amber-400' :
+                          manager.role === 'admin' ? 'bg-purple-500/20 text-purple-400' :
+                          'bg-blue-500/20 text-blue-400'
+                        }`}>
+                          {manager.role === 'rop' ? 'РОП' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[10px] text-slate-400 mt-0.5">Звонков: <span className="text-white font-medium">{manager.totalCalls}</span></p>
                   </div>
                 </button>
               ))}
+            </div>
+
+            {/* CALLS DASHBOARD — stats for both real_calls and ai_calls */}
+            <div className="flex flex-col gap-3">
+              {/* Period Filter */}
+              <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner w-max">
+                {([
+                  { id: "day", label: "День" },
+                  { id: "week", label: "Неделя" },
+                  { id: "month", label: "Месяц" },
+                ] as const).map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => setAiDashPeriod(p.id)}
+                    className={`px-4 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+                      aiDashPeriod === p.id
+                        ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Stats Row */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                {/* Card 1: Average Score */}
+                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Средний балл отдела</span>
+                  <div className="flex items-baseline gap-2">
+                    <span className={`text-3xl font-black ${
+                      callsDashStats.avgScore >= 66 ? "text-emerald-400" :
+                      callsDashStats.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                    }`}>
+                      {callsDashStats.avgScore}%
+                    </span>
+                    <span className="text-xs text-slate-500">только менеджеры</span>
+                  </div>
+                </div>
+
+                {/* Card 2: Total Calls */}
+                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
+                    {activeTab === "ai_calls" ? "Ролевок сыграно" : "Звонков совершено"}
+                  </span>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-3xl font-black text-white">{callsDashStats.totalCalls}</span>
+                    <span className="text-xs text-slate-500">
+                      {aiDashPeriod === "day" ? "за сегодня" : aiDashPeriod === "week" ? "за неделю" : "за месяц"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Card 3: Per-Manager Scores */}
+                <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-2 max-h-[180px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold sticky top-0 bg-slate-900/80 backdrop-blur-sm pb-1">Оценки менеджеров</span>
+                  <div className="flex flex-col gap-1.5">
+                    {callsDashStats.perManager.length === 0 ? (
+                      <span className="text-xs text-slate-500">Нет данных за период</span>
+                    ) : (
+                      callsDashStats.perManager.map((m) => (
+                        <div key={m.name} className="flex items-center justify-between text-xs">
+                          <span className="text-slate-300 truncate mr-3">{m.name}</span>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-[10px] text-slate-500">{m.count} зв.</span>
+                            <span className={`font-bold min-w-[36px] text-right ${
+                              m.avgScore >= 66 ? "text-emerald-400" :
+                              m.avgScore >= 41 ? "text-amber-400" :
+                              m.count === 0 ? "text-slate-600" : "text-rose-400"
+                            }`}>
+                              {m.count > 0 ? `${m.avgScore}%` : "—"}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* DATA TABLE */}
@@ -619,7 +765,20 @@ export default function Dashboard() {
                   {activeTab === "real_calls" ? "Таблица: Звонки" : "Таблица: Ролевые AI Звонки"}
                 </h2>
                 {/* Advanced Table Filters */}
-                <div className="flex gap-2">
+                <div className="flex gap-3 items-center">
+                  <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5 gap-2">
+                    <BarChart3 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    <span className="text-[10px] text-slate-400 whitespace-nowrap">от</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={scoreFilter}
+                      onChange={(e) => setScoreFilter(parseInt(e.target.value))}
+                      className="w-20 accent-blue-500 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-blue-400 w-8 text-right">{scoreFilter}%</span>
+                  </div>
                   <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5">
                     <Search className="w-3.5 h-3.5 text-slate-400 mr-2" />
                     <input
@@ -662,10 +821,7 @@ export default function Dashboard() {
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">
-                          <div className="flex items-center gap-3">
-                            <img src={call.avatarUrl} alt={call.name} className="w-8 h-8 rounded-full border border-blue-500/30" />
-                            <span className="font-medium text-slate-200">{call.name}</span>
-                          </div>
+                          <span className="font-medium text-slate-200">{call.name}</span>
                         </td>
                         <td className="px-5 py-3 text-slate-400 whitespace-nowrap">{call.date}</td>
                         <td className="px-5 py-3 text-slate-300 font-mono text-center">{call.callDuration}</td>
@@ -728,7 +884,6 @@ export default function Dashboard() {
             {/* HEADER */}
             <div className="flex justify-between items-start shrink-0">
               <div className="flex items-center gap-4">
-                <img src={selectedCall.avatarUrl} alt={selectedCall.name} className="w-12 h-12 rounded-full border-2 border-blue-500/30" />
                 <div>
                   <h3 className="font-bold text-lg text-white">{selectedCall.name}</h3>
                   <p className="text-xs text-slate-400">{selectedCall.date} • Длительность: {selectedCall.callDuration}</p>
@@ -877,7 +1032,6 @@ export default function Dashboard() {
             {/* HEADER */}
             <div className="flex justify-between items-center shrink-0">
               <div className="flex items-center gap-3">
-                <img src={selectedManager.avatarUrl} alt={selectedManager.name} className="w-12 h-12 rounded-full border-2 border-blue-500/30 shadow-lg" />
                 <h2 className="text-lg font-bold text-white tracking-tight">{selectedManager.name}</h2>
               </div>
               <button onClick={closeManagerSidebar} className="p-2 text-slate-400 hover:text-white bg-white/5 rounded-full hover:bg-white/10 transition-colors">

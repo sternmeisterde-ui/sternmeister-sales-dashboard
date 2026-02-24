@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, Mail, ArrowRight, Bot } from "lucide-react";
+import { Lock, Mail, ArrowRight } from "lucide-react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
@@ -32,10 +33,8 @@ export default function LoginPage() {
 
                 {/* Логотип */}
                 <div className="flex flex-col items-center justify-center mb-10 gap-4">
-                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-emerald-400 p-[2px] shadow-lg shadow-blue-500/20">
-                        <div className="w-full h-full bg-slate-950 rounded-[14px] flex items-center justify-center">
-                            <Bot className="w-8 h-8 text-blue-400" />
-                        </div>
+                    <div className="w-16 h-16 flex items-center justify-center">
+                        <Image src="/logo.png" alt="Logo" width={64} height={64} />
                     </div>
                     <div className="text-center">
                         <h1 className="text-2xl font-black text-white tracking-tight">Sternmeister</h1>
