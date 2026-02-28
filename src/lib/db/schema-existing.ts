@@ -1,4 +1,4 @@
-import { pgTable, text, uuid, integer, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 // ==================== D1 TABLES (Госники - B2G) ====================
@@ -11,23 +11,23 @@ export const d1Users = pgTable("d1_users", {
   team: text("team").notNull(), // 'dima', 'ruzanna', 'all'
   role: text("role").notNull(), // 'manager', 'rop', 'admin'
   isActive: boolean("is_active").default(true),
-  line: integer("line"),
+  line: text("line"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 export const d1Avatars = pgTable("d1_avatars", {
-  id: integer("id").primaryKey(),
-  name: text("name").notNull(),
-  prompt: text("prompt"),
-  description: text("description"),
+  id: serial("id").primaryKey(),
+  data: jsonb("data").notNull(),
+  isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 export const d1Calls = pgTable("d1_calls", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").notNull().references(() => d1Users.id),
-  avatarId: integer("avatar_id").notNull().references(() => d1Avatars.id),
+  avatarId: integer("avatar_id").references(() => d1Avatars.id),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   durationSeconds: integer("duration_seconds"),
@@ -45,6 +45,7 @@ export const d1Calls = pgTable("d1_calls", {
   recommendations: text("recommendations"),
   grokSessionId: text("grok_session_id"),
   livekitRoomId: text("livekit_room_id"),
+  recordingPath: text("recording_path"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
@@ -58,23 +59,23 @@ export const r1Users = pgTable("r1_users", {
   team: text("team").notNull(),
   role: text("role").notNull(),
   isActive: boolean("is_active").default(true),
-  line: integer("line"),
+  line: text("line"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 export const r1Avatars = pgTable("r1_avatars", {
-  id: integer("id").primaryKey(),
-  name: text("name").notNull(),
-  prompt: text("prompt"),
-  description: text("description"),
+  id: serial("id").primaryKey(),
+  data: jsonb("data").notNull(),
+  isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 export const r1Calls = pgTable("r1_calls", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").notNull().references(() => r1Users.id),
-  avatarId: integer("avatar_id").notNull().references(() => r1Avatars.id),
+  avatarId: integer("avatar_id").references(() => r1Avatars.id),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   durationSeconds: integer("duration_seconds"),
@@ -92,6 +93,7 @@ export const r1Calls = pgTable("r1_calls", {
   recommendations: text("recommendations"),
   grokSessionId: text("grok_session_id"),
   livekitRoomId: text("livekit_room_id"),
+  recordingPath: text("recording_path"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 

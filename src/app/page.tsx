@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  LayoutDashboard, Phone, Bot, Play, FileText, Activity, Users, DollarSign,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, TrendingUp, ClipboardList
+  LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users, DollarSign,
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, TrendingUp, ClipboardList, Loader2
 } from "lucide-react";
 import Image from "next/image";
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from "recharts";
@@ -85,6 +85,63 @@ export default function Dashboard() {
     avgDuration: "00:00",
     filteredCalls: 0,
   });
+
+  // Audio player state
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingCallId, setPlayingCallId] = useState<string | null>(null);
+  const [audioLoading, setAudioLoading] = useState<string | null>(null);
+
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+    }
+    setPlayingCallId(null);
+    setAudioLoading(null);
+  }, []);
+
+  const toggleAudio = useCallback((call: ManagerCall) => {
+    if (!call.hasRecording) return;
+
+    // If same call is playing — stop it
+    if (playingCallId === call.id) {
+      stopAudio();
+      return;
+    }
+
+    // Stop previous audio
+    stopAudio();
+
+    // Start new audio
+    setAudioLoading(call.id);
+    const audio = new Audio(call.audioUrl);
+    audioRef.current = audio;
+
+    audio.oncanplaythrough = () => {
+      setAudioLoading(null);
+      setPlayingCallId(call.id);
+      audio.play().catch(() => {
+        setPlayingCallId(null);
+        setAudioLoading(null);
+      });
+    };
+
+    audio.onended = () => {
+      setPlayingCallId(null);
+    };
+
+    audio.onerror = () => {
+      setPlayingCallId(null);
+      setAudioLoading(null);
+    };
+
+    audio.load();
+  }, [playingCallId, stopAudio]);
+
+  // Cleanup audio on unmount or department change
+  useEffect(() => {
+    return () => { stopAudio(); };
+  }, [activeDepartment, stopAudio]);
 
   // Load calls data from API (single request + client cache)
   useEffect(() => {
@@ -849,12 +906,39 @@ export default function Dashboard() {
                         </td>
                         <td className="px-5 py-3">
                           <div className="flex items-center gap-2 bg-slate-900/50 p-1.5 rounded-full border border-white/5 w-max mx-auto">
-                            <button className="w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center hover:scale-105 transition-transform">
-                              <Play className="w-3 h-3 ml-0.5" />
+                            <button
+                              onClick={() => toggleAudio(call)}
+                              disabled={!call.hasRecording}
+                              title={call.hasRecording ? (playingCallId === call.id ? "Пауза" : "Воспроизвести") : "Запись недоступна"}
+                              className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${
+                                !call.hasRecording
+                                  ? "bg-slate-700 text-slate-500 cursor-not-allowed"
+                                  : playingCallId === call.id
+                                    ? "bg-amber-500 text-white hover:scale-105 animate-pulse"
+                                    : "bg-blue-500 text-white hover:scale-105"
+                              }`}
+                            >
+                              {audioLoading === call.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : playingCallId === call.id ? (
+                                <Pause className="w-3 h-3" />
+                              ) : (
+                                <Play className="w-3 h-3 ml-0.5" />
+                              )}
                             </button>
                             <div className="flex gap-0.5 items-center mr-2">
                               {[3, 6, 4, 8, 5, 7, 3].map((h, i) => (
-                                <div key={i} style={{ height: `${h}px` }} className="w-[2px] bg-blue-500/50 rounded-full" />
+                                <div
+                                  key={i}
+                                  style={{ height: `${h * (playingCallId === call.id ? 1.5 : 1)}px` }}
+                                  className={`w-[2px] rounded-full transition-all ${
+                                    playingCallId === call.id
+                                      ? "bg-amber-400 animate-pulse"
+                                      : call.hasRecording
+                                        ? "bg-blue-500/50"
+                                        : "bg-slate-600/30"
+                                  }`}
+                                />
                               ))}
                             </div>
                           </div>

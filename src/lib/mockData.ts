@@ -10,6 +10,7 @@ export interface ManagerCall {
     transcript: string;
     aiFeedback: string;
     summary: string;
+    hasRecording: boolean;
     blocks: {
         id: string;
         name: string;
@@ -99,6 +100,7 @@ export const mockCalls: ManagerCall[] = [
         date: "Сегодня, 14:30",
         score: 85,
         audioUrl: "#",
+        hasRecording: false,
         kommoUrl: "https://kommo.com/leads/123",
         transcript: "Клиент: Алло, добрый день. Меня интересует ваше предложение по закупкам.\nМенеджер: Здравствуйте! Да, конечно. Давайте обсудим объемы, которые вам требуются на этот квартал...",
         aiFeedback: "Менеджер отлично начал разговор, но забыл уточнить сроки поставки на первом этапе. Тон общения: вежливый. Отработка возражений: 8/10.",
@@ -113,6 +115,7 @@ export const mockCalls: ManagerCall[] = [
         date: "Сегодня, 12:15",
         score: 92,
         audioUrl: "#",
+        hasRecording: false,
         kommoUrl: "https://kommo.com/leads/124",
         transcript: "Клиент: Нам дорого.\nМенеджер: Понимаю вас. Если мы разобьем платеж на три части и добавим расширенную поддержку, это уложится в ваш бюджет?",
         aiFeedback: "Идеальная отработка возражения по цене. Менеджер сразу перевел диалог в конструктивное русло и предложил альтернативу.",
@@ -127,6 +130,7 @@ export const mockCalls: ManagerCall[] = [
         date: "Вчера, 16:40",
         score: 45,
         audioUrl: "#",
+        hasRecording: false,
         kommoUrl: "https://kommo.com/leads/125",
         transcript: "Клиент: Я подумаю.\nМенеджер: Хорошо, как надумаете — звоните. До свидания.",
         aiFeedback: "Критическая ошибка: менеджер отпустил клиента без попытки назначить следующий шаг или закрыть возражение 'Я подумаю'.",
@@ -141,6 +145,7 @@ export const mockCalls: ManagerCall[] = [
         date: "Вчера, 10:05",
         score: 98,
         audioUrl: "#",
+        hasRecording: false,
         kommoUrl: "https://kommo.com/leads/126",
         transcript: "Клиент: Давайте подписывать договор.\nМенеджер: Отлично. Отправляю вам ссылку на подписание, параллельно зафиксирую бонусы за этот месяц.",
         aiFeedback: "Быстрое и уверенное закрытие сделки. Четкое озвучивание следующих шагов.",

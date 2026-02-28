@@ -6,11 +6,11 @@ import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 export type DepartmentType = "b2g" | "b2b";
 
 // Получить таблицы по типу отдела
-// R1 таблицы → Коммерсы (B2B), D1 таблицы → Госники (B2G)
+// D1 таблицы → Госники (B2G), R1 таблицы → Коммерсы (B2B)
 function getTables(departmentType: DepartmentType) {
   return departmentType === "b2g"
-    ? { calls: r1Calls, users: r1Users }  // Коммерсы используют R1
-    : { calls: d1Calls, users: d1Users };  // Госники используют D1
+    ? { calls: d1Calls, users: d1Users }   // Госники используют D1
+    : { calls: r1Calls, users: r1Users };   // Коммерсы используют R1
 }
 
 // Получить все AI ролевые звонки для отдела
@@ -29,6 +29,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       mistakes: calls.mistakes,
       recommendations: calls.recommendations,
       evaluationJson: calls.evaluationJson,
+      recordingPath: calls.recordingPath,
       userName: users.name,
       userTelegramUsername: users.telegramUsername,
     })
@@ -49,7 +50,8 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
       date: formatDate(call.startedAt),
       score: call.score || 0, // Оценка уже в шкале 0-100
-      audioUrl: "#", // TODO: добавить реальный URL аудио
+      hasRecording: !!call.recordingPath,
+      audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${departmentType}` : "#",
       kommoUrl: "#",
       transcript: call.transcript || "",
       aiFeedback: call.recommendations || "",
