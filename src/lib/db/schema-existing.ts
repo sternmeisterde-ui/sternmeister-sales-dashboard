@@ -61,6 +61,7 @@ export const r1Users = pgTable("r1_users", {
   role: text("role").notNull(),
   isActive: boolean("is_active").default(true),
   line: text("line"),
+  kommoUserId: integer("kommo_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

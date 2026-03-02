@@ -16,7 +16,7 @@ import {
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getD1ManagersWithKommo } from "@/lib/db/queries-daily";
+import { getManagersWithKommo } from "@/lib/db/queries-daily";
 import {
   getPipelineIds,
   getActiveStatusIds,
@@ -269,9 +269,9 @@ export async function GET(req: NextRequest) {
     const pipelineIds = getPipelineIds(department);
     const activeStatusIds = getActiveStatusIds(department);
 
-    // Step 1: DB — get managers (filter by department line if needed)
-    const allManagers = await getD1ManagersWithKommo();
-    // For B2B we still want all managers' calls — Kommo user IDs drive call attribution
+    // Step 1: DB — get managers based on department
+    const allManagers = await getManagersWithKommo(department);
+    // Kommo user IDs drive call attribution
     const kommoUserIds = allManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id !== null);

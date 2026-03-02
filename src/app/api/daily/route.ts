@@ -10,7 +10,7 @@ import {
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getD1ManagersWithKommo, getPlans, getScheduleForDate } from "@/lib/db/queries-daily";
+import { getManagersWithKommo, getPlans, getScheduleForDate } from "@/lib/db/queries-daily";
 import { dailySections, type SectionDef } from "@/lib/daily/metrics-config";
 import { B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
@@ -144,7 +144,7 @@ export async function GET(req: NextRequest) {
 
     // ─── Step 1: DB queries (fast, parallel) ───
     const [allManagers, plans, scheduleMap] = await Promise.all([
-      getD1ManagersWithKommo(),
+      getManagersWithKommo(department),
       getPlans(department, periodType, periodDate),
       period === "day" ? getScheduleForDate(dateStr) : Promise.resolve(null),
     ]);

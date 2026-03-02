@@ -1,7 +1,7 @@
 // DB queries for the Daily tab — plans CRUD + manager-kommo mapping
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "./index";
-import { d1Users, dailyPlans, managerSchedule } from "./schema-existing";
+import { d1Users, r1Users, dailyPlans, managerSchedule } from "./schema-existing";
 
 export interface ManagerRow {
   id: string;
@@ -11,20 +11,30 @@ export interface ManagerRow {
 }
 
 /**
- * Get all active D1 managers with their Kommo user IDs
+ * Get all active managers with their Kommo user IDs for a given department
+ * B2G → d1_users, B2B → r1_users
  */
-export async function getD1ManagersWithKommo(): Promise<ManagerRow[]> {
+export async function getManagersWithKommo(department: string = "b2g"): Promise<ManagerRow[]> {
+  const usersTable = department === "b2b" ? r1Users : d1Users;
+
   const rows = await db
     .select({
-      id: d1Users.id,
-      name: d1Users.name,
-      line: d1Users.line,
-      kommoUserId: d1Users.kommoUserId,
+      id: usersTable.id,
+      name: usersTable.name,
+      line: usersTable.line,
+      kommoUserId: usersTable.kommoUserId,
     })
-    .from(d1Users)
-    .where(eq(d1Users.isActive, true));
+    .from(usersTable)
+    .where(eq(usersTable.isActive, true));
 
   return rows;
+}
+
+/**
+ * @deprecated Use getManagersWithKommo(department) instead
+ */
+export async function getD1ManagersWithKommo(): Promise<ManagerRow[]> {
+  return getManagersWithKommo("b2g");
 }
 
 /**
