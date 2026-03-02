@@ -116,10 +116,11 @@ export default function Dashboard() {
 
     // Start new audio
     setAudioLoading(call.id);
-    const audio = new Audio(call.audioUrl);
+    const audio = new Audio();
+    audio.preload = "auto";
     audioRef.current = audio;
 
-    audio.oncanplaythrough = () => {
+    audio.oncanplay = () => {
       setAudioLoading(null);
       setPlayingCallId(call.id);
       audio.play().catch(() => {
@@ -132,11 +133,14 @@ export default function Dashboard() {
       setPlayingCallId(null);
     };
 
-    audio.onerror = () => {
+    audio.onerror = (e) => {
+      console.error("Audio error:", audio.error?.message, audio.error?.code);
       setPlayingCallId(null);
       setAudioLoading(null);
     };
 
+    // Set src after listeners to ensure events fire
+    audio.src = call.audioUrl;
     audio.load();
   }, [playingCallId, stopAudio]);
 

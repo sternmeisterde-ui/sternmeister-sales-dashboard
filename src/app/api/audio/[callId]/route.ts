@@ -46,10 +46,29 @@ export async function GET(
       );
     }
 
-    // Стримим аудио обратно клиенту
-    const audioData = await response.arrayBuffer();
     const contentType = response.headers.get("content-type") || "audio/webm";
+    const contentLength = response.headers.get("content-length");
 
+    // Стрим прокси — не загружаем весь файл в память
+    // Это критично для больших записей (15-20 МБ)
+    if (response.body) {
+      const headers: Record<string, string> = {
+        "Content-Type": contentType,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=3600",
+      };
+      if (contentLength) {
+        headers["Content-Length"] = contentLength;
+      }
+
+      return new NextResponse(response.body, {
+        status: 200,
+        headers,
+      });
+    }
+
+    // Fallback: если body не доступен как ReadableStream — загружаем целиком
+    const audioData = await response.arrayBuffer();
     return new NextResponse(audioData, {
       status: 200,
       headers: {
