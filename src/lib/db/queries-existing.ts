@@ -28,7 +28,6 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       score: calls.score,
       mistakes: calls.mistakes,
       recommendations: calls.recommendations,
-      evaluationJson: calls.evaluationJson,
       recordingPath: calls.recordingPath,
       userName: users.name,
       userTelegramUsername: users.telegramUsername,
@@ -56,7 +55,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       transcript: call.transcript || "",
       aiFeedback: call.recommendations || "",
       summary: call.mistakes || "",
-      blocks: parseEvaluationJson(call.evaluationJson),
+      blocks: [], // evaluation_json column not yet in DB — will be populated when migration is run
     };
   });
 }

@@ -12,6 +12,7 @@ export const d1Users = pgTable("d1_users", {
   role: text("role").notNull(), // 'manager', 'rop', 'admin'
   isActive: boolean("is_active").default(true),
   line: text("line"),
+  kommoUserId: integer("kommo_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
@@ -95,6 +96,40 @@ export const r1Calls = pgTable("r1_calls", {
   livekitRoomId: text("livekit_room_id"),
   recordingPath: text("recording_path"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ==================== SHARED TABLES ====================
+
+export const dailyPlans = pgTable("daily_plans", {
+  id: serial("id").primaryKey(),
+  department: text("department").notNull(),          // 'b2g' | 'b2b'
+  line: text("line").notNull(),                      // '1' (qualifier), '2' (second line), 'funnel'
+  userId: uuid("user_id"),                           // NULL = line-level default plan
+  metricKey: text("metric_key").notNull(),
+  planValue: text("plan_value").notNull(),
+  periodType: text("period_type").notNull(),         // 'day' | 'week' | 'month'
+  periodDate: text("period_date").notNull(),         // '2026-02-28' | '2026-W09' | '2026-02'
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+export const managerSchedule = pgTable("manager_schedule", {
+  id: serial("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => d1Users.id),
+  scheduleDate: text("schedule_date").notNull(),     // 'YYYY-MM-DD'
+  isOnLine: boolean("is_on_line").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+export const kommoTokens = pgTable("kommo_tokens", {
+  id: serial("id").primaryKey(),
+  subdomain: text("subdomain").notNull().unique(),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 // ==================== RELATIONS ====================

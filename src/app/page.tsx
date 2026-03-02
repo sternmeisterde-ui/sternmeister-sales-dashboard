@@ -2,12 +2,14 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users, DollarSign,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, TrendingUp, ClipboardList, Loader2
+  LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2
 } from "lucide-react";
 import Image from "next/image";
-import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { salesTrendData, businessMetrics, ManagerStat, ManagerCall, dailyMetrics } from "@/lib/mockData";
+// recharts moved to DashboardTab component
+import { ManagerStat, ManagerCall } from "@/lib/mockData";
+import DailyTab from "@/components/DailyTab";
+import DashboardTab from "@/components/DashboardTab";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -49,7 +51,7 @@ const isInRange = (date: Date, start: Date | null, end: Date | null) => {
 export default function Dashboard() {
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
-  const [dailyFilter, setDailyFilter] = useState<"day" | "week" | "month" | "3months" | "6months">("day");
+  // dailyFilter moved to DailyTab component
 
   // API Data States
   const [aiCalls, setAiCalls] = useState<ManagerCall[]>([]);
@@ -153,9 +155,10 @@ export default function Dashboard() {
       return;
     }
 
+    const ac = new AbortController();
     setIsLoadingAI(true);
 
-    fetch(`/api/calls?department=${activeDepartment}&type=all`)
+    fetch(`/api/calls?department=${activeDepartment}&type=all`, { signal: ac.signal })
       .then(r => r.json())
       .then(res => {
         if (res.success) {
@@ -169,9 +172,13 @@ export default function Dashboard() {
         }
       })
       .catch(error => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof TypeError && error.message === "Failed to fetch") return;
         console.error("Error loading calls:", error);
       })
       .finally(() => setIsLoadingAI(false));
+
+    return () => ac.abort();
   }, [activeDepartment]);
 
   // Parse date from Russian format (Сегодня, Вчера, DD.MM)
@@ -410,14 +417,14 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2C)
+              Госники (B2G)
             </button>
             <button
               onClick={() => setActiveDepartment("b2b")}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Госники (B2G)
+              Коммерсы (B2B)
             </button>
           </div>
 
@@ -425,138 +432,12 @@ export default function Dashboard() {
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}
         {activeTab === "dashboard" && (
-          <div className="flex flex-col gap-4 fade-in">
-            {/* Business KPI Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-              <KpiCard title="Выручка" value={businessMetrics.revenue.value} dG={businessMetrics.revenue.dailyGrowth} wG={businessMetrics.revenue.weeklyGrowth} icon={DollarSign} />
-              <KpiCard title="Лучший Менеджер" value={businessMetrics.bestManager.name} subValue={businessMetrics.bestManager.value} dG={businessMetrics.bestManager.dailyGrowth} wG={businessMetrics.bestManager.weeklyGrowth} icon={TrendingUp} />
-              <KpiCard title="Звонки (B2G)" value={businessMetrics.callsB2G.value} dG={businessMetrics.callsB2G.dailyGrowth} wG={businessMetrics.callsB2G.weeklyGrowth} icon={Phone} />
-              <KpiCard title="Звонки (B2B)" value={businessMetrics.callsB2B.value} dG={businessMetrics.callsB2B.dailyGrowth} wG={businessMetrics.callsB2B.weeklyGrowth} icon={Phone} />
-              <KpiCard title="Ср. Время на Линии" value={businessMetrics.avgCallDuration.value} dG={businessMetrics.avgCallDuration.dailyGrowth} wG={businessMetrics.avgCallDuration.weeklyGrowth} icon={Clock} />
-            </div>
-
-            {/* General Graph */}
-            <div className="glass-panel rounded-2xl p-5 border border-white/5 h-[300px]">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Общая динамика звонков по отделам</h3>
-              </div>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={salesTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="colorB2G" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="colorB2B" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis dataKey="name" stroke="#475569" fontSize={11} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', fontSize: '12px' }} />
-                  <Area type="monotone" dataKey="b2gCalls" stroke="#3b82f6" fillOpacity={1} fill="url(#colorB2G)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="b2bCalls" stroke="#06b6d4" fillOpacity={1} fill="url(#colorB2B)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          <DashboardTab department={activeDepartment} />
         )}
 
         {/* --------------------- DAILY VIEW --------------------- */}
         {activeTab === "daily" && (
-          <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
-
-            {/* Вкладки Фильтров периодов */}
-            <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner w-full sm:w-max self-start overflow-x-auto scrollbar-hide">
-              {[
-                { id: "day", label: "День" },
-                { id: "week", label: "Неделя" },
-                { id: "month", label: "Мес" },
-                { id: "3months", label: "3 Мес" },
-                { id: "6months", label: "6 Мес" },
-              ].map((filter) => (
-                <button
-                  key={filter.id}
-                  onClick={() => setDailyFilter(filter.id as any)}
-                  className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${dailyFilter === filter.id
-                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                    : "text-slate-400 hover:text-white"
-                    }`}
-                >
-                  {filter.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Block 1: Воронка продаж */}
-            <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-              <div className="p-5 border-b border-white/5 bg-slate-900/20 flex items-center gap-3">
-                <TrendingUp className="w-5 h-5 text-blue-400" />
-                <h3 className="text-sm font-bold tracking-widest uppercase text-white">
-                  Сделки на активных этапах и Воронка
-                </h3>
-              </div>
-              <div className="w-full overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <tbody className="divide-y divide-white/5 text-sm">
-                    {dailyMetrics.funnel.map((m, i) => (
-                      <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
-                        <td className="px-5 py-3 font-medium text-slate-300 w-2/3 group-hover:text-blue-200 transition-colors">{m.label}</td>
-                        <td className="px-5 py-3 font-bold text-white text-right font-mono">{m.value}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Block 2: Менеджер-квалификатор */}
-              <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-                <div className="p-5 border-b border-white/5 bg-slate-900/20 flex items-center gap-3">
-                  <Users className="w-5 h-5 text-emerald-400" />
-                  <h3 className="text-sm font-bold tracking-widest uppercase text-white">
-                    Менеджер-квалификатор
-                  </h3>
-                </div>
-                <div className="w-full overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <tbody className="divide-y divide-white/5 text-sm">
-                      {dailyMetrics.qualifier.map((m, i) => (
-                        <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
-                          <td className="px-5 py-3 font-medium text-slate-300 group-hover:text-emerald-200 transition-colors w-2/3">{m.label}</td>
-                          <td className="px-5 py-3 font-bold text-white text-right font-mono">{m.value}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Block 3: Менеджер второй линии */}
-              <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-                <div className="p-5 border-b border-white/5 bg-slate-900/20 flex items-center gap-3">
-                  <Activity className="w-5 h-5 text-purple-400" />
-                  <h3 className="text-sm font-bold tracking-widest uppercase text-white">
-                    Менеджер второй линии
-                  </h3>
-                </div>
-                <div className="w-full overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <tbody className="divide-y divide-white/5 text-sm">
-                      {dailyMetrics.secondLine.map((m, i) => (
-                        <tr key={i} className="hover:bg-white/[0.02] transition-colors group">
-                          <td className="px-5 py-3 font-medium text-slate-300 group-hover:text-purple-200 transition-colors w-2/3">{m.label}</td>
-                          <td className="px-5 py-3 font-bold text-white text-right font-mono">{m.value}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-
-          </div>
+          <DailyTab department={activeDepartment} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
