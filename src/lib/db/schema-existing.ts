@@ -47,6 +47,7 @@ export const d1Calls = pgTable("d1_calls", {
   grokSessionId: text("grok_session_id"),
   livekitRoomId: text("livekit_room_id"),
   recordingPath: text("recording_path"),
+  recordingExpiresAt: timestamp("recording_expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
@@ -96,6 +97,7 @@ export const r1Calls = pgTable("r1_calls", {
   grokSessionId: text("grok_session_id"),
   livekitRoomId: text("livekit_room_id"),
   recordingPath: text("recording_path"),
+  recordingExpiresAt: timestamp("recording_expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
