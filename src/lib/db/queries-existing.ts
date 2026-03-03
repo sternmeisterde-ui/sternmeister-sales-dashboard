@@ -1,12 +1,12 @@
 import { eq, desc } from "drizzle-orm";
-import { db } from "./index";
+import { getDbForDepartment } from "./index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 
 // Тип отдела
 export type DepartmentType = "b2g" | "b2b";
 
 // Получить таблицы по типу отдела
-// D1 таблицы → Госники (B2G), R1 таблицы → Коммерсы (B2B)
+// D1 таблицы → Госники (B2G) на ветке D1, R1 таблицы → Коммерсы (B2B) на ветке R1
 function getTables(departmentType: DepartmentType) {
   return departmentType === "b2g"
     ? { calls: d1Calls, users: d1Users }   // Госники используют D1
@@ -16,6 +16,7 @@ function getTables(departmentType: DepartmentType) {
 // Получить все AI ролевые звонки для отдела
 export async function getAIRoleCalls(departmentType: DepartmentType) {
   const { calls, users } = getTables(departmentType);
+  const db = getDbForDepartment(departmentType);
 
   const result = await db
     .select({
@@ -63,6 +64,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
 // Получить статистику менеджеров (2 запроса вместо N+1)
 export async function getManagerStats(departmentType: DepartmentType) {
   const { calls, users } = getTables(departmentType);
+  const db = getDbForDepartment(departmentType);
 
   // Параллельно: все пользователи + все звонки (2 запроса вместо N+1)
   const [allUsers, allCalls] = await Promise.all([

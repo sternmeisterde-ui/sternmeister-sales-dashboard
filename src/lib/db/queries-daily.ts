@@ -1,6 +1,6 @@
 // DB queries for the Daily tab — plans CRUD + manager-kommo mapping
 import { eq, and, sql } from "drizzle-orm";
-import { db } from "./index";
+import { db, getDbForDepartment } from "./index";
 import { d1Users, r1Users, dailyPlans, managerSchedule } from "./schema-existing";
 
 export interface ManagerRow {
@@ -12,12 +12,13 @@ export interface ManagerRow {
 
 /**
  * Get all active managers with their Kommo user IDs for a given department
- * B2G → d1_users, B2B → r1_users
+ * B2G → d1_users (D1 branch), B2B → r1_users (R1 branch)
  */
 export async function getManagersWithKommo(department: string = "b2g"): Promise<ManagerRow[]> {
   const usersTable = department === "b2b" ? r1Users : d1Users;
+  const deptDb = getDbForDepartment(department);
 
-  const rows = await db
+  const rows = await deptDb
     .select({
       id: usersTable.id,
       name: usersTable.name,
