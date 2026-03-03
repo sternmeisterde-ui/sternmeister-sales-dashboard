@@ -4,6 +4,16 @@ import * as schema from "./schema-existing";
 
 type DrizzleDb = ReturnType<typeof drizzle>;
 
+// Neon branch endpoints (same project, same credentials, same DB name)
+// D1 = ep-withered-recipe-ai1ea97w (Госники / B2G) — main branch
+// R1 = ep-shiny-recipe-aio8wyp2   (Коммерсы / B2B) — child branch
+const R1_ENDPOINT = "ep-shiny-recipe-aio8wyp2-pooler";
+const D1_ENDPOINT = "ep-withered-recipe-ai1ea97w-pooler";
+
+function deriveR1Url(d1Url: string): string {
+  return d1Url.replace(D1_ENDPOINT, R1_ENDPOINT);
+}
+
 // ==================== D1 (B2G / Госники) ====================
 let d1DbInstance: DrizzleDb | null = null;
 
@@ -21,12 +31,17 @@ let r1DbInstance: DrizzleDb | null = null;
 
 function getR1Db(): DrizzleDb {
   if (!r1DbInstance) {
-    const url = process.env.R1_DATABASE_URL;
+    let url = process.env.R1_DATABASE_URL;
     if (!url) {
-      // Fallback: если R1_DATABASE_URL не задан, используем DATABASE_URL
-      // (для обратной совместимости, когда все таблицы на одной ветке)
-      console.warn("R1_DATABASE_URL not set, falling back to DATABASE_URL");
-      return getD1Db();
+      // Auto-derive R1 URL from DATABASE_URL by swapping the Neon branch endpoint
+      const d1Url = process.env.DATABASE_URL;
+      if (d1Url && d1Url.includes(D1_ENDPOINT)) {
+        url = deriveR1Url(d1Url);
+        console.log("R1_DATABASE_URL auto-derived from DATABASE_URL");
+      } else {
+        console.warn("R1_DATABASE_URL not set and cannot derive from DATABASE_URL");
+        return getD1Db();
+      }
     }
     r1DbInstance = drizzle(neon(url), { schema });
   }
