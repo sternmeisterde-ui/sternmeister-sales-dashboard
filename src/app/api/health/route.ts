@@ -4,6 +4,13 @@ import { d1Users, r1Users } from "@/lib/db/schema-existing";
 import { eq } from "drizzle-orm";
 
 export async function GET() {
+  // Diagnostic: list ALL env var keys the container sees (no values for security)
+  const allEnvKeys = Object.keys(process.env).sort();
+  const relevantKeys = allEnvKeys.filter(k =>
+    k.includes("DATABASE") || k.includes("API") || k.includes("KOMMO") ||
+    k.includes("R1_") || k.includes("D1_") || k.includes("NODE") || k.includes("PORT")
+  );
+
   const results: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
     env: {
@@ -12,6 +19,8 @@ export async function GET() {
       D1_API_URL: process.env.D1_API_URL || "not set",
       R1_API_URL: process.env.R1_API_URL || "not set",
     },
+    _debug_all_relevant_env_keys: relevantKeys,
+    _debug_total_env_count: allEnvKeys.length,
   };
 
   // Test D1 (B2G) connection
