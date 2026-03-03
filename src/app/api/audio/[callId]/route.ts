@@ -29,7 +29,7 @@ export async function GET(
     // Проксируем запрос к API серверу (серверный запрос — без CORS ограничений)
     const response = await fetch(audioUrl, {
       headers: {
-        Accept: "audio/webm, audio/*",
+        Accept: "audio/ogg, audio/webm, audio/*",
       },
     });
 
