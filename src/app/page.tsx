@@ -10,6 +10,7 @@ import Image from "next/image";
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
 import DashboardTab from "@/components/DashboardTab";
+import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -76,6 +77,7 @@ export default function Dashboard() {
 
   // AI Dashboard period filter
   const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("day");
+  const [aiCustomRange, setAiCustomRange] = useState<DateRange>({ start: null, end: null });
 
   // Manager filter states
   const [managerPeriod, setManagerPeriod] = useState<"week" | "month" | "all">("month");
@@ -277,8 +279,17 @@ export default function Dashboard() {
     const now = new Date();
     now.setHours(23, 59, 59, 999);
 
-    let periodStart = new Date(now);
-    if (aiDashPeriod === "day") {
+    let periodStart: Date;
+    let periodEnd = now;
+
+    // Custom date range overrides period buttons
+    if (aiCustomRange.start && aiCustomRange.end) {
+      periodStart = new Date(aiCustomRange.start);
+      periodStart.setHours(0, 0, 0, 0);
+      periodEnd = new Date(aiCustomRange.end);
+      periodEnd.setHours(23, 59, 59, 999);
+    } else if (aiDashPeriod === "day") {
+      periodStart = new Date(now);
       periodStart.setHours(0, 0, 0, 0);
     } else if (aiDashPeriod === "week") {
       periodStart = new Date(now);
@@ -294,7 +305,7 @@ export default function Dashboard() {
       if (!managerNames.has(call.name)) return false;
       if (call.score <= 0) return false; // Исключаем звонки с нулевым скорингом
       const callDate = parseCallDate(call.date);
-      return callDate >= periodStart && callDate <= now;
+      return callDate >= periodStart && callDate <= periodEnd;
     });
 
     const totalRoleplays = periodCalls.length;
@@ -315,13 +326,20 @@ export default function Dashboard() {
     // Target completion: qualifying calls ≥10 min (regardless of score)
     const TARGET_WEEK = 2;
     const TARGET_MONTH = 8;
-    const target = aiDashPeriod === "month" ? TARGET_MONTH : TARGET_WEEK;
+    // For custom range, estimate target based on range length
+    let target: number;
+    if (aiCustomRange.start && aiCustomRange.end) {
+      const rangeDays = Math.max(1, Math.round((periodEnd.getTime() - periodStart.getTime()) / (1000 * 60 * 60 * 24)));
+      target = rangeDays <= 7 ? TARGET_WEEK : Math.round((rangeDays / 30) * TARGET_MONTH);
+    } else {
+      target = aiDashPeriod === "month" ? TARGET_MONTH : TARGET_WEEK;
+    }
 
     // Filter ALL calls in period for qualifying duration (≥10 min), no score filter
     const periodAllCalls = allCalls.filter(call => {
       if (!managerNames.has(call.name)) return false;
       const callDate = parseCallDate(call.date);
-      return callDate >= periodStart && callDate <= now;
+      return callDate >= periodStart && callDate <= periodEnd;
     });
 
     const perManagerTarget = managers.map(m => {
@@ -505,25 +523,33 @@ export default function Dashboard() {
 
             {/* CALLS DASHBOARD — stats for both real_calls and ai_calls */}
             <div className="flex flex-col gap-3">
-              {/* Period Filter */}
-              <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner w-max">
-                {([
-                  { id: "day", label: "День" },
-                  { id: "week", label: "Неделя" },
-                  { id: "month", label: "Месяц" },
-                ] as const).map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => setAiDashPeriod(p.id)}
-                    className={`px-4 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
-                      aiDashPeriod === p.id
-                        ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
+              {/* Period Filter + Calendar */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
+                  {([
+                    { id: "day", label: "День" },
+                    { id: "week", label: "Неделя" },
+                    { id: "month", label: "Месяц" },
+                  ] as const).map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => { setAiDashPeriod(p.id); setAiCustomRange({ start: null, end: null }); }}
+                      className={`px-4 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+                        aiDashPeriod === p.id && !aiCustomRange.start
+                          ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <CalendarPicker
+                  mode="range"
+                  value={aiCustomRange}
+                  onChange={(range) => setAiCustomRange(range)}
+                  onClear={() => setAiCustomRange({ start: null, end: null })}
+                />
               </div>
 
               {/* Stats Row: compact KPIs left + wide manager list right */}

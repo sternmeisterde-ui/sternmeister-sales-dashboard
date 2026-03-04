@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { TrendingUp, Users, Activity, Loader2, RefreshCw, ChevronLeft, ChevronRight, CalendarDays, UserCheck, UserX } from "lucide-react";
+import CalendarPicker from "@/components/CalendarPicker";
 
 // ====================== TYPES ======================
 
@@ -688,26 +689,34 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
       {/* Controls */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-        {/* Period tabs */}
-        <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner overflow-x-auto scrollbar-hide">
-          {([
-            { id: "day", label: "День" },
-            { id: "week", label: "Неделя" },
-            { id: "month", label: "Месяц" },
-            { id: "year", label: "Год" },
-          ] as const).map((f) => (
-            <button
-              key={f.id}
-              onClick={() => setPeriod(f.id)}
-              className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
-                period === f.id
-                  ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
+        {/* Period tabs + Calendar */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner overflow-x-auto scrollbar-hide">
+            {([
+              { id: "day", label: "День" },
+              { id: "week", label: "Неделя" },
+              { id: "month", label: "Месяц" },
+              { id: "year", label: "Год" },
+            ] as const).map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setPeriod(f.id)}
+                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
+                  period === f.id
+                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <CalendarPicker
+            mode="single"
+            value={{ start: date, end: date }}
+            onChange={(range) => { if (range.start) setDate(range.start); }}
+            onClear={() => setDate(new Date())}
+          />
         </div>
 
         {/* Date navigator */}
