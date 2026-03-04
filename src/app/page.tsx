@@ -3,14 +3,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2, Shield
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
 import DashboardTab from "@/components/DashboardTab";
-import OkkTab from "@/components/OkkTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // Функция для очистки текста от markdown и специальных символов
@@ -52,7 +51,7 @@ const isInRange = (date: Date, start: Date | null, end: Date | null) => {
 
 export default function Dashboard() {
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls" | "okk">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -188,6 +187,46 @@ export default function Dashboard() {
     return () => ac.abort();
   }, [activeDepartment]);
 
+  // ── OKK Real Calls data (same pattern as AI calls above) ──
+  const [realCalls, setRealCalls] = useState<ManagerCall[]>([]);
+  const [realManagers, setRealManagers] = useState<ManagerStat[]>([]);
+  const [isLoadingReal, setIsLoadingReal] = useState(true);
+  const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
+
+  // Fetch OKK calls — same pattern as AI calls above
+  useEffect(() => {
+    if (realDataCache[activeDepartment]) {
+      setRealCalls(realDataCache[activeDepartment].calls);
+      setRealManagers(realDataCache[activeDepartment].managers);
+      setIsLoadingReal(false);
+      return;
+    }
+
+    const ac = new AbortController();
+    setIsLoadingReal(true);
+
+    fetch(`/api/okk/calls?department=${activeDepartment}`, { signal: ac.signal })
+      .then(r => r.json())
+      .then(res => {
+        if (res.success) {
+          setRealCalls(res.data.calls);
+          setRealManagers(res.data.managers);
+          setRealDataCache(prev => ({
+            ...prev,
+            [activeDepartment]: { calls: res.data.calls, managers: res.data.managers },
+          }));
+        }
+      })
+      .catch(error => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof TypeError && error.message === "Failed to fetch") return;
+        console.error("Error loading OKK calls:", error);
+      })
+      .finally(() => setIsLoadingReal(false));
+
+    return () => ac.abort();
+  }, [activeDepartment]);
+
   // Parse date from Russian format (Сегодня, Вчера, DD.MM)
   const parseCallDate = (dateStr: string): Date => {
     const now = new Date();
@@ -215,8 +254,10 @@ export default function Dashboard() {
   useEffect(() => {
     if (!selectedManager) return;
 
+    const currentCalls = activeTab === "real_calls" ? realCalls : aiCalls;
+
     // All calls for this manager, excluding 0-score (unscored/failed calls)
-    const scoredCalls = aiCalls.filter(
+    const scoredCalls = currentCalls.filter(
       call => call.name === selectedManager.name && call.score > 0
     );
 
@@ -269,12 +310,17 @@ export default function Dashboard() {
       avgDuration: totalDuration,
       filteredCalls: filtered.length,
     });
-  }, [selectedManager, managerPeriod, managerMinScore, aiCalls]);
+  }, [selectedManager, managerPeriod, managerMinScore, aiCalls, activeTab, realCalls]);
+
+  // Pick data source based on active tab
+  const activeCalls = activeTab === "real_calls" ? realCalls : aiCalls;
+  const activeManagers = activeTab === "real_calls" ? realManagers : aiManagers;
+  const isLoadingCalls = activeTab === "real_calls" ? isLoadingReal : isLoadingAI;
 
   // Dashboard stats for calls tabs (managers only, no ROPs/admins)
   const callsDashStats = (() => {
-    const allCalls = aiCalls;
-    const managers = aiManagers.filter(m => !m.role || m.role === "manager");
+    const allCalls = activeCalls;
+    const managers = activeManagers.filter(m => !m.role || m.role === "manager");
     const managerNames = new Set(managers.map(m => m.name));
 
     const now = new Date();
@@ -363,7 +409,7 @@ export default function Dashboard() {
   })();
 
   // Filter calls by date range and search query
-  const filteredCalls = aiCalls.filter(call => {
+  const filteredCalls = activeCalls.filter(call => {
     // Filter by date range
     if (activeDateFilter.start && activeDateFilter.end) {
       const callDate = parseCallDate(call.date);
@@ -391,8 +437,8 @@ export default function Dashboard() {
   });
 
   // Update manager stats based on scored calls (excluding 0-score)
-  const filteredManagers = aiManagers.map(manager => {
-    const scoredManagerCalls = aiCalls.filter(
+  const filteredManagers = activeManagers.map(manager => {
+    const scoredManagerCalls = activeCalls.filter(
       call => call.name === manager.name && call.score > 0
     );
     return {
@@ -440,7 +486,6 @@ export default function Dashboard() {
             { id: "daily", icon: ClipboardList, label: "Дейли" },
             { id: "real_calls", icon: Phone, label: "Звонки" },
             { id: "ai_calls", icon: Bot, label: "AI Ролевые" },
-            { id: "okk", icon: Shield, label: "ОКК" },
           ].map((item) => (
             <button
               key={item.id}
@@ -492,11 +537,6 @@ export default function Dashboard() {
           <DailyTab department={activeDepartment} />
         )}
 
-        {/* --------------------- OKK VIEW --------------------- */}
-        {activeTab === "okk" && (
-          <OkkTab department={activeDepartment} />
-        )}
-
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
         {(activeTab === "real_calls" || activeTab === "ai_calls") && (
           <div className="flex flex-col gap-4 fade-in flex-1">
@@ -528,7 +568,7 @@ export default function Dashboard() {
               ))}
             </div>
 
-            {/* CALLS DASHBOARD — stats for both real_calls and ai_calls */}
+            {/* CALLS DASHBOARD — stats for ai_calls */}
             <div className="flex flex-col gap-3">
               {/* Period Filter + Calendar */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -882,7 +922,7 @@ export default function Dashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
-                    {isLoadingAI ? (
+                    {isLoadingCalls ? (
                       <tr><td colSpan={6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
@@ -901,9 +941,13 @@ export default function Dashboard() {
                         </td>
                         {activeTab === "real_calls" && (
                           <td className="px-5 py-3 text-center">
-                            <a href={call.kommoUrl} target="_blank" rel="noreferrer" className="inline-block p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all shadow-inner border border-cyan-500/20">
-                              <Activity className="w-3.5 h-3.5" />
-                            </a>
+                            {call.kommoUrl ? (
+                              <a href={call.kommoUrl} target="_blank" rel="noreferrer" className="inline-block p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all shadow-inner border border-cyan-500/20">
+                                <Activity className="w-3.5 h-3.5" />
+                              </a>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
                           </td>
                         )}
                         <td className="px-5 py-3">

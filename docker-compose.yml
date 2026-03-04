@@ -10,6 +10,13 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3008
       - DATABASE_URL=${DATABASE_URL}
+      - R1_DATABASE_URL=${R1_DATABASE_URL}
+      - D1_API_URL=${D1_API_URL}
+      - R1_API_URL=${R1_API_URL}
+      - KOMMO_ACCESS_TOKEN=${KOMMO_ACCESS_TOKEN}
+      - KOMMO_API_DOMAIN=${KOMMO_API_DOMAIN}
+      - R2_OKK_DATABASE_URL=${R2_OKK_DATABASE_URL}
+      - D2_OKK_DATABASE_URL=${D2_OKK_DATABASE_URL}
       - NEXT_TELEMETRY_DISABLED=1
     restart: unless-stopped
     networks:

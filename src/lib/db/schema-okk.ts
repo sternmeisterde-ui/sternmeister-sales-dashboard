@@ -61,11 +61,38 @@ export const okkCalls = pgTable("calls", {
 });
 
 // ─── evaluations ────────────────────────────────────────────
+
+/** Single criterion inside a block */
+export interface EvalCriterion {
+  name: string;
+  score: number;       // 0 or 1 for binary, 0 for informational
+  max_score: number;   // 1 for binary, 0 for informational/tags
+  feedback: string;
+}
+
+/**
+ * Evaluation block — supports BOTH formats:
+ *   New (OKK backend):  block_score / max_block_score / criteria[]
+ *   Legacy:             score / max_score / feedback
+ */
 export interface EvalBlock {
   name: string;
-  score: number;
-  max_score: number;
-  feedback: string;
+  // New format (from OKK backend convertCriteriaArrayToBlocks)
+  block_score?: number;
+  max_block_score?: number;
+  criteria?: EvalCriterion[];
+  // Legacy format (backward-compatible)
+  score?: number;
+  max_score?: number;
+  feedback?: string;
+}
+
+/** Helper: resolve block score regardless of format */
+export function getBlockScore(b: EvalBlock): number {
+  return b.block_score ?? b.score ?? 0;
+}
+export function getBlockMaxScore(b: EvalBlock): number {
+  return b.max_block_score ?? b.max_score ?? 0;
 }
 
 export interface EvaluationJson {
