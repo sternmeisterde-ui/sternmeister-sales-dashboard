@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
+import { okkCalls, okkEvaluations, okkManagers, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
 
 // ─── Helper: format date (same pattern as queries-existing.ts) ──────
@@ -135,11 +135,26 @@ export async function GET(request: NextRequest) {
       .orderBy(desc(okkCalls.callCreatedAt))
       .limit(200);
 
-    // ── Per-manager aggregate ────────────────────────────────
+    // ── All managers from managers table (only role='manager', active) ──
+    const allManagerRows = await db
+      .select({
+        id: okkManagers.id,
+        name: okkManagers.name,
+        role: okkManagers.role,
+      })
+      .from(okkManagers)
+      .where(
+        and(
+          eq(okkManagers.isActive, true),
+          eq(okkManagers.role, "manager"),
+        )
+      )
+      .orderBy(okkManagers.name);
+
+    // ── Per-manager call aggregate (for scored stats) ────────
     const managerAggRows = await db
       .select({
         managerId: okkCalls.managerId,
-        managerName: okkCalls.managerName,
         count: sql<number>`count(distinct ${okkCalls.id})::int`,
         evaluatedCount: sql<number>`count(${okkEvaluations.id})::int`,
         avgScore: sql<number>`round(avg(${okkEvaluations.totalScore}))::int`,
@@ -147,8 +162,7 @@ export async function GET(request: NextRequest) {
       .from(okkCalls)
       .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
       .where(whereClause)
-      .groupBy(okkCalls.managerId, okkCalls.managerName)
-      .orderBy(desc(sql`count(distinct ${okkCalls.id})`));
+      .groupBy(okkCalls.managerId);
 
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
     const calls = rows.map((row) => {
@@ -198,16 +212,24 @@ export async function GET(request: NextRequest) {
       };
     });
 
-    // ── Convert to ManagerStat[] format ──────────────────────
-    const managers = managerAggRows.map((m) => ({
-      id: m.managerId || m.managerName || "",
-      name: m.managerName || "—",
-      avatarUrl: "",
-      totalCalls: Number(m.count) || 0,
-      avgScore: Number(m.avgScore) || 0,
-      avgDuration: "—",
-      conversionRate: "—",
-    }));
+    // ── Merge managers table with call aggregates ────────────
+    const aggByManagerId = new Map(
+      managerAggRows.map((m) => [m.managerId, m])
+    );
+
+    const managers = allManagerRows.map((m) => {
+      const agg = aggByManagerId.get(m.id);
+      return {
+        id: m.id,
+        name: m.name || "—",
+        avatarUrl: "",
+        totalCalls: Number(agg?.count) || 0,
+        avgScore: Number(agg?.avgScore) || 0,
+        avgDuration: "—",
+        conversionRate: "—",
+        role: m.role || "manager",
+      };
+    });
 
     // ── Same response shape as /api/calls ────────────────────
     return NextResponse.json({

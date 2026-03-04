@@ -94,6 +94,10 @@ export default function Dashboard() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playingCallId, setPlayingCallId] = useState<string | null>(null);
   const [audioLoading, setAudioLoading] = useState<string | null>(null);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioPlaybackRate, setAudioPlaybackRate] = useState(1);
+  const [audioPaused, setAudioPaused] = useState(false);
 
   const stopAudio = useCallback(() => {
     if (audioRef.current) {
@@ -102,14 +106,26 @@ export default function Dashboard() {
     }
     setPlayingCallId(null);
     setAudioLoading(null);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
+    setAudioPaused(false);
   }, []);
 
   const toggleAudio = useCallback((call: ManagerCall) => {
     if (!call.hasRecording) return;
 
-    // If same call is playing — stop it
+    // If same call is playing — toggle pause/resume
     if (playingCallId === call.id) {
-      stopAudio();
+      const audio = audioRef.current;
+      if (audio) {
+        if (audio.paused) {
+          audio.play();
+          setAudioPaused(false);
+        } else {
+          audio.pause();
+          setAudioPaused(true);
+        }
+      }
       return;
     }
 
@@ -118,13 +134,23 @@ export default function Dashboard() {
 
     // Start new audio
     setAudioLoading(call.id);
+    setAudioPlaybackRate(1);
     const audio = new Audio();
     audio.preload = "auto";
     audioRef.current = audio;
 
+    audio.onloadedmetadata = () => {
+      setAudioDuration(audio.duration);
+    };
+
+    audio.ontimeupdate = () => {
+      setAudioCurrentTime(audio.currentTime);
+    };
+
     audio.oncanplay = () => {
       setAudioLoading(null);
       setPlayingCallId(call.id);
+      setAudioPaused(false);
       audio.play().catch(() => {
         setPlayingCallId(null);
         setAudioLoading(null);
@@ -133,9 +159,11 @@ export default function Dashboard() {
 
     audio.onended = () => {
       setPlayingCallId(null);
+      setAudioCurrentTime(0);
+      setAudioPaused(false);
     };
 
-    audio.onerror = (e) => {
+    audio.onerror = () => {
       console.error("Audio error:", audio.error?.message, audio.error?.code);
       setPlayingCallId(null);
       setAudioLoading(null);
@@ -145,6 +173,29 @@ export default function Dashboard() {
     audio.src = call.audioUrl;
     audio.load();
   }, [playingCallId, stopAudio]);
+
+  const seekAudio = useCallback((fraction: number) => {
+    if (audioRef.current && audioDuration > 0) {
+      audioRef.current.currentTime = fraction * audioDuration;
+    }
+  }, [audioDuration]);
+
+  const cyclePlaybackRate = useCallback(() => {
+    const rates = [1, 1.5, 2];
+    const nextIdx = (rates.indexOf(audioPlaybackRate) + 1) % rates.length;
+    const newRate = rates[nextIdx];
+    setAudioPlaybackRate(newRate);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = newRate;
+    }
+  }, [audioPlaybackRate]);
+
+  const fmtTime = (sec: number) => {
+    if (!sec || !isFinite(sec)) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
 
   // Cleanup audio on unmount or department change
   useEffect(() => {
@@ -521,7 +572,7 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2B)
+              Коммерсы (B2C)
             </button>
           </div>
 
@@ -960,44 +1011,64 @@ export default function Dashboard() {
                             </button>
                           </div>
                         </td>
-                        <td className="px-5 py-3">
-                          <div className="flex items-center gap-2 bg-slate-900/50 p-1.5 rounded-full border border-white/5 w-max mx-auto">
-                            <button
-                              onClick={() => toggleAudio(call)}
-                              disabled={!call.hasRecording}
-                              title={call.hasRecording ? (playingCallId === call.id ? "Пауза" : "Воспроизвести") : "Запись недоступна"}
-                              className={`w-6 h-6 rounded-full flex items-center justify-center transition-all ${
-                                !call.hasRecording
-                                  ? "bg-slate-700 text-slate-500 cursor-not-allowed"
-                                  : playingCallId === call.id
-                                    ? "bg-amber-500 text-white hover:scale-105 animate-pulse"
-                                    : "bg-blue-500 text-white hover:scale-105"
-                              }`}
-                            >
-                              {audioLoading === call.id ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : playingCallId === call.id ? (
-                                <Pause className="w-3 h-3" />
-                              ) : (
-                                <Play className="w-3 h-3 ml-0.5" />
-                              )}
-                            </button>
-                            <div className="flex gap-0.5 items-center mr-2">
-                              {[3, 6, 4, 8, 5, 7, 3].map((h, i) => (
+                        <td className="px-3 py-3">
+                          {playingCallId === call.id ? (
+                            /* ── Active mini-player ── */
+                            <div className="flex items-center gap-2 bg-slate-900/70 px-2 py-1.5 rounded-xl border border-blue-500/20 min-w-[180px]">
+                              <button
+                                onClick={() => toggleAudio(call)}
+                                className="w-6 h-6 rounded-full flex items-center justify-center bg-blue-500 text-white hover:scale-105 transition-all shrink-0"
+                              >
+                                {audioPaused ? <Play className="w-3 h-3 ml-0.5" /> : <Pause className="w-3 h-3" />}
+                              </button>
+                              {/* Seek bar */}
+                              <div
+                                className="flex-1 h-1.5 bg-slate-700 rounded-full cursor-pointer relative group"
+                                onClick={(e) => {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  seekAudio((e.clientX - rect.left) / rect.width);
+                                }}
+                              >
                                 <div
-                                  key={i}
-                                  style={{ height: `${h * (playingCallId === call.id ? 1.5 : 1)}px` }}
-                                  className={`w-[2px] rounded-full transition-all ${
-                                    playingCallId === call.id
-                                      ? "bg-amber-400 animate-pulse"
-                                      : call.hasRecording
-                                        ? "bg-blue-500/50"
-                                        : "bg-slate-600/30"
-                                  }`}
-                                />
-                              ))}
+                                  className="h-full bg-blue-500 rounded-full relative transition-all"
+                                  style={{ width: `${audioDuration > 0 ? (audioCurrentTime / audioDuration) * 100 : 0}%` }}
+                                >
+                                  <div className="absolute right-0 top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-white rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-opacity" />
+                                </div>
+                              </div>
+                              {/* Time */}
+                              <span className="text-[9px] text-slate-400 font-mono whitespace-nowrap shrink-0">
+                                {fmtTime(audioCurrentTime)}
+                              </span>
+                              {/* Speed */}
+                              <button
+                                onClick={cyclePlaybackRate}
+                                className="text-[9px] font-bold text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded-md hover:bg-blue-500/20 transition-colors shrink-0"
+                              >
+                                {audioPlaybackRate}x
+                              </button>
                             </div>
-                          </div>
+                          ) : (
+                            /* ── Idle play button ── */
+                            <div className="flex items-center justify-center">
+                              <button
+                                onClick={() => toggleAudio(call)}
+                                disabled={!call.hasRecording}
+                                title={call.hasRecording ? "Воспроизвести" : "Запись недоступна"}
+                                className={`w-7 h-7 rounded-full flex items-center justify-center transition-all ${
+                                  !call.hasRecording
+                                    ? "bg-slate-700 text-slate-500 cursor-not-allowed"
+                                    : "bg-blue-500 text-white hover:scale-110 hover:shadow-[0_0_12px_rgba(59,130,246,0.4)]"
+                                }`}
+                              >
+                                {audioLoading === call.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Play className="w-3 h-3 ml-0.5" />
+                                )}
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ))}
