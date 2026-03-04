@@ -1,4 +1,4 @@
-import { eq, desc } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { getDbForDepartment } from "./index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 
@@ -73,7 +73,7 @@ export async function getManagerStats(departmentType: DepartmentType) {
       name: users.name,
       telegramUsername: users.telegramUsername,
       role: users.role,
-    }).from(users).where(eq(users.isActive, true)),
+    }).from(users).where(and(eq(users.isActive, true), eq(users.role, "manager"))),
 
     db.select({
       userId: calls.userId,

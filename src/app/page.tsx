@@ -488,15 +488,17 @@ export default function Dashboard() {
   });
 
   // Update manager stats based on scored calls (excluding 0-score)
-  const filteredManagers = activeManagers.map(manager => {
-    const scoredManagerCalls = activeCalls.filter(
-      call => call.name === manager.name && call.score > 0
-    );
-    return {
-      ...manager,
-      totalCalls: scoredManagerCalls.length
-    };
-  });
+  const filteredManagers = activeManagers
+    .filter(m => !m.role || m.role === "manager")
+    .map(manager => {
+      const scoredManagerCalls = activeCalls.filter(
+        call => call.name === manager.name && call.score > 0
+      );
+      return {
+        ...manager,
+        totalCalls: scoredManagerCalls.length
+      };
+    });
 
   // Close modals
   const closeModal = () => {
