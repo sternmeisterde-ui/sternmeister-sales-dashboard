@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { okkCalls, okkEvaluations } from "@/lib/db/schema-okk";
+import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
 
 // ─── Helper: format date (same pattern as queries-existing.ts) ──────
@@ -24,6 +24,46 @@ function formatDate(date: Date | null): string {
     const month = (callDate.getMonth() + 1).toString().padStart(2, "0");
     return `${day}.${month}, ${hours}:${minutes}`;
   }
+}
+
+// ─── Helper: build speaker-labelled transcript ──────────────────────
+// AssemblyAI returns speakers as "A", "B", etc.
+// We determine who is the manager based on call direction:
+//   outbound → manager called the client → client picks up first → Speaker A = Клиент
+//   inbound  → client called the company → manager answers first → Speaker A = Менеджер
+// Fallback: assume outbound (most sales calls are outbound).
+
+function buildSpeakerTranscript(
+  speakersRaw: unknown,
+  direction: string | null,
+): string {
+  // transcript_speakers is stored as { utterances: [...] }
+  const utterances: TranscriptSpeakerSegment[] = (() => {
+    if (!speakersRaw) return [];
+    if (Array.isArray(speakersRaw)) return speakersRaw;
+    if (typeof speakersRaw === "object" && "utterances" in (speakersRaw as any)) {
+      return (speakersRaw as any).utterances ?? [];
+    }
+    return [];
+  })();
+
+  if (utterances.length === 0) return "";
+
+  // Determine which speaker label is the manager
+  const isOutbound = direction !== "inbound"; // default outbound
+  // outbound: first speaker (A) = Client, second (B) = Manager
+  // inbound:  first speaker (A) = Manager, second (B) = Client
+  const firstSpeaker = utterances[0]?.speaker ?? "A";
+  const managerSpeaker = isOutbound
+    ? (utterances.find((u) => u.speaker !== firstSpeaker)?.speaker ?? "B")
+    : firstSpeaker;
+
+  return utterances
+    .map((u) => {
+      const role = u.speaker === managerSpeaker ? "[Продавец]" : "[Клиент]";
+      return `${role}: ${u.text}`;
+    })
+    .join("\n");
 }
 
 // ─── GET handler ─────────────────────────────────────────────
@@ -79,6 +119,8 @@ export async function GET(request: NextRequest) {
         durationSeconds: okkCalls.durationSeconds,
         recordingUrl: okkCalls.recordingUrl,
         transcript: okkCalls.transcript,
+        transcriptSpeakers: okkCalls.transcriptSpeakers,
+        direction: okkCalls.direction,
         kommoLeadUrl: okkCalls.kommoLeadUrl,
         callCreatedAt: okkCalls.callCreatedAt,
         // Evaluation (may be null)
@@ -146,7 +188,10 @@ export async function GET(request: NextRequest) {
           ? `/api/okk/audio/${row.id}?dept=${department}`
           : "#",
         kommoUrl: row.kommoLeadUrl || "",
-        transcript: row.transcript || "",
+        transcript:
+          buildSpeakerTranscript(row.transcriptSpeakers, row.direction) ||
+          row.transcript ||
+          "",
         aiFeedback: row.recommendations || "",
         summary: row.mistakes || "",
         blocks,
