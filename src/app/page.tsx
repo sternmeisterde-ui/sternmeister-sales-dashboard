@@ -312,7 +312,35 @@ export default function Dashboard() {
       return { name: m.name, avgScore: avg, count };
     }).sort((a, b) => b.count - a.count);
 
-    return { avgScore, totalCalls: totalRoleplays, perManager };
+    // Target completion: qualifying calls ≥10 min (regardless of score)
+    const TARGET_WEEK = 2;
+    const TARGET_MONTH = 8;
+    const target = aiDashPeriod === "month" ? TARGET_MONTH : TARGET_WEEK;
+
+    // Filter ALL calls in period for qualifying duration (≥10 min), no score filter
+    const periodAllCalls = allCalls.filter(call => {
+      if (!managerNames.has(call.name)) return false;
+      const callDate = parseCallDate(call.date);
+      return callDate >= periodStart && callDate <= now;
+    });
+
+    const perManagerTarget = managers.map(m => {
+      const mCalls = periodAllCalls.filter(c => {
+        if (c.name !== m.name) return false;
+        // Parse "MM:SS" duration to check ≥10 min
+        const [min] = c.callDuration.split(":").map(Number);
+        return min >= 10;
+      });
+      const qualifyingCount = mCalls.length;
+      const targetPercent = target > 0 ? Math.min(100, Math.round((qualifyingCount / target) * 100)) : 0;
+      return { name: m.name, qualifyingCount, target, targetPercent };
+    }).sort((a, b) => b.targetPercent - a.targetPercent || b.qualifyingCount - a.qualifyingCount);
+
+    const teamTargetAvg = perManagerTarget.length > 0
+      ? Math.round(perManagerTarget.reduce((sum, m) => sum + m.targetPercent, 0) / perManagerTarget.length)
+      : 0;
+
+    return { avgScore, totalCalls: totalRoleplays, perManager, perManagerTarget, target, teamTargetAvg };
   })();
 
   // Filter calls by date range and search query
@@ -589,6 +617,72 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
+
+            {/* TARGET COMPLETION: qualifying roleplays ≥10 min */}
+            {activeTab === "ai_calls" && (
+              <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Таргет выполнения</span>
+                    <span className="text-[10px] text-slate-500">
+                      {aiDashPeriod === "month" ? "месяц: 8 ролевок от 10 мин" : "неделя: 2 ролевки от 10 мин"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500 uppercase">Команда</span>
+                    <span className={`text-sm font-black ${
+                      callsDashStats.teamTargetAvg >= 100 ? "text-emerald-400" :
+                      callsDashStats.teamTargetAvg >= 50 ? "text-amber-400" :
+                      callsDashStats.teamTargetAvg === 0 ? "text-slate-600" : "text-rose-400"
+                    }`}>
+                      {callsDashStats.teamTargetAvg}%
+                    </span>
+                  </div>
+                </div>
+
+                {callsDashStats.perManagerTarget.length === 0 ? (
+                  <span className="text-sm text-slate-500">Нет данных за период</span>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
+                    {callsDashStats.perManagerTarget.map((m) => {
+                      const color = m.targetPercent >= 100 ? "emerald" :
+                        m.targetPercent >= 50 ? "amber" :
+                        m.qualifyingCount === 0 ? "slate" : "rose";
+                      return (
+                        <div key={m.name} className="flex flex-col gap-1 py-1.5 border-b border-white/5 last:border-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-slate-200 truncate mr-3">{m.name}</span>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className="text-xs text-slate-400">
+                                {m.qualifyingCount}<span className="text-slate-600">/{m.target}</span>
+                              </span>
+                              <span className={`text-sm font-bold min-w-[36px] text-right ${
+                                color === "emerald" ? "text-emerald-400" :
+                                color === "amber" ? "text-amber-400" :
+                                color === "slate" ? "text-slate-600" : "text-rose-400"
+                              }`}>
+                                {m.targetPercent}%
+                              </span>
+                            </div>
+                          </div>
+                          {/* Progress bar */}
+                          <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                            <div
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                color === "emerald" ? "bg-emerald-500" :
+                                color === "amber" ? "bg-amber-500" :
+                                color === "slate" ? "bg-slate-700" : "bg-rose-500"
+                              }`}
+                              style={{ width: `${m.targetPercent}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* DATA TABLE */}
             <div className="glass-panel rounded-2xl flex-1 border border-white/5 overflow-hidden flex flex-col shadow-2xl">
