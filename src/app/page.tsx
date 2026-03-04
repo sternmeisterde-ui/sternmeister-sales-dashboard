@@ -3,13 +3,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2, Shield
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
 import DashboardTab from "@/components/DashboardTab";
+import OkkTab from "@/components/OkkTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // Функция для очистки текста от markdown и специальных символов
@@ -51,7 +52,7 @@ const isInRange = (date: Date, start: Date | null, end: Date | null) => {
 
 export default function Dashboard() {
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls" | "okk">("dashboard");
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -439,6 +440,7 @@ export default function Dashboard() {
             { id: "daily", icon: ClipboardList, label: "Дейли" },
             { id: "real_calls", icon: Phone, label: "Звонки" },
             { id: "ai_calls", icon: Bot, label: "AI Ролевые" },
+            { id: "okk", icon: Shield, label: "ОКК" },
           ].map((item) => (
             <button
               key={item.id}
@@ -488,6 +490,11 @@ export default function Dashboard() {
         {/* --------------------- DAILY VIEW --------------------- */}
         {activeTab === "daily" && (
           <DailyTab department={activeDepartment} />
+        )}
+
+        {/* --------------------- OKK VIEW --------------------- */}
+        {activeTab === "okk" && (
+          <OkkTab department={activeDepartment} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
