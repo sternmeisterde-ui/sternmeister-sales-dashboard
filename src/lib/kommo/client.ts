@@ -46,28 +46,70 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
   }
 }
 
+// ==================== KOMMO CONFIG (env → DB fallback) ====================
+// Same pattern as R1_DATABASE_URL auto-derive: Dokploy only passes DATABASE_URL,
+// so we load Kommo credentials from the kommo_tokens DB table when env vars are missing.
+
+let _configPromise: Promise<void> | null = null;
+let _cachedToken: string | null = null;
+let _cachedDomain: string | null = null;
+
+function ensureKommoConfig(): Promise<void> {
+  if (!_configPromise) {
+    _configPromise = (async () => {
+      // 1. Check env vars first
+      if (process.env.KOMMO_ACCESS_TOKEN) {
+        _cachedToken = process.env.KOMMO_ACCESS_TOKEN;
+        _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+        return;
+      }
+
+      // 2. Fallback: load from kommo_tokens table in D1 (main branch DB)
+      try {
+        const { db } = await import("../db/index");
+        const { kommoTokens } = await import("../db/schema-existing");
+        const rows = await db.select().from(kommoTokens).limit(1);
+        if (rows.length > 0) {
+          _cachedToken = rows[0].accessToken;
+          _cachedDomain = `${rows[0].subdomain}.kommo.com`;
+          console.log("Kommo token loaded from DB (kommo_tokens table)");
+          return;
+        }
+      } catch (e) {
+        console.error("Failed to load Kommo token from DB:", e);
+      }
+
+      throw new Error(
+        "KOMMO_ACCESS_TOKEN not set and no token found in kommo_tokens table"
+      );
+    })();
+  }
+  return _configPromise;
+}
+
 // ==================== HELPERS ====================
 
-function getAuthHeaders(): HeadersInit {
-  const token = process.env.KOMMO_ACCESS_TOKEN;
-  if (!token) throw new Error("KOMMO_ACCESS_TOKEN not set");
+async function getAuthHeaders(): Promise<HeadersInit> {
+  await ensureKommoConfig();
   return {
-    Authorization: `Bearer ${token}`,
+    Authorization: `Bearer ${_cachedToken}`,
     "Content-Type": "application/json",
   };
 }
 
-function getBaseUrl(): string {
-  const domain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+async function getBaseUrl(): Promise<string> {
+  await ensureKommoConfig();
+  const domain = _cachedDomain || process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
   return `https://${domain}/api/v4`;
 }
 
 async function kommoGet<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const url = new URL(`${getBaseUrl()}${path}`);
+  const baseUrl = await getBaseUrl();
+  const url = new URL(`${baseUrl}${path}`);
   if (params) {
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   }
-  const res = await rateLimitedFetch(url.toString(), { headers: getAuthHeaders() });
+  const res = await rateLimitedFetch(url.toString(), { headers: await getAuthHeaders() });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Kommo API ${res.status}: ${text}`);
@@ -85,15 +127,18 @@ async function kommoGetAll<T>(
   const all: T[] = [];
   let page = 1;
 
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+
   while (page <= maxPages) {
-    const url = new URL(`${getBaseUrl()}${path}`);
+    const url = new URL(`${baseUrl}${path}`);
     if (params) {
       Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
     }
     url.searchParams.set("page", String(page));
     url.searchParams.set("limit", "250");
 
-    const res = await rateLimitedFetch(url.toString(), { headers: getAuthHeaders() });
+    const res = await rateLimitedFetch(url.toString(), { headers });
 
     if (res.status === 204) break;
     if (!res.ok) {
@@ -137,7 +182,9 @@ export async function getLeads(
   const ttl = dateFilter ? CACHE_TTL.LEADS_FILTERED : CACHE_TTL.LEADS_SNAPSHOT;
 
   return cached(cacheKey, ttl, async () => {
-    const url = new URL(`${getBaseUrl()}/leads`);
+    const baseUrl = await getBaseUrl();
+    const headers = await getAuthHeaders();
+    const url = new URL(`${baseUrl}/leads`);
     if (pipelineIds && pipelineIds.length > 0) {
       pipelineIds.forEach((id) => url.searchParams.append("filter[pipeline_id][]", String(id)));
     }
@@ -157,7 +204,7 @@ export async function getLeads(
       const pageUrl = new URL(url.toString());
       pageUrl.searchParams.set("page", String(page));
 
-      const res = await rateLimitedFetch(pageUrl.toString(), { headers: getAuthHeaders() });
+      const res = await rateLimitedFetch(pageUrl.toString(), { headers });
       if (res.status === 204) break;
       if (!res.ok) break;
 
@@ -211,8 +258,11 @@ export async function getCallNotes(
   const cacheKey = `calls:${dateFrom}:${dateTo}:${kommoUserIds?.join(",") ?? "all"}:${maxPages}`;
 
   return cached(cacheKey, CACHE_TTL.CALLS, async () => {
+    const baseUrl = await getBaseUrl();
+    const headers = await getAuthHeaders();
+
     // Phase 1: Events API
-    const eventsUrl = new URL(`${getBaseUrl()}/events`);
+    const eventsUrl = new URL(`${baseUrl}/events`);
     eventsUrl.searchParams.append("filter[type][]", "outgoing_call");
     eventsUrl.searchParams.append("filter[type][]", "incoming_call");
     eventsUrl.searchParams.set("filter[created_at][from]", String(dateFrom));
@@ -248,7 +298,7 @@ export async function getCallNotes(
         pageUrl.searchParams.set("page", String(page));
 
         const res = await rateLimitedFetch(pageUrl.toString(), {
-          headers: getAuthHeaders(),
+          headers,
         });
         if (res.status === 204) break;
         if (!res.ok) {
@@ -286,14 +336,14 @@ export async function getCallNotes(
     const BATCH_SIZE = 100;
     for (let i = 0; i < noteIds.length; i += BATCH_SIZE) {
       const batch = noteIds.slice(i, i + BATCH_SIZE);
-      const notesUrl = new URL(`${getBaseUrl()}/contacts/notes`);
+      const notesUrl = new URL(`${baseUrl}/contacts/notes`);
       batch.forEach((id) =>
         notesUrl.searchParams.append("filter[id][]", String(id))
       );
       notesUrl.searchParams.set("limit", "250");
 
       const res = await rateLimitedFetch(notesUrl.toString(), {
-        headers: getAuthHeaders(),
+        headers,
       });
       if (res.status === 204) continue;
       if (!res.ok) continue;
