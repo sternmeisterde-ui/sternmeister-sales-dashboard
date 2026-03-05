@@ -17,7 +17,9 @@ export interface ManagerCall {
         score: number;
         maxScore: number;
         feedback: string;
+        criteria: { id: number; name: string; score: number; maxScore: number; feedback: string; quote: string }[];
     }[];
+    clientScoring?: { urgency: number; solvency: number; need: number; total: number };
 }
 
 export interface ManagerStat {
@@ -81,12 +83,16 @@ const generateMockBlocks = (baseScore: number) => {
         let val = Math.floor(baseScore + Math.random() * 20 - 10);
         if (val > 100) val = 100;
         if (val < 0) val = 0;
+        const feedbackText = `Саммари по критерию «${name}»: ${val >= 80 ? 'Менеджер отлично справился с данным блоком, выполнив все требования чек-листа.' : val >= 50 ? 'Блок закрыт частично. Желательно проявлять больше инициативы, например, задавать более открытые вопросы.' : 'Критическая ошибка или полное отсутствие отработки по данному блоком. Рекомендуется прослушать звонок вместе с РОПом.'}`;
         return {
             id: `block-${i}`,
             name,
             score: val,
             maxScore: 100,
-            feedback: `Саммари по критерию «${name}»: ${val >= 80 ? 'Менеджер отлично справился с данным блоком, выполнив все требования чек-листа.' : val >= 50 ? 'Блок закрыт частично. Желательно проявлять больше инициативы, например, задавать более открытые вопросы.' : 'Критическая ошибка или полное отсутствие отработки по данному блоком. Рекомендуется прослушать звонок вместе с РОПом.'}`
+            feedback: feedbackText,
+            criteria: [
+                { id: 1, name: `${name} — основной критерий`, score: val >= 50 ? 1 : 0, maxScore: 1, feedback: feedbackText, quote: '' },
+            ],
         };
     });
 };

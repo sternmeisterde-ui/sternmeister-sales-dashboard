@@ -170,6 +170,10 @@ export async function GET(request: NextRequest) {
       const mins = Math.floor(dSec / 60);
       const secs = dSec % 60;
 
+      // Extract client scoring from evaluation JSON
+      const evalJson = row.evaluationJson as any;
+      const clientScoring = evalJson?.client_scoring || evalJson?.summary?.client_scoring || null;
+
       // Convert evaluation blocks to UI block format
       const blocks = (row.evaluationJson?.blocks || [])
         .filter(
@@ -182,10 +186,20 @@ export async function GET(request: NextRequest) {
           name: b.name || "",
           score: b.block_score ?? b.score ?? 0,
           maxScore: b.max_block_score ?? b.max_score ?? 0,
+          criteria: b.criteria
+            ? b.criteria.map((c: any, idx: number) => ({
+                id: idx + 1,
+                name: c.name || '',
+                score: typeof c.score === 'number' ? c.score : (c.score === '1' ? 1 : c.score === '0' ? 0 : -1),
+                maxScore: typeof c.max_score === 'number' ? c.max_score : (c.max_score === 1 ? 1 : 0),
+                feedback: c.feedback || '',
+                quote: c.quote || '',
+              }))
+            : [],
           feedback: b.criteria
             ? b.criteria
-                .filter((c) => c.score === 0 && c.max_score > 0)
-                .map((c) => `❌ ${c.name}`)
+                .filter((c: any) => c.score === 0 && c.max_score > 0)
+                .map((c: any) => `❌ ${c.name}`)
                 .join("\n")
             : b.feedback || "",
         }));
@@ -209,6 +223,7 @@ export async function GET(request: NextRequest) {
         aiFeedback: row.recommendations || "",
         summary: row.mistakes || "",
         blocks,
+        clientScoring,
       };
     });
 

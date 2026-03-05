@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, BarChart3, ClipboardList, Loader2
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -98,6 +98,21 @@ export default function Dashboard() {
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioPlaybackRate, setAudioPlaybackRate] = useState(1);
   const [audioPaused, setAudioPaused] = useState(false);
+
+  // Accordion state: set of open block IDs in the scoring modal
+  const [openBlocks, setOpenBlocks] = useState<Set<string>>(new Set());
+
+  const toggleBlock = (blockId: string) => {
+    setOpenBlocks(prev => {
+      const next = new Set(prev);
+      if (next.has(blockId)) {
+        next.delete(blockId);
+      } else {
+        next.add(blockId);
+      }
+      return next;
+    });
+  };
 
   const stopAudio = useCallback(() => {
     if (audioRef.current) {
@@ -499,6 +514,15 @@ export default function Dashboard() {
         totalCalls: scoredManagerCalls.length
       };
     });
+
+  // When a call is selected, open the first block by default
+  useEffect(() => {
+    if (selectedCall && selectedCall.blocks && selectedCall.blocks.length > 0) {
+      setOpenBlocks(new Set([selectedCall.blocks[0].id]));
+    } else {
+      setOpenBlocks(new Set());
+    }
+  }, [selectedCall]);
 
   // Close modals
   const closeModal = () => {
@@ -971,6 +995,7 @@ export default function Dashboard() {
                         <th className="px-5 py-3 font-semibold text-center">CRM</th>
                       )}
                       <th className="px-5 py-3 font-semibold text-center">AI Оценка</th>
+                      <th className="px-5 py-3 font-semibold text-center">Скоринг клиента</th>
                       <th className="px-5 py-3 font-semibold text-center">Аудио</th>
                     </tr>
                   </thead>
@@ -1012,6 +1037,26 @@ export default function Dashboard() {
                               <span className="text-[10px] font-bold">{call.score}%</span>
                             </button>
                           </div>
+                        </td>
+                        <td className="px-5 py-3 text-center">
+                          {call.clientScoring ? (() => {
+                            const cs = call.clientScoring;
+                            // r2_commercial has solvency field → max 30; d2_qualifier (urgency+need only) → max 20
+                            const maxScore = cs.solvency !== undefined ? 30 : 20;
+                            const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
+                            const colorClass = pct >= 70
+                              ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
+                              : pct >= 40
+                              ? "text-amber-400 border-amber-500/40 bg-amber-500/10"
+                              : "text-rose-400 border-rose-500/40 bg-rose-500/10";
+                            return (
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-bold ${colorClass}`}>
+                                {cs.total}/{maxScore}
+                              </span>
+                            );
+                          })() : (
+                            <span className="text-slate-600 text-sm">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-3">
                           {playingCallId === call.id ? (
@@ -1156,22 +1201,147 @@ export default function Dashboard() {
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col gap-6 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-                {/* Overall Score */}
-                <div className="bg-slate-900/50 rounded-2xl p-6 border border-white/5 flex items-center justify-between shadow-inner">
-                  <div>
-                    <h4 className="text-base font-black text-white mb-1 uppercase tracking-wider">Итоговая Оценка</h4>
-                    <p className="text-xs text-slate-400">Рассчитана на базе критериев оценки звонка</p>
-                  </div>
-                  <div className={`relative flex items-center justify-center w-20 h-20 rounded-full border-[5px] shrink-0 ${selectedCall.score >= 66 ? "border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.2)]" :
-                    selectedCall.score >= 41 ? "border-amber-400 text-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.2)]" :
-                      "border-rose-400 text-rose-400 shadow-[0_0_20px_rgba(251,113,133,0.2)]"
+              <div className="flex flex-col gap-4 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+
+                {/* ── Row 1: Score Circle + Client Scoring ── */}
+                <div className="flex flex-col sm:flex-row gap-4 items-stretch">
+                  {/* Overall Score Circle */}
+                  <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex items-center gap-5 shadow-inner flex-1">
+                    <div className={`relative flex items-center justify-center w-20 h-20 rounded-full border-[5px] shrink-0 ${
+                      selectedCall.score >= 66
+                        ? "border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.2)]"
+                        : selectedCall.score >= 41
+                        ? "border-amber-400 text-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
+                        : "border-rose-400 text-rose-400 shadow-[0_0_20px_rgba(251,113,133,0.2)]"
                     }`}>
-                    <span className="text-xl font-black">{selectedCall.score}%</span>
+                      <span className="text-xl font-black">{selectedCall.score}%</span>
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
+                      <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
+                    </div>
                   </div>
+
+                  {/* Client Scoring Block */}
+                  {selectedCall.clientScoring && (() => {
+                    const cs = selectedCall.clientScoring;
+                    const hasSolvency = cs.solvency !== undefined;
+                    const maxScore = hasSolvency ? 30 : 20;
+                    const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
+                    const totalColor = pct >= 70 ? "text-emerald-400" : pct >= 40 ? "text-amber-400" : "text-rose-400";
+                    return (
+                      <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 shadow-inner flex-1">
+                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                          <Users className="w-3.5 h-3.5 text-purple-400" /> Скоринг клиента
+                        </h4>
+                        <div className="flex flex-wrap gap-3 items-center">
+                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
+                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Срочность</span>
+                            <span className="text-base font-black text-white">{cs.urgency}<span className="text-xs font-normal text-slate-500">/10</span></span>
+                          </div>
+                          {hasSolvency && (
+                            <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
+                              <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Платежесп.</span>
+                              <span className="text-base font-black text-white">{cs.solvency}<span className="text-xs font-normal text-slate-500">/10</span></span>
+                            </div>
+                          )}
+                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
+                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Потребность</span>
+                            <span className="text-base font-black text-white">{cs.need}<span className="text-xs font-normal text-slate-500">/10</span></span>
+                          </div>
+                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-4 py-2 border border-purple-500/20 bg-purple-500/5 min-w-[70px]">
+                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Итого</span>
+                            <span className={`text-base font-black ${totalColor}`}>{cs.total}<span className="text-xs font-normal text-slate-500">/{maxScore}</span></span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
-                {/* AI Summary - Mistakes */}
+                {/* ── Evaluation Blocks Accordion ── */}
+                {selectedCall.blocks && selectedCall.blocks.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">Детальный разбор по блокам</h4>
+                    {selectedCall.blocks.map((block) => {
+                      const isOpen = openBlocks.has(block.id);
+                      const blockPct = block.maxScore > 0 ? (block.score / block.maxScore) * 100 : 0;
+                      const blockColor = blockPct >= 70
+                        ? "text-emerald-400"
+                        : blockPct >= 40
+                        ? "text-amber-400"
+                        : "text-rose-400";
+                      const blockBorder = blockPct >= 70
+                        ? "border-emerald-500/20"
+                        : blockPct >= 40
+                        ? "border-amber-500/20"
+                        : "border-rose-500/20";
+
+                      return (
+                        <div key={block.id} className={`rounded-xl border bg-slate-900/40 overflow-hidden transition-all duration-200 ${blockBorder}`}>
+                          {/* Accordion Header */}
+                          <button
+                            onClick={() => toggleBlock(block.id)}
+                            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.03] transition-colors"
+                            aria-expanded={isOpen}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform duration-200 ${isOpen ? "" : "-rotate-90"}`} />
+                              <span className="text-sm font-semibold text-slate-100 truncate">{block.name}</span>
+                            </div>
+                            <span className={`text-xs font-bold shrink-0 ml-3 ${blockColor}`}>
+                              {block.score}/{block.maxScore}
+                            </span>
+                          </button>
+
+                          {/* Accordion Content */}
+                          {isOpen && (
+                            <div className="px-4 pb-4 pt-1 flex flex-col gap-3 border-t border-white/5">
+                              {block.criteria && block.criteria.length > 0 ? (
+                                block.criteria.map((criterion) => {
+                                  // Score badge: 1 = pass, 0 = fail, else = empty/na
+                                  const badge = criterion.score === 1
+                                    ? { icon: "✅", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" }
+                                    : criterion.score === 0
+                                    ? { icon: "❌", color: "text-rose-400 bg-rose-500/10 border-rose-500/30" }
+                                    : { icon: "⬜", color: "text-slate-500 bg-slate-800/60 border-white/10" };
+
+                                  return (
+                                    <div key={criterion.id} className="flex flex-col gap-1.5 pl-3 border-l-2 border-white/10">
+                                      {/* Criterion name + badge */}
+                                      <div className="flex items-start gap-2">
+                                        <span className={`inline-flex items-center shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded border mt-0.5 ${badge.color}`}>
+                                          {badge.icon} {criterion.score === 1 ? "1" : criterion.score === 0 ? "0" : "—"}
+                                        </span>
+                                        <span className="text-xs font-semibold text-slate-200 leading-relaxed">{criterion.name}</span>
+                                      </div>
+
+                                      {/* Feedback text */}
+                                      {criterion.feedback && (
+                                        <p className="text-xs text-slate-400 leading-relaxed pl-8">{criterion.feedback}</p>
+                                      )}
+
+                                      {/* Quote block */}
+                                      {criterion.quote && (
+                                        <blockquote className="ml-8 pl-3 border-l-2 border-blue-500/40 italic text-[11px] text-slate-400 leading-relaxed">
+                                          &ldquo;{criterion.quote}&rdquo;
+                                        </blockquote>
+                                      )}
+                                    </div>
+                                  );
+                                })
+                              ) : block.feedback ? (
+                                <p className="text-xs text-slate-400 leading-relaxed pl-7">{block.feedback}</p>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* ── AI Summary - Mistakes ── */}
                 {selectedCall.summary && (
                   <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex flex-col gap-3 shadow-inner">
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 shrink-0">
@@ -1179,7 +1349,6 @@ export default function Dashboard() {
                     </h4>
                     <div className="text-sm text-slate-200 leading-relaxed overflow-y-auto max-h-[300px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50 pr-2">
                       {selectedCall.summary.split(/(?=\d+[\.\)]\s)/).filter(Boolean).map((point, idx) => {
-                        // Поддержка форматов: "1. текст" и "1) текст"
                         const match = point.match(/^(\d+)[\.\)]\s+([\s\S]+)/);
                         if (match) {
                           return (
@@ -1199,7 +1368,7 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* AI Feedback - Recommendations */}
+                {/* ── AI Feedback - Recommendations ── */}
                 {selectedCall.aiFeedback && (
                   <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex flex-col gap-3 shadow-inner">
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 shrink-0">
@@ -1207,7 +1376,6 @@ export default function Dashboard() {
                     </h4>
                     <div className="text-sm text-slate-200 leading-relaxed overflow-y-auto max-h-[300px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50 pr-2">
                       {selectedCall.aiFeedback.split(/(?=\d+[\.\)]\s)/).filter(Boolean).map((point, idx) => {
-                        // Поддержка форматов: "1. текст" и "1) текст"
                         const match = point.match(/^(\d+)[\.\)]\s+([\s\S]+)/);
                         if (match) {
                           return (

@@ -68,6 +68,7 @@ export interface EvalCriterion {
   score: number;       // 0 or 1 for binary, 0 for informational
   max_score: number;   // 1 for binary, 0 for informational/tags
   feedback: string;
+  quote?: string;
 }
 
 /**
@@ -100,6 +101,7 @@ export interface EvaluationJson {
   total_score: number;
   total_max_score: number;
   summary: string;
+  client_scoring?: { urgency: number; solvency: number; need: number; total: number };
 }
 
 export const okkEvaluations = pgTable("evaluations", {
