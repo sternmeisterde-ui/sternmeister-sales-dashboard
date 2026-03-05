@@ -7,23 +7,29 @@ import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
 
 function formatDate(date: Date | null): string {
   if (!date) return "—";
-  const now = new Date();
+  const tz = "Europe/Moscow";
   const callDate = new Date(date);
-  const diffMs = now.getTime() - callDate.getTime();
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const now = new Date();
 
-  const hours = callDate.getHours().toString().padStart(2, "0");
-  const minutes = callDate.getMinutes().toString().padStart(2, "0");
+  const nowMsk = now.toLocaleDateString("en-CA", { timeZone: tz });
+  const callMsk = callDate.toLocaleDateString("en-CA", { timeZone: tz });
 
-  if (diffDays === 0) {
-    return `Сегодня, ${hours}:${minutes}`;
-  } else if (diffDays === 1) {
-    return `Вчера, ${hours}:${minutes}`;
-  } else {
-    const day = callDate.getDate().toString().padStart(2, "0");
-    const month = (callDate.getMonth() + 1).toString().padStart(2, "0");
-    return `${day}.${month}, ${hours}:${minutes}`;
+  const hours = callDate.toLocaleString("ru-RU", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+
+  if (callMsk === nowMsk) {
+    return `Сегодня, ${hours}`;
   }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayMsk = yesterday.toLocaleDateString("en-CA", { timeZone: tz });
+  if (callMsk === yesterdayMsk) {
+    return `Вчера, ${hours}`;
+  }
+
+  const day = callDate.toLocaleString("ru-RU", { timeZone: tz, day: "2-digit" });
+  const month = callDate.toLocaleString("ru-RU", { timeZone: tz, month: "2-digit" });
+  return `${day}.${month}, ${hours}`;
 }
 
 // ─── Helper: build speaker-labelled transcript ──────────────────────
