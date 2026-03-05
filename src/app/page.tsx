@@ -438,8 +438,8 @@ export default function Dashboard() {
     }).sort((a, b) => b.count - a.count);
 
     // Target completion: qualifying calls ≥10 min (regardless of score)
-    const TARGET_WEEK = 2;
-    const TARGET_MONTH = 8;
+    const TARGET_WEEK = 5;
+    const TARGET_MONTH = 20;
     // For custom range, estimate target based on range length
     let target: number;
     if (aiCustomRange.start && aiCustomRange.end) {
@@ -833,7 +833,7 @@ export default function Dashboard() {
                   <div className="flex items-center gap-3">
                     <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Таргет выполнения</span>
                     <span className="text-[10px] text-slate-500">
-                      {aiDashPeriod === "month" ? "месяц: 8 ролевок от 10 мин" : "неделя: 2 ролевки от 10 мин"}
+                      {aiDashPeriod === "month" ? "месяц: 20 ролевок от 10 мин" : "неделя: 5 ролевок от 10 мин"}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
