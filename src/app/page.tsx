@@ -1203,57 +1203,31 @@ export default function Dashboard() {
             ) : (
               <div className="flex flex-col gap-4 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
 
-                {/* ── Row 1: Score Circle + Client Scoring ── */}
-                <div className="flex flex-col sm:flex-row gap-4 items-stretch">
-                  {/* Overall Score Circle */}
-                  <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex items-center gap-5 shadow-inner flex-1">
-                    <div className={`relative flex items-center justify-center w-20 h-20 rounded-full border-[5px] shrink-0 ${
-                      selectedCall.score >= 66
-                        ? "border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.2)]"
-                        : selectedCall.score >= 41
-                        ? "border-amber-400 text-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
-                        : "border-rose-400 text-rose-400 shadow-[0_0_20px_rgba(251,113,133,0.2)]"
-                    }`}>
-                      <span className="text-xl font-black">{selectedCall.score}%</span>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
-                      <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
-                    </div>
+                {/* ── Overall Score ── */}
+                <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex items-center gap-5 shadow-inner">
+                  <div className={`relative flex items-center justify-center w-20 h-20 rounded-full border-[5px] shrink-0 ${
+                    selectedCall.score >= 66
+                      ? "border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.2)]"
+                      : selectedCall.score >= 41
+                      ? "border-amber-400 text-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
+                      : "border-rose-400 text-rose-400 shadow-[0_0_20px_rgba(251,113,133,0.2)]"
+                  }`}>
+                    <span className="text-xl font-black">{selectedCall.score}%</span>
                   </div>
-
-                  {/* Client Scoring Block */}
+                  <div className="flex-1">
+                    <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
+                    <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
+                  </div>
+                  {/* Mini client scoring in the same row */}
                   {selectedCall.clientScoring && (() => {
                     const cs = selectedCall.clientScoring;
-                    const hasSolvency = cs.solvency !== undefined;
-                    const maxScore = hasSolvency ? 30 : 20;
+                    const maxScore = cs.solvency !== undefined ? 30 : 20;
                     const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
                     const totalColor = pct >= 70 ? "text-emerald-400" : pct >= 40 ? "text-amber-400" : "text-rose-400";
                     return (
-                      <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 shadow-inner flex-1">
-                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                          <Users className="w-3.5 h-3.5 text-purple-400" /> Скоринг клиента
-                        </h4>
-                        <div className="flex flex-wrap gap-3 items-center">
-                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
-                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Срочность</span>
-                            <span className="text-base font-black text-white">{cs.urgency}<span className="text-xs font-normal text-slate-500">/10</span></span>
-                          </div>
-                          {hasSolvency && (
-                            <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
-                              <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Платежесп.</span>
-                              <span className="text-base font-black text-white">{cs.solvency}<span className="text-xs font-normal text-slate-500">/10</span></span>
-                            </div>
-                          )}
-                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-3 py-2 border border-white/5 min-w-[70px]">
-                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Потребность</span>
-                            <span className="text-base font-black text-white">{cs.need}<span className="text-xs font-normal text-slate-500">/10</span></span>
-                          </div>
-                          <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-4 py-2 border border-purple-500/20 bg-purple-500/5 min-w-[70px]">
-                            <span className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Итого</span>
-                            <span className={`text-base font-black ${totalColor}`}>{cs.total}<span className="text-xs font-normal text-slate-500">/{maxScore}</span></span>
-                          </div>
-                        </div>
+                      <div className="flex flex-col items-center bg-slate-800/60 rounded-xl px-4 py-2 border border-purple-500/20 shrink-0">
+                        <span className="text-[10px] text-purple-400 uppercase tracking-wider mb-1 font-bold">Клиент</span>
+                        <span className={`text-lg font-black ${totalColor}`}>{cs.total}<span className="text-xs font-normal text-slate-500">/{maxScore}</span></span>
                       </div>
                     );
                   })()}
@@ -1265,16 +1239,17 @@ export default function Dashboard() {
                     <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">Детальный разбор по блокам</h4>
                     {selectedCall.blocks.map((block) => {
                       const isOpen = openBlocks.has(block.id);
-                      const blockPct = block.maxScore > 0 ? (block.score / block.maxScore) * 100 : 0;
-                      const blockColor = blockPct >= 70
-                        ? "text-emerald-400"
-                        : blockPct >= 40
-                        ? "text-amber-400"
+                      const isInfoBlock = block.maxScore === 0; // informational block (tags, recommendations, etc.)
+                      const blockPct = block.maxScore > 0 ? (block.score / block.maxScore) * 100 : -1;
+                      const blockColor = isInfoBlock
+                        ? "text-blue-400"
+                        : blockPct >= 70 ? "text-emerald-400"
+                        : blockPct >= 40 ? "text-amber-400"
                         : "text-rose-400";
-                      const blockBorder = blockPct >= 70
-                        ? "border-emerald-500/20"
-                        : blockPct >= 40
-                        ? "border-amber-500/20"
+                      const blockBorder = isInfoBlock
+                        ? "border-blue-500/20"
+                        : blockPct >= 70 ? "border-emerald-500/20"
+                        : blockPct >= 40 ? "border-amber-500/20"
                         : "border-rose-500/20";
 
                       return (
@@ -1290,7 +1265,7 @@ export default function Dashboard() {
                               <span className="text-sm font-semibold text-slate-100 truncate">{block.name}</span>
                             </div>
                             <span className={`text-xs font-bold shrink-0 ml-3 ${blockColor}`}>
-                              {block.score}/{block.maxScore}
+                              {isInfoBlock ? "Инфо" : `${block.score}/${block.maxScore}`}
                             </span>
                           </button>
 
@@ -1299,30 +1274,36 @@ export default function Dashboard() {
                             <div className="px-4 pb-4 pt-1 flex flex-col gap-3 border-t border-white/5">
                               {block.criteria && block.criteria.length > 0 ? (
                                 block.criteria.map((criterion) => {
-                                  // Score badge: 1 = pass, 0 = fail, else = empty/na
-                                  const badge = criterion.score === 1
-                                    ? { icon: "✅", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" }
-                                    : criterion.score === 0
-                                    ? { icon: "❌", color: "text-rose-400 bg-rose-500/10 border-rose-500/30" }
-                                    : { icon: "⬜", color: "text-slate-500 bg-slate-800/60 border-white/10" };
+                                  const isBinary = criterion.maxScore === 1;
+                                  const isInfo = criterion.maxScore === 0;
+
+                                  const badge = isBinary
+                                    ? criterion.score === 1
+                                      ? { label: "✅", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" }
+                                      : { label: "❌", color: "text-rose-400 bg-rose-500/10 border-rose-500/30" }
+                                    : { label: "ℹ️", color: "text-blue-400 bg-blue-500/10 border-blue-500/30" };
+
+                                  const borderColor = isBinary
+                                    ? criterion.score === 1 ? "border-emerald-500/30" : "border-rose-500/30"
+                                    : "border-blue-500/30";
 
                                   return (
-                                    <div key={criterion.id} className="flex flex-col gap-1.5 pl-3 border-l-2 border-white/10">
+                                    <div key={criterion.id} className={`flex flex-col gap-1.5 pl-3 border-l-2 ${borderColor}`}>
                                       {/* Criterion name + badge */}
                                       <div className="flex items-start gap-2">
                                         <span className={`inline-flex items-center shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded border mt-0.5 ${badge.color}`}>
-                                          {badge.icon} {criterion.score === 1 ? "1" : criterion.score === 0 ? "0" : "—"}
+                                          {badge.label}
                                         </span>
                                         <span className="text-xs font-semibold text-slate-200 leading-relaxed">{criterion.name}</span>
                                       </div>
 
                                       {/* Feedback text */}
                                       {criterion.feedback && (
-                                        <p className="text-xs text-slate-400 leading-relaxed pl-8">{criterion.feedback}</p>
+                                        <p className="text-xs text-slate-400 leading-relaxed pl-8">{cleanText(criterion.feedback)}</p>
                                       )}
 
                                       {/* Quote block */}
-                                      {criterion.quote && (
+                                      {criterion.quote && criterion.quote !== "Не применимо" && (
                                         <blockquote className="ml-8 pl-3 border-l-2 border-blue-500/40 italic text-[11px] text-slate-400 leading-relaxed">
                                           &ldquo;{criterion.quote}&rdquo;
                                         </blockquote>
@@ -1331,7 +1312,7 @@ export default function Dashboard() {
                                   );
                                 })
                               ) : block.feedback ? (
-                                <p className="text-xs text-slate-400 leading-relaxed pl-7">{block.feedback}</p>
+                                <p className="text-xs text-slate-400 leading-relaxed pl-7">{cleanText(block.feedback)}</p>
                               ) : null}
                             </div>
                           )}
@@ -1340,6 +1321,70 @@ export default function Dashboard() {
                     })}
                   </div>
                 )}
+
+                {/* ── Client Scoring Accordion ── */}
+                {selectedCall.clientScoring && (() => {
+                  const cs = selectedCall.clientScoring;
+                  const hasSolvency = cs.solvency !== undefined && cs.solvency > 0;
+                  const maxScore = hasSolvency ? 30 : 20;
+                  const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
+                  const totalColor = pct >= 70 ? "text-emerald-400" : pct >= 40 ? "text-amber-400" : "text-rose-400";
+                  const borderColor = pct >= 70 ? "border-purple-500/20" : pct >= 40 ? "border-purple-500/20" : "border-purple-500/20";
+                  const isOpen = openBlocks.has("client_scoring");
+
+                  const items = [
+                    { label: "Срочность", value: cs.urgency, max: 10 },
+                    ...(hasSolvency ? [{ label: "Платежеспособность", value: cs.solvency, max: 10 }] : []),
+                    { label: "Потребность", value: cs.need, max: 10 },
+                  ];
+
+                  return (
+                    <div className="flex flex-col gap-2">
+                      <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">Скоринг клиента</h4>
+                      <div className={`rounded-xl border bg-slate-900/40 overflow-hidden transition-all duration-200 ${borderColor}`}>
+                        <button
+                          onClick={() => toggleBlock("client_scoring")}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.03] transition-colors"
+                          aria-expanded={isOpen}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <ChevronDown className={`w-4 h-4 text-purple-400 shrink-0 transition-transform duration-200 ${isOpen ? "" : "-rotate-90"}`} />
+                            <Users className="w-4 h-4 text-purple-400 shrink-0" />
+                            <span className="text-sm font-semibold text-slate-100">Оценка клиента</span>
+                          </div>
+                          <span className={`text-xs font-bold shrink-0 ml-3 ${totalColor}`}>
+                            {cs.total}/{maxScore}
+                          </span>
+                        </button>
+                        {isOpen && (
+                          <div className="px-4 pb-4 pt-1 flex flex-col gap-3 border-t border-white/5">
+                            {items.map((item) => {
+                              const itemPct = item.max > 0 ? (item.value / item.max) * 100 : 0;
+                              const itemColor = itemPct >= 70 ? "text-emerald-400" : itemPct >= 40 ? "text-amber-400" : "text-rose-400";
+                              const barColor = itemPct >= 70 ? "bg-emerald-500" : itemPct >= 40 ? "bg-amber-500" : "bg-rose-500";
+                              return (
+                                <div key={item.label} className="flex items-center gap-3">
+                                  <span className="text-xs text-slate-400 w-36 shrink-0">{item.label}</span>
+                                  <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                                    <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${itemPct}%` }} />
+                                  </div>
+                                  <span className={`text-xs font-bold shrink-0 w-10 text-right ${itemColor}`}>{item.value}/{item.max}</span>
+                                </div>
+                              );
+                            })}
+                            <div className="flex items-center gap-3 pt-2 border-t border-white/5">
+                              <span className="text-xs font-bold text-slate-300 w-36 shrink-0">Итого</span>
+                              <div className="flex-1 h-2.5 bg-slate-800 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full transition-all ${pct >= 70 ? "bg-emerald-500" : pct >= 40 ? "bg-amber-500" : "bg-rose-500"}`} style={{ width: `${pct}%` }} />
+                              </div>
+                              <span className={`text-xs font-black shrink-0 w-10 text-right ${totalColor}`}>{cs.total}/{maxScore}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* ── AI Summary - Mistakes ── */}
                 {selectedCall.summary && (

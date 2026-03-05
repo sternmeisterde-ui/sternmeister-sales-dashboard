@@ -174,13 +174,9 @@ export async function GET(request: NextRequest) {
       const evalJson = row.evaluationJson as any;
       const clientScoring = evalJson?.client_scoring || evalJson?.summary?.client_scoring || null;
 
-      // Convert evaluation blocks to UI block format
+      // Convert evaluation blocks to UI block format (keep ALL blocks including informational)
       const blocks = (row.evaluationJson?.blocks || [])
-        .filter(
-          (b) =>
-            (b.block_score ?? b.score ?? 0) > 0 ||
-            (b.max_block_score ?? b.max_score ?? 0) > 0
-        )
+        .filter((b) => (b.criteria && b.criteria.length > 0) || b.feedback)
         .map((b, i) => ({
           id: String(i),
           name: b.name || "",
