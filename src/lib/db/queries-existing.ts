@@ -30,6 +30,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       mistakes: calls.mistakes,
       recommendations: calls.recommendations,
       recordingPath: calls.recordingPath,
+      evaluationJson: calls.evaluationJson,
       userName: users.name,
       userTelegramUsername: users.telegramUsername,
     })
@@ -43,20 +44,46 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
     const minutes = Math.floor(duration / 60);
     const seconds = duration % 60;
 
+    // Parse evaluation blocks from evaluationJson (same logic as OKK route.ts)
+    const blocks = (call.evaluationJson?.blocks || [])
+      .filter((b) => (b.criteria && b.criteria.length > 0))
+      .map((b, i) => ({
+        id: String(i),
+        name: b.name || "",
+        score: b.block_score ?? 0,
+        maxScore: b.max_block_score ?? 0,
+        criteria: b.criteria
+          ? b.criteria.map((c: any, idx: number) => ({
+              id: idx + 1,
+              name: c.name || "",
+              score: typeof c.score === "number" ? c.score : c.score === "1" ? 1 : c.score === "0" ? 0 : -1,
+              maxScore: typeof c.max_score === "number" ? c.max_score : c.max_score === 1 ? 1 : 0,
+              feedback: c.feedback || "",
+              quote: c.quote || "",
+            }))
+          : [],
+        feedback: b.criteria
+          ? b.criteria
+              .filter((c: any) => c.score === 0 && c.max_score > 0)
+              .map((c: any) => `❌ ${c.name}`)
+              .join("\n")
+          : "",
+      }));
+
     return {
       id: call.id,
       name: call.userName || "Unknown",
       avatarUrl: `https://i.pravatar.cc/150?u=${call.userTelegramUsername || call.userId}`,
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
       date: formatDate(call.startedAt),
-      score: call.score || 0, // Оценка уже в шкале 0-100
+      score: call.score || 0,
       hasRecording: !!call.recordingPath,
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${departmentType}` : "#",
       kommoUrl: "#",
       transcript: call.transcript || "",
       aiFeedback: call.recommendations || "",
       summary: call.mistakes || "",
-      blocks: [], // evaluation_json column not yet in DB — will be populated when migration is run
+      blocks,
     };
   });
 }
@@ -140,17 +167,3 @@ function formatDate(date: Date): string {
   }
 }
 
-// Парсинг evaluation_json в формат блоков для UI
-function parseEvaluationJson(evaluationJson: any) {
-  if (!evaluationJson || !evaluationJson.criteria) {
-    return [];
-  }
-
-  return evaluationJson.criteria.map((criterion: any, index: number) => ({
-    id: `block-${index}`,
-    name: criterion.name || `Критерий ${index + 1}`,
-    score: criterion.score || 0,
-    maxScore: 100,
-    feedback: criterion.feedback || "",
-  }));
-}

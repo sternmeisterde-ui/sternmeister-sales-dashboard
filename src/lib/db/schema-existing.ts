@@ -35,11 +35,21 @@ export const d1Calls = pgTable("d1_calls", {
   transcript: text("transcript"),
   generatedPrompt: text("generated_prompt"),
   evaluationJson: jsonb("evaluation_json").$type<{
-    criteria: Array<{
+    blocks: Array<{
       name: string;
-      score: number;
-      feedback: string;
+      block_score: number;
+      max_block_score: number;
+      criteria: Array<{
+        name: string;
+        score: number;
+        max_score: number;
+        feedback: string;
+        quote?: string;
+      }>;
     }>;
+    total_score: number;
+    total_max_score: number;
+    summary: string;
   }>(),
   score: integer("score"), // 0-100
   mistakes: text("mistakes"),
@@ -85,11 +95,21 @@ export const r1Calls = pgTable("r1_calls", {
   transcript: text("transcript"),
   generatedPrompt: text("generated_prompt"),
   evaluationJson: jsonb("evaluation_json").$type<{
-    criteria: Array<{
+    blocks: Array<{
       name: string;
-      score: number;
-      feedback: string;
+      block_score: number;
+      max_block_score: number;
+      criteria: Array<{
+        name: string;
+        score: number;
+        max_score: number;
+        feedback: string;
+        quote?: string;
+      }>;
     }>;
+    total_score: number;
+    total_max_score: number;
+    summary: string;
   }>(),
   score: integer("score"), // 0-100
   mistakes: text("mistakes"),
