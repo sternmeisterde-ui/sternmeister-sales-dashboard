@@ -101,7 +101,7 @@ export interface EvaluationJson {
   total_score: number;
   total_max_score: number;
   summary: string;
-  client_scoring?: { urgency: number; solvency: number; need: number; total: number };
+  client_scoring?: { urgency: number; solvency?: number; need: number; total: number };
 }
 
 export const okkEvaluations = pgTable("evaluations", {
