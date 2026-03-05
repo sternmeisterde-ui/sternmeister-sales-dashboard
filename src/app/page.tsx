@@ -77,7 +77,7 @@ export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
 
   // AI Dashboard period filter
-  const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("day");
+  const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("week");
   const [aiCustomRange, setAiCustomRange] = useState<DateRange>({ start: null, end: null });
 
   // Manager filter states
@@ -323,16 +323,16 @@ export default function Dashboard() {
 
     const currentCalls = activeTab === "real_calls" ? realCalls : aiCalls;
 
-    // All calls for this manager, excluding 0-score (unscored/failed calls)
-    const scoredCalls = currentCalls.filter(
-      call => call.name === selectedManager.name && call.score > 0
+    // All calls for this manager (including unevaluated / score=0)
+    const allManagerCalls = currentCalls.filter(
+      call => call.name === selectedManager.name
     );
 
     // Apply period filter
     const now = new Date();
     now.setHours(23, 59, 59, 999);
 
-    const filteredByPeriod = scoredCalls.filter(call => {
+    const filteredByPeriod = allManagerCalls.filter(call => {
       const callDate = parseCallDate(call.date);
 
       if (managerPeriod === "week") {
@@ -356,9 +356,10 @@ export default function Dashboard() {
 
     setManagerCalls(filtered);
 
-    // Calculate stats from filtered calls
-    const avgScore = filtered.length > 0
-      ? Math.round(filtered.reduce((sum, c) => sum + c.score, 0) / filtered.length)
+    // Calculate stats — avgScore only from scored calls
+    const scoredFiltered = filtered.filter(c => c.score > 0);
+    const avgScore = scoredFiltered.length > 0
+      ? Math.round(scoredFiltered.reduce((sum, c) => sum + c.score, 0) / scoredFiltered.length)
       : 0;
 
     // Рассчитать ОБЩЕЕ время (сумму)
@@ -417,24 +418,27 @@ export default function Dashboard() {
       periodStart.setHours(0, 0, 0, 0);
     }
 
+    // ALL calls in period (including unevaluated / score=0)
     const periodCalls = allCalls.filter(call => {
       if (!managerNames.has(call.name)) return false;
-      if (call.score <= 0) return false; // Исключаем звонки с нулевым скорингом
       const callDate = parseCallDate(call.date);
       return callDate >= periodStart && callDate <= periodEnd;
     });
 
     const totalRoleplays = periodCalls.length;
-    const avgScore = totalRoleplays > 0
-      ? Math.round(periodCalls.reduce((sum, c) => sum + c.score, 0) / totalRoleplays)
+    // avgScore only from evaluated calls (score > 0)
+    const scoredCalls = periodCalls.filter(c => c.score > 0);
+    const avgScore = scoredCalls.length > 0
+      ? Math.round(scoredCalls.reduce((sum, c) => sum + c.score, 0) / scoredCalls.length)
       : 0;
 
-    // Per-manager breakdown
+    // Per-manager breakdown — count all calls, avg only scored
     const perManager = managers.map(m => {
       const mCalls = periodCalls.filter(c => c.name === m.name);
+      const mScored = mCalls.filter(c => c.score > 0);
       const count = mCalls.length;
-      const avg = count > 0
-        ? Math.round(mCalls.reduce((sum, c) => sum + c.score, 0) / count)
+      const avg = mScored.length > 0
+        ? Math.round(mScored.reduce((sum, c) => sum + c.score, 0) / mScored.length)
         : 0;
       return { name: m.name, avgScore: avg, count };
     }).sort((a, b) => b.count - a.count);
@@ -505,19 +509,10 @@ export default function Dashboard() {
     return true;
   });
 
-  // Update manager stats based on scored calls (excluding 0-score)
+  // Filter managers by role + line — totalCalls & avgScore come directly from the API
   const filteredManagers = activeManagers
     .filter(m => !m.role || m.role === "manager")
-    .filter(m => lineFilter === "all" || m.line === lineFilter)
-    .map(manager => {
-      const scoredManagerCalls = activeCalls.filter(
-        call => call.name === manager.name && call.score > 0
-      );
-      return {
-        ...manager,
-        totalCalls: scoredManagerCalls.length
-      };
-    });
+    .filter(m => lineFilter === "all" || m.line === lineFilter);
 
   // When a call is selected, open the first block by default
   useEffect(() => {
