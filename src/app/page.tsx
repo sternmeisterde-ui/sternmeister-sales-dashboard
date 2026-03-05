@@ -561,7 +561,7 @@ export default function Dashboard() {
           {[
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд" },
             { id: "daily", icon: ClipboardList, label: "Дейли" },
-            { id: "real_calls", icon: Phone, label: "Звонки" },
+            { id: "real_calls", icon: Phone, label: "ОКК" },
             { id: "ai_calls", icon: Bot, label: "AI Ролевые" },
           ].map((item) => (
             <button
@@ -838,7 +838,7 @@ export default function Dashboard() {
             <div className="glass-panel rounded-2xl flex-1 border border-white/5 overflow-hidden flex flex-col shadow-2xl">
               <div className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/20">
                 <h2 className="text-sm font-bold tracking-wide uppercase text-slate-200">
-                  {activeTab === "real_calls" ? "Таблица: Звонки" : "Таблица: Ролевые AI Звонки"}
+                  {activeTab === "real_calls" ? "Таблица: ОКК" : "Таблица: Ролевые AI Звонки"}
                 </h2>
                 {/* Advanced Table Filters */}
                 <div className="flex gap-3 items-center">
