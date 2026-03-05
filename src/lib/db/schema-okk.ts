@@ -21,6 +21,7 @@ export const okkManagers = pgTable("managers", {
   telegramId: text("telegram_id"),
   department: text("department"),           // 'b2g' | 'b2b'
   role: text("role"),                       // 'manager' | 'rop' | 'admin'
+  line: text("line"),                       // '1' (квалификатор) | '2' (бератер)
   isActive: boolean("is_active").default(true),
   callgearEmployeeId: text("callgear_employee_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),

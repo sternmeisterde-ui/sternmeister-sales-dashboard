@@ -100,6 +100,7 @@ export async function getManagerStats(departmentType: DepartmentType) {
       name: users.name,
       telegramUsername: users.telegramUsername,
       role: users.role,
+      line: users.line,
     }).from(users).where(and(eq(users.isActive, true), eq(users.role, "manager"))),
 
     db.select({
@@ -142,6 +143,7 @@ export async function getManagerStats(departmentType: DepartmentType) {
       avgDuration: avgDurationFormatted,
       conversionRate: "N/A",
       role: user.role,
+      line: user.line || null,
     };
   });
 }

@@ -52,6 +52,7 @@ const isInRange = (date: Date, start: Date | null, end: Date | null) => {
 export default function Dashboard() {
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
+  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2">("all");
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -386,7 +387,9 @@ export default function Dashboard() {
   // Dashboard stats for calls tabs (managers only, no ROPs/admins)
   const callsDashStats = (() => {
     const allCalls = activeCalls;
-    const managers = activeManagers.filter(m => !m.role || m.role === "manager");
+    const managers = activeManagers
+      .filter(m => !m.role || m.role === "manager")
+      .filter(m => lineFilter === "all" || m.line === lineFilter);
     const managerNames = new Set(managers.map(m => m.name));
 
     const now = new Date();
@@ -505,6 +508,7 @@ export default function Dashboard() {
   // Update manager stats based on scored calls (excluding 0-score)
   const filteredManagers = activeManagers
     .filter(m => !m.role || m.role === "manager")
+    .filter(m => lineFilter === "all" || m.line === lineFilter)
     .map(manager => {
       const scoredManagerCalls = activeCalls.filter(
         call => call.name === manager.name && call.score > 0
@@ -587,14 +591,14 @@ export default function Dashboard() {
         <header className="glass-panel rounded-2xl px-5 py-3 flex flex-col sm:flex-row justify-between items-center shadow-lg border border-white/5 gap-4">
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner w-full sm:w-auto">
             <button
-              onClick={() => setActiveDepartment("b2g")}
+              onClick={() => { setActiveDepartment("b2g"); setLineFilter("all"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
               Госники (B2G)
             </button>
             <button
-              onClick={() => setActiveDepartment("b2b")}
+              onClick={() => { setActiveDepartment("b2b"); setLineFilter("all"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
@@ -638,6 +642,11 @@ export default function Dashboard() {
                           {manager.role === 'rop' ? 'РОП' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
                         </span>
                       )}
+                      {activeDepartment === "b2g" && (() => {
+                        const mgr = activeManagers.find(am => am.name === manager.name);
+                        const lineLabel = mgr?.line === "1" ? "1я" : mgr?.line === "2" ? "2я" : null;
+                        return lineLabel ? <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400">{lineLabel}</span> : null;
+                      })()}
                     </div>
                     <p className="text-[10px] text-slate-400 mt-0.5">Звонков: <span className="text-white font-medium">{manager.totalCalls}</span></p>
                   </div>
@@ -674,6 +683,16 @@ export default function Dashboard() {
                   onChange={(range) => setAiCustomRange(range)}
                   onClear={() => setAiCustomRange({ start: null, end: null })}
                 />
+                {activeDepartment === "b2g" && (
+                  <div className="flex gap-1 ml-2">
+                    {(["all", "1", "2"] as const).map(val => (
+                      <button key={val} onClick={() => setLineFilter(val)}
+                        className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
+                        {val === "all" ? "Все" : val === "1" ? "Квалиф." : "Бератер"}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Stats Row: compact KPIs left + wide manager list right */}

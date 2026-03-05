@@ -147,6 +147,7 @@ export async function GET(request: NextRequest) {
         id: okkManagers.id,
         name: okkManagers.name,
         role: okkManagers.role,
+        line: okkManagers.line,
       })
       .from(okkManagers)
       .where(
@@ -245,6 +246,7 @@ export async function GET(request: NextRequest) {
         avgDuration: "—",
         conversionRate: "—",
         role: m.role || "manager",
+        line: m.line || null,
       };
     });
 

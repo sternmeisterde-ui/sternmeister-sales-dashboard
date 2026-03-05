@@ -31,6 +31,7 @@ export interface ManagerStat {
     avgDuration: string;
     conversionRate: string;
     role?: string;
+    line?: string | null; // '1' (квалификатор) | '2' (бератер)
 }
 
 // 📌 ЗАГЛУШКИ ДЛЯ ГРАФИКОВ
