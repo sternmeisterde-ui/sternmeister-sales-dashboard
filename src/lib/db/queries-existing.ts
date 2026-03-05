@@ -18,17 +18,14 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
   const { calls, users } = getTables(departmentType);
   const db = getDbForDepartment(departmentType);
 
+  // LIGHT query: no transcript, no evaluationJson heavy fields
   const result = await db
     .select({
       id: calls.id,
       userId: calls.userId,
       startedAt: calls.startedAt,
-      endedAt: calls.endedAt,
       durationSeconds: calls.durationSeconds,
-      transcript: calls.transcript,
       score: calls.score,
-      mistakes: calls.mistakes,
-      recommendations: calls.recommendations,
       recordingPath: calls.recordingPath,
       evaluationJson: calls.evaluationJson,
       userName: users.name,
@@ -36,15 +33,16 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
     })
     .from(calls)
     .leftJoin(users, eq(calls.userId, users.id))
-    .orderBy(desc(calls.startedAt));
+    .orderBy(desc(calls.startedAt))
+    .limit(200);
 
-  // Преобразовать в формат для фронтенда
+  // Преобразовать в формат для фронтенда (LIGHT — без transcript/criteria)
   return result.map((call) => {
     const duration = call.durationSeconds || 0;
     const minutes = Math.floor(duration / 60);
     const seconds = duration % 60;
 
-    // Parse evaluation blocks from evaluationJson (same logic as OKK route.ts)
+    // LIGHT blocks: only id/name/score/maxScore — criteria loaded on-demand via /api/calls/[callId]
     const blocks = (call.evaluationJson?.blocks || [])
       .filter((b) => (b.criteria && b.criteria.length > 0))
       .map((b, i) => ({
@@ -52,22 +50,8 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
         name: b.name || "",
         score: b.block_score ?? 0,
         maxScore: b.max_block_score ?? 0,
-        criteria: b.criteria
-          ? b.criteria.map((c: any, idx: number) => ({
-              id: idx + 1,
-              name: c.name || "",
-              score: typeof c.score === "number" ? c.score : c.score === "1" ? 1 : c.score === "0" ? 0 : -1,
-              maxScore: typeof c.max_score === "number" ? c.max_score : c.max_score === 1 ? 1 : 0,
-              feedback: c.feedback || "",
-              quote: c.quote || "",
-            }))
-          : [],
-        feedback: b.criteria
-          ? b.criteria
-              .filter((c: any) => c.score === 0 && c.max_score > 0)
-              .map((c: any) => `❌ ${c.name}`)
-              .join("\n")
-          : "",
+        criteria: [] as any[],
+        feedback: "",
       }));
 
     return {
@@ -80,9 +64,10 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
       hasRecording: !!call.recordingPath,
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${departmentType}` : "#",
       kommoUrl: "#",
-      transcript: call.transcript || "",
-      aiFeedback: call.recommendations || "",
-      summary: call.mistakes || "",
+      // Heavy fields empty — loaded on-demand via /api/calls/[callId]
+      transcript: "",
+      aiFeedback: "",
+      summary: "",
       blocks,
     };
   });

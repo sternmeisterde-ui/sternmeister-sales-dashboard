@@ -67,6 +67,7 @@ export default function Dashboard() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const [selectedCall, setSelectedCall] = useState<ManagerCall | null>(null);
+  const [callDetailLoading, setCallDetailLoading] = useState(false);
   const [callModalType, setCallModalType] = useState<"transcript" | "scoring">("transcript");
   const [selectedManager, setSelectedManager] = useState<ManagerStat | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -218,78 +219,71 @@ export default function Dashboard() {
     return () => { stopAudio(); };
   }, [activeDepartment, stopAudio]);
 
-  // Load calls data from API (single request + client cache)
-  useEffect(() => {
-    // Если есть в кеше — показываем мгновенно
-    if (dataCache[activeDepartment]) {
-      setAiCalls(dataCache[activeDepartment].calls);
-      setAiManagers(dataCache[activeDepartment].managers);
-      setIsLoadingAI(false);
-      return;
-    }
-
-    const ac = new AbortController();
-    setIsLoadingAI(true);
-
-    fetch(`/api/calls?department=${activeDepartment}&type=all`, { signal: ac.signal })
-      .then(r => r.json())
-      .then(res => {
-        if (res.success) {
-          setAiCalls(res.data.calls);
-          setAiManagers(res.data.managers);
-          // Сохраняем в кеш
-          setDataCache(prev => ({
-            ...prev,
-            [activeDepartment]: { calls: res.data.calls, managers: res.data.managers }
-          }));
-        }
-      })
-      .catch(error => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        if (error instanceof TypeError && error.message === "Failed to fetch") return;
-        console.error("Error loading calls:", error);
-      })
-      .finally(() => setIsLoadingAI(false));
-
-    return () => ac.abort();
-  }, [activeDepartment]);
-
-  // ── OKK Real Calls data (same pattern as AI calls above) ──
+  // ── OKK Real Calls data ──
   const [realCalls, setRealCalls] = useState<ManagerCall[]>([]);
   const [realManagers, setRealManagers] = useState<ManagerStat[]>([]);
   const [isLoadingReal, setIsLoadingReal] = useState(true);
   const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
-  // Fetch OKK calls — same pattern as AI calls above
+  // Load BOTH datasets in PARALLEL (single useEffect, Promise.all)
   useEffect(() => {
-    if (realDataCache[activeDepartment]) {
-      setRealCalls(realDataCache[activeDepartment].calls);
-      setRealManagers(realDataCache[activeDepartment].managers);
-      setIsLoadingReal(false);
-      return;
+    const ac = new AbortController();
+    const dept = activeDepartment;
+
+    // AI data
+    const cachedAI = dataCache[dept];
+    if (cachedAI) {
+      setAiCalls(cachedAI.calls);
+      setAiManagers(cachedAI.managers);
+      setIsLoadingAI(false);
+    } else {
+      setIsLoadingAI(true);
     }
 
-    const ac = new AbortController();
-    setIsLoadingReal(true);
+    // OKK data
+    const cachedOKK = realDataCache[dept];
+    if (cachedOKK) {
+      setRealCalls(cachedOKK.calls);
+      setRealManagers(cachedOKK.managers);
+      setIsLoadingReal(false);
+    } else {
+      setIsLoadingReal(true);
+    }
 
-    fetch(`/api/okk/calls?department=${activeDepartment}`, { signal: ac.signal })
-      .then(r => r.json())
-      .then(res => {
-        if (res.success) {
-          setRealCalls(res.data.calls);
-          setRealManagers(res.data.managers);
-          setRealDataCache(prev => ({
-            ...prev,
-            [activeDepartment]: { calls: res.data.calls, managers: res.data.managers },
-          }));
-        }
-      })
-      .catch(error => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        if (error instanceof TypeError && error.message === "Failed to fetch") return;
-        console.error("Error loading OKK calls:", error);
-      })
-      .finally(() => setIsLoadingReal(false));
+    // Fetch only what's not cached — in PARALLEL
+    const fetches: Promise<void>[] = [];
+
+    if (!cachedAI) {
+      fetches.push(
+        fetch(`/api/calls?department=${dept}&type=all`, { signal: ac.signal })
+          .then(r => r.json())
+          .then(res => {
+            if (res.success) {
+              setAiCalls(res.data.calls);
+              setAiManagers(res.data.managers);
+              setDataCache(prev => ({ ...prev, [dept]: { calls: res.data.calls, managers: res.data.managers } }));
+            }
+          })
+          .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading AI calls:", e); })
+          .finally(() => setIsLoadingAI(false))
+      );
+    }
+
+    if (!cachedOKK) {
+      fetches.push(
+        fetch(`/api/okk/calls?department=${dept}`, { signal: ac.signal })
+          .then(r => r.json())
+          .then(res => {
+            if (res.success) {
+              setRealCalls(res.data.calls);
+              setRealManagers(res.data.managers);
+              setRealDataCache(prev => ({ ...prev, [dept]: { calls: res.data.calls, managers: res.data.managers } }));
+            }
+          })
+          .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading OKK calls:", e); })
+          .finally(() => setIsLoadingReal(false))
+      );
+    }
 
     return () => ac.abort();
   }, [activeDepartment]);
@@ -522,6 +516,56 @@ export default function Dashboard() {
       setOpenBlocks(new Set());
     }
   }, [selectedCall]);
+
+  // ── Lazy-load call details on click (transcript, blocks, criteria) ──
+  const handleSelectCall = useCallback(async (call: ManagerCall, modalType: "transcript" | "scoring") => {
+    setCallModalType(modalType);
+
+    // If full data already loaded (transcript non-empty), show immediately
+    if (call.transcript) {
+      setSelectedCall(call);
+      return;
+    }
+
+    // Show modal with loading state
+    setSelectedCall(call);
+    setCallDetailLoading(true);
+
+    try {
+      const isOkk = activeTab === "real_calls";
+      const url = isOkk
+        ? `/api/okk/calls/${call.id}?dept=${activeDepartment}`
+        : `/api/calls/${call.id}?department=${activeDepartment}`;
+      const res = await fetch(url);
+      const json = await res.json();
+
+      if (json.success && json.data) {
+        const fullCall: ManagerCall = { ...call, ...json.data };
+        setSelectedCall(fullCall);
+
+        // Update cache so next click is instant
+        if (isOkk) {
+          setRealCalls(prev => prev.map(c => c.id === call.id ? fullCall : c));
+          setRealDataCache(prev => {
+            const cached = prev[activeDepartment];
+            if (!cached) return prev;
+            return { ...prev, [activeDepartment]: { ...cached, calls: cached.calls.map(c => c.id === call.id ? fullCall : c) } };
+          });
+        } else {
+          setAiCalls(prev => prev.map(c => c.id === call.id ? fullCall : c));
+          setDataCache(prev => {
+            const cached = prev[activeDepartment];
+            if (!cached) return prev;
+            return { ...prev, [activeDepartment]: { ...cached, calls: cached.calls.map(c => c.id === call.id ? fullCall : c) } };
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Error loading call details:", e);
+    } finally {
+      setCallDetailLoading(false);
+    }
+  }, [activeTab, activeDepartment]);
 
   // Close modals
   const closeModal = () => {
@@ -1027,7 +1071,7 @@ export default function Dashboard() {
                         <td className="px-5 py-3 text-slate-300 font-mono text-center">{call.callDuration}</td>
                         <td className="px-5 py-3 text-center">
                           <button
-                            onClick={() => { setSelectedCall(call); setCallModalType("transcript"); }}
+                            onClick={() => handleSelectCall(call, "transcript")}
                             className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:bg-blue-500 hover:text-white transition-all shadow-inner border border-white/5"
                           >
                             <FileText className="w-3.5 h-3.5" />
@@ -1046,7 +1090,7 @@ export default function Dashboard() {
                         )}
                         <td className="px-5 py-3">
                           <div className="flex justify-center items-center">
-                            <button onClick={() => { setSelectedCall(call); setCallModalType("scoring"); }} className={`relative flex items-center justify-center w-9 h-9 rounded-full border-[2px] cursor-pointer hover:scale-110 transition-transform ${call.score >= 66 ? "border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.3)] text-emerald-400" :
+                            <button onClick={() => handleSelectCall(call, "scoring")} className={`relative flex items-center justify-center w-9 h-9 rounded-full border-[2px] cursor-pointer hover:scale-110 transition-transform ${call.score >= 66 ? "border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.3)] text-emerald-400" :
                               call.score >= 41 ? "border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.3)] text-amber-400" :
                                 "border-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.3)] text-rose-400"
                               }`}>
@@ -1183,7 +1227,12 @@ export default function Dashboard() {
             </div>
 
             {/* MODAL CONTENT */}
-            {callModalType === "transcript" ? (
+            {callDetailLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+                <span className="ml-3 text-slate-400 text-sm">Загрузка данных...</span>
+              </div>
+            ) : callModalType === "transcript" ? (
               <div className="flex flex-col gap-6 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
                 {/* Transcript ONLY */}
                 <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex-1 shadow-inner flex flex-col gap-4">
@@ -1580,7 +1629,7 @@ export default function Dashboard() {
                   managerCalls.map(call => (
                     <button
                       key={call.id}
-                      onClick={() => setSelectedCall(call)}
+                      onClick={() => handleSelectCall(call, "scoring")}
                       className="bg-slate-800/40 border border-white/5 rounded-xl px-3 py-3 text-left hover:bg-white/5 transition-all group"
                     >
                       <div className="flex items-center justify-between mb-2">

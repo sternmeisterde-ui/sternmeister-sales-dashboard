@@ -116,60 +116,59 @@ export async function GET(request: NextRequest) {
     const whereClause =
       conditions.length > 0 ? and(...conditions) : undefined;
 
-    // ── Main query: ALL calls left-joined with evaluations ────
-    const rows = await db
-      .select({
-        id: okkCalls.id,
-        managerId: okkCalls.managerId,
-        managerName: okkCalls.managerName,
-        durationSeconds: okkCalls.durationSeconds,
-        recordingUrl: okkCalls.recordingUrl,
-        transcript: okkCalls.transcript,
-        transcriptSpeakers: okkCalls.transcriptSpeakers,
-        direction: okkCalls.direction,
-        kommoLeadUrl: okkCalls.kommoLeadUrl,
-        callCreatedAt: okkCalls.callCreatedAt,
-        // Evaluation (may be null)
-        totalScore: okkEvaluations.totalScore,
-        evaluationJson: okkEvaluations.evaluationJson,
-        mistakes: okkEvaluations.mistakes,
-        recommendations: okkEvaluations.recommendations,
-      })
-      .from(okkCalls)
-      .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
-      .where(whereClause)
-      .orderBy(desc(okkCalls.callCreatedAt))
-      .limit(200);
+    // ── All 3 queries in PARALLEL ────────────────────────────
+    const [rows, allManagerRows, managerAggRows] = await Promise.all([
+      // Query 1: Calls — LIGHT fields only (no transcript, no full evaluationJson)
+      db
+        .select({
+          id: okkCalls.id,
+          managerId: okkCalls.managerId,
+          managerName: okkCalls.managerName,
+          durationSeconds: okkCalls.durationSeconds,
+          recordingUrl: okkCalls.recordingUrl,
+          direction: okkCalls.direction,
+          kommoLeadUrl: okkCalls.kommoLeadUrl,
+          callCreatedAt: okkCalls.callCreatedAt,
+          // Evaluation — only score + blocks summary (no transcript/mistakes/recommendations)
+          totalScore: okkEvaluations.totalScore,
+          evaluationJson: okkEvaluations.evaluationJson,
+        })
+        .from(okkCalls)
+        .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
+        .where(whereClause)
+        .orderBy(desc(okkCalls.callCreatedAt))
+        .limit(200),
 
-    // ── All managers from managers table (only role='manager', active) ──
-    const allManagerRows = await db
-      .select({
-        id: okkManagers.id,
-        name: okkManagers.name,
-        role: okkManagers.role,
-        line: okkManagers.line,
-      })
-      .from(okkManagers)
-      .where(
-        and(
-          eq(okkManagers.isActive, true),
-          eq(okkManagers.role, "manager"),
+      // Query 2: All managers (only role='manager', active)
+      db
+        .select({
+          id: okkManagers.id,
+          name: okkManagers.name,
+          role: okkManagers.role,
+          line: okkManagers.line,
+        })
+        .from(okkManagers)
+        .where(
+          and(
+            eq(okkManagers.isActive, true),
+            eq(okkManagers.role, "manager"),
+          )
         )
-      )
-      .orderBy(okkManagers.name);
+        .orderBy(okkManagers.name),
 
-    // ── Per-manager call aggregate (for scored stats) ────────
-    const managerAggRows = await db
-      .select({
-        managerId: okkCalls.managerId,
-        count: sql<number>`count(distinct ${okkCalls.id})::int`,
-        evaluatedCount: sql<number>`count(${okkEvaluations.id})::int`,
-        avgScore: sql<number>`round(avg(${okkEvaluations.totalScore}))::int`,
-      })
-      .from(okkCalls)
-      .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
-      .where(whereClause)
-      .groupBy(okkCalls.managerId);
+      // Query 3: Per-manager call aggregates
+      db
+        .select({
+          managerId: okkCalls.managerId,
+          count: sql<number>`count(distinct ${okkCalls.id})::int`,
+          evaluatedCount: sql<number>`count(${okkEvaluations.id})::int`,
+          avgScore: sql<number>`round(avg(${okkEvaluations.totalScore}))::int`,
+        })
+        .from(okkCalls)
+        .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
+        .where(whereClause)
+        .groupBy(okkCalls.managerId),
+    ]);
 
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
     const calls = rows.map((row) => {
@@ -181,7 +180,7 @@ export async function GET(request: NextRequest) {
       const evalJson = row.evaluationJson as any;
       const clientScoring = evalJson?.client_scoring || evalJson?.summary?.client_scoring || null;
 
-      // Convert evaluation blocks to UI block format (keep ALL blocks including informational)
+      // LIGHT blocks: only id/name/score/maxScore — no criteria (loaded on-demand via /api/okk/calls/[callId])
       const blocks = (row.evaluationJson?.blocks || [])
         .filter((b) => (b.criteria && b.criteria.length > 0) || b.feedback)
         .map((b, i) => ({
@@ -189,22 +188,8 @@ export async function GET(request: NextRequest) {
           name: b.name || "",
           score: b.block_score ?? b.score ?? 0,
           maxScore: b.max_block_score ?? b.max_score ?? 0,
-          criteria: b.criteria
-            ? b.criteria.map((c: any, idx: number) => ({
-                id: idx + 1,
-                name: c.name || '',
-                score: typeof c.score === 'number' ? c.score : (c.score === '1' ? 1 : c.score === '0' ? 0 : -1),
-                maxScore: typeof c.max_score === 'number' ? c.max_score : (c.max_score === 1 ? 1 : 0),
-                feedback: c.feedback || '',
-                quote: c.quote || '',
-              }))
-            : [],
-          feedback: b.criteria
-            ? b.criteria
-                .filter((c: any) => c.score === 0 && c.max_score > 0)
-                .map((c: any) => `❌ ${c.name}`)
-                .join("\n")
-            : b.feedback || "",
+          criteria: [] as any[],
+          feedback: "",
         }));
 
       return {
@@ -219,12 +204,10 @@ export async function GET(request: NextRequest) {
           ? `/api/okk/audio/${row.id}?dept=${department}`
           : "#",
         kommoUrl: row.kommoLeadUrl || "",
-        transcript:
-          buildSpeakerTranscript(row.transcriptSpeakers, row.direction) ||
-          row.transcript ||
-          "",
-        aiFeedback: row.recommendations || "",
-        summary: row.mistakes || "",
+        // Heavy fields empty — loaded on-demand via /api/okk/calls/[callId]
+        transcript: "",
+        aiFeedback: "",
+        summary: "",
         blocks,
         clientScoring,
       };
