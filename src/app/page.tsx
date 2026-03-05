@@ -995,7 +995,9 @@ export default function Dashboard() {
                         <th className="px-5 py-3 font-semibold text-center">CRM</th>
                       )}
                       <th className="px-5 py-3 font-semibold text-center">AI Оценка</th>
-                      <th className="px-5 py-3 font-semibold text-center">Скоринг клиента</th>
+                      {activeTab === "real_calls" && (
+                        <th className="px-5 py-3 font-semibold text-center">Скоринг клиента</th>
+                      )}
                       <th className="px-5 py-3 font-semibold text-center">Аудио</th>
                     </tr>
                   </thead>
@@ -1038,26 +1040,27 @@ export default function Dashboard() {
                             </button>
                           </div>
                         </td>
-                        <td className="px-5 py-3 text-center">
-                          {call.clientScoring ? (() => {
-                            const cs = call.clientScoring;
-                            // r2_commercial has solvency field → max 30; d2_qualifier (urgency+need only) → max 20
-                            const maxScore = cs.solvency !== undefined ? 30 : 20;
-                            const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
-                            const colorClass = pct >= 70
-                              ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
-                              : pct >= 40
-                              ? "text-amber-400 border-amber-500/40 bg-amber-500/10"
-                              : "text-rose-400 border-rose-500/40 bg-rose-500/10";
-                            return (
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-bold ${colorClass}`}>
-                                {cs.total}/{maxScore}
-                              </span>
-                            );
-                          })() : (
-                            <span className="text-slate-600 text-sm">—</span>
-                          )}
-                        </td>
+                        {activeTab === "real_calls" && (
+                          <td className="px-5 py-3 text-center">
+                            {call.clientScoring ? (() => {
+                              const cs = call.clientScoring;
+                              const maxScore = cs.solvency !== undefined ? 30 : 20;
+                              const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
+                              const colorClass = pct >= 70
+                                ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
+                                : pct >= 40
+                                ? "text-amber-400 border-amber-500/40 bg-amber-500/10"
+                                : "text-rose-400 border-rose-500/40 bg-rose-500/10";
+                              return (
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-bold ${colorClass}`}>
+                                  {cs.total}/{maxScore}
+                                </span>
+                              );
+                            })() : (
+                              <span className="text-slate-600 text-sm">—</span>
+                            )}
+                          </td>
+                        )}
                         <td className="px-3 py-3">
                           {playingCallId === call.id ? (
                             /* ── Active mini-player ── */
@@ -1218,8 +1221,8 @@ export default function Dashboard() {
                     <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
                     <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
                   </div>
-                  {/* Mini client scoring in the same row */}
-                  {selectedCall.clientScoring && (() => {
+                  {/* Mini client scoring in the same row (only for real calls) */}
+                  {activeTab === "real_calls" && selectedCall.clientScoring && (() => {
                     const cs = selectedCall.clientScoring;
                     const maxScore = cs.solvency !== undefined ? 30 : 20;
                     const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
@@ -1322,8 +1325,8 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* ── Client Scoring Accordion ── */}
-                {selectedCall.clientScoring && (() => {
+                {/* ── Client Scoring Accordion (only for real calls) ── */}
+                {activeTab === "real_calls" && selectedCall.clientScoring && (() => {
                   const cs = selectedCall.clientScoring;
                   const hasSolvency = cs.solvency !== undefined && cs.solvency > 0;
                   const maxScore = hasSolvency ? 30 : 20;
