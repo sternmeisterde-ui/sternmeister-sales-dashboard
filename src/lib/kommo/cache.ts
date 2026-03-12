@@ -55,11 +55,9 @@ export async function cached<T>(
   // Fetch and cache
   const promise = fetcher().then((data) => {
     store.set(key, { data, expiresAt: Date.now() + ttlMs });
-    inflight.delete(key);
     return data;
-  }).catch((err) => {
+  }).finally(() => {
     inflight.delete(key);
-    throw err;
   });
 
   inflight.set(key, promise);
@@ -82,7 +80,8 @@ export function purgeExpired(): void {
   }
 }
 
-// Auto-purge every 5 minutes
-if (typeof setInterval !== "undefined") {
-  setInterval(purgeExpired, 5 * 60 * 1000);
+// Auto-purge every 5 minutes (guarded against duplicate intervals on hot reload)
+let _purgeIntervalId: ReturnType<typeof setInterval> | null = null;
+if (typeof setInterval !== "undefined" && !_purgeIntervalId) {
+  _purgeIntervalId = setInterval(purgeExpired, 5 * 60 * 1000);
 }

@@ -4,7 +4,8 @@ import { getAIRoleCalls, getManagerStats } from "@/lib/db/queries-existing";
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
-    const department = searchParams.get("department") as "b2g" | "b2b" || "b2g";
+    const deptParam = searchParams.get("department");
+    const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
     const type = searchParams.get("type") || "all";
 
     // Диагностика: какая БД используется

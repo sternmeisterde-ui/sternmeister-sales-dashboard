@@ -99,7 +99,8 @@ export async function GET(
     }
 
     const sp = request.nextUrl.searchParams;
-    const department = (sp.get("dept") ?? "b2g") as "b2g" | "b2b";
+    const deptParam = sp.get("dept") ?? "b2g";
+    const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
 
     const db = getOkkDbForDepartment(department);
 

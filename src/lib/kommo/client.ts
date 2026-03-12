@@ -23,18 +23,22 @@ let rateLimitMutex: Promise<void> = Promise.resolve();
 async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
   // Acquire mutex
   const prevMutex = rateLimitMutex;
-  let releaseMutex: () => void;
+  let releaseMutex: () => void = () => {};
   rateLimitMutex = new Promise<void>((resolve) => { releaseMutex = resolve; });
-  await prevMutex;
 
-  // Wait if needed
-  const now = Date.now();
-  const elapsed = now - lastRequestTime;
-  if (elapsed < RATE_LIMIT_MS) {
-    await new Promise<void>((r) => setTimeout(r, RATE_LIMIT_MS - elapsed));
+  try {
+    await prevMutex;
+
+    // Wait if needed
+    const now = Date.now();
+    const elapsed = now - lastRequestTime;
+    if (elapsed < RATE_LIMIT_MS) {
+      await new Promise<void>((r) => setTimeout(r, RATE_LIMIT_MS - elapsed));
+    }
+    lastRequestTime = Date.now();
+  } finally {
+    releaseMutex(); // Guaranteed release — never blocks the chain
   }
-  lastRequestTime = Date.now();
-  releaseMutex!(); // Release — allow next request to start timing
 
   // Fetch with 1 retry on socket/network errors
   try {
@@ -206,7 +210,10 @@ export async function getLeads(
 
       const res = await rateLimitedFetch(pageUrl.toString(), { headers });
       if (res.status === 204) break;
-      if (!res.ok) break;
+      if (!res.ok) {
+        console.warn(`getLeads: page ${page} failed with ${res.status}, stopping pagination`);
+        break;
+      }
 
       const data = (await res.json()) as KommoPaginatedResponse<KommoLead>;
       const items = data._embedded?.leads || [];
@@ -346,7 +353,10 @@ export async function getCallNotes(
         headers,
       });
       if (res.status === 204) continue;
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.warn(`getCallNotes: batch notes fetch failed with ${res.status}, skipping batch`);
+        continue;
+      }
 
       const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
       const notes = data._embedded?.notes || [];
