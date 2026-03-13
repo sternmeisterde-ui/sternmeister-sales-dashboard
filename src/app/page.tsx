@@ -475,8 +475,21 @@ export default function Dashboard() {
     return { avgScore, totalCalls: totalRoleplays, perManager, perManagerTarget, target, teamTargetAvg };
   })();
 
-  // Filter calls by date range and search query
+  // Filter managers by role + line — totalCalls & avgScore come directly from the API
+  const filteredManagers = activeManagers
+    .filter(m => !m.role || m.role === "manager")
+    .filter(m => lineFilter === "all" || m.line === lineFilter);
+
+  // Set of manager names matching current line filter (for call filtering)
+  const filteredManagerNames = new Set(filteredManagers.map(m => m.name));
+
+  // Filter calls by line, date range, score, and search query
   const filteredCalls = activeCalls.filter(call => {
+    // Filter by line (via manager name)
+    if (lineFilter !== "all" && !filteredManagerNames.has(call.name)) {
+      return false;
+    }
+
     // Filter by date range
     if (activeDateFilter.start && activeDateFilter.end) {
       const callDate = parseCallDate(call.date);
@@ -502,11 +515,6 @@ export default function Dashboard() {
 
     return true;
   });
-
-  // Filter managers by role + line — totalCalls & avgScore come directly from the API
-  const filteredManagers = activeManagers
-    .filter(m => !m.role || m.role === "manager")
-    .filter(m => lineFilter === "all" || m.line === lineFilter);
 
   // When a call is selected, open the first block by default
   useEffect(() => {
