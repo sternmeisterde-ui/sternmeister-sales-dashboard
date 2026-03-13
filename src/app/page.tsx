@@ -449,15 +449,9 @@ export default function Dashboard() {
       target = aiDashPeriod === "month" ? TARGET_MONTH : TARGET_WEEK;
     }
 
-    // Filter ALL calls in period for qualifying duration (≥10 min), no score filter
-    const periodAllCalls = allCalls.filter(call => {
-      if (!managerNames.has(call.name)) return false;
-      const callDate = parseCallDate(call.date);
-      return callDate >= periodStart && callDate <= periodEnd;
-    });
-
+    // Target: qualifying calls ≥10 min (reuse periodCalls — same filter)
     const perManagerTarget = managers.map(m => {
-      const mCalls = periodAllCalls.filter(c => {
+      const mCalls = periodCalls.filter(c => {
         if (c.name !== m.name) return false;
         // Parse "MM:SS" duration to check ≥10 min
         const [min] = c.callDuration.split(":").map(Number);
@@ -689,11 +683,11 @@ export default function Dashboard() {
                           {manager.role === 'rop' ? 'РОП' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
                         </span>
                       )}
-                      {activeDepartment === "b2g" && (() => {
-                        const mgr = activeManagers.find(am => am.name === manager.name);
-                        const lineLabel = mgr?.line === "1" ? "1я" : mgr?.line === "2" ? "2я" : null;
-                        return lineLabel ? <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400">{lineLabel}</span> : null;
-                      })()}
+                      {activeDepartment === "b2g" && manager.line && (
+                        <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400">
+                          {manager.line === "1" ? "1я" : "2я"}
+                        </span>
+                      )}
                     </div>
                     <p className="text-[10px] text-slate-400 mt-0.5">Звонков: <span className="text-white font-medium">{manager.totalCalls}</span></p>
                   </div>
@@ -1069,7 +1063,7 @@ export default function Dashboard() {
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
                     {isLoadingCalls ? (
-                      <tr><td colSpan={6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
+                      <tr><td colSpan={activeTab === "real_calls" ? 8 : 6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">

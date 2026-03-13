@@ -107,6 +107,9 @@ export async function GET(request: NextRequest) {
     const statusParam = sp.get("status");
     if (statusParam) {
       conditions.push(eq(okkCalls.status, statusParam));
+    } else {
+      // By default only show evaluated calls (hide pending/error)
+      conditions.push(eq(okkCalls.status, "evaluated"));
     }
 
     const managerIdParam = sp.get("manager_id");
