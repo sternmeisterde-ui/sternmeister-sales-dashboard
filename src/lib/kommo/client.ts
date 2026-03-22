@@ -190,7 +190,7 @@ export async function getLeads(
     const headers = await getAuthHeaders();
     const url = new URL(`${baseUrl}/leads`);
     if (pipelineIds && pipelineIds.length > 0) {
-      pipelineIds.forEach((id) => url.searchParams.append("filter[pipeline_id][]", String(id)));
+      pipelineIds.forEach((id, i) => url.searchParams.append(`filter[pipeline_id][${i}]`, String(id)));
     }
     if (statusIds && statusIds.length > 0) {
       // Kommo requires status filter paired with pipeline_id for correct filtering
