@@ -24,24 +24,28 @@ export default function DinoLoader() {
           </svg>
         </div>
 
-        {/* Dino - bouncing */}
+        {/* Ostrich - bouncing */}
         <div className="absolute left-[60px] bottom-[18px] animate-[dinoJump_0.6s_ease-in-out_infinite]">
-          <svg width="40" height="44" viewBox="0 0 40 44" className="text-blue-400">
-            {/* Body */}
-            <rect x="8" y="10" width="20" height="18" rx="4" fill="currentColor" />
+          <svg width="44" height="52" viewBox="0 0 44 52" className="text-blue-400">
+            {/* Body - oval */}
+            <ellipse cx="18" cy="30" rx="14" ry="10" fill="currentColor" />
+            {/* Tail feathers */}
+            <ellipse cx="4" cy="26" rx="5" ry="4" fill="currentColor" opacity="0.7" />
+            <ellipse cx="2" cy="30" rx="4" ry="3" fill="currentColor" opacity="0.5" />
+            {/* Neck - long */}
+            <rect x="28" y="8" width="5" height="24" rx="2.5" fill="currentColor" />
             {/* Head */}
-            <rect x="20" y="0" width="16" height="14" rx="3" fill="currentColor" />
+            <ellipse cx="34" cy="7" rx="7" ry="5" fill="currentColor" />
             {/* Eye */}
-            <rect x="30" y="4" width="3" height="3" rx="1" fill="#0f172a" />
-            {/* Mouth */}
-            <rect x="33" y="9" width="5" height="2" rx="1" fill="currentColor" />
-            {/* Legs - animated via parent */}
-            <rect className="animate-[legMove_0.2s_linear_infinite]" x="10" y="28" width="5" height="12" rx="2" fill="currentColor" />
-            <rect className="animate-[legMove_0.2s_linear_infinite_0.1s]" x="20" y="28" width="5" height="12" rx="2" fill="currentColor" />
-            {/* Tail */}
-            <rect x="2" y="14" width="10" height="6" rx="3" fill="currentColor" />
-            {/* Arms */}
-            <rect x="26" y="16" width="8" height="3" rx="1" fill="currentColor" />
+            <circle cx="37" cy="6" r="2" fill="#0f172a" />
+            <circle cx="37.5" cy="5.5" r="0.8" fill="white" />
+            {/* Beak */}
+            <polygon points="41,7 44,9 41,10" fill="#f59e0b" />
+            {/* Legs - long, animated */}
+            <rect className="animate-[legMove_0.2s_linear_infinite]" x="12" y="38" width="3" height="14" rx="1.5" fill="currentColor" />
+            <rect className="animate-[legMove_0.2s_linear_infinite]" style={{animationDelay: "0.1s"}} x="22" y="38" width="3" height="14" rx="1.5" fill="currentColor" />
+            {/* Wing */}
+            <ellipse cx="16" cy="28" rx="8" ry="5" fill="currentColor" opacity="0.6" />
           </svg>
         </div>
 
