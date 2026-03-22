@@ -287,9 +287,9 @@ function UnifiedTable({
     );
   }
 
-  // Managers mode: sticky metric col | Итого (Plan/Fact/%) | manager columns (Fact only)
-  // colSpan for a full row: 1 (metric) + 3 (итого) + allManagers.length (one Fact col each)
-  const totalCols = 1 + 3 + allManagers.length;
+  // Managers mode: sticky metric col | Итого (Fact/%) | manager columns (Fact only)
+  // colSpan for a full row: 1 (metric) + 2 (итого) + allManagers.length (one Fact col each)
+  const totalCols = 1 + 2 + allManagers.length;
 
   return (
     <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
@@ -303,7 +303,7 @@ function UnifiedTable({
               </th>
               {/* Итого group */}
               <th
-                colSpan={3}
+                colSpan={2}
                 className="px-3 py-2 text-center border-l-2 border-r-2 border-blue-400/60 bg-blue-500/15"
               >
                 <span className="text-[10px] uppercase tracking-widest text-blue-300 font-bold">
@@ -311,14 +311,21 @@ function UnifiedTable({
                 </span>
               </th>
               {/* Per-manager single-column headers */}
-              {allManagers.map((mgr) => (
+              {allManagers.map((mgr) => {
+                const parts = mgr.name.split(" ");
+                return (
                 <th
                   key={mgr.id}
-                  className="px-2 py-2 text-center border-l border-white/10 min-w-[80px]"
+                  className="px-2 py-2 text-center border-l border-white/10 min-w-[70px]"
                 >
-                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold whitespace-nowrap">
-                    {mgr.name}
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold leading-tight block">
+                    {parts[0]}
                   </span>
+                  {parts[1] && (
+                    <span className="text-[9px] uppercase tracking-wider text-slate-500 font-medium leading-tight block">
+                      {parts[1]}
+                    </span>
+                  )}
                   {!mgr.kommoUserId && (
                     <span
                       className="block text-[9px] text-amber-500"
@@ -328,16 +335,14 @@ function UnifiedTable({
                     </span>
                   )}
                 </th>
-              ))}
+              );
+              })}
             </tr>
 
-            {/* Sub-header row: П / Ф / % under Итого, Факт label under each manager */}
+            {/* Sub-header row: Ф / % under Итого, Факт label under each manager */}
             <tr className="border-b border-white/5">
               <th className="sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10" />
               <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-l-2 border-blue-400/60 bg-blue-500/10">
-                План
-              </th>
-              <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium bg-blue-500/10">
                 Факт
               </th>
               <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-r-2 border-blue-400/60 bg-blue-500/10">
@@ -395,16 +400,8 @@ function UnifiedTable({
                           {m.label}
                         </td>
 
-                        {/* Итого Plan */}
-                        <td className="px-2 py-2 text-right border-l-2 border-blue-400/60 bg-blue-500/[0.07]">
-                          <EditableCell
-                            value={m.plan}
-                            onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
-                          />
-                        </td>
-
                         {/* Итого Fact */}
-                        <td className="px-2 py-2 font-bold text-white text-right font-mono text-[13px] bg-blue-500/[0.07]">
+                        <td className="px-2 py-2 font-bold text-white text-right font-mono text-[13px] border-l-2 border-blue-400/60 bg-blue-500/[0.07]">
                           {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
                         </td>
 
