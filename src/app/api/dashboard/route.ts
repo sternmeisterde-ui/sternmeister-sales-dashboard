@@ -323,7 +323,8 @@ async function buildDashboardResponse(department: string, period: string, dateSt
     // All Kommo API calls in parallel (each individually cached)
     const closedDateFilter = { field: "closed_at" as const, from, to };
     const [snapshotLeads, tasks, wonLeads, lostLeads, callNotesPeriod, callNotesTrend] = await Promise.all([
-      getLeads(pipelineIds, activeStatusIds, 10).catch(() => [] as KommoLead[]),
+      // ALL leads from pipelines (no status filter) — filter on server
+      getLeads(pipelineIds, undefined, 10).catch(() => [] as KommoLead[]),
       getTasks(false).catch(() => []),
       getLeads(pipelineIds, [142], 10, closedDateFilter).catch(() => [] as KommoLead[]),
       getLeads(pipelineIds, [143], 10, closedDateFilter).catch(() => [] as KommoLead[]),
