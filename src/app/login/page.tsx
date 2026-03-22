@@ -95,18 +95,21 @@ export default function LoginPage() {
               >
                 Telegram Username
               </label>
-              <input
-                id="username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="@username"
-                autoComplete="username"
-                autoFocus
-                required
-                disabled={loading}
-                className="w-full rounded-2xl border border-white/5 bg-slate-950/50 px-4 py-3.5 text-sm font-medium text-slate-200 shadow-inner outline-none placeholder:text-slate-500 transition-all focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
-              />
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-500 pointer-events-none">@</span>
+                <input
+                  id="username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value.replace(/^@/, ""))}
+                  placeholder="username"
+                  autoComplete="username"
+                  autoFocus
+                  required
+                  disabled={loading}
+                  className="w-full rounded-2xl border border-white/5 bg-slate-950/50 pl-8 pr-4 py-3.5 text-sm font-medium text-slate-200 shadow-inner outline-none placeholder:text-slate-500 transition-all focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
+                />
+              </div>
             </div>
 
             {error && (
