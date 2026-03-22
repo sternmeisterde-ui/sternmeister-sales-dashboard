@@ -49,10 +49,41 @@ const isInRange = (date: Date, start: Date | null, end: Date | null) => {
   return date >= start && date <= end;
 };
 
+interface SessionUser {
+  userId: string;
+  name: string;
+  role: "admin" | "manager";
+  department: "b2g" | "b2b";
+  telegramUsername: string;
+  line: string | null;
+  kommoUserId: number | null;
+}
+
 export default function Dashboard() {
+  const [session, setSession] = useState<SessionUser | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2">("all");
+
+  // Load session on mount
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) {
+          setSession(data);
+          setActiveDepartment(data.department);
+          if (data.role === "manager") {
+            setActiveTab("real_calls");
+          }
+        }
+      })
+      .finally(() => setSessionLoading(false));
+  }, []);
+
+  const isAdmin = session?.role === "admin";
+  const isManager = session?.role === "manager";
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -606,11 +637,11 @@ export default function Dashboard() {
 
         <nav className="flex flex-col gap-2 mt-4 w-full">
           {[
-            { id: "dashboard", icon: LayoutDashboard, label: "Дашборд" },
-            { id: "daily", icon: ClipboardList, label: "Дейли" },
-            { id: "real_calls", icon: Phone, label: "ОКК" },
-            { id: "ai_calls", icon: Bot, label: "AI Ролевки" },
-          ].map((item) => (
+            { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
+            { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
+            { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
+            { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
+          ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id as any)}
@@ -625,6 +656,30 @@ export default function Dashboard() {
             </button>
           ))}
         </nav>
+
+        {/* User info + logout */}
+        {session && (
+          <div className="mt-auto pt-4 border-t border-white/5 w-full">
+            {isSidebarOpen && (
+              <div className="text-xs text-slate-400 mb-2 truncate px-2">
+                <span className="text-white font-medium">{session.name}</span>
+                <br />
+                <span className="text-[10px]">@{session.telegramUsername}</span>
+              </div>
+            )}
+            <button
+              onClick={async () => {
+                await fetch("/api/auth/logout", { method: "POST" });
+                window.location.href = "/login";
+              }}
+              className="flex items-center gap-3 px-4 py-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all w-full text-sm"
+              title="Выйти"
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+              {isSidebarOpen && <span>Выйти</span>}
+            </button>
+          </div>
+        )}
       </aside>
 
       {/* MAIN CONTENT AREA */}
@@ -632,6 +687,7 @@ export default function Dashboard() {
 
         {/* TOP NAVIGATION / HEADER */}
         <header className="glass-panel rounded-2xl px-5 py-3 flex flex-col sm:flex-row justify-between items-center shadow-lg border border-white/5 gap-4">
+          {isAdmin ? (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner w-full sm:w-auto">
             <button
               onClick={() => { setActiveDepartment("b2g"); setLineFilter("all"); }}
@@ -648,7 +704,11 @@ export default function Dashboard() {
               Коммерсы (B2C)
             </button>
           </div>
-
+          ) : (
+            <div className="text-sm text-slate-400 px-2">
+              {session?.department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}
+            </div>
+          )}
         </header>
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}

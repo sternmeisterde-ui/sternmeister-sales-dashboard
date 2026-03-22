@@ -1,113 +1,145 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, Mail, ArrowRight } from "lucide-react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
-    const [email, setEmail] = useState("");
-    const [password, setPassword] = useState("");
-    const [isLoading, setIsLoading] = useState(false);
-    const router = useRouter();
+  const router = useRouter();
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-    const handleLogin = (e: React.FormEvent) => {
-        e.preventDefault();
-        setIsLoading(true);
-        // Имитация задержки авторизации при загрузке
-        setTimeout(() => {
-            setIsLoading(false);
-            router.push("/");
-        }, 1200);
-    };
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
 
-    return (
-        <div className="relative min-h-screen flex items-center justify-center overflow-hidden bg-slate-950 font-sans">
-            {/* Динамический фон со свечениями (Glassmorphism + Orbs) */}
-            <div className="absolute top-[20%] left-[20%] w-[500px] h-[500px] bg-blue-600/20 rounded-full blur-[120px] mix-blend-screen animate-pulse" />
-            <div className="absolute bottom-[20%] right-[20%] w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[150px] mix-blend-screen animate-pulse" style={{ animationDelay: '2s' }} />
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-900/50 via-slate-950 to-slate-950/90 -z-10" />
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
 
-            {/* Центральная карточка (Glassmorphic) */}
-            <div className="relative z-10 w-full max-w-md p-8 pt-10 mx-4 sm:mx-0 bg-slate-900/40 backdrop-blur-2xl rounded-[32px] border border-white/10 shadow-[0_0_80px_-20px_rgba(0,0,0,0.5)]">
+      const data = (await res.json()) as { error?: string };
 
-                {/* Логотип */}
-                <div className="flex flex-col items-center justify-center mb-10 gap-4">
-                    <div className="w-16 h-16 flex items-center justify-center">
-                        <Image src="/logo.png" alt="Logo" width={64} height={64} />
-                    </div>
-                    <div className="text-center">
-                        <h1 className="text-2xl font-black text-white tracking-tight">Sternmeister</h1>
-                        <p className="text-sm font-medium text-slate-400 mt-1 uppercase tracking-widest">Dashboard AI</p>
-                    </div>
-                </div>
+      if (!res.ok) {
+        setError(data.error ?? "Ошибка входа");
+        return;
+      }
 
-                {/* Форма авторизации */}
-                <form onSubmit={handleLogin} className="flex flex-col gap-6">
-                    <div className="flex flex-col gap-4">
+      router.push("/");
+    } catch {
+      setError("Не удалось подключиться к серверу");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-                        {/* Input Email */}
-                        <div className="relative group">
-                            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
-                                <Mail className="w-5 h-5" />
-                            </div>
-                            <input
-                                type="email"
-                                required
-                                value={email}
-                                onChange={(e) => setEmail(e.target.value)}
-                                placeholder="Рабочий Email"
-                                className="w-full pl-12 pr-4 py-3.5 bg-slate-950/50 border border-white/5 rounded-2xl text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all text-sm font-medium shadow-inner"
-                            />
-                        </div>
+  return (
+    <>
+      <style>{`
+        @keyframes gradientShift {
+          0%   { background-position: 0% 50%; }
+          50%  { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+        .animated-gradient {
+          background: linear-gradient(
+            135deg,
+            #0f172a 0%,
+            #1e1b4b 25%,
+            #0f172a 50%,
+            #172554 75%,
+            #0f172a 100%
+          );
+          background-size: 400% 400%;
+          animation: gradientShift 12s ease infinite;
+        }
+      `}</style>
 
-                        {/* Input Password */}
-                        <div className="relative group">
-                            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
-                                <Lock className="w-5 h-5" />
-                            </div>
-                            <input
-                                type="password"
-                                required
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Пароль"
-                                className="w-full pl-12 pr-4 py-3.5 bg-slate-950/50 border border-white/5 rounded-2xl text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all text-sm font-medium shadow-inner"
-                            />
-                        </div>
+      <div className="animated-gradient relative min-h-screen overflow-hidden flex items-center justify-center p-4 font-sans">
+        {/* Glow orbs for depth */}
+        <div className="pointer-events-none absolute top-1/4 left-1/4 h-[500px] w-[500px] rounded-full bg-blue-600/15 blur-[120px]" />
+        <div className="pointer-events-none absolute bottom-1/4 right-1/4 h-[400px] w-[400px] rounded-full bg-indigo-500/10 blur-[150px]" />
 
-                    </div>
-
-                    {/* Кнопка войти */}
-                    <button
-                        type="submit"
-                        disabled={isLoading}
-                        className="group relative w-full flex justify-center py-3.5 px-4 rounded-2xl text-sm font-bold text-white overflow-hidden transition-all shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)] hover:shadow-[0_0_60px_-15px_rgba(59,130,246,0.6)] hover:-translate-y-0.5 disabled:opacity-70 disabled:hover:translate-y-0"
-                    >
-                        <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-blue-600 to-indigo-500" />
-                        <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-blue-500 to-indigo-400 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                        <span className="relative flex items-center gap-2">
-                            {isLoading ? (
-                                <>
-                                    <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                                    Вход в систему...
-                                </>
-                            ) : (
-                                <>
-                                    Войти
-                                    <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                                </>
-                            )}
-                        </span>
-                    </button>
-                </form>
-
-                {/* Футер */}
-                <p className="mt-8 text-center text-[10px] font-bold text-slate-500/50 uppercase tracking-[0.2em]">
-                    v 2.0.1 • Encrypted Connection
-                </p>
-
+        {/* Card */}
+        <div className="relative z-10 w-full max-w-sm rounded-[28px] border border-white/10 bg-slate-900/50 p-8 pt-10 shadow-[0_0_80px_-20px_rgba(0,0,0,0.6)] backdrop-blur-2xl">
+          {/* Logo + title */}
+          <div className="mb-10 flex flex-col items-center gap-4">
+            <Image
+              src="/logo.png"
+              alt="Sternmeister logo"
+              width={64}
+              height={64}
+              className="rounded-xl"
+              priority
+            />
+            <div className="text-center">
+              <h1 className="text-2xl font-black tracking-tight text-white">
+                Sternmeister
+              </h1>
+              <p className="mt-1 text-xs font-medium uppercase tracking-widest text-slate-400">
+                Dashboard
+              </p>
             </div>
+          </div>
+
+          {/* Form */}
+          <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="username"
+                className="text-sm font-medium text-slate-300"
+              >
+                Telegram Username
+              </label>
+              <input
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="@username"
+                autoComplete="username"
+                autoFocus
+                required
+                disabled={loading}
+                className="w-full rounded-2xl border border-white/5 bg-slate-950/50 px-4 py-3.5 text-sm font-medium text-slate-200 shadow-inner outline-none placeholder:text-slate-500 transition-all focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
+              />
+            </div>
+
+            {error && (
+              <p className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading || !username.trim()}
+              className="group relative w-full overflow-hidden rounded-2xl py-3.5 text-sm font-bold text-white shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_60px_-15px_rgba(59,130,246,0.6)] disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:translate-y-0"
+            >
+              <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-indigo-500" />
+              <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-indigo-400 opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+              <span className="relative flex items-center justify-center gap-2">
+                {loading ? (
+                  <>
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Вход в систему...
+                  </>
+                ) : (
+                  "Войти"
+                )}
+              </span>
+            </button>
+          </form>
+
+          <p className="mt-8 text-center text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500/50">
+            v 2.1.0 • Secure Connection
+          </p>
         </div>
-    );
+      </div>
+    </>
+  );
 }
