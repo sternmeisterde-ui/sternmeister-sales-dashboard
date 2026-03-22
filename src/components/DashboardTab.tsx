@@ -6,10 +6,6 @@ import {
   PhoneMissed, Target, Loader2, RefreshCw,
   ChevronLeft, ChevronRight,
 } from "lucide-react";
-import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, CartesianGrid, Legend,
-} from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 
@@ -250,87 +246,47 @@ export default function DashboardTab({ department }: { department: string }) {
 
 
 
-      {/* ============ CHARTS ROW ============ */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Calls trend */}
+      {/* ============ TREND TABLE ============ */}
+      {data.trend.length > 0 && (
         <div className="glass-panel rounded-2xl p-5 border border-white/5">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-            Динамика звонков
+            Динамика по дням
           </h3>
-          <div className="h-[220px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={trendForChart} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                <XAxis dataKey="dateShort" stroke="#475569" fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    background: "#0f172a",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    borderRadius: "12px",
-                    fontSize: "12px",
-                  }}
-                  labelFormatter={(_, payload) => {
-                    if (payload?.[0]) {
-                      const item = payload[0].payload;
-                      return `${item.label} ${item.dateShort}`;
-                    }
-                    return "";
-                  }}
-                />
-                <Legend
-                  verticalAlign="top"
-                  height={30}
-                  iconSize={8}
-                  wrapperStyle={{ fontSize: "11px", color: "#94a3b8" }}
-                />
-                <Bar dataKey="callsTotal" name="Исходящие" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="callsConnected" name="Дозвон" fill="#22c55e" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="missedIncoming" name="Пропущенные" fill="#f43f5e" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
+                  <th className="text-left py-2 px-2 font-medium">Дата</th>
+                  <th className="text-right py-2 px-2 font-medium">Звонки</th>
+                  <th className="text-right py-2 px-2 font-medium">Дозвон</th>
+                  <th className="text-right py-2 px-2 font-medium">% дозв.</th>
+                  <th className="text-right py-2 px-2 font-medium">На линии</th>
+                  <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trendForChart.map((t) => {
+                  const dp = t.callsTotal > 0 ? Math.round((t.callsConnected / t.callsTotal) * 100) : 0;
+                  return (
+                    <tr key={t.date} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                      <td className="py-2 px-2 text-white font-medium">{t.label} {t.dateShort}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{t.callsTotal}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{t.callsConnected}</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={dp >= 50 ? "text-emerald-400" : dp >= 30 ? "text-amber-400" : "text-rose-400"}>{dp}%</span>
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-300">{t.totalMinutes} мин</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={t.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{t.missedIncoming}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
-
-        {/* Time on line trend */}
-        <div className="glass-panel rounded-2xl p-5 border border-white/5">
-          <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-            Время на линии
-          </h3>
-          <div className="h-[220px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={trendForChart} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="colorMinutes" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                <XAxis dataKey="dateShort" stroke="#475569" fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    background: "#0f172a",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    borderRadius: "12px",
-                    fontSize: "12px",
-                  }}
-                  formatter={(val) => [`${val} мин`, "На линии"]}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="totalMinutes"
-                  stroke="#8b5cf6"
-                  fillOpacity={1}
-                  fill="url(#colorMinutes)"
-                  strokeWidth={2}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
+      )}
 
       {/* ============ PER-MANAGER TABLES ============ */}
       {(isB2G

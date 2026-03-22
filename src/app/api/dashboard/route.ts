@@ -377,7 +377,7 @@ async function buildDashboardResponse(department: string, period: string, dateSt
 
     // Step 7: Per-manager breakdown (today)
     const perManager = allManagers
-      .filter((m) => m.kommoUserId !== null)
+      .filter((m) => m.kommoUserId !== null && m.role === "manager")
       .map((mgr) => {
         const cm = mgr.kommoUserId ? todayCallMap.get(mgr.kommoUserId) : undefined;
         const tm = mgr.kommoUserId ? taskMap.get(mgr.kommoUserId) : undefined;

@@ -8,6 +8,7 @@ export interface ManagerRow {
   name: string;
   line: string | null;
   kommoUserId: number | null;
+  role: string;
 }
 
 /**
@@ -24,6 +25,7 @@ export async function getManagersWithKommo(department: string = "b2g"): Promise<
       name: usersTable.name,
       line: usersTable.line,
       kommoUserId: usersTable.kommoUserId,
+      role: usersTable.role,
     })
     .from(usersTable)
     .where(eq(usersTable.isActive, true));
