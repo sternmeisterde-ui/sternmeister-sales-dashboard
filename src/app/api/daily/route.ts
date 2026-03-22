@@ -539,8 +539,13 @@ function getFunnelFact(
   to?: number
 ): string | null {
   switch (key) {
-    case "activeDeals":
-      return String(fc.activeDeals);
+    case "activeDeals": {
+      // All non-closed, non-deleted leads from snapshot
+      const adCount = (snapshotLeads || []).filter(
+        (l) => !l.is_deleted && !l.closed_at
+      ).length;
+      return String(adCount);
+    }
     case "termsTotal":
       // WON leads from first line (Термин ДЦ) — previous day or selected period
       return String(termsWonLeads?.length ?? 0);
@@ -558,8 +563,14 @@ function getFunnelFact(
       return String(managersOnLine);
     case "totalLeads":
       return String(fc.totalLeads);
-    case "qualLeads":
-      return String(fc.qualLeads);
+    case "qualLeads": {
+      // All active leads from both pipelines EXCLUDING: closed(143), won/термин ДЦ(142), база(93485479), отложенный старт(95514987)
+      const qualExclude = new Set([142, 143, 93485479, 95514987]);
+      const qualCount = (snapshotLeads || []).filter(
+        (l) => !l.is_deleted && !l.closed_at && !qualExclude.has(l.status_id)
+      ).length;
+      return String(qualCount);
+    }
 
     case "a2":
       return String(fc.a2);
@@ -601,11 +612,16 @@ function getFunnelFact(
       return String(awaitingNew.length);
     }
 
-    case "qualLeadsPercent":
-      // qualLeads / totalLeads (snapshot qual / period new leads)
+    case "qualLeadsPercent": {
+      // qualLeads / totalLeads
+      const qExclude = new Set([142, 143, 93485479, 95514987]);
+      const qCount = (snapshotLeads || []).filter(
+        (l) => !l.is_deleted && !l.closed_at && !qExclude.has(l.status_id)
+      ).length;
       return fc.totalLeads > 0
-        ? String(Math.round((fc.qualLeads / fc.totalLeads) * 100))
+        ? String(Math.round((qCount / fc.totalLeads) * 100))
         : "0";
+    }
     case "convQualTask":
       // Conversion: qualified → task (docs sent). Both from flow set.
       return fc.qualLeadsFlow > 0
