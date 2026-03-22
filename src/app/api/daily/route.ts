@@ -412,40 +412,73 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
         }>;
       }> = [];
 
-      // For funnel section: distribute totalLeads/qualLeads equally among line-1 managers
+      // For funnel section: compute per-manager metrics using responsible_user_id on leads
       if (section.key === "funnel") {
         const line1Managers = managers.filter((m) => m.line === "1");
         if (line1Managers.length > 0) {
-          const splitKeys = new Set(["totalLeads", "qualLeads"]);
+          const excludeQual = new Set([142, 143, 93485479, 95514987]);
+          const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
+          const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
+          const beraterPipeline = 12154099;
+          const firstLinePipeline = 10935879;
+
           managerData = line1Managers.map((mgr) => {
+            const uid = mgr.kommoUserId;
+            // Leads where this manager is responsible
+            const mgrLeads = uid ? snapshotLeads.filter((l) => l.responsible_user_id === uid) : [];
+            const mgrActiveLeads = mgrLeads.filter((l) => !l.is_deleted && !l.closed_at);
+            const mgrTermsWon = uid ? (termsWonLeads || []).filter((l) => l.responsible_user_id === uid) : [];
+
             const mgrMetrics = section.metrics
               .filter((m) => !m.isGroupHeader)
               .map((metric) => {
-                let plan: string | null = null;
                 let fact: string | null = null;
-                let percent: number | null = null;
 
-                if (splitKeys.has(metric.key)) {
-                  // Divide total evenly
-                  const totalFact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to);
-                  const totalPlan = getPlan(section.dbLine, null, metric.key);
-                  if (totalFact) fact = String(Math.round(Number(totalFact) / line1Managers.length));
-                  if (totalPlan) plan = String(Math.round(Number(totalPlan) / line1Managers.length));
-                  if (plan && fact && Number(plan) > 0) {
-                    percent = Math.round((Number(fact) / Number(plan)) * 100);
+                switch (metric.key) {
+                  case "activeDeals":
+                    fact = String(mgrActiveLeads.length);
+                    break;
+                  case "managersOnLine":
+                    fact = "1";
+                    break;
+                  case "totalLeads": {
+                    const newInPeriod = mgrLeads.filter((l) => !l.is_deleted && l.created_at >= from && l.created_at <= to);
+                    fact = String(newInPeriod.length);
+                    break;
                   }
-                } else if (metric.key === "qualLeadsPercent") {
-                  // Same % for all managers (computed from totals)
-                  const totalFact = getFunnelFact("qualLeadsPercent", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to);
-                  const planTotal = getPlan(section.dbLine, null, "totalLeads");
-                  const planQual = getPlan(section.dbLine, null, "qualLeads");
-                  fact = totalFact;
-                  if (planTotal && planQual && Number(planTotal) > 0) {
-                    plan = String(Math.round((Number(planQual) / Number(planTotal)) * 100));
+                  case "qualLeads":
+                    fact = String(mgrActiveLeads.filter((l) => !excludeQual.has(l.status_id)).length);
+                    break;
+                  case "qualLeadsPercent": {
+                    const mgrTotal = mgrLeads.filter((l) => !l.is_deleted && l.created_at >= from && l.created_at <= to).length;
+                    const mgrQual = mgrActiveLeads.filter((l) => !excludeQual.has(l.status_id)).length;
+                    fact = mgrTotal > 0 ? String(Math.round((mgrQual / mgrTotal) * 100)) : "0";
+                    break;
+                  }
+                  case "avgPortfolio":
+                    fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && !excludePortfolio.has(l.status_id)).length);
+                    break;
+                  case "termsTotal":
+                    fact = String(mgrTermsWon.length);
+                    break;
+                  case "termsNew": {
+                    fact = String(mgrTermsWon.filter((l) => l.created_at >= from && l.created_at <= to).length);
+                    break;
+                  }
+                  case "awaitTermTotal":
+                    fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id)).length);
+                    break;
+                  case "awaitTermNew":
+                    fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id) && l.created_at >= from && l.created_at <= to).length);
+                    break;
+                  case "gutscheinsApproved": {
+                    const mgrGut = uid ? wonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
+                    fact = String(mgrGut);
+                    break;
                   }
                 }
 
-                return { key: metric.key, plan, fact, percent };
+                return { key: metric.key, plan: null as string | null, fact, percent: null as number | null };
               });
 
             return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
