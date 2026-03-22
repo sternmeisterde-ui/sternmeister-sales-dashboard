@@ -135,17 +135,6 @@ export default function DashboardTab({ department }: { department: string }) {
   const f = data.funnel;
   const missed = data.missedBreakdown;
 
-  // Format day labels for trend chart
-  const trendForChart = data.trend.map((t) => {
-    const d = new Date(t.date + "T12:00:00");
-    const dayNames = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-    return {
-      ...t,
-      label: dayNames[d.getDay()],
-      dateShort: `${d.getDate()}.${String(d.getMonth() + 1).padStart(2, "0")}`,
-    };
-  });
-
   const isB2G = department === "b2g";
 
   const shiftDate = (dir: -1 | 1) => {
@@ -246,47 +235,6 @@ export default function DashboardTab({ department }: { department: string }) {
 
 
 
-      {/* ============ TREND TABLE ============ */}
-      {data.trend.length > 0 && (
-        <div className="glass-panel rounded-2xl p-5 border border-white/5">
-          <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-            Динамика по дням
-          </h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
-                  <th className="text-left py-2 px-2 font-medium">Дата</th>
-                  <th className="text-right py-2 px-2 font-medium">Звонки</th>
-                  <th className="text-right py-2 px-2 font-medium">Дозвон</th>
-                  <th className="text-right py-2 px-2 font-medium">% дозв.</th>
-                  <th className="text-right py-2 px-2 font-medium">На линии</th>
-                  <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trendForChart.map((t) => {
-                  const dp = t.callsTotal > 0 ? Math.round((t.callsConnected / t.callsTotal) * 100) : 0;
-                  return (
-                    <tr key={t.date} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                      <td className="py-2 px-2 text-white font-medium">{t.label} {t.dateShort}</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{t.callsTotal}</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{t.callsConnected}</td>
-                      <td className="py-2 px-2 text-right">
-                        <span className={dp >= 50 ? "text-emerald-400" : dp >= 30 ? "text-amber-400" : "text-rose-400"}>{dp}%</span>
-                      </td>
-                      <td className="py-2 px-2 text-right text-slate-300">{t.totalMinutes} мин</td>
-                      <td className="py-2 px-2 text-right">
-                        <span className={t.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{t.missedIncoming}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       {/* ============ PER-MANAGER TABLES ============ */}
       {(isB2G
