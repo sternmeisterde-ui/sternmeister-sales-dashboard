@@ -427,25 +427,62 @@ function ManagerTable({
   );
 }
 
-// ====================== SCHEDULE PANEL ======================
+// ====================== ACTIVE MANAGERS PANEL ======================
 
-function SchedulePanel({
+function ActiveManagersPanel({
   schedule,
   dateStr,
-  onToggle,
+  onSave,
+  saving,
 }: {
   schedule: ScheduleInfo;
   dateStr: string;
-  onToggle: (userId: string, isOnLine: boolean) => void;
+  onSave: (selectedIds: Set<string>) => void;
+  saving: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!schedule.hasSchedule);
+  const [selected, setSelected] = useState<Set<string>>(() => {
+    const s = new Set<string>();
+    for (const m of schedule.allManagers) {
+      if (m.isOnLine) s.add(m.id);
+    }
+    return s;
+  });
+  const [dirty, setDirty] = useState(false);
 
-  // Group by line
+  // Sync selected state when schedule data changes from server
+  useEffect(() => {
+    const s = new Set<string>();
+    for (const m of schedule.allManagers) {
+      if (m.isOnLine) s.add(m.id);
+    }
+    setSelected(s);
+    setDirty(false);
+  }, [schedule]);
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const selectAll = () => {
+    setSelected(new Set(schedule.allManagers.map((m) => m.id)));
+    setDirty(true);
+  };
+
+  const deselectAll = () => {
+    setSelected(new Set());
+    setDirty(true);
+  };
+
   const line1 = schedule.allManagers.filter((m) => m.line === "1");
   const line2 = schedule.allManagers.filter((m) => m.line === "2");
-
-  const onLineCount = schedule.allManagers.filter((m) => m.isOnLine).length;
-  const totalCount = schedule.allManagers.length;
+  const activeCount = schedule.allManagers.filter((m) => m.isOnLine).length;
 
   return (
     <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-lg">
@@ -456,24 +493,41 @@ function SchedulePanel({
         <div className="flex items-center gap-3">
           <CalendarDays className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-bold tracking-wide uppercase text-white">
-            На линии сегодня
+            Активные менеджеры
           </span>
-          <span className="text-xs text-slate-400">
-            {onLineCount} из {totalCount}
-          </span>
-          {!schedule.hasSchedule && (
-            <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full">
-              расписание не задано
+          {schedule.hasSchedule ? (
+            <span className="text-xs text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full">
+              {activeCount} на линии
+            </span>
+          ) : (
+            <span className="text-[10px] bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full font-medium">
+              не заполнено — данные скрыты
             </span>
           )}
         </div>
         <span className="text-slate-500 text-xs">
-          {expanded ? "▲ Свернуть" : "▼ Развернуть"}
+          {expanded ? "▲" : "▼"}
         </span>
       </button>
 
       {expanded && (
         <div className="px-4 pb-4 space-y-3">
+          {/* Select all / deselect all */}
+          <div className="flex gap-2">
+            <button
+              onClick={selectAll}
+              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-emerald-400 hover:bg-emerald-500/15 transition-colors border border-emerald-500/20"
+            >
+              Выбрать всех
+            </button>
+            <button
+              onClick={deselectAll}
+              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors border border-white/10"
+            >
+              Снять всех
+            </button>
+          </div>
+
           {/* Line 1 */}
           {line1.length > 0 && (
             <div>
@@ -484,14 +538,14 @@ function SchedulePanel({
                 {line1.map((mgr) => (
                   <button
                     key={mgr.id}
-                    onClick={() => onToggle(mgr.id, !mgr.isOnLine)}
+                    onClick={() => toggle(mgr.id)}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
-                      mgr.isOnLine
+                      selected.has(mgr.id)
                         ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25"
                         : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
                     }`}
                   >
-                    {mgr.isOnLine ? (
+                    {selected.has(mgr.id) ? (
                       <UserCheck className="w-3 h-3" />
                     ) : (
                       <UserX className="w-3 h-3" />
@@ -513,14 +567,14 @@ function SchedulePanel({
                 {line2.map((mgr) => (
                   <button
                     key={mgr.id}
-                    onClick={() => onToggle(mgr.id, !mgr.isOnLine)}
+                    onClick={() => toggle(mgr.id)}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
-                      mgr.isOnLine
+                      selected.has(mgr.id)
                         ? "bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25"
                         : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
                     }`}
                   >
-                    {mgr.isOnLine ? (
+                    {selected.has(mgr.id) ? (
                       <UserCheck className="w-3 h-3" />
                     ) : (
                       <UserX className="w-3 h-3" />
@@ -532,9 +586,34 @@ function SchedulePanel({
             </div>
           )}
 
-          <p className="text-[10px] text-slate-600 mt-2">
-            Нажмите на менеджера чтобы включить/выключить. Данные обновятся автоматически.
-          </p>
+          {/* Save button */}
+          <div className="flex items-center gap-3 pt-2">
+            <button
+              onClick={() => onSave(selected)}
+              disabled={saving}
+              className={`px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all duration-200 ${
+                dirty
+                  ? "bg-blue-500 text-white hover:bg-blue-400 shadow-lg shadow-blue-500/25"
+                  : "bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
+              } disabled:opacity-50`}
+            >
+              {saving ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Сохранение...
+                </span>
+              ) : (
+                "Сохранить"
+              )}
+            </button>
+            {dirty && (
+              <span className="text-[10px] text-amber-400">
+                Есть несохранённые изменения
+              </span>
+            )}
+            <span className="text-[10px] text-slate-500 ml-auto">
+              Выбрано: {selected.size} из {schedule.allManagers.length}
+            </span>
+          </div>
         </div>
       )}
     </div>
@@ -637,27 +716,41 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     }
   };
 
-  // Toggle manager schedule (on-line/off-line for day view)
-  const handleScheduleToggle = async (userId: string, isOnLine: boolean) => {
-    if (!data) return;
+  // Save active managers for the day
+  const handleSaveActiveManagers = async (selectedIds: Set<string>) => {
+    if (!data?.schedule) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/daily/schedule", {
-        method: "PUT",
+      const managers = data.schedule.allManagers
+        .filter((m) => selectedIds.has(m.id))
+        .map((m) => ({ managerId: m.id, managerName: m.name, line: m.line }));
+
+      const res = await fetch("/api/daily/active-managers", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId,
           date: data.date,
-          isOnLine,
+          department,
+          managers,
         }),
       });
       if (!res.ok) {
-        console.error("Schedule save error:", await res.text());
+        console.error("Active managers save error:", await res.text());
       }
+      // Also update old schedule table for filtering compatibility
+      const entries = data.schedule.allManagers.map((m) => ({
+        userId: m.id,
+        isOnLine: selectedIds.has(m.id),
+      }));
+      await fetch("/api/daily/schedule", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: data.date, entries }),
+      });
       // Refresh data to apply filtering
       await fetchData();
     } catch (e) {
-      console.error("Schedule save error:", e);
+      console.error("Active managers save error:", e);
     } finally {
       setSaving(false);
     }
@@ -779,17 +872,27 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </div>
       )}
 
-      {/* Schedule Panel (only for day view) */}
+      {/* Active Managers Panel (only for day view) */}
       {data && !loading && period === "day" && data.schedule && (
-        <SchedulePanel
+        <ActiveManagersPanel
           schedule={data.schedule}
           dateStr={data.date}
-          onToggle={handleScheduleToggle}
+          onSave={handleSaveActiveManagers}
+          saving={saving}
         />
       )}
 
-      {/* Sections */}
-      {data && !loading && data.sections.map((section) => {
+      {/* Block data if active managers not set for day view */}
+      {data && !loading && period === "day" && data.schedule && !data.schedule.hasSchedule && (
+        <div className="glass-panel rounded-2xl p-8 border border-amber-500/20 bg-amber-500/5 text-center">
+          <p className="text-amber-400 text-sm font-medium">
+            Выберите активных менеджеров на сегодня и нажмите «Сохранить» чтобы увидеть данные
+          </p>
+        </div>
+      )}
+
+      {/* Sections — hidden if schedule not set on day view */}
+      {data && !loading && (period !== "day" || !data.schedule || data.schedule.hasSchedule) && data.sections.map((section) => {
         if (!section.perManager) {
           return (
             <FunnelTable
