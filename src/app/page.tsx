@@ -225,68 +225,70 @@ export default function Dashboard() {
   const [isLoadingReal, setIsLoadingReal] = useState(true);
   const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
+  // Compute OKK date range from period/custom range
+  const getOkkDateRange = useCallback((): { from: string; to: string } => {
+    const now = new Date();
+    if (aiCustomRange.start && aiCustomRange.end) {
+      return {
+        from: aiCustomRange.start.toISOString().slice(0, 10),
+        to: aiCustomRange.end.toISOString().slice(0, 10),
+      };
+    }
+    const end = new Date(now);
+    const start = new Date(now);
+    if (aiDashPeriod === "day") {
+      // today
+    } else if (aiDashPeriod === "week") {
+      start.setDate(start.getDate() - 6);
+    } else {
+      start.setDate(1); // first of month
+    }
+    return {
+      from: start.toISOString().slice(0, 10),
+      to: end.toISOString().slice(0, 10),
+    };
+  }, [aiDashPeriod, aiCustomRange]);
+
   // Load BOTH datasets in PARALLEL (single useEffect, Promise.all)
   useEffect(() => {
     const ac = new AbortController();
     const dept = activeDepartment;
+    const { from: dateFrom, to: dateTo } = getOkkDateRange();
 
-    // AI data
-    const cachedAI = dataCache[dept];
-    if (cachedAI) {
-      setAiCalls(cachedAI.calls);
-      setAiManagers(cachedAI.managers);
-      setIsLoadingAI(false);
-    } else {
-      setIsLoadingAI(true);
-    }
+    // AI data — always reload with date filter
+    setIsLoadingAI(true);
+    setIsLoadingReal(true);
 
-    // OKK data
-    const cachedOKK = realDataCache[dept];
-    if (cachedOKK) {
-      setRealCalls(cachedOKK.calls);
-      setRealManagers(cachedOKK.managers);
-      setIsLoadingReal(false);
-    } else {
-      setIsLoadingReal(true);
-    }
-
-    // Fetch only what's not cached — in PARALLEL
     const fetches: Promise<void>[] = [];
 
-    if (!cachedAI) {
-      fetches.push(
-        fetch(`/api/calls?department=${dept}&type=all`, { signal: ac.signal })
-          .then(r => r.json())
-          .then(res => {
-            if (res.success) {
-              setAiCalls(res.data.calls);
-              setAiManagers(res.data.managers);
-              setDataCache(prev => ({ ...prev, [dept]: { calls: res.data.calls, managers: res.data.managers } }));
-            }
-          })
-          .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading AI calls:", e); })
-          .finally(() => setIsLoadingAI(false))
-      );
-    }
+    fetches.push(
+      fetch(`/api/calls?department=${dept}&type=all&from=${dateFrom}&to=${dateTo}`, { signal: ac.signal })
+        .then(r => r.json())
+        .then(res => {
+          if (res.success) {
+            setAiCalls(res.data.calls);
+            setAiManagers(res.data.managers);
+          }
+        })
+        .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading AI calls:", e); })
+        .finally(() => setIsLoadingAI(false))
+    );
 
-    if (!cachedOKK) {
-      fetches.push(
-        fetch(`/api/okk/calls?department=${dept}`, { signal: ac.signal })
-          .then(r => r.json())
-          .then(res => {
-            if (res.success) {
-              setRealCalls(res.data.calls);
-              setRealManagers(res.data.managers);
-              setRealDataCache(prev => ({ ...prev, [dept]: { calls: res.data.calls, managers: res.data.managers } }));
-            }
-          })
-          .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading OKK calls:", e); })
-          .finally(() => setIsLoadingReal(false))
-      );
-    }
+    fetches.push(
+      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}`, { signal: ac.signal })
+        .then(r => r.json())
+        .then(res => {
+          if (res.success) {
+            setRealCalls(res.data.calls);
+            setRealManagers(res.data.managers);
+          }
+        })
+        .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading OKK calls:", e); })
+        .finally(() => setIsLoadingReal(false))
+    );
 
     return () => ac.abort();
-  }, [activeDepartment]);
+  }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange]);
 
   // Parse date from Russian format (Сегодня, Вчера, DD.MM)
   const parseCallDate = (dateStr: string): Date => {
@@ -607,7 +609,7 @@ export default function Dashboard() {
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд" },
             { id: "daily", icon: ClipboardList, label: "Дейли" },
             { id: "real_calls", icon: Phone, label: "ОКК" },
-            { id: "ai_calls", icon: Bot, label: "AI Ролевые" },
+            { id: "ai_calls", icon: Bot, label: "AI Ролевки" },
           ].map((item) => (
             <button
               key={item.id}
@@ -898,7 +900,7 @@ export default function Dashboard() {
             <div className="glass-panel rounded-2xl flex-1 border border-white/5 overflow-hidden flex flex-col shadow-2xl">
               <div className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/20">
                 <h2 className="text-sm font-bold tracking-wide uppercase text-slate-200">
-                  {activeTab === "real_calls" ? "Таблица: ОКК" : "Таблица: Ролевые AI Звонки"}
+                  {activeTab === "real_calls" ? "Таблица: ОКК" : "Таблица: AI Ролевки"}
                 </h2>
                 {/* Advanced Table Filters */}
                 <div className="flex gap-3 items-center">

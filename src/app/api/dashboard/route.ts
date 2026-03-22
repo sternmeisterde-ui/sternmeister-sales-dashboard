@@ -26,32 +26,61 @@ import {
 } from "@/lib/kommo/pipeline-config";
 import type { KommoCallNote, KommoLead } from "@/lib/kommo/types";
 
+import { cached } from "@/lib/kommo/cache";
+
 // ==================== Helpers ====================
 
-function todayRange(): { from: number; to: number } {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  return {
-    from: Math.floor(start.getTime() / 1000),
-    to: Math.floor(end.getTime() / 1000),
-  };
+function getDateRange(period: string, dateStr: string): { from: number; to: number } {
+  const base = new Date(dateStr + "T00:00:00Z");
+
+  switch (period) {
+    case "week": {
+      const day = base.getUTCDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      const monday = new Date(base);
+      monday.setUTCDate(base.getUTCDate() + diff);
+      monday.setUTCHours(0, 0, 0, 0);
+      const sunday = new Date(monday);
+      sunday.setUTCDate(monday.getUTCDate() + 6);
+      sunday.setUTCHours(23, 59, 59, 999);
+      return { from: Math.floor(monday.getTime() / 1000), to: Math.floor(sunday.getTime() / 1000) };
+    }
+    case "month": {
+      const firstDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
+      const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+      return { from: Math.floor(firstDay.getTime() / 1000), to: Math.floor(lastDay.getTime() / 1000) };
+    }
+    case "year": {
+      const yearStart = new Date(Date.UTC(base.getUTCFullYear(), 0, 1));
+      const yearEnd = new Date(Date.UTC(base.getUTCFullYear(), 11, 31, 23, 59, 59, 999));
+      return { from: Math.floor(yearStart.getTime() / 1000), to: Math.floor(yearEnd.getTime() / 1000) };
+    }
+    default: {
+      const dayStart = new Date(base);
+      dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(base);
+      dayEnd.setUTCHours(23, 59, 59, 999);
+      return { from: Math.floor(dayStart.getTime() / 1000), to: Math.floor(dayEnd.getTime() / 1000) };
+    }
+  }
 }
 
-function last7DaysRange(): { from: number; to: number } {
-  const now = new Date();
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  const start = new Date(end);
-  start.setDate(start.getDate() - 6);
-  start.setHours(0, 0, 0, 0);
-  return {
-    from: Math.floor(start.getTime() / 1000),
-    to: Math.floor(end.getTime() / 1000),
-  };
+function getTrendRange(period: string, from: number, to: number): { trendFrom: number; trendTo: number; trendDays: number } {
+  if (period === "day") {
+    // Last 7 days ending on selected date
+    const end = new Date(to * 1000);
+    const start = new Date(end);
+    start.setUTCDate(start.getUTCDate() - 6);
+    start.setUTCHours(0, 0, 0, 0);
+    return { trendFrom: Math.floor(start.getTime() / 1000), trendTo: to, trendDays: 7 };
+  }
+  // For week/month/year — trend covers the full selected period
+  const days = Math.ceil((to - from) / 86400);
+  return { trendFrom: from, trendTo: to, trendDays: days };
 }
 
 /** Group call notes by calendar day → per-day call counts */
-function groupCallsByDay(notes: KommoCallNote[], fromTs: number): Array<{
+function groupCallsByDay(notes: KommoCallNote[], fromTs: number, days: number = 7): Array<{
   date: string;
   callsTotal: number;
   callsConnected: number;
@@ -62,8 +91,8 @@ function groupCallsByDay(notes: KommoCallNote[], fromTs: number): Array<{
 }> {
   const dayMap = new Map<string, KommoCallNote[]>();
 
-  // Initialize all 7 days
-  for (let i = 0; i < 7; i++) {
+  // Initialize all days in range
+  for (let i = 0; i < days; i++) {
     const d = new Date(fromTs * 1000);
     d.setDate(d.getDate() + i);
     const key = d.toISOString().slice(0, 10);
@@ -258,42 +287,52 @@ function buildPipelineBreakdown(
 
 // ==================== MAIN HANDLER ====================
 
+const RESPONSE_CACHE_TTL = 2 * 60 * 1000;
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const department = url.searchParams.get("department") || "b2g";
+    const period = url.searchParams.get("period") || "day";
+    const dateStr = url.searchParams.get("date") || new Date().toISOString().slice(0, 10);
 
-    const today = todayRange();
-    const week = last7DaysRange();
+    const cacheKey = `dashboard-response:${department}:${period}:${dateStr}`;
+    const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
+      buildDashboardResponse(department, period, dateStr)
+    );
+
+    return NextResponse.json(responseData);
+  } catch (error) {
+    console.error("Dashboard API error:", error);
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
+}
+
+async function buildDashboardResponse(department: string, period: string, dateStr: string) {
+    const { from, to } = getDateRange(period, dateStr);
+    const { trendFrom, trendTo, trendDays } = getTrendRange(period, from, to);
 
     const pipelineIds = getPipelineIds(department);
     const activeStatusIds = getActiveStatusIds(department);
 
-    // Step 1: DB — get managers based on department
     const allManagers = await getManagersWithKommo(department);
-    // Kommo user IDs drive call attribution
     const kommoUserIds = allManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id !== null);
 
-    // Step 2: Kommo API — fetch in parallel groups
-    // Group A: snapshot data (no date filter)
-    const [snapshotLeads, tasks] = await Promise.all([
+    // All Kommo API calls in parallel (each individually cached)
+    const closedDateFilter = { field: "closed_at" as const, from, to };
+    const [snapshotLeads, tasks, wonLeads, lostLeads, callNotesPeriod, callNotesTrend] = await Promise.all([
       getLeads(pipelineIds, activeStatusIds, 10).catch(() => [] as KommoLead[]),
       getTasks(false).catch(() => []),
-    ]);
-
-    // Group B: period-filtered data
-    const closedDateFilter = { field: "closed_at" as const, from: today.from, to: today.to };
-    const [wonLeadsToday, lostLeadsToday, callNotesToday, callNotesWeek] = await Promise.all([
-      getLeads(pipelineIds, [142], 3, closedDateFilter).catch(() => [] as KommoLead[]),
-      getLeads(pipelineIds, [143], 3, closedDateFilter).catch(() => [] as KommoLead[]),
-      getCallNotes(today.from, today.to, kommoUserIds, 20).catch(() => [] as KommoCallNote[]),
-      getCallNotes(week.from, week.to, kommoUserIds, 30).catch(() => [] as KommoCallNote[]),
+      getLeads(pipelineIds, [142], 10, closedDateFilter).catch(() => [] as KommoLead[]),
+      getLeads(pipelineIds, [143], 10, closedDateFilter).catch(() => [] as KommoLead[]),
+      getCallNotes(from, to, kommoUserIds, 20).catch(() => [] as KommoCallNote[]),
+      getCallNotes(trendFrom, trendTo, kommoUserIds, 30).catch(() => [] as KommoCallNote[]),
     ]);
 
     // Step 3: Aggregate today's call metrics
-    const todayCallMap = aggregateCallMetrics(callNotesToday);
+    const todayCallMap = aggregateCallMetrics(callNotesPeriod);
     const allTodayCallMetrics: UserCallMetrics[] = [];
     for (const uid of kommoUserIds) {
       const m = todayCallMap.get(uid);
@@ -305,15 +344,15 @@ export async function GET(req: NextRequest) {
     let funnel: Record<string, unknown>;
 
     if (department === "b2b") {
-      funnel = buildB2BFunnel(snapshotLeads, wonLeadsToday, lostLeadsToday);
+      funnel = buildB2BFunnel(snapshotLeads, wonLeads, lostLeads);
     } else {
       // B2G funnel with qualification stages
-      const snapshotLeadsAll = [...snapshotLeads, ...wonLeadsToday, ...lostLeadsToday];
+      const snapshotLeadsAll = [...snapshotLeads, ...wonLeads, ...lostLeads];
       const flowActive = snapshotLeads.filter(
-        (l) => l.updated_at >= today.from && l.updated_at <= today.to
+        (l) => l.updated_at >= from && l.updated_at <= to
       );
-      const flowLeads = [...flowActive, ...wonLeadsToday, ...lostLeadsToday];
-      const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, today.from, today.to);
+      const flowLeads = [...flowActive, ...wonLeads, ...lostLeads];
+      const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to);
       funnel = {
         activeDeals: fc.activeDeals,
         qualLeads: fc.qualLeads,
@@ -321,8 +360,8 @@ export async function GET(req: NextRequest) {
         a2: fc.a2,
         b1: fc.b1,
         b2plus: fc.b2plus,
-        wonToday: wonLeadsToday.length,
-        lostToday: lostLeadsToday.length,
+        wonToday: wonLeads.length,
+        lostToday: lostLeads.length,
       };
     }
 
@@ -334,7 +373,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Step 6: WON revenue from today
-    const todayRevenue = wonLeadsToday.reduce((sum, l) => sum + (l.price || 0), 0);
+    const todayRevenue = wonLeads.reduce((sum, l) => sum + (l.price || 0), 0);
 
     // Step 7: Per-manager breakdown (today)
     const perManager = allManagers
@@ -361,7 +400,7 @@ export async function GET(req: NextRequest) {
       .sort((a, b) => b.callsTotal - a.callsTotal);
 
     // Step 8: 7-day trend
-    const trend = groupCallsByDay(callNotesWeek, week.from);
+    const trend = groupCallsByDay(callNotesTrend, trendFrom, trendDays);
 
     // Step 9: Missed calls breakdown (today)
     const missedBreakdown = {
@@ -375,8 +414,9 @@ export async function GET(req: NextRequest) {
     // Step 10: Per-pipeline breakdown
     const pipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
 
-    return NextResponse.json({
-      date: new Date().toISOString().slice(0, 10),
+    return {
+      date: dateStr,
+      period,
       department,
       todayMetrics: {
         callsTotal: todaySummary.callsTotal,
@@ -396,9 +436,5 @@ export async function GET(req: NextRequest) {
       perManager,
       trend,
       pipelineBreakdown,
-    });
-  } catch (error) {
-    console.error("Dashboard API error:", error);
-    return NextResponse.json({ error: String(error) }, { status: 500 });
-  }
+    };
 }

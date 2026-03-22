@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, gte, lte } from "drizzle-orm";
 import { getDbForDepartment } from "./index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 
@@ -14,9 +14,21 @@ function getTables(departmentType: DepartmentType) {
 }
 
 // Получить все AI ролевые звонки для отдела
-export async function getAIRoleCalls(departmentType: DepartmentType) {
+export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: string, toDate?: string) {
   const { calls, users } = getTables(departmentType);
   const db = getDbForDepartment(departmentType);
+
+  const conditions: ReturnType<typeof eq>[] = [];
+  if (fromDate) {
+    conditions.push(gte(calls.startedAt, new Date(fromDate)));
+  }
+  if (toDate) {
+    const end = new Date(toDate);
+    end.setHours(23, 59, 59, 999);
+    conditions.push(lte(calls.startedAt, end));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
   // LIGHT query: no transcript, no evaluationJson heavy fields
   const result = await db
@@ -33,6 +45,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType) {
     })
     .from(calls)
     .leftJoin(users, eq(calls.userId, users.id))
+    .where(whereClause)
     .orderBy(desc(calls.startedAt))
     .limit(200);
 

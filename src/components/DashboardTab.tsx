@@ -4,11 +4,13 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Phone, Clock, AlertTriangle, Users,
   PhoneMissed, Target, Loader2, RefreshCw,
+  ChevronLeft, ChevronRight,
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
+import CalendarPicker from "@/components/CalendarPicker";
 
 // ==================== Types ====================
 
@@ -72,7 +74,13 @@ interface DashboardData {
 
 // ==================== Component ====================
 
+function formatDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
 export default function DashboardTab({ department }: { department: string }) {
+  const [period, setPeriod] = useState<"day" | "week" | "month" | "year">("day");
+  const [date, setDate] = useState<Date>(new Date());
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +89,8 @@ export default function DashboardTab({ department }: { department: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/dashboard?department=${department}`, { signal });
+      const dateStr = formatDate(date);
+      const res = await fetch(`/api/dashboard?department=${department}&period=${period}&date=${dateStr}`, { signal });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`API error ${res.status}: ${text}`);
@@ -96,7 +105,7 @@ export default function DashboardTab({ department }: { department: string }) {
     } finally {
       setLoading(false);
     }
-  }, [department]);
+  }, [department, period, date]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -147,21 +156,90 @@ export default function DashboardTab({ department }: { department: string }) {
 
   const isB2G = department === "b2g";
 
+  const shiftDate = (dir: -1 | 1) => {
+    const d = new Date(date);
+    switch (period) {
+      case "day": d.setDate(d.getDate() + dir); break;
+      case "week": d.setDate(d.getDate() + 7 * dir); break;
+      case "month": d.setMonth(d.getMonth() + dir); break;
+      case "year": d.setFullYear(d.getFullYear() + dir); break;
+    }
+    setDate(d);
+  };
+
+  const dateDisplay = (() => {
+    switch (period) {
+      case "day":
+        return date.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+      case "week": {
+        const d = new Date(date);
+        const day = d.getDay();
+        const diff = day === 0 ? -6 : 1 - day;
+        const monday = new Date(d);
+        monday.setDate(d.getDate() + diff);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        return `${monday.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })} — ${sunday.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" })}`;
+      }
+      case "month":
+        return date.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+      case "year":
+        return `${date.getFullYear()} год`;
+    }
+  })();
+
   return (
     <div className="flex flex-col gap-4 fade-in">
-      {/* Header with refresh */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-slate-300 text-sm font-medium">
-          Данные за {data.date} • {isB2G ? "Госники (B2G)" : "Коммерсы (B2B)"} • Kommo CRM
-        </h2>
-        <button
-          onClick={() => fetchData()}
-          disabled={loading}
-          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-          title="Обновить"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-        </button>
+      {/* Filters */}
+      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
+            {([
+              { id: "day", label: "День" },
+              { id: "week", label: "Неделя" },
+              { id: "month", label: "Месяц" },
+              { id: "year", label: "Год" },
+            ] as const).map((f) => (
+              <button
+                key={f.id}
+                onClick={() => setPeriod(f.id)}
+                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 ${
+                  period === f.id
+                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <CalendarPicker
+            mode="single"
+            value={{ start: date, end: date }}
+            onChange={(range) => { if (range.start) setDate(range.start); }}
+            onClear={() => setDate(new Date())}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => shiftDate(-1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <span className="text-sm text-slate-300 font-medium min-w-[180px] text-center">{dateDisplay}</span>
+          <button onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
+            <ChevronRight className="w-4 h-4" />
+          </button>
+          <button onClick={() => setDate(new Date())} className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors border border-white/5">
+            Сегодня
+          </button>
+          <button
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            title="Обновить"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       {/* ============ KPI CARDS ============ */}
@@ -174,78 +252,14 @@ export default function DashboardTab({ department }: { department: string }) {
         <MetricCard icon={Users} label="Менеджеров" value={m.managersCount} />
       </div>
 
-      {/* ============ FUNNEL ROW ============ */}
-      {isB2G ? (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-          <FunnelCard label="Активных сделок" value={f.activeDeals ?? 0} />
-          <FunnelCard label="Всего лидов" value={f.totalLeads ?? 0} />
-          <FunnelCard label="Квал. лидов" value={f.qualLeads ?? 0} />
-          <FunnelCard label="A2" value={f.a2 ?? 0} />
-          <FunnelCard label="B1" value={f.b1 ?? 0} />
-          <FunnelCard label="B2+" value={f.b2plus ?? 0} />
-          <FunnelCard label="WON сегодня" value={f.wonToday ?? 0} color="emerald" />
-          <FunnelCard label="LOST сегодня" value={f.lostToday ?? 0} color="rose" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-          <FunnelCard label="Активных сделок" value={f.activeDeals ?? 0} />
-          <FunnelCard label="Новый лид" value={f.newLead ?? 0} />
-          <FunnelCard label="В работе" value={f.inProgress ?? 0} />
-          <FunnelCard label="Контакт установлен" value={f.contactMade ?? 0} />
-          <FunnelCard label="Интерес подтвержден" value={f.interestConfirmed ?? 0} />
-          <FunnelCard label="Счет выставлен" value={f.invoiceSent ?? 0} />
-          <FunnelCard label="WON сегодня" value={f.wonToday ?? 0} color="emerald" />
-          <FunnelCard label="LOST сегодня" value={f.lostToday ?? 0} color="rose" />
-        </div>
-      )}
 
-      {/* ============ PIPELINE BREAKDOWN ============ */}
-      {data.pipelineBreakdown && data.pipelineBreakdown.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {data.pipelineBreakdown.map((pipeline) => (
-            <div key={pipeline.pipelineId} className="glass-panel rounded-2xl p-4 border border-white/5">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-slate-300 font-semibold text-xs uppercase tracking-wide">
-                  {pipeline.pipelineName}
-                </h3>
-                <span className="text-blue-400 font-bold text-sm">{pipeline.activeDeals} сделок</span>
-              </div>
-              <div className="space-y-1.5">
-                {pipeline.statuses.map((s) => {
-                  const maxCount = pipeline.statuses[0]?.count ?? 1;
-                  const pct = Math.round((s.count / Math.max(maxCount, 1)) * 100);
-                  return (
-                    <div key={s.statusId} className="flex items-center gap-2">
-                      <span className="text-slate-400 text-[11px] w-[160px] truncate flex-shrink-0">
-                        {s.name}
-                      </span>
-                      <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-blue-500/60 rounded-full transition-all"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <span className="text-slate-300 text-[11px] font-medium w-8 text-right">
-                        {s.count}
-                      </span>
-                    </div>
-                  );
-                })}
-                {pipeline.statuses.length === 0 && (
-                  <div className="text-slate-500 text-xs text-center py-2">Нет активных сделок</div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* ============ CHARTS ROW ============ */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Calls trend */}
         <div className="glass-panel rounded-2xl p-5 border border-white/5">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-            Динамика звонков (7 дней)
+            Динамика звонков
           </h3>
           <div className="h-[220px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -285,7 +299,7 @@ export default function DashboardTab({ department }: { department: string }) {
         {/* Time on line trend */}
         <div className="glass-panel rounded-2xl p-5 border border-white/5">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-            Время на линии (мин/день)
+            Время на линии
           </h3>
           <div className="h-[220px]">
             <ResponsiveContainer width="100%" height="100%">
@@ -322,86 +336,71 @@ export default function DashboardTab({ department }: { department: string }) {
         </div>
       </div>
 
-      {/* ============ PER-MANAGER TABLE ============ */}
-      <div className="glass-panel rounded-2xl p-5 border border-white/5">
-        <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-          По менеджерам (сегодня)
-        </h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
-                <th className="text-left py-2 px-2 font-medium">Менеджер</th>
-                <th className="text-left py-2 px-1 font-medium">Линия</th>
-                <th className="text-right py-2 px-2 font-medium">Звонки</th>
-                <th className="text-right py-2 px-2 font-medium">Дозвон</th>
-                <th className="text-right py-2 px-2 font-medium">% дозв.</th>
-                <th className="text-right py-2 px-2 font-medium">На линии</th>
-                <th className="text-right py-2 px-2 font-medium">Ср. диалог</th>
-                <th className="text-right py-2 px-2 font-medium">Вх. всего</th>
-                <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
-                <th className="text-right py-2 px-2 font-medium">Задачи</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.perManager.map((mgr) => (
-                <tr
-                  key={mgr.id}
-                  className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
-                >
-                  <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">
-                    {mgr.name}
-                  </td>
-                  <td className="py-2 px-1 text-slate-500 text-xs">
-                    {mgr.line === "1" ? "1я" : mgr.line === "2" ? "2я" : "—"}
-                  </td>
-                  <td className="py-2 px-2 text-right text-slate-300">
-                    {mgr.callsTotal}
-                  </td>
-                  <td className="py-2 px-2 text-right text-slate-300">
-                    {mgr.callsConnected}
-                  </td>
-                  <td className="py-2 px-2 text-right">
-                    <span className={
-                      mgr.dialPercent >= 50 ? "text-emerald-400" :
-                      mgr.dialPercent >= 30 ? "text-amber-400" :
-                      "text-rose-400"
-                    }>
-                      {mgr.dialPercent}%
-                    </span>
-                  </td>
-                  <td className="py-2 px-2 text-right text-slate-300">
-                    {mgr.totalMinutes} мин
-                  </td>
-                  <td className="py-2 px-2 text-right text-slate-300">
-                    {mgr.avgDialogMinutes} мин
-                  </td>
-                  <td className="py-2 px-2 text-right text-slate-300">
-                    {mgr.incomingTotal}
-                  </td>
-                  <td className="py-2 px-2 text-right">
-                    <span className={mgr.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>
-                      {mgr.missedIncoming}
-                    </span>
-                  </td>
-                  <td className="py-2 px-2 text-right">
-                    <span className={mgr.overdueTasks > 0 ? "text-rose-400" : "text-slate-400"}>
-                      {mgr.overdueTasks > 0 ? `⚠ ${mgr.overdueTasks}` : "0"}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-              {data.perManager.length === 0 && (
-                <tr>
-                  <td colSpan={10} className="py-8 text-center text-slate-500">
-                    Нет данных по менеджерам
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* ============ PER-MANAGER TABLES ============ */}
+      {(isB2G
+        ? [
+            { title: "Квалификатор (1я линия)", line: "1", color: "emerald" },
+            { title: "Бератер (2я линия)", line: "2", color: "purple" },
+          ]
+        : [
+            { title: "Менеджеры", line: "__all__", color: "blue" },
+          ]
+      ).map(({ title, line, color }) => {
+        const lineManagers = line === "__all__"
+          ? data.perManager
+          : data.perManager.filter((m) => m.line === line);
+        if (lineManagers.length === 0) return null;
+        return (
+          <div key={line} className="glass-panel rounded-2xl p-5 border border-white/5">
+            <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
+              <span className={`text-${color}-400`}>{title}</span>
+              <span className="text-slate-500 ml-2">({lineManagers.length} чел.)</span>
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
+                    <th className="text-left py-2 px-2 font-medium">Менеджер</th>
+                    <th className="text-right py-2 px-2 font-medium">Звонки</th>
+                    <th className="text-right py-2 px-2 font-medium">Дозвон</th>
+                    <th className="text-right py-2 px-2 font-medium">% дозв.</th>
+                    <th className="text-right py-2 px-2 font-medium">На линии</th>
+                    <th className="text-right py-2 px-2 font-medium">Ср. диалог</th>
+                    <th className="text-right py-2 px-2 font-medium">Вх. всего</th>
+                    <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
+                    <th className="text-right py-2 px-2 font-medium">Задачи</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lineManagers.map((mgr) => (
+                    <tr key={mgr.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                      <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">{mgr.name}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsConnected}</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={mgr.dialPercent >= 50 ? "text-emerald-400" : mgr.dialPercent >= 30 ? "text-amber-400" : "text-rose-400"}>
+                          {mgr.dialPercent}%
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.avgDialogMinutes} мин</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.incomingTotal}</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={mgr.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{mgr.missedIncoming}</span>
+                      </td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={mgr.overdueTasks > 0 ? "text-rose-400" : "text-slate-400"}>
+                          {mgr.overdueTasks > 0 ? `⚠ ${mgr.overdueTasks}` : "0"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -443,26 +442,3 @@ function MetricCard({
   );
 }
 
-function FunnelCard({
-  label,
-  value,
-  color = "slate",
-}: {
-  label: string;
-  value: number;
-  color?: "slate" | "emerald" | "rose";
-}) {
-  const valueColor =
-    color === "emerald" ? "text-emerald-400" :
-    color === "rose" ? "text-rose-400" :
-    "text-white";
-
-  return (
-    <div className="glass-panel rounded-xl p-3 border border-white/5 text-center">
-      <div className="text-lg font-bold tracking-tight">
-        <span className={valueColor}>{value}</span>
-      </div>
-      <div className="text-[9px] text-slate-500 uppercase tracking-wider mt-1 font-medium">{label}</div>
-    </div>
-  );
-}

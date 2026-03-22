@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAIRoleCalls, getManagerStats } from "@/lib/db/queries-existing";
+import { cached } from "@/lib/kommo/cache";
+
+const AI_CALLS_CACHE_TTL = 2 * 60 * 1000;
 
 export async function GET(request: NextRequest) {
   try {
@@ -7,30 +10,29 @@ export async function GET(request: NextRequest) {
     const deptParam = searchParams.get("department");
     const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
     const type = searchParams.get("type") || "all";
+    const fromDate = searchParams.get("from") || undefined;
+    const toDate = searchParams.get("to") || undefined;
 
-    // Диагностика: какая БД используется
-    const dbInfo = {
-      department,
-      hasR1Url: !!process.env.R1_DATABASE_URL,
-      tables: department === "b2b" ? "r1_calls + r1_users" : "d1_calls + d1_users",
-    };
+    const cacheKey = `ai-calls:${department}:${type}:${fromDate || ""}:${toDate || ""}`;
+    const result = await cached(cacheKey, AI_CALLS_CACHE_TTL, async () => {
+      if (type === "all") {
+        const [calls, managers] = await Promise.all([
+          getAIRoleCalls(department, fromDate, toDate),
+          getManagerStats(department),
+        ]);
+        return { success: true, data: { calls, managers } };
+      }
 
-    // Возвращаем оба набора данных за один запрос
-    if (type === "all") {
-      const [calls, managers] = await Promise.all([
-        getAIRoleCalls(department),
-        getManagerStats(department),
-      ]);
-      return NextResponse.json({ success: true, data: { calls, managers }, _debug: dbInfo });
-    }
+      if (type === "managers") {
+        const managers = await getManagerStats(department);
+        return { success: true, data: managers };
+      }
 
-    if (type === "managers") {
-      const managers = await getManagerStats(department);
-      return NextResponse.json({ success: true, data: managers, _debug: dbInfo });
-    }
+      const calls = await getAIRoleCalls(department, fromDate, toDate);
+      return { success: true, data: calls };
+    });
 
-    const calls = await getAIRoleCalls(department);
-    return NextResponse.json({ success: true, data: calls, _debug: dbInfo });
+    return NextResponse.json(result);
   } catch (error) {
     console.error("Error fetching calls:", error);
     return NextResponse.json(

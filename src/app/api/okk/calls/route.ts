@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, okkManagers, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
+import { cached } from "@/lib/kommo/cache";
 
 // ─── Helper: format date (same pattern as queries-existing.ts) ──────
 
@@ -76,12 +77,25 @@ function buildSpeakerTranscript(
 // Returns data in the SAME shape as /api/calls:
 //   { success: true, data: { calls: ManagerCall[], managers: ManagerStat[] } }
 
+const OKK_CACHE_TTL = 2 * 60 * 1000; // 2 min
+
 export async function GET(request: NextRequest) {
   try {
     const sp = request.nextUrl.searchParams;
     const deptParam = sp.get("department") ?? "b2g";
     const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
 
+    const cacheKey = `okk-calls:${department}:${sp.get("from") || ""}:${sp.get("to") || ""}:${sp.get("status") || ""}:${sp.get("manager_id") || ""}`;
+    const result = await cached(cacheKey, OKK_CACHE_TTL, () => buildOkkResponse(department, sp));
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("[OKK Calls API] Error:", error);
+    const message = error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
+  }
+}
+
+async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) {
     const db = getOkkDbForDepartment(department);
 
     // Build WHERE conditions
@@ -238,17 +252,8 @@ export async function GET(request: NextRequest) {
     });
 
     // ── Same response shape as /api/calls ────────────────────
-    return NextResponse.json({
+    return {
       success: true,
       data: { calls, managers },
-    });
-  } catch (error) {
-    console.error("[OKK Calls API] Error:", error);
-    const message =
-      error instanceof Error ? error.message : "Internal server error";
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 }
-    );
-  }
+    };
 }
