@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { TrendingUp, Users, Activity, Loader2, RefreshCw, ChevronLeft, ChevronRight, CalendarDays, UserCheck, UserX } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
+import DinoLoader from "@/components/DinoLoader";
 
 // ====================== TYPES ======================
 
@@ -916,12 +917,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
       </div>
 
       {/* Loading */}
-      {loading && !data && (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
-          <span className="ml-3 text-slate-400">Загрузка данных из Kommo...</span>
-        </div>
-      )}
+      {loading && !data && <DinoLoader />}
 
       {/* Error */}
       {error && (

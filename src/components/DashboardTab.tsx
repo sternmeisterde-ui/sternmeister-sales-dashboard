@@ -11,6 +11,7 @@ import {
   ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
+import DinoLoader from "@/components/DinoLoader";
 
 // ==================== Types ====================
 
@@ -114,12 +115,7 @@ export default function DashboardTab({ department }: { department: string }) {
   }, [fetchData]);
 
   if (loading && !data) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
-        <span className="ml-3 text-slate-400">Загрузка данных из Kommo...</span>
-      </div>
-    );
+    return <DinoLoader />;
   }
 
   if (error && !data) {
