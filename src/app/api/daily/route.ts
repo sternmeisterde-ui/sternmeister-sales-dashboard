@@ -365,7 +365,7 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
         }
 
         if (section.key === "funnel") {
-          fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
+          fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to);
         } else {
           const facts = buildUserFacts(summaryCallMetrics, totalOverdue, section);
           fact = facts[metric.key] ?? null;
@@ -419,7 +419,7 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
 
                 if (splitKeys.has(metric.key)) {
                   // Divide total evenly
-                  const totalFact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
+                  const totalFact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to);
                   const totalPlan = getPlan(section.dbLine, null, metric.key);
                   if (totalFact) fact = String(Math.round(Number(totalFact) / line1Managers.length));
                   if (totalPlan) plan = String(Math.round(Number(totalPlan) / line1Managers.length));
@@ -428,7 +428,7 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
                   }
                 } else if (metric.key === "qualLeadsPercent") {
                   // Same % for all managers (computed from totals)
-                  const totalFact = getFunnelFact("qualLeadsPercent", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
+                  const totalFact = getFunnelFact("qualLeadsPercent", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to);
                   const planTotal = getPlan(section.dbLine, null, "totalLeads");
                   const planQual = getPlan(section.dbLine, null, "qualLeads");
                   fact = totalFact;
@@ -530,7 +530,9 @@ function getFunnelFact(
   managersOnLine: number,
   snapshotLeads?: KommoLead[],
   line1ManagerCount?: number,
-  termsWonLeads?: KommoLead[]
+  termsWonLeads?: KommoLead[],
+  from?: number,
+  to?: number
 ): string | null {
   switch (key) {
     case "activeDeals":
@@ -538,6 +540,16 @@ function getFunnelFact(
     case "termsTotal":
       // WON leads from first line (Термин ДЦ) — previous day or selected period
       return String(termsWonLeads?.length ?? 0);
+    case "termsNew": {
+      // Same as termsTotal but only leads created in period
+      const tf = from ?? 0;
+      const tt = to ?? Infinity;
+      return String(
+        (termsWonLeads || []).filter(
+          (l) => l.created_at >= tf && l.created_at <= tt
+        ).length
+      );
+    }
     case "managersOnLine":
       return String(managersOnLine);
     case "totalLeads":
@@ -561,6 +573,28 @@ function getFunnelFact(
       );
       const divisor = line1ManagerCount || managersOnLine || 1;
       return String(Math.round(portfolioLeads.length / divisor));
+    }
+
+    case "awaitTermTotal": {
+      // Snapshot: leads currently awaiting term in berater pipeline
+      const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
+      const beraterPipeline = 12154099;
+      const awaiting = (snapshotLeads || []).filter(
+        (l) => l.pipeline_id === beraterPipeline && !l.is_deleted && !l.closed_at && awaitStatuses.has(l.status_id)
+      );
+      return String(awaiting.length);
+    }
+    case "awaitTermNew": {
+      // Flow: leads created in period that are currently awaiting term
+      const awaitStatusesNew = new Set([93860331, 102183931, 102183935, 102183939]);
+      const beraterPipelineNew = 12154099;
+      const f = from ?? 0;
+      const t = to ?? Infinity;
+      const awaitingNew = (snapshotLeads || []).filter(
+        (l) => l.pipeline_id === beraterPipelineNew && !l.is_deleted && !l.closed_at
+          && awaitStatusesNew.has(l.status_id) && l.created_at >= f && l.created_at <= t
+      );
+      return String(awaitingNew.length);
     }
 
     case "qualLeadsPercent":
