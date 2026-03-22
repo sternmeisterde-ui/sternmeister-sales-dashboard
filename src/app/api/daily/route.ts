@@ -264,7 +264,11 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
     ]);
 
     const activeOnly = snapshotActiveLeads.filter(l => !l.closed_at);
-    console.log(`[Daily API] ${department}/${period}/${dateStr}: allLeads=${snapshotActiveLeads.length} active=${activeOnly.length} won=${wonLeads.length} lost=${lostLeads.length} calls=${callNotes.length} terms=${termsWonLeads.length}`);
+    const byPipeline: Record<number, number> = {};
+    for (const l of snapshotActiveLeads) {
+      byPipeline[l.pipeline_id] = (byPipeline[l.pipeline_id] || 0) + 1;
+    }
+    console.log(`[Daily API] ${department}/${period}/${dateStr}: allLeads=${snapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${wonLeads.length} lost=${lostLeads.length} calls=${callNotes.length} terms=${termsWonLeads.length} managers=${managers.length} line1=${managers.filter(m => m.line === "1").length}`);
 
     // ─── Step 3: Build lead sets ───
     //
