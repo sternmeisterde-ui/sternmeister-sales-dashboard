@@ -132,8 +132,8 @@ function buildUserFacts(
 
 // ==================== MAIN HANDLER ====================
 
-// Response-level cache: 2 min TTL for assembled daily data
-const RESPONSE_CACHE_TTL = 2 * 60 * 1000;
+// Response-level cache: 30 sec TTL for assembled daily data
+const RESPONSE_CACHE_TTL = 30 * 1000;
 
 export async function GET(req: NextRequest) {
   try {
@@ -261,6 +261,8 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
         return [] as KommoLead[];
       }),
     ]);
+
+    console.log(`[Daily API] ${department}/${period}/${dateStr}: snapshot=${snapshotActiveLeads.length} won=${wonLeads.length} lost=${lostLeads.length} calls=${callNotes.length} terms=${termsWonLeads.length}`);
 
     // ─── Step 3: Build lead sets ───
     //

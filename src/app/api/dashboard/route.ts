@@ -287,7 +287,7 @@ function buildPipelineBreakdown(
 
 // ==================== MAIN HANDLER ====================
 
-const RESPONSE_CACHE_TTL = 2 * 60 * 1000;
+const RESPONSE_CACHE_TTL = 30 * 1000;
 
 export async function GET(req: NextRequest) {
   try {
