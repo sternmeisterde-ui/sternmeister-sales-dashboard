@@ -414,15 +414,15 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
 
       // For funnel section: compute per-manager metrics using responsible_user_id on leads
       if (section.key === "funnel") {
-        const line1Managers = managers.filter((m) => m.line === "1");
-        if (line1Managers.length > 0) {
+        const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2");
+        if (funnelManagers.length > 0) {
           const excludeQual = new Set([142, 143, 93485479, 95514987]);
           const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
           const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
           const beraterPipeline = 12154099;
           const firstLinePipeline = 10935879;
 
-          managerData = line1Managers.map((mgr) => {
+          managerData = funnelManagers.map((mgr) => {
             const uid = mgr.kommoUserId;
             // Leads where this manager is responsible
             const mgrLeads = uid ? snapshotLeads.filter((l) => l.responsible_user_id === uid) : [];
