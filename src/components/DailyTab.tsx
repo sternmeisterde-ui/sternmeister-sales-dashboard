@@ -87,15 +87,6 @@ function getSectionIcon(iconName: string) {
   }
 }
 
-function getSectionAccent(sectionKey: string): string {
-  switch (sectionKey) {
-    case "funnel": return "blue";
-    case "qualifier": return "emerald";
-    case "secondLine": return "purple";
-    default: return "blue";
-  }
-}
-
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -163,152 +154,185 @@ function EditableCell({
   );
 }
 
-// ====================== SECTION TABLE (NO PER-MANAGER) ======================
+// ====================== UNIFIED TABLE ======================
 
-function FunnelTable({
+// Returns a Tailwind accent colour token for a given section key
+function getSectionAccentColor(sectionKey: string): string {
+  switch (sectionKey) {
+    case "funnel": return "text-blue-400";
+    case "qualifier": return "text-emerald-400";
+    case "secondLine": return "text-purple-400";
+    default: return "text-blue-400";
+  }
+}
+
+// Section-separator row rendered inside the unified table body
+function SectionHeaderRow({
   section,
-  onPlanSave,
+  colSpan,
 }: {
   section: Section;
-  onPlanSave: (line: string, metricKey: string, value: string) => void;
+  colSpan: number;
 }) {
   return (
-    <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-      <div className="p-5 border-b border-white/5 bg-slate-900/20 flex items-center gap-3">
-        {getSectionIcon(section.icon)}
-        <h3 className="text-sm font-bold tracking-widest uppercase text-white">
-          {section.title}
-        </h3>
-      </div>
-      <div className="w-full overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-white/10">
-              <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold w-[55%]">
-                Метрика
-              </th>
-              <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[15%]">
-                План
-              </th>
-              <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[15%]">
-                Факт
-              </th>
-              <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[15%]">
-                %
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-white/5 text-sm">
-            {section.metrics.map((m) => {
-              if (m.isGroupHeader) {
-                return (
-                  <tr key={m.key} className="bg-slate-800/30">
-                    <td colSpan={4} className="px-5 py-2 text-[10px] uppercase tracking-widest text-blue-400 font-bold">
-                      {m.label}
-                    </td>
-                  </tr>
-                );
-              }
-              return (
-                <tr key={m.key} className="hover:bg-white/[0.02] transition-colors group">
-                  <td className="px-5 py-3 font-medium text-slate-300 group-hover:text-blue-200 transition-colors">
-                    {m.label}
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    {m.plan !== null || (section.metrics.find((x) => x.key === m.key) as any)?.hasPlan !== false ? (
-                      <EditableCell
-                        value={m.plan}
-                        onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
-                      />
-                    ) : (
-                      <span className="text-slate-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-3 font-bold text-white text-right font-mono">
-                    {m.fact ?? <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className={`px-3 py-3 text-right font-bold font-mono ${getPercentColor(m.percent)} ${getPercentBg(m.percent)}`}>
-                    {m.percent !== null ? `${m.percent}%` : ""}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <tr className="bg-slate-900/40 border-t-2 border-white/10">
+      <td
+        colSpan={colSpan}
+        className="px-5 py-2.5 sticky left-0 bg-slate-900/40"
+      >
+        <div className="flex items-center gap-2">
+          {getSectionIcon(section.icon)}
+          <span className={`text-[10px] uppercase tracking-widest font-bold ${getSectionAccentColor(section.key)}`}>
+            {section.title}
+          </span>
+        </div>
+      </td>
+    </tr>
   );
 }
 
-// ====================== SECTION TABLE (WITH PER-MANAGER) ======================
-
-function ManagerTable({
-  section,
+function UnifiedTable({
+  sections,
+  viewMode,
   onPlanSave,
 }: {
-  section: Section;
+  sections: Section[];
+  viewMode: "summary" | "managers";
   onPlanSave: (line: string, metricKey: string, value: string, userId?: string) => void;
 }) {
-  const [showManagers, setShowManagers] = useState(true);
-  const accent = getSectionAccent(section.key);
-  const nonHeaderMetrics = section.metrics.filter((m) => !m.isGroupHeader);
-  const managers = section.managers;
+  // Collect all managers that appear in any section (including funnel with split leads)
+  const allManagers: ManagerData[] = (() => {
+    const seen = new Set<string>();
+    const result: ManagerData[] = [];
+    for (const sec of sections) {
+      for (const mgr of sec.managers) {
+        if (!seen.has(mgr.id)) {
+          seen.add(mgr.id);
+          result.push(mgr);
+        }
+      }
+    }
+    return result;
+  })();
+
+  // Summary mode: Метрика | План | Факт | %
+  if (viewMode === "summary") {
+    return (
+      <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-white/10">
+                <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold">
+                  Метрика
+                </th>
+                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[13%]">
+                  План
+                </th>
+                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[13%]">
+                  Факт
+                </th>
+                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[10%]">
+                  %
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5 text-sm">
+              {sections.map((section) => (
+                <>
+                  {/* Section separator */}
+                  <SectionHeaderRow
+                    key={`sep-${section.key}`}
+                    section={section}
+                    colSpan={4}
+                  />
+
+                  {section.metrics.map((m) => {
+                    if (m.isGroupHeader) {
+                      return (
+                        <tr key={`${section.key}-${m.key}`} className="bg-slate-800/30">
+                          <td colSpan={4} className="px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-10">
+                            {m.label}
+                          </td>
+                        </tr>
+                      );
+                    }
+                    return (
+                      <tr key={`${section.key}-${m.key}`} className="hover:bg-white/[0.02] transition-colors group">
+                        <td className="px-5 py-3 font-medium text-slate-300 group-hover:text-white transition-colors pl-10">
+                          {m.label}
+                        </td>
+                        <td className="px-3 py-3 text-right">
+                          <EditableCell
+                            value={m.plan}
+                            onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
+                          />
+                        </td>
+                        <td className="px-3 py-3 font-bold text-white text-right font-mono">
+                          {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
+                        </td>
+                        <td className={`px-3 py-3 text-right font-bold font-mono ${getPercentColor(m.percent)} ${getPercentBg(m.percent)}`}>
+                          {m.percent !== null ? `${m.percent}%` : ""}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  // Managers mode: sticky metric col | Итого (Plan/Fact/%) | manager columns (Fact only)
+  // colSpan for a full row: 1 (metric) + 3 (итого) + allManagers.length (one Fact col each)
+  const totalCols = 1 + 3 + allManagers.length;
 
   return (
     <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-      <div className="p-5 border-b border-white/5 bg-slate-900/20 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          {getSectionIcon(section.icon)}
-          <h3 className="text-sm font-bold tracking-widest uppercase text-white">
-            {section.title}
-          </h3>
-          <span className="text-xs text-slate-500">
-            ({managers.length} чел.)
-          </span>
-        </div>
-        {managers.length > 0 && (
-          <button
-            onClick={() => setShowManagers(!showManagers)}
-            className="text-xs text-slate-400 hover:text-white px-3 py-1.5 rounded-lg hover:bg-white/5 transition-colors"
-          >
-            {showManagers ? "Скрыть менеджеров" : "Показать менеджеров"}
-          </button>
-        )}
-      </div>
-
       <div className="w-full overflow-x-auto">
-        <table className="w-full text-left border-collapse min-w-[600px]">
+        <table className="w-full text-left border-collapse">
           <thead>
+            {/* Top row: column group headers */}
             <tr className="border-b border-white/10">
-              <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10 min-w-[200px]">
+              <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10 min-w-[220px]">
                 Метрика
               </th>
-              {/* Summary columns — highlighted */}
-              <th className="px-3 py-2 text-center border-l-2 border-r-2 border-blue-400/60 bg-blue-500/15" colSpan={3}>
-                <span className="text-[10px] uppercase tracking-widest text-blue-300 font-bold">Итого</span>
+              {/* Итого group */}
+              <th
+                colSpan={3}
+                className="px-3 py-2 text-center border-l-2 border-r-2 border-blue-400/60 bg-blue-500/15"
+              >
+                <span className="text-[10px] uppercase tracking-widest text-blue-300 font-bold">
+                  Итого
+                </span>
               </th>
-              {/* Per-manager columns */}
-              {showManagers &&
-                managers.map((mgr) => (
-                  <th
-                    key={mgr.id}
-                    className="px-2 py-2 text-center border-l border-white/10"
-                    colSpan={3}
-                  >
-                    <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold whitespace-nowrap">
-                      {mgr.name}
+              {/* Per-manager single-column headers */}
+              {allManagers.map((mgr) => (
+                <th
+                  key={mgr.id}
+                  className="px-2 py-2 text-center border-l border-white/10 min-w-[80px]"
+                >
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold whitespace-nowrap">
+                    {mgr.name}
+                  </span>
+                  {!mgr.kommoUserId && (
+                    <span
+                      className="block text-[9px] text-amber-500"
+                      title="Нет привязки к Kommo"
+                    >
+                      ! Kommo
                     </span>
-                    {!mgr.kommoUserId && (
-                      <span className="block text-[9px] text-amber-500" title="Нет привязки к Kommo">
-                        ⚠ нет Kommo ID
-                      </span>
-                    )}
-                  </th>
-                ))}
+                  )}
+                </th>
+              ))}
             </tr>
+
+            {/* Sub-header row: П / Ф / % under Итого, Факт label under each manager */}
             <tr className="border-b border-white/5">
-              <th className="sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10"></th>
-              {/* Summary sub-headers — highlighted */}
+              <th className="sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10" />
               <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-l-2 border-blue-400/60 bg-blue-500/10">
                 План
               </th>
@@ -318,106 +342,107 @@ function ManagerTable({
               <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-r-2 border-blue-400/60 bg-blue-500/10">
                 %
               </th>
-              {/* Per-manager sub-headers */}
-              {showManagers &&
-                managers.map((mgr) => (
-                  <th key={`${mgr.id}-sub`} className="border-l border-white/10" colSpan={3}>
-                    <div className="flex">
-                      <span className="flex-1 px-1 py-1 text-[9px] uppercase text-slate-500 text-right font-medium">П</span>
-                      <span className="flex-1 px-1 py-1 text-[9px] uppercase text-slate-500 text-right font-medium">Ф</span>
-                      <span className="flex-1 px-1 py-1 text-[9px] uppercase text-slate-500 text-right font-medium">%</span>
-                    </div>
-                  </th>
-                ))}
+              {allManagers.map((mgr) => (
+                <th
+                  key={`${mgr.id}-sub`}
+                  className="px-2 py-1 text-[9px] uppercase text-slate-500 text-right font-medium border-l border-white/10"
+                >
+                  Факт
+                </th>
+              ))}
             </tr>
           </thead>
+
           <tbody className="divide-y divide-white/5 text-sm">
-            {section.metrics.map((m, rowIdx) => {
-              if (m.isGroupHeader) {
-                const totalCols = 4 + (showManagers ? managers.length * 3 : 0);
-                const accentColor =
-                  accent === "emerald" ? "text-emerald-400" :
-                  accent === "purple" ? "text-purple-400" :
-                  "text-blue-400";
-                return (
-                  <tr key={m.key} className="bg-slate-800/30">
-                    <td
-                      colSpan={totalCols}
-                      className={`px-5 py-2 text-[10px] uppercase tracking-widest ${accentColor} font-bold`}
-                    >
-                      {m.label}
-                    </td>
-                  </tr>
-                );
+            {sections.map((section) => {
+              // Build a map: managerId → their metrics array for this section (non-header only)
+              const nonHeaderMetrics = section.metrics.filter((m) => !m.isGroupHeader);
+              const mgrMetricMap = new Map<string, typeof section.managers[0]["metrics"]>();
+              for (const mgr of section.managers) {
+                mgrMetricMap.set(mgr.id, mgr.metrics);
               }
 
-              // Find the non-header index for per-manager lookup
-              const nonHeaderIdx = nonHeaderMetrics.findIndex((x) => x.key === m.key);
-
               return (
-                <tr key={m.key} className="hover:bg-white/[0.02] transition-colors group">
-                  {/* Metric label */}
-                  <td className="px-5 py-2.5 font-medium text-slate-300 group-hover:text-white transition-colors sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10 text-[13px]">
-                    {m.label}
-                  </td>
+                <>
+                  {/* Section separator */}
+                  <SectionHeaderRow
+                    key={`sep-${section.key}`}
+                    section={section}
+                    colSpan={totalCols}
+                  />
 
-                  {/* Summary Plan — highlighted */}
-                  <td className="px-2 py-2 text-right border-l-2 border-blue-400/60 bg-blue-500/[0.07]">
-                    <EditableCell
-                      value={m.plan}
-                      onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
-                    />
-                  </td>
-
-                  {/* Summary Fact — highlighted */}
-                  <td className="px-2 py-2 font-bold text-white text-right font-mono text-[13px] bg-blue-500/[0.07]">
-                    {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
-                  </td>
-
-                  {/* Summary % — highlighted */}
-                  <td className={`px-2 py-2 text-right font-bold font-mono text-[13px] border-r-2 border-blue-400/60 bg-blue-500/[0.07] ${getPercentColor(m.percent)}`}>
-                    {m.percent !== null ? `${m.percent}%` : ""}
-                  </td>
-
-                  {/* Per-manager cells */}
-                  {showManagers &&
-                    managers.map((mgr) => {
-                      const mgrMetric = mgr.metrics[nonHeaderIdx];
-                      if (!mgrMetric) {
-                        return (
-                          <td key={mgr.id} colSpan={3} className="border-l border-white/10">
-                            <span className="text-slate-600 text-xs">—</span>
-                          </td>
-                        );
-                      }
-
+                  {section.metrics.map((m) => {
+                    if (m.isGroupHeader) {
                       return (
-                        <td key={mgr.id} colSpan={3} className="border-l border-white/10">
-                          <div className="flex">
-                            {/* Manager Plan */}
-                            <span className="flex-1 px-1 py-1 text-right">
-                              <EditableCell
-                                value={mgrMetric.plan}
-                                onSave={(v) =>
-                                  onPlanSave(section.dbLine, m.key, v, mgr.id)
-                                }
-                              />
-                            </span>
-                            {/* Manager Fact */}
-                            <span className="flex-1 px-1 py-1 text-right font-mono text-[12px] text-slate-300">
-                              {mgrMetric.fact ?? "—"}
-                            </span>
-                            {/* Manager % */}
-                            <span
-                              className={`flex-1 px-1 py-1 text-right font-mono text-[12px] font-bold ${getPercentColor(mgrMetric.percent)}`}
-                            >
-                              {mgrMetric.percent !== null ? `${mgrMetric.percent}%` : ""}
-                            </span>
-                          </div>
-                        </td>
+                        <tr key={`${section.key}-${m.key}`} className="bg-slate-800/30">
+                          <td
+                            colSpan={totalCols}
+                            className="px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-bold sticky left-0 bg-slate-800/30 pl-10"
+                          >
+                            {m.label}
+                          </td>
+                        </tr>
                       );
-                    })}
-                </tr>
+                    }
+
+                    const nonHeaderIdx = nonHeaderMetrics.findIndex((x) => x.key === m.key);
+
+                    return (
+                      <tr key={`${section.key}-${m.key}`} className="hover:bg-white/[0.02] transition-colors group">
+                        {/* Sticky metric label */}
+                        <td className="px-5 py-2.5 font-medium text-slate-300 group-hover:text-white transition-colors sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10 text-[13px] pl-10">
+                          {m.label}
+                        </td>
+
+                        {/* Итого Plan */}
+                        <td className="px-2 py-2 text-right border-l-2 border-blue-400/60 bg-blue-500/[0.07]">
+                          <EditableCell
+                            value={m.plan}
+                            onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
+                          />
+                        </td>
+
+                        {/* Итого Fact */}
+                        <td className="px-2 py-2 font-bold text-white text-right font-mono text-[13px] bg-blue-500/[0.07]">
+                          {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
+                        </td>
+
+                        {/* Итого % */}
+                        <td
+                          className={`px-2 py-2 text-right font-bold font-mono text-[13px] border-r-2 border-blue-400/60 bg-blue-500/[0.07] ${getPercentColor(m.percent)}`}
+                        >
+                          {m.percent !== null ? `${m.percent}%` : ""}
+                        </td>
+
+                        {/* Per-manager Fact cells */}
+                        {allManagers.map((mgr) => {
+                          const mgrMetrics = mgrMetricMap.get(mgr.id);
+                          const mgrMetric = mgrMetrics?.[nonHeaderIdx];
+
+                          if (!mgrMetric) {
+                            return (
+                              <td
+                                key={mgr.id}
+                                className="px-2 py-2 text-center border-l border-white/10 text-slate-600 font-mono text-[12px]"
+                              >
+                                —
+                              </td>
+                            );
+                          }
+
+                          return (
+                            <td
+                              key={mgr.id}
+                              className={`px-2 py-2 text-right border-l border-white/10 font-mono text-[12px] font-bold ${getPercentColor(mgrMetric.percent)}`}
+                            >
+                              {mgrMetric.fact ?? <span className="text-slate-600 font-normal">—</span>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </>
               );
             })}
           </tbody>
@@ -629,6 +654,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [viewMode, setViewMode] = useState<"summary" | "managers">("summary");
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -681,7 +707,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     setDate(d);
   };
 
-  // Save plan value
+  // Save plan value — always stored as monthly plan
   const handlePlanSave = async (
     line: string,
     metricKey: string,
@@ -691,6 +717,23 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     if (!data) return;
     setSaving(true);
     try {
+      // Convert displayed value back to monthly plan
+      let monthlyValue = value;
+      const num = Number(value);
+      if (!Number.isNaN(num) && data.periodType !== "month") {
+        const d = new Date(date);
+        const daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        if (data.periodType === "day") {
+          monthlyValue = String(Math.round(num * daysInMonth));
+        } else if (data.periodType === "week") {
+          monthlyValue = String(Math.round(num * (daysInMonth / 7)));
+        } else if (data.periodType === "year") {
+          monthlyValue = String(Math.round(num / 12));
+        }
+      }
+
+      // Always save as month period
+      const monthDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
       const res = await fetch("/api/daily/plans", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -699,9 +742,9 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           line,
           userId: userId || null,
           metricKey,
-          planValue: value,
-          periodType: data.periodType,
-          periodDate: data.periodDate,
+          planValue: monthlyValue,
+          periodType: "month",
+          periodDate: monthDate,
         }),
       });
       if (!res.ok) {
@@ -782,7 +825,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
       {/* Controls */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-        {/* Period tabs + Calendar */}
+        {/* Period tabs + Calendar + View mode toggle */}
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner overflow-x-auto scrollbar-hide">
             {([
@@ -804,6 +847,27 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
               </button>
             ))}
           </div>
+
+          {/* View mode toggle */}
+          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
+            {([
+              { id: "summary", label: "Общая статистика" },
+              { id: "managers", label: "Менеджеры" },
+            ] as const).map((v) => (
+              <button
+                key={v.id}
+                onClick={() => setViewMode(v.id)}
+                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
+                  viewMode === v.id
+                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+
           <CalendarPicker
             mode="single"
             value={{ start: date, end: date }}
@@ -891,26 +955,14 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </div>
       )}
 
-      {/* Sections — hidden if schedule not set on day view */}
-      {data && !loading && (period !== "day" || !data.schedule || data.schedule.hasSchedule) && data.sections.map((section) => {
-        if (!section.perManager) {
-          return (
-            <FunnelTable
-              key={section.key}
-              section={section}
-              onPlanSave={handlePlanSave}
-            />
-          );
-        }
-
-        return (
-          <ManagerTable
-            key={section.key}
-            section={section}
-            onPlanSave={handlePlanSave}
-          />
-        );
-      })}
+      {/* Unified table — hidden if schedule not set on day view */}
+      {data && !loading && (period !== "day" || !data.schedule || data.schedule.hasSchedule) && (
+        <UnifiedTable
+          sections={data.sections}
+          viewMode={viewMode}
+          onPlanSave={handlePlanSave}
+        />
+      )}
 
       {/* Data with loading overlay */}
       {data && loading && (

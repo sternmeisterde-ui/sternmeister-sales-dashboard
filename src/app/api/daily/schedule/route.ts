@@ -2,6 +2,7 @@
 // PUT /api/daily/schedule — set schedule for a manager on a date
 import { NextRequest, NextResponse } from "next/server";
 import { getFullScheduleForDate, bulkSetSchedule, setSchedule } from "@/lib/db/queries-daily";
+import { clearCache } from "@/lib/kommo/cache";
 
 export async function GET(req: NextRequest) {
   try {
@@ -29,6 +30,7 @@ export async function PUT(req: NextRequest) {
         return NextResponse.json({ error: "Missing date" }, { status: 400 });
       }
       await bulkSetSchedule(body.date, body.entries);
+      clearCache();
       return NextResponse.json({ ok: true });
     }
 
@@ -42,6 +44,7 @@ export async function PUT(req: NextRequest) {
     }
 
     await setSchedule(userId, date, isOnLine);
+    clearCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error("Schedule PUT error:", error);

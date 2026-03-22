@@ -69,13 +69,17 @@ export const FIRST_LINE_STATUSES = {
 export const BERATER_STATUSES = {
   UNSORTED: 93860327,                // Неразобранное
   RECEIVED_FROM_FIRST: 93860331,     // Принято от первой линии
+  DOVEDENIE: 102183931,              // Доведение
+  CONSULT_BEFORE_DC: 102183935,      // Консультация перед термином ДЦ
+  CONSULT_BEFORE_DC_DONE: 102183939, // Консультация перед термином ДЦ проведена
   IN_PROGRESS: 93860335,             // Взято в работу
   NO_ANSWER: 93860339,               // Недозвон
   CONTACT_MADE: 93860863,            // Контакт установлен
   TERM_DC_CANCELLED: 93860875,       // Термин ДЦ отменен/перенесен
   TERM_DC_DONE: 93886075,            // Термин ДЦ состоялся
-  TERM_AA: 93860879,                 // Термин АА
   TERM_AA_CANCELLED: 93860883,       // Термин АА отменен/перенесен
+  CONSULT_BEFORE_AA: 102183943,      // Консультация перед термином АА
+  CONSULT_BEFORE_AA_DONE: 102183947, // Консультация перед термином АА проведена
   BERATER_REVIEW: 93860887,          // На рассмотрении бератера
   DELAYED_START: 95515895,           // Отложенный старт
   APPEAL: 93860891,                  // Апелляция
@@ -106,12 +110,16 @@ export const B2_PLUS_STATUSES: Set<number> = new Set([
   FIRST_LINE_STATUSES.DELAYED_START,
   // Also berater pipeline active statuses (transferred from first line)
   BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  BERATER_STATUSES.DOVEDENIE,
+  BERATER_STATUSES.CONSULT_BEFORE_DC,
+  BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
   BERATER_STATUSES.IN_PROGRESS,
   BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
-  BERATER_STATUSES.TERM_AA,
   BERATER_STATUSES.TERM_AA_CANCELLED,
+  BERATER_STATUSES.CONSULT_BEFORE_AA,
+  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
   BERATER_STATUSES.BERATER_REVIEW,
   BERATER_STATUSES.DELAYED_START,
   BERATER_STATUSES.APPEAL,
@@ -146,13 +154,17 @@ export const ALL_ACTIVE_STATUS_IDS: number[] = [
   // Berater
   BERATER_STATUSES.UNSORTED,
   BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  BERATER_STATUSES.DOVEDENIE,
+  BERATER_STATUSES.CONSULT_BEFORE_DC,
+  BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
   BERATER_STATUSES.IN_PROGRESS,
   BERATER_STATUSES.NO_ANSWER,
   BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
-  BERATER_STATUSES.TERM_AA,
   BERATER_STATUSES.TERM_AA_CANCELLED,
+  BERATER_STATUSES.CONSULT_BEFORE_AA,
+  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
   BERATER_STATUSES.BERATER_REVIEW,
   BERATER_STATUSES.DELAYED_START,
   BERATER_STATUSES.APPEAL,
@@ -185,7 +197,7 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
   },
   termAA: {
     pipelineIds: [B2G_PIPELINES.BERATER],
-    statusIds: new Set([BERATER_STATUSES.TERM_AA]),
+    statusIds: new Set([BERATER_STATUSES.CONSULT_BEFORE_AA]),
   },
   termAACancelled: {
     pipelineIds: [B2G_PIPELINES.BERATER],
@@ -243,7 +255,7 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
       BERATER_STATUSES.CONTACT_MADE,
       BERATER_STATUSES.TERM_DC_CANCELLED,
       BERATER_STATUSES.TERM_DC_DONE,
-      BERATER_STATUSES.TERM_AA,
+      BERATER_STATUSES.CONSULT_BEFORE_AA,
       BERATER_STATUSES.TERM_AA_CANCELLED,
       BERATER_STATUSES.BERATER_REVIEW,
       BERATER_STATUSES.DELAYED_START,
@@ -251,14 +263,14 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     ]),
   },
 
-  // Ожидают термин всего — leads in berater before term appointment happens
+  // Ожидают термин всего — leads in berater before term DC
   awaitTermTotal: {
     pipelineIds: [B2G_PIPELINES.BERATER],
     statusIds: new Set([
       BERATER_STATUSES.RECEIVED_FROM_FIRST,
-      BERATER_STATUSES.IN_PROGRESS,
-      BERATER_STATUSES.NO_ANSWER,
-      BERATER_STATUSES.CONTACT_MADE,
+      BERATER_STATUSES.DOVEDENIE,
+      BERATER_STATUSES.CONSULT_BEFORE_DC,
+      BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
     ]),
   },
 };

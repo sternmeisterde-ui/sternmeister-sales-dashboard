@@ -138,16 +138,17 @@ export default function CalendarPicker({
           </span>
         )}
         {isActive && (
-          <span
-            role="button"
+          <button
+            type="button"
             onClick={(e) => {
+              e.preventDefault();
               e.stopPropagation();
               clear();
             }}
             className="ml-0.5 p-0.5 hover:bg-white/10 rounded transition-colors"
           >
             <X className="w-3 h-3" />
-          </span>
+          </button>
         )}
       </button>
 

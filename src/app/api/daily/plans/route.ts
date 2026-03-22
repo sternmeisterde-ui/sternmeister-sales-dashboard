@@ -1,6 +1,7 @@
 // PUT /api/daily/plans — Upsert a single plan value
 import { NextRequest, NextResponse } from "next/server";
 import { upsertPlan } from "@/lib/db/queries-daily";
+import { clearCache } from "@/lib/kommo/cache";
 
 export async function PUT(req: NextRequest) {
   try {
@@ -24,6 +25,9 @@ export async function PUT(req: NextRequest) {
       periodType,
       periodDate,
     });
+
+    // Invalidate daily response cache so new plan is visible immediately
+    clearCache();
 
     return NextResponse.json({ ok: true });
   } catch (error) {

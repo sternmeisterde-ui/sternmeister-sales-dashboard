@@ -1,6 +1,7 @@
 // GET /api/daily?department=b2g&period=day&date=2026-02-28
 // Returns merged Kommo facts + DB plans for the Daily tab
 import { NextRequest, NextResponse } from "next/server";
+import { cached } from "@/lib/kommo/cache";
 import { getCallNotes, getLeads, getTasks } from "@/lib/kommo/client";
 import {
   aggregateCallMetrics,
@@ -131,6 +132,9 @@ function buildUserFacts(
 
 // ==================== MAIN HANDLER ====================
 
+// Response-level cache: 2 min TTL for assembled daily data
+const RESPONSE_CACHE_TTL = 2 * 60 * 1000;
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
@@ -139,15 +143,50 @@ export async function GET(req: NextRequest) {
     const dateStr =
       url.searchParams.get("date") || new Date().toISOString().slice(0, 10);
 
+    const cacheKey = `daily-response:${department}:${period}:${dateStr}`;
+    const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, async () => {
+      return buildDailyResponse(department, period, dateStr);
+    });
+
+    return NextResponse.json(responseData);
+  } catch (error) {
+    console.error("Daily API error:", error);
+    return NextResponse.json(
+      { error: String(error) },
+      { status: 500 }
+    );
+  }
+}
+
+async function buildDailyResponse(department: string, period: string, dateStr: string) {
     const { from, to, periodType, periodDate } = getDateRange(period, dateStr);
     const { leadsPages, closedPages, callPages } = getMaxPages(period);
 
     // ─── Step 1: DB queries (fast, parallel) ───
-    const [allManagers, plans, scheduleMap] = await Promise.all([
+    // Always load monthly plan as base — day/week plans are derived proportionally
+    const base = new Date(dateStr + "T00:00:00Z");
+    const monthPeriodDate = `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, "0")}`;
+    const daysInMonth = new Date(base.getUTCFullYear(), base.getUTCMonth() + 1, 0).getUTCDate();
+
+    const [allManagers, monthlyPlans, scheduleMap] = await Promise.all([
       getManagersWithKommo(department),
-      getPlans(department, periodType, periodDate),
+      getPlans(department, "month", monthPeriodDate),
       period === "day" ? getScheduleForDate(dateStr) : Promise.resolve(null),
     ]);
+
+    // Calculate plan multiplier/divisor based on period
+    // Month plan is the base (divisor=1). Day/week = divide, year = multiply by 12
+    let planDivisor = 1;
+    if (periodType === "day") {
+      planDivisor = daysInMonth; // e.g. 31 for March
+    } else if (periodType === "week") {
+      planDivisor = daysInMonth / 7; // ~4.3 weeks per month
+    } else if (periodType === "year") {
+      planDivisor = 1 / 12; // year = month * 12
+    }
+    // month uses divisor=1 (full monthly plan)
+
+    const plans = monthlyPlans;
 
     // Schedule / on-line filtering
     const isManagerOnLine = (managerId: string): boolean => {
@@ -185,8 +224,18 @@ export async function GET(req: NextRequest) {
 
     const closedDateFilter = { field: "closed_at" as const, from, to };
 
-    // Group A: snapshot + tasks (parallel)
-    const [snapshotActiveLeads, tasks] = await Promise.all([
+    // For "termsTotal" — previous day (or same period for non-day views)
+    let termsFrom = from;
+    let termsTo = to;
+    if (periodType === "day") {
+      // Previous day: shift back 24h
+      termsFrom = from - 86400;
+      termsTo = from - 1;
+    }
+
+    // All Kommo API calls in parallel (each individually cached by client.ts)
+    const termsDateFilter = { field: "closed_at" as const, from: termsFrom, to: termsTo };
+    const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads] = await Promise.all([
       getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch((e) => {
         console.error("Kommo snapshot leads error:", e);
         return [] as KommoLead[];
@@ -195,10 +244,6 @@ export async function GET(req: NextRequest) {
         console.error("Kommo tasks error:", e);
         return [];
       }),
-    ]);
-
-    // Group B: period-filtered data (parallel)
-    const [wonLeads, lostLeads, callNotes] = await Promise.all([
       getLeads(B2G_ALL_PIPELINE_IDS, [142], closedPages, closedDateFilter).catch((e) => {
         console.error("Kommo won leads error:", e);
         return [] as KommoLead[];
@@ -210,6 +255,10 @@ export async function GET(req: NextRequest) {
       getCallNotes(from, to, kommoUserIds, callPages).catch((e) => {
         console.error("Kommo call notes error:", e);
         return [];
+      }),
+      getLeads([10935879], [142], closedPages, termsDateFilter).catch((e) => {
+        console.error("Kommo terms won leads error:", e);
+        return [] as KommoLead[];
       }),
     ]);
 
@@ -244,15 +293,27 @@ export async function GET(req: NextRequest) {
     }
 
     const getPlan = (line: string, userId: string | null, metricKey: string): string | null => {
+      let val: string | undefined;
       if (userId) {
-        const val = planLookup.get(`${line}:${userId}:${metricKey}`);
-        if (val !== undefined) return val;
+        val = planLookup.get(`${line}:${userId}:${metricKey}`);
       }
-      const val = planLookup.get(`${line}:null:${metricKey}`);
-      return val ?? null;
+      if (val === undefined) {
+        val = planLookup.get(`${line}:null:${metricKey}`);
+      }
+      if (val === undefined) return null;
+
+      // Apply period divisor (monthly plan → day/week proportion)
+      if (planDivisor !== 1) {
+        const num = Number(val);
+        if (!Number.isNaN(num)) {
+          return String(Math.round(num / planDivisor));
+        }
+      }
+      return val;
     };
 
     const managersOnLineCount = managers.length;
+    const line1ManagerCount = managers.filter((m) => m.line === "1").length;
 
     // ─── Step 6: Build response sections ───
     const sections = dailySections.map((section) => {
@@ -291,11 +352,20 @@ export async function GET(req: NextRequest) {
           return { key: metric.key, label: metric.label, plan: null, fact: null, percent: null, isGroupHeader: true };
         }
 
-        const plan = getPlan(section.dbLine, null, metric.key);
+        let plan = getPlan(section.dbLine, null, metric.key);
         let fact: string | null = null;
 
+        // Computed plan for qualLeadsPercent = plan(qualLeads) / plan(totalLeads)
+        if (metric.key === "qualLeadsPercent") {
+          const planTotal = getPlan(section.dbLine, null, "totalLeads");
+          const planQual = getPlan(section.dbLine, null, "qualLeads");
+          if (planTotal && planQual && Number(planTotal) > 0) {
+            plan = String(Math.round((Number(planQual) / Number(planTotal)) * 100));
+          }
+        }
+
         if (section.key === "funnel") {
-          fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount);
+          fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
         } else {
           const facts = buildUserFacts(summaryCallMetrics, totalOverdue, section);
           fact = facts[metric.key] ?? null;
@@ -310,7 +380,12 @@ export async function GET(req: NextRequest) {
 
         let percent: number | null = null;
         if (plan && fact && Number(plan) > 0) {
-          percent = Math.round((Number(fact) / Number(plan)) * 100);
+          // For %-based metrics, show difference rather than ratio of ratios
+          if (metric.unit === "%") {
+            percent = null; // don't show % of % — plan and fact are already percentages
+          } else {
+            percent = Math.round((Number(fact) / Number(plan)) * 100);
+          }
         }
 
         return { key: metric.key, label: metric.label, plan, fact, percent, isGroupHeader: false };
@@ -328,6 +403,47 @@ export async function GET(req: NextRequest) {
           percent: number | null;
         }>;
       }> = [];
+
+      // For funnel section: distribute totalLeads/qualLeads equally among line-1 managers
+      if (section.key === "funnel") {
+        const line1Managers = managers.filter((m) => m.line === "1");
+        if (line1Managers.length > 0) {
+          const splitKeys = new Set(["totalLeads", "qualLeads"]);
+          managerData = line1Managers.map((mgr) => {
+            const mgrMetrics = section.metrics
+              .filter((m) => !m.isGroupHeader)
+              .map((metric) => {
+                let plan: string | null = null;
+                let fact: string | null = null;
+                let percent: number | null = null;
+
+                if (splitKeys.has(metric.key)) {
+                  // Divide total evenly
+                  const totalFact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
+                  const totalPlan = getPlan(section.dbLine, null, metric.key);
+                  if (totalFact) fact = String(Math.round(Number(totalFact) / line1Managers.length));
+                  if (totalPlan) plan = String(Math.round(Number(totalPlan) / line1Managers.length));
+                  if (plan && fact && Number(plan) > 0) {
+                    percent = Math.round((Number(fact) / Number(plan)) * 100);
+                  }
+                } else if (metric.key === "qualLeadsPercent") {
+                  // Same % for all managers (computed from totals)
+                  const totalFact = getFunnelFact("qualLeadsPercent", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads);
+                  const planTotal = getPlan(section.dbLine, null, "totalLeads");
+                  const planQual = getPlan(section.dbLine, null, "qualLeads");
+                  fact = totalFact;
+                  if (planTotal && planQual && Number(planTotal) > 0) {
+                    plan = String(Math.round((Number(planQual) / Number(planTotal)) * 100));
+                  }
+                }
+
+                return { key: metric.key, plan, fact, percent };
+              });
+
+            return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
+          });
+        }
+      }
 
       if (section.perManager) {
         managerData = sectionManagers.map((mgr) => {
@@ -351,7 +467,11 @@ export async function GET(req: NextRequest) {
 
               let percent: number | null = null;
               if (plan && fact && Number(plan) > 0) {
-                percent = Math.round((Number(fact) / Number(plan)) * 100);
+                if (metric.unit === "%") {
+                  percent = null;
+                } else {
+                  percent = Math.round((Number(fact) / Number(plan)) * 100);
+                }
               }
 
               return { key: metric.key, plan, fact, percent };
@@ -392,21 +512,14 @@ export async function GET(req: NextRequest) {
         }
       : undefined;
 
-    return NextResponse.json({
+    return {
       date: dateStr,
       period,
       periodType,
       periodDate,
       sections,
       schedule: scheduleInfo,
-    });
-  } catch (error) {
-    console.error("Daily API error:", error);
-    return NextResponse.json(
-      { error: String(error) },
-      { status: 500 }
-    );
-  }
+    };
 }
 
 // ==================== FUNNEL FACT RESOLVER ====================
@@ -414,11 +527,17 @@ export async function GET(req: NextRequest) {
 function getFunnelFact(
   key: string,
   fc: LeadFunnelCounts,
-  managersOnLine: number
+  managersOnLine: number,
+  snapshotLeads?: KommoLead[],
+  line1ManagerCount?: number,
+  termsWonLeads?: KommoLead[]
 ): string | null {
   switch (key) {
     case "activeDeals":
       return String(fc.activeDeals);
+    case "termsTotal":
+      // WON leads from first line (Термин ДЦ) — previous day or selected period
+      return String(termsWonLeads?.length ?? 0);
     case "managersOnLine":
       return String(managersOnLine);
     case "totalLeads":
@@ -433,15 +552,21 @@ function getFunnelFact(
     case "b2plus":
       return String(fc.b2plus);
 
-    case "avgPortfolio":
-      return managersOnLine > 0
-        ? String(Math.round(fc.activeDeals / managersOnLine))
-        : "0";
+    case "avgPortfolio": {
+      // All deals in "Бух Гос" pipeline EXCLUDING: closed(143), won/термин ДЦ(142), база(93485479), отложенный старт(95514987)
+      const excludeStatuses = new Set([142, 143, 93485479, 95514987]);
+      const pipelineId = 10935879; // Бух Гос first line
+      const portfolioLeads = (snapshotLeads || []).filter(
+        (l) => l.pipeline_id === pipelineId && !l.is_deleted && !excludeStatuses.has(l.status_id)
+      );
+      const divisor = line1ManagerCount || managersOnLine || 1;
+      return String(Math.round(portfolioLeads.length / divisor));
+    }
 
     case "qualLeadsPercent":
-      // % of new leads in period that reached qualified status (flow / flow)
+      // qualLeads / totalLeads (snapshot qual / period new leads)
       return fc.totalLeads > 0
-        ? String(Math.round((fc.qualLeadsNew / fc.totalLeads) * 100))
+        ? String(Math.round((fc.qualLeads / fc.totalLeads) * 100))
         : "0";
     case "convQualTask":
       // Conversion: qualified → task (docs sent). Both from flow set.
