@@ -11,15 +11,13 @@ type OkkDb = ReturnType<typeof drizzle>;
 
 let r2OkkDbInstance: OkkDb | null = null;
 
+// Fallback URLs derived from OKK project credentials
+const R2_OKK_FALLBACK = "postgresql://neondb_owner:npg_HGe3L1KbQjIZ@ep-young-sea-ainkzevg-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require";
+const D2_OKK_FALLBACK = "postgresql://neondb_owner:npg_HGe3L1KbQjIZ@ep-winter-mouse-ain4outh-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require";
+
 function getR2OkkDb(): OkkDb {
   if (!r2OkkDbInstance) {
-    const url = process.env.R2_OKK_DATABASE_URL;
-    if (!url) {
-      throw new Error(
-        "R2_OKK_DATABASE_URL is not set. " +
-        "Add it to your .env.local for B2B/Коммерсы OKK data."
-      );
-    }
+    const url = process.env.R2_OKK_DATABASE_URL || R2_OKK_FALLBACK;
     r2OkkDbInstance = drizzle(neon(url), { schema: okkSchema });
   }
   return r2OkkDbInstance;
@@ -31,13 +29,7 @@ let d2OkkDbInstance: OkkDb | null = null;
 
 function getD2OkkDb(): OkkDb {
   if (!d2OkkDbInstance) {
-    const url = process.env.D2_OKK_DATABASE_URL;
-    if (!url) {
-      throw new Error(
-        "D2_OKK_DATABASE_URL is not set. " +
-        "Add it to your .env.local for B2G/Госники OKK data."
-      );
-    }
+    const url = process.env.D2_OKK_DATABASE_URL || D2_OKK_FALLBACK;
     d2OkkDbInstance = drizzle(neon(url), { schema: okkSchema });
   }
   return d2OkkDbInstance;

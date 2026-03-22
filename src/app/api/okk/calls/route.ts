@@ -122,8 +122,10 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
     if (statusParam) {
       conditions.push(eq(okkCalls.status, statusParam));
     } else {
-      // By default only show evaluated calls (hide pending/error)
-      conditions.push(eq(okkCalls.status, "evaluated"));
+      // By default only show completed calls: "notified" (OKK pipeline) or "evaluated"
+      conditions.push(
+        sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`
+      );
     }
 
     const managerIdParam = sp.get("manager_id");
