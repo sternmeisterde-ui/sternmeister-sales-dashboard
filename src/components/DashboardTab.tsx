@@ -209,9 +209,11 @@ export default function DashboardTab({ department }: { department: string }) {
           <button onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
             <ChevronRight className="w-4 h-4" />
           </button>
-          <button onClick={() => setDate(new Date())} className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors border border-white/5">
-            Сегодня
-          </button>
+          {formatDate(date) !== formatDate(new Date()) && (
+            <button onClick={() => setDate(new Date())} className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20">
+              Сегодня
+            </button>
+          )}
           <button
             onClick={() => fetchData()}
             disabled={loading}
