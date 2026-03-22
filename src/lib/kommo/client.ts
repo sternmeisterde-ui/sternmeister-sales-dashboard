@@ -192,8 +192,23 @@ export async function getLeads(
     if (pipelineIds && pipelineIds.length > 0) {
       pipelineIds.forEach((id) => url.searchParams.append("filter[pipeline_id][]", String(id)));
     }
-    if (statusIds) {
-      statusIds.forEach((s) => url.searchParams.append("filter[statuses][][status_id]", String(s)));
+    if (statusIds && statusIds.length > 0) {
+      // Kommo requires status filter paired with pipeline_id for correct filtering
+      let idx = 0;
+      if (pipelineIds && pipelineIds.length > 0) {
+        for (const pid of pipelineIds) {
+          for (const sid of statusIds) {
+            url.searchParams.append(`filter[statuses][${idx}][status_id]`, String(sid));
+            url.searchParams.append(`filter[statuses][${idx}][pipeline_id]`, String(pid));
+            idx++;
+          }
+        }
+      } else {
+        for (const sid of statusIds) {
+          url.searchParams.append(`filter[statuses][${idx}][status_id]`, String(sid));
+          idx++;
+        }
+      }
     }
     if (dateFilter) {
       url.searchParams.set(`filter[${dateFilter.field}][from]`, String(dateFilter.from));

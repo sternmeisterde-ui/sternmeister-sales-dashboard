@@ -236,8 +236,8 @@ async function buildDailyResponse(department: string, period: string, dateStr: s
     // All Kommo API calls in parallel (each individually cached by client.ts)
     const termsDateFilter = { field: "closed_at" as const, from: termsFrom, to: termsTo };
     const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads] = await Promise.all([
-      // Snapshot: ALL leads from pipelines (no status filter) — filter active on server
-      getLeads(B2G_ALL_PIPELINE_IDS, undefined, leadsPages).catch((e) => {
+      // Snapshot: active leads from pipelines (correct status filter with pipeline_id pairing)
+      getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch((e) => {
         console.error("Kommo snapshot leads error:", e);
         return [] as KommoLead[];
       }),
