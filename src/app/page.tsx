@@ -9,6 +9,7 @@ import Image from "next/image";
 // recharts moved to DashboardTab component
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
+import AnalyticsTab from "@/components/AnalyticsTab";
 import DashboardTab from "@/components/DashboardTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
@@ -63,7 +64,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "real_calls" | "ai_calls">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2">("all");
 
   // Load session on mount
@@ -639,6 +640,7 @@ export default function Dashboard() {
           {[
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
+            { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
@@ -719,6 +721,11 @@ export default function Dashboard() {
         {/* --------------------- DAILY VIEW --------------------- */}
         {activeTab === "daily" && (
           <DailyTab department={activeDepartment} />
+        )}
+
+        {/* --------------------- ANALYTICS VIEW --------------------- */}
+        {activeTab === "analytics" && (
+          <AnalyticsTab department={activeDepartment} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
