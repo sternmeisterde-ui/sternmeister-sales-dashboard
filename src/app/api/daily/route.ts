@@ -132,8 +132,8 @@ function buildUserFacts(
 
 // ==================== MAIN HANDLER ====================
 
-// Response-level cache: 30 sec TTL for assembled daily data
-const RESPONSE_CACHE_TTL = 30 * 1000;
+// Response-level cache: 5 min TTL for assembled daily data
+const RESPONSE_CACHE_TTL = 5 * 60 * 1000;
 
 export async function GET(req: NextRequest) {
   try {

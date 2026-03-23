@@ -655,7 +655,8 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [viewMode, setViewMode] = useState<"summary" | "managers">("summary");
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
+    // Only show full loading on first load (no data yet)
+    if (!data) setLoading(true);
     setError(null);
     try {
       const dateStr = formatDate(date);
@@ -915,8 +916,18 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </div>
       </div>
 
-      {/* Loading */}
+      {/* First load */}
       {loading && !data && <DinoLoader />}
+
+      {/* Background refresh indicator */}
+      {loading && data && (
+        <div className="flex items-center justify-center py-2">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+            <span className="text-[10px] text-blue-400 font-medium">Обновление данных...</span>
+          </div>
+        </div>
+      )}
 
       {/* Error */}
       {error && (
