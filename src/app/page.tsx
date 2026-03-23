@@ -100,7 +100,10 @@ export default function Dashboard() {
 
   const [selectedCall, setSelectedCall] = useState<ManagerCall | null>(null);
   const [callDetailLoading, setCallDetailLoading] = useState(false);
-  const [callModalType, setCallModalType] = useState<"transcript" | "scoring">("transcript");
+  const [callModalType, setCallModalType] = useState<"transcript" | "scoring" | "report">("transcript");
+  const [reportMessage, setReportMessage] = useState("");
+  const [reportSending, setReportSending] = useState(false);
+  const [reportSent, setReportSent] = useState(false);
   const [selectedManager, setSelectedManager] = useState<ManagerStat | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [scoreFilter, setScoreFilter] = useState(0);
@@ -1295,10 +1298,70 @@ export default function Dashboard() {
               >
                 AI Анализ (Скоринг)
               </button>
+              <button
+                onClick={() => { setCallModalType("report"); setReportSent(false); setReportMessage(""); }}
+                className={`text-sm font-bold uppercase tracking-wider px-4 py-2 rounded-lg transition-colors ${callModalType === "report" ? "bg-red-500/20 text-red-400" : "text-slate-500 hover:text-slate-300"}`}
+              >
+                Сообщить об ошибке
+              </button>
             </div>
 
             {/* MODAL CONTENT */}
-            {callDetailLoading ? (
+            {callModalType === "report" ? (
+              <div className="flex flex-col gap-4 py-6 px-2">
+                <div className="glass-panel rounded-2xl p-5 border border-red-500/20 bg-red-500/5">
+                  <h4 className="text-sm font-bold text-red-400 mb-1">Сообщить об ошибке в оценке</h4>
+                  <p className="text-[11px] text-slate-400 mb-4">Опишите что именно оценено неправильно. Ваше сообщение будет отправлено руководству.</p>
+                  {reportSent ? (
+                    <div className="text-center py-8">
+                      <span className="text-emerald-400 text-lg font-bold">✓ Отправлено!</span>
+                      <p className="text-slate-400 text-xs mt-2">Спасибо за обратную связь. Мы рассмотрим вашу жалобу.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <textarea
+                        value={reportMessage}
+                        onChange={(e) => setReportMessage(e.target.value)}
+                        placeholder="Напишите что не так с оценкой этого звонка..."
+                        rows={5}
+                        className="w-full bg-slate-900/50 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-red-500/50 resize-none"
+                      />
+                      <button
+                        disabled={!reportMessage.trim() || reportSending}
+                        onClick={async () => {
+                          if (!selectedCall || !reportMessage.trim()) return;
+                          setReportSending(true);
+                          try {
+                            await fetch("/api/error-report", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                callId: selectedCall.id,
+                                department: activeDepartment,
+                                source: activeTab === "real_calls" ? "okk" : "ai",
+                                managerName: selectedCall.name,
+                                managerTelegram: session?.telegramUsername || null,
+                                callDate: selectedCall.date,
+                                callScore: selectedCall.score,
+                                message: reportMessage.trim(),
+                              }),
+                            });
+                            setReportSent(true);
+                          } catch {
+                            // silent
+                          } finally {
+                            setReportSending(false);
+                          }
+                        }}
+                        className="mt-3 w-full py-3 rounded-xl text-sm font-bold uppercase tracking-wider transition-all bg-red-500 text-white hover:bg-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {reportSending ? "Отправка..." : "Отправить жалобу"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : callDetailLoading ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
                 <span className="ml-3 text-slate-400 text-sm">Загрузка данных...</span>
