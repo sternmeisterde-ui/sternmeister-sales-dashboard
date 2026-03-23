@@ -427,8 +427,8 @@ export default function AnalyticsTab({
           const text = await res.text();
           throw new Error(`API error ${res.status}: ${text}`);
         }
-        const json: AnalyticsData = await res.json();
-        setData(json);
+        const json = await res.json();
+        setData(json.data ?? json);
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
         if (e instanceof TypeError && e.message === "Failed to fetch") return;

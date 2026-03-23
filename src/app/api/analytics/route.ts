@@ -252,12 +252,15 @@ async function buildAnalytics(
     return { type, distribution };
   });
 
-  // ── Build categories output ───────────────────────────────────────────────
+  // ── Build categories output (cat → month → count) ─────────────────────────
   const categories: Record<string, Record<string, number>> = {};
   for (const month of monthRange) {
     const acc = accumulators.get(month);
     if (!acc || acc.categories.size === 0) continue;
-    categories[month] = Object.fromEntries(acc.categories);
+    for (const [cat, count] of acc.categories) {
+      if (!categories[cat]) categories[cat] = {};
+      categories[cat][month] = count;
+    }
   }
 
   // ── Build overallScores and callVolume ────────────────────────────────────
