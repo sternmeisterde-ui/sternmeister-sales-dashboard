@@ -135,7 +135,7 @@ async function buildAnalytics(
       totalScore: okkEvaluations.totalScore,
       evaluationJson: okkEvaluations.evaluationJson,
       // Raw JSONB extraction for the lead category custom field
-      leadCategory: sql<string | null>`(${okkCalls}.kommo_custom_fields->>'field_866934')`,
+      leadCategory: sql<string | null>`("calls".kommo_custom_fields->>'field_866934')`,
     })
     .from(okkCalls)
     .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
