@@ -92,7 +92,7 @@ export async function GET(
 
     // Преобразование блоков оценки из evaluationJson
     const blocks = (call.evaluationJson?.blocks || [])
-      .filter((b) => b.criteria && b.criteria.length > 0)
+      .filter((b) => (b.criteria && b.criteria.length > 0) || b.feedback)
       .map((b, i) => ({
         id: String(i),
         name: b.name || "",

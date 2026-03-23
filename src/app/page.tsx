@@ -1435,7 +1435,7 @@ export default function Dashboard() {
                                       {/* Quote block */}
                                       {criterion.quote && criterion.quote !== "Не применимо" && (
                                         <blockquote className="ml-8 pl-3 border-l-2 border-blue-500/40 italic text-[11px] text-slate-400 leading-relaxed">
-                                          &ldquo;{criterion.quote}&rdquo;
+                                          {"\u201c"}{criterion.quote}{"\u201d"}
                                         </blockquote>
                                       )}
                                     </div>
