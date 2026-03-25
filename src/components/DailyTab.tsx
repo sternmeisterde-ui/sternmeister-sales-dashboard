@@ -1,8 +1,18 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { TrendingUp, Users, Activity, Loader2, RefreshCw, ChevronLeft, ChevronRight, CalendarDays, UserCheck, UserX } from "lucide-react";
-import CalendarPicker from "@/components/CalendarPicker";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  TrendingUp,
+  Users,
+  Activity,
+  Loader2,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  CalendarDays,
+  UserCheck,
+  UserX,
+} from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 
 // ====================== TYPES ======================
@@ -50,7 +60,7 @@ interface ScheduleInfo {
   hasSchedule: boolean;
 }
 
-interface DailyResponse {
+interface DailySnapshot {
   date: string;
   period: string;
   periodType: string;
@@ -59,390 +69,410 @@ interface DailyResponse {
   schedule?: ScheduleInfo;
 }
 
+interface RangeResponse {
+  mode: "days" | "months";
+  days?: DailySnapshot[];
+  monthlySummary?: DailySnapshot;
+  months?: DailySnapshot[];
+  month?: string;
+  year?: number;
+}
+
 // ====================== HELPERS ======================
-
-function getPercentColor(percent: number | null): string {
-  if (percent === null) return "";
-  if (percent >= 100) return "text-emerald-400";
-  if (percent >= 80) return "text-amber-400";
-  return "text-red-400";
-}
-
-function getPercentBg(percent: number | null): string {
-  if (percent === null) return "";
-  if (percent >= 100) return "bg-emerald-500/10";
-  if (percent >= 80) return "bg-amber-500/10";
-  return "bg-red-500/10";
-}
 
 function getSectionIcon(iconName: string) {
   switch (iconName) {
     case "TrendingUp":
-      return <TrendingUp className="w-5 h-5 text-blue-400" />;
+      return <TrendingUp className="w-4 h-4 text-blue-400" />;
     case "Users":
-      return <Users className="w-5 h-5 text-emerald-400" />;
+      return <Users className="w-4 h-4 text-emerald-400" />;
     case "Activity":
-      return <Activity className="w-5 h-5 text-purple-400" />;
+      return <Activity className="w-4 h-4 text-purple-400" />;
     default:
-      return <TrendingUp className="w-5 h-5 text-blue-400" />;
+      return <TrendingUp className="w-4 h-4 text-blue-400" />;
   }
 }
 
-function formatDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+function getCellColor(value: string | null): string {
+  if (!value) return "text-slate-600";
+  const num = Number(value);
+  if (Number.isNaN(num)) return "text-white";
+  if (num === 0) return "text-slate-600";
+  return "text-white";
 }
 
-// ====================== EDITABLE CELL ======================
-
-function EditableCell({
-  value,
-  onSave,
-  placeholder = "—",
-}: {
-  value: string | null;
-  onSave: (val: string) => void;
-  placeholder?: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value || "");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (editing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editing]);
-
-  const commit = () => {
-    setEditing(false);
-    if (draft !== (value || "")) {
-      onSave(draft);
-    }
-  };
-
-  if (editing) {
-    return (
-      <input
-        ref={inputRef}
-        type="text"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-          if (e.key === "Escape") {
-            setDraft(value || "");
-            setEditing(false);
-          }
-        }}
-        className="w-20 bg-slate-700/80 border border-blue-500/50 rounded px-2 py-0.5 text-white text-right text-sm font-mono outline-none focus:border-blue-400 transition-colors"
-      />
-    );
-  }
-
-  return (
-    <button
-      onClick={() => {
-        setDraft(value || "");
-        setEditing(true);
-      }}
-      className="min-w-[3rem] text-right font-mono text-sm cursor-pointer hover:bg-blue-500/10 rounded px-2 py-0.5 transition-colors border border-transparent hover:border-blue-500/30 text-blue-300"
-      title="Нажмите для редактирования"
-    >
-      {value || placeholder}
-    </button>
-  );
+function formatDayLabel(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `D${d.getDate()}`;
 }
 
-// ====================== UNIFIED TABLE ======================
-
-// Returns a Tailwind accent colour token for a given section key
-function getSectionAccentColor(sectionKey: string): string {
-  switch (sectionKey) {
-    case "funnel": return "text-blue-400";
-    case "qualifier": return "text-emerald-400";
-    case "secondLine": return "text-purple-400";
-    default: return "text-blue-400";
-  }
+function formatDaySubLabel(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-// Section-separator row rendered inside the unified table body
-function SectionHeaderRow({
-  section,
-  colSpan,
-}: {
-  section: Section;
-  colSpan: number;
-}) {
-  return (
-    <tr className="bg-slate-900/40 border-t-2 border-white/10">
-      <td
-        colSpan={colSpan}
-        className="px-5 py-2.5 sticky left-0 bg-slate-900/40"
-      >
-        <div className="flex items-center gap-2">
-          {getSectionIcon(section.icon)}
-          <span className={`text-[10px] uppercase tracking-widest font-bold ${getSectionAccentColor(section.key)}`}>
-            {section.title}
-          </span>
-        </div>
-      </td>
-    </tr>
-  );
+const MONTH_NAMES_SHORT = [
+  "Янв", "Фев", "Мар", "Апр", "Май", "Июн",
+  "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек",
+];
+
+const MONTH_NAMES = [
+  "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+];
+
+// Get fact value for a metric from a snapshot's section
+function getMetricFact(snapshot: DailySnapshot | undefined, sectionKey: string, metricKey: string): string | null {
+  if (!snapshot) return null;
+  const section = snapshot.sections.find((s) => s.key === sectionKey);
+  if (!section) return null;
+  const metric = section.metrics.find((m) => m.key === metricKey);
+  return metric?.fact ?? null;
 }
 
-function UnifiedTable({
-  sections,
-  viewMode,
-  onPlanSave,
-}: {
-  sections: Section[];
-  viewMode: "summary" | "managers";
-  onPlanSave: (line: string, metricKey: string, value: string, userId?: string) => void;
-}) {
-  // Collect all managers that appear in any section (including funnel with split leads)
-  const allManagers: ManagerData[] = (() => {
-    const seen = new Set<string>();
-    const result: ManagerData[] = [];
-    for (const sec of sections) {
-      for (const mgr of sec.managers) {
-        if (!seen.has(mgr.id)) {
-          seen.add(mgr.id);
-          result.push(mgr);
-        }
+// Get per-manager fact for a metric
+function getManagerMetricFact(
+  snapshot: DailySnapshot | undefined,
+  sectionKey: string,
+  metricKey: string,
+  managerId: string
+): string | null {
+  if (!snapshot) return null;
+  const section = snapshot.sections.find((s) => s.key === sectionKey);
+  if (!section) return null;
+  const mgr = section.managers.find((m) => m.id === managerId);
+  if (!mgr) return null;
+  const nonHeaderMetrics = section.metrics.filter((m) => !m.isGroupHeader);
+  const idx = nonHeaderMetrics.findIndex((m) => m.key === metricKey);
+  return mgr.metrics[idx]?.fact ?? null;
+}
+
+// Collect all unique managers from a snapshot
+function collectManagers(snapshot: DailySnapshot | undefined): ManagerData[] {
+  if (!snapshot) return [];
+  const seen = new Set<string>();
+  const result: ManagerData[] = [];
+  for (const sec of snapshot.sections) {
+    for (const mgr of sec.managers) {
+      if (!seen.has(mgr.id)) {
+        seen.add(mgr.id);
+        result.push(mgr);
       }
     }
-    return result;
-  })();
+  }
+  return result;
+}
 
-  // Summary mode: Метрика | План | Факт | %
-  if (viewMode === "summary") {
+// Get all non-header metrics across all sections (flat list with section info)
+function getAllMetrics(snapshot: DailySnapshot | undefined): Array<{
+  sectionKey: string;
+  sectionTitle: string;
+  sectionIcon: string;
+  metricKey: string;
+  metricLabel: string;
+  isGroupHeader: boolean;
+}> {
+  if (!snapshot) return [];
+  const result: Array<{
+    sectionKey: string;
+    sectionTitle: string;
+    sectionIcon: string;
+    metricKey: string;
+    metricLabel: string;
+    isGroupHeader: boolean;
+  }> = [];
+  for (const sec of snapshot.sections) {
+    // Add section header
+    result.push({
+      sectionKey: sec.key,
+      sectionTitle: sec.title,
+      sectionIcon: sec.icon,
+      metricKey: `__section_${sec.key}`,
+      metricLabel: sec.title,
+      isGroupHeader: false,
+    });
+    for (const m of sec.metrics) {
+      result.push({
+        sectionKey: sec.key,
+        sectionTitle: sec.title,
+        sectionIcon: sec.icon,
+        metricKey: m.key,
+        metricLabel: m.label,
+        isGroupHeader: m.isGroupHeader,
+      });
+    }
+  }
+  return result;
+}
+
+// ====================== SUMMARY TIME TABLE ======================
+// Rows = metrics, Columns = days or months
+
+function SummaryTimeTable({
+  snapshots,
+  columnLabels,
+  columnSubLabels,
+  selectedCol,
+  onSelectCol,
+}: {
+  snapshots: DailySnapshot[];
+  columnLabels: string[];
+  columnSubLabels: string[];
+  selectedCol: number | null;
+  onSelectCol: (idx: number) => void;
+}) {
+  const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
+  const metrics = useMemo(() => getAllMetrics(referenceSnapshot), [referenceSnapshot]);
+
+  if (!referenceSnapshot || metrics.length === 0) {
     return (
-      <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
-        <div className="w-full overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-white/10">
-                <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold">
-                  Метрика
-                </th>
-                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[13%]">
-                  План
-                </th>
-                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[13%]">
-                  Факт
-                </th>
-                <th className="px-3 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right w-[10%]">
-                  %
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5 text-sm">
-              {sections.map((section) => (
-                <>
-                  {/* Section separator */}
-                  <SectionHeaderRow
-                    key={`sep-${section.key}`}
-                    section={section}
-                    colSpan={4}
-                  />
-
-                  {section.metrics.map((m) => {
-                    if (m.isGroupHeader) {
-                      return (
-                        <tr key={`${section.key}-${m.key}`} className="bg-slate-800/30">
-                          <td colSpan={4} className="px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-10">
-                            {m.label}
-                          </td>
-                        </tr>
-                      );
-                    }
-                    return (
-                      <tr key={`${section.key}-${m.key}`} className="hover:bg-white/[0.02] transition-colors group">
-                        <td className="px-5 py-3 font-medium text-slate-300 group-hover:text-white transition-colors pl-10">
-                          {m.label}
-                        </td>
-                        <td className="px-3 py-3 text-right">
-                          <EditableCell
-                            value={m.plan}
-                            onSave={(v) => onPlanSave(section.dbLine, m.key, v)}
-                          />
-                        </td>
-                        <td className="px-3 py-3 font-bold text-white text-right font-mono">
-                          {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
-                        </td>
-                        <td className={`px-3 py-3 text-right font-bold font-mono ${getPercentColor(m.percent)} ${getPercentBg(m.percent)}`}>
-                          {m.percent !== null ? `${m.percent}%` : ""}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+        Нет данных за выбранный период
       </div>
     );
   }
 
-  // Managers mode: sticky metric col | Итого (Fact/%) | manager columns (Fact only)
-  // colSpan for a full row: 1 (metric) + 2 (итого) + allManagers.length (one Fact col each)
-  const totalCols = 1 + 2 + allManagers.length;
-
   return (
-    <div className="glass-panel text-slate-200 rounded-3xl overflow-hidden border border-white/5 shadow-2xl flex flex-col">
+    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            {/* Top row: column group headers */}
             <tr className="border-b border-white/10">
-              <th className="px-5 py-3 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10 min-w-[220px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[220px]">
                 Метрика
               </th>
-              {/* Итого group */}
-              <th
-                colSpan={2}
-                className="px-3 py-2 text-center border-l-2 border-r-2 border-blue-400/60 bg-blue-500/15"
-              >
-                <span className="text-[10px] uppercase tracking-widest text-blue-300 font-bold">
-                  Итого
-                </span>
-              </th>
-              {/* Per-manager single-column headers */}
-              {allManagers.map((mgr) => {
-                const parts = mgr.name.split(" ");
-                return (
+              {columnLabels.map((label, i) => (
                 <th
-                  key={mgr.id}
-                  className="px-2 py-2 text-center border-l border-white/10 min-w-[70px]"
+                  key={i}
+                  onClick={() => onSelectCol(i)}
+                  className={`px-2 py-2 text-center min-w-[60px] cursor-pointer transition-colors ${
+                    selectedCol === i
+                      ? "bg-blue-500/20 border-b-2 border-blue-400"
+                      : "hover:bg-white/[0.03]"
+                  }`}
                 >
-                  <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold leading-tight block">
-                    {parts[0]}
-                  </span>
-                  {parts[1] && (
-                    <span className="text-[9px] uppercase tracking-wider text-slate-500 font-medium leading-tight block">
-                      {parts[1]}
-                    </span>
-                  )}
-                  {!mgr.kommoUserId && (
-                    <span
-                      className="block text-[9px] text-amber-500"
-                      title="Нет привязки к Kommo"
-                    >
-                      ! Kommo
-                    </span>
-                  )}
-                </th>
-              );
-              })}
-            </tr>
-
-            {/* Sub-header row: Ф / % under Итого, Факт label under each manager */}
-            <tr className="border-b border-white/5">
-              <th className="sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10" />
-              <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-l-2 border-blue-400/60 bg-blue-500/10">
-                Факт
-              </th>
-              <th className="px-2 py-1 text-[9px] uppercase text-blue-400/80 text-right font-medium border-r-2 border-blue-400/60 bg-blue-500/10">
-                %
-              </th>
-              {allManagers.map((mgr) => (
-                <th
-                  key={`${mgr.id}-sub`}
-                  className="px-2 py-1 text-[9px] uppercase text-slate-500 text-right font-medium border-l border-white/10"
-                >
-                  Факт
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    {label}
+                  </div>
+                  <div className="text-[9px] text-slate-600">{columnSubLabels[i]}</div>
                 </th>
               ))}
             </tr>
           </thead>
-
-          <tbody className="divide-y divide-white/5 text-sm">
-            {sections.map((section) => {
-              // Build a map: managerId → their metrics array for this section (non-header only)
-              const nonHeaderMetrics = section.metrics.filter((m) => !m.isGroupHeader);
-              const mgrMetricMap = new Map<string, typeof section.managers[0]["metrics"]>();
-              for (const mgr of section.managers) {
-                mgrMetricMap.set(mgr.id, mgr.metrics);
+          <tbody className="text-sm">
+            {metrics.map((m) => {
+              // Section header row
+              if (m.metricKey.startsWith("__section_")) {
+                return (
+                  <tr key={m.metricKey} className="bg-slate-900/40 border-t-2 border-white/10">
+                    <td
+                      colSpan={columnLabels.length + 1}
+                      className="px-4 py-2 sticky left-0 bg-slate-900/40 z-10"
+                    >
+                      <div className="flex items-center gap-2">
+                        {getSectionIcon(m.sectionIcon)}
+                        <span className="text-[10px] uppercase tracking-widest font-bold text-slate-400">
+                          {m.sectionTitle}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                );
               }
 
+              // Group header
+              if (m.isGroupHeader) {
+                return (
+                  <tr key={`${m.sectionKey}-${m.metricKey}`} className="bg-slate-800/30">
+                    <td
+                      colSpan={columnLabels.length + 1}
+                      className="px-4 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-8 sticky left-0 bg-slate-800/30 z-10"
+                    >
+                      {m.metricLabel}
+                    </td>
+                  </tr>
+                );
+              }
+
+              // Data row
               return (
-                <>
-                  {/* Section separator */}
-                  <SectionHeaderRow
-                    key={`sep-${section.key}`}
-                    section={section}
-                    colSpan={totalCols}
-                  />
-
-                  {section.metrics.map((m) => {
-                    if (m.isGroupHeader) {
-                      return (
-                        <tr key={`${section.key}-${m.key}`} className="bg-slate-800/30">
-                          <td
-                            colSpan={totalCols}
-                            className="px-5 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-bold sticky left-0 bg-slate-800/30 pl-10"
-                          >
-                            {m.label}
-                          </td>
-                        </tr>
-                      );
-                    }
-
-                    const nonHeaderIdx = nonHeaderMetrics.findIndex((x) => x.key === m.key);
-
+                <tr
+                  key={`${m.sectionKey}-${m.metricKey}`}
+                  className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
+                >
+                  <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-8">
+                    {m.metricLabel}
+                  </td>
+                  {snapshots.map((snap, colIdx) => {
+                    const val = getMetricFact(snap, m.sectionKey, m.metricKey);
                     return (
-                      <tr key={`${section.key}-${m.key}`} className="hover:bg-white/[0.02] transition-colors group">
-                        {/* Sticky metric label */}
-                        <td className="px-5 py-2.5 font-medium text-slate-300 group-hover:text-white transition-colors sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10 text-[13px] pl-10">
-                          {m.label}
-                        </td>
-
-                        {/* Итого Fact */}
-                        <td className="px-2 py-2 font-bold text-white text-right font-mono text-[13px] border-l-2 border-blue-400/60 bg-blue-500/[0.07]">
-                          {m.fact ?? <span className="text-slate-600 font-normal">—</span>}
-                        </td>
-
-                        {/* Итого % */}
-                        <td
-                          className={`px-2 py-2 text-right font-bold font-mono text-[13px] border-r-2 border-blue-400/60 bg-blue-500/[0.07] ${getPercentColor(m.percent)}`}
-                        >
-                          {m.percent !== null ? `${m.percent}%` : ""}
-                        </td>
-
-                        {/* Per-manager Fact cells */}
-                        {allManagers.map((mgr) => {
-                          const mgrMetrics = mgrMetricMap.get(mgr.id);
-                          const mgrMetric = mgrMetrics?.[nonHeaderIdx];
-
-                          if (!mgrMetric) {
-                            return (
-                              <td
-                                key={mgr.id}
-                                className="px-2 py-2 text-center border-l border-white/10 text-slate-600 font-mono text-[12px]"
-                              >
-                                —
-                              </td>
-                            );
-                          }
-
-                          return (
-                            <td
-                              key={mgr.id}
-                              className={`px-2 py-2 text-right border-l border-white/10 font-mono text-[12px] font-bold ${getPercentColor(mgrMetric.percent)}`}
-                            >
-                              {mgrMetric.fact ?? <span className="text-slate-600 font-normal">—</span>}
-                            </td>
-                          );
-                        })}
-                      </tr>
+                      <td
+                        key={colIdx}
+                        onClick={() => onSelectCol(colIdx)}
+                        className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
+                          selectedCol === colIdx ? "bg-blue-500/10" : ""
+                        } ${getCellColor(val)}`}
+                      >
+                        {val ?? "—"}
+                      </td>
                     );
                   })}
-                </>
+                </tr>
               );
             })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ====================== MANAGER METRICS TABLE ======================
+// Rows = managers, Columns = metrics
+
+function ManagerMetricsTable({
+  snapshot,
+  title,
+}: {
+  snapshot: DailySnapshot | undefined;
+  title: string;
+}) {
+  const managers = useMemo(() => collectManagers(snapshot), [snapshot]);
+
+  // Build flat metric columns from all sections (non-header only)
+  const metricColumns = useMemo(() => {
+    if (!snapshot) return [];
+    const cols: Array<{
+      sectionKey: string;
+      sectionTitle: string;
+      sectionIcon: string;
+      metricKey: string;
+      metricLabel: string;
+    }> = [];
+    for (const sec of snapshot.sections) {
+      for (const m of sec.metrics) {
+        if (!m.isGroupHeader) {
+          cols.push({
+            sectionKey: sec.key,
+            sectionTitle: sec.title,
+            sectionIcon: sec.icon,
+            metricKey: m.key,
+            metricLabel: m.label,
+          });
+        }
+      }
+    }
+    return cols;
+  }, [snapshot]);
+
+  if (!snapshot || managers.length === 0) return null;
+
+  // Compute totals and averages
+  const totals = metricColumns.map((col) => {
+    let sum = 0;
+    let count = 0;
+    for (const mgr of managers) {
+      const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
+      if (val !== null) {
+        const num = Number(val);
+        if (!Number.isNaN(num)) {
+          sum += num;
+          count++;
+        }
+      }
+    }
+    return { sum, count, avg: count > 0 ? Math.round((sum / count) * 10) / 10 : 0 };
+  });
+
+  // Use summary fact from sections for totals (more accurate than summing per-manager)
+  const summaryTotals = metricColumns.map((col) => {
+    const section = snapshot.sections.find((s) => s.key === col.sectionKey);
+    const metric = section?.metrics.find((m) => m.key === col.metricKey);
+    return metric?.fact ?? null;
+  });
+
+  return (
+    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
+      <div className="px-4 py-3 border-b border-white/5 bg-slate-900/40">
+        <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">
+          {title}
+        </span>
+      </div>
+      <div className="w-full overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="border-b border-white/10">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[160px]">
+                Менеджер
+              </th>
+              {metricColumns.map((col, i) => (
+                <th
+                  key={`${col.sectionKey}-${col.metricKey}-${i}`}
+                  className="px-2 py-2 text-center min-w-[80px]"
+                >
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold leading-tight">
+                    {col.metricLabel}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="text-sm">
+            {/* Manager rows */}
+            {managers.map((mgr) => (
+              <tr
+                key={mgr.id}
+                className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
+              >
+                <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                  {mgr.name}
+                  {!mgr.kommoUserId && (
+                    <span className="ml-1 text-[9px] text-amber-500">! Kommo</span>
+                  )}
+                </td>
+                {metricColumns.map((col, i) => {
+                  const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
+                  return (
+                    <td
+                      key={`${col.sectionKey}-${col.metricKey}-${i}`}
+                      className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
+                    >
+                      {val ?? "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+
+            {/* Итого row */}
+            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+              <td className="px-4 py-2 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                Итого команда:
+              </td>
+              {summaryTotals.map((val, i) => (
+                <td
+                  key={i}
+                  className="px-2 py-2 text-right font-mono text-[12px] font-bold text-white"
+                >
+                  {val ?? "—"}
+                </td>
+              ))}
+            </tr>
+
+            {/* Среднее row */}
+            <tr className="bg-slate-800/30">
+              <td className="px-4 py-2 text-slate-400 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                Среднее:
+              </td>
+              {totals.map((t, i) => (
+                <td
+                  key={i}
+                  className="px-2 py-2 text-right font-mono text-[12px] text-slate-400"
+                >
+                  {t.count > 0 ? t.avg : "—"}
+                </td>
+              ))}
+            </tr>
           </tbody>
         </table>
       </div>
@@ -473,7 +503,6 @@ function ActiveManagersPanel({
   });
   const [dirty, setDirty] = useState(false);
 
-  // Sync selected state when schedule data changes from server
   useEffect(() => {
     const s = new Set<string>();
     for (const m of schedule.allManagers) {
@@ -528,14 +557,11 @@ function ActiveManagersPanel({
             </span>
           )}
         </div>
-        <span className="text-slate-500 text-xs">
-          {expanded ? "▲" : "▼"}
-        </span>
+        <span className="text-slate-500 text-xs">{expanded ? "▲" : "▼"}</span>
       </button>
 
       {expanded && (
         <div className="px-4 pb-4 space-y-3">
-          {/* Select all / deselect all */}
           <div className="flex gap-2">
             <button
               onClick={selectAll}
@@ -551,7 +577,6 @@ function ActiveManagersPanel({
             </button>
           </div>
 
-          {/* Line 1 */}
           {line1.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold mb-2">
@@ -568,11 +593,7 @@ function ActiveManagersPanel({
                         : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
                     }`}
                   >
-                    {selected.has(mgr.id) ? (
-                      <UserCheck className="w-3 h-3" />
-                    ) : (
-                      <UserX className="w-3 h-3" />
-                    )}
+                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
                     {mgr.name}
                   </button>
                 ))}
@@ -580,7 +601,6 @@ function ActiveManagersPanel({
             </div>
           )}
 
-          {/* Line 2 */}
           {line2.length > 0 && (
             <div>
               <div className="text-[10px] uppercase tracking-widest text-purple-400 font-bold mb-2">
@@ -597,11 +617,7 @@ function ActiveManagersPanel({
                         : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
                     }`}
                   >
-                    {selected.has(mgr.id) ? (
-                      <UserCheck className="w-3 h-3" />
-                    ) : (
-                      <UserX className="w-3 h-3" />
-                    )}
+                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
                     {mgr.name}
                   </button>
                 ))}
@@ -609,7 +625,6 @@ function ActiveManagersPanel({
             </div>
           )}
 
-          {/* Save button */}
           <div className="flex items-center gap-3 pt-2">
             <button
               onClick={() => onSave(selected)}
@@ -628,11 +643,7 @@ function ActiveManagersPanel({
                 "Сохранить"
               )}
             </button>
-            {dirty && (
-              <span className="text-[10px] text-amber-400">
-                Есть несохранённые изменения
-              </span>
-            )}
+            {dirty && <span className="text-[10px] text-amber-400">Есть несохранённые изменения</span>}
             <span className="text-[10px] text-slate-500 ml-auto">
               Выбрано: {selected.size} из {schedule.allManagers.length}
             </span>
@@ -646,39 +657,58 @@ function ActiveManagersPanel({
 // ====================== MAIN COMPONENT ======================
 
 export default function DailyTab({ department }: { department: "b2g" | "b2b" }) {
-  const [period, setPeriod] = useState<"day" | "week" | "month" | "year">("day");
-  const [date, setDate] = useState<Date>(new Date());
-  const [data, setData] = useState<DailyResponse | null>(null);
+  const [mode, setMode] = useState<"days" | "months">("days");
+  const [selectedMonth, setSelectedMonth] = useState<Date>(new Date());
+  const [data, setData] = useState<RangeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [viewMode, setViewMode] = useState<"summary" | "managers">("summary");
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
-  const fetchData = useCallback(async (signal?: AbortSignal) => {
-    // Only show full loading on first load (no data yet)
-    if (!data) setLoading(true);
-    setError(null);
-    try {
-      const dateStr = formatDate(date);
-      const res = await fetch(
-        `/api/daily?department=${department}&period=${period}&date=${dateStr}`,
-        { signal }
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`API error ${res.status}: ${text}`);
+  const fetchData = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!data) setLoading(true);
+      setError(null);
+      try {
+        let url: string;
+        if (mode === "days") {
+          const monthStr = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
+          url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}`;
+        } else {
+          url = `/api/daily/range?department=${department}&mode=months&year=${selectedMonth.getFullYear()}`;
+        }
+
+        const res = await fetch(url, { signal });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text}`);
+        }
+        const json = await res.json();
+        setData(json);
+
+        // Auto-select today if in current month
+        if (mode === "days" && json.days) {
+          const today = new Date();
+          if (
+            today.getFullYear() === selectedMonth.getFullYear() &&
+            today.getMonth() === selectedMonth.getMonth()
+          ) {
+            setSelectedDayIdx(today.getDate() - 1);
+          } else {
+            setSelectedDayIdx(null);
+          }
+        }
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        if (e instanceof TypeError && e.message === "Failed to fetch") return;
+        console.error("Daily range fetch error:", e);
+        setError(String(e));
+      } finally {
+        setLoading(false);
       }
-      const json = await res.json();
-      setData(json);
-    } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") return;
-      if (e instanceof TypeError && (e as TypeError).message === "Failed to fetch") return;
-      console.error("Daily fetch error:", e);
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [department, period, date]);
+    },
+    [department, mode, selectedMonth]
+  );
 
   useEffect(() => {
     const ac = new AbortController();
@@ -686,84 +716,26 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     return () => ac.abort();
   }, [fetchData]);
 
-  // Navigate date
-  const shiftDate = (dir: -1 | 1) => {
-    const d = new Date(date);
-    switch (period) {
-      case "day":
-        d.setDate(d.getDate() + dir);
-        break;
-      case "week":
-        d.setDate(d.getDate() + 7 * dir);
-        break;
-      case "month":
-        d.setMonth(d.getMonth() + dir);
-        break;
-      case "year":
-        d.setFullYear(d.getFullYear() + dir);
-        break;
+  // Navigation
+  const shiftMonth = (dir: -1 | 1) => {
+    const d = new Date(selectedMonth);
+    if (mode === "days") {
+      d.setMonth(d.getMonth() + dir);
+    } else {
+      d.setFullYear(d.getFullYear() + dir);
     }
-    setDate(d);
+    setSelectedMonth(d);
+    setSelectedDayIdx(null);
   };
 
-  // Save plan value — always stored as monthly plan
-  const handlePlanSave = async (
-    line: string,
-    metricKey: string,
-    value: string,
-    userId?: string
-  ) => {
-    if (!data) return;
-    setSaving(true);
-    try {
-      // Convert displayed value back to monthly plan
-      let monthlyValue = value;
-      const num = Number(value);
-      if (!Number.isNaN(num) && data.periodType !== "month") {
-        const d = new Date(date);
-        const daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-        if (data.periodType === "day") {
-          monthlyValue = String(Math.round(num * daysInMonth));
-        } else if (data.periodType === "week") {
-          monthlyValue = String(Math.round(num * (daysInMonth / 7)));
-        } else if (data.periodType === "year") {
-          monthlyValue = String(Math.round(num / 12));
-        }
-      }
-
-      // Always save as month period
-      const monthDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-      const res = await fetch("/api/daily/plans", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          department,
-          line,
-          userId: userId || null,
-          metricKey,
-          planValue: monthlyValue,
-          periodType: "month",
-          periodDate: monthDate,
-        }),
-      });
-      if (!res.ok) {
-        console.error("Plan save error:", await res.text());
-      }
-      // Refresh data
-      await fetchData();
-    } catch (e) {
-      console.error("Plan save error:", e);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // Save active managers for the day
+  // Save active managers
   const handleSaveActiveManagers = async (selectedIds: Set<string>) => {
-    if (!data?.schedule) return;
+    // Find the schedule from the selected day's snapshot
+    const snapshot = data?.days?.[selectedDayIdx ?? 0];
+    if (!snapshot?.schedule) return;
     setSaving(true);
     try {
-      const managers = data.schedule.allManagers
+      const managers = snapshot.schedule.allManagers
         .filter((m) => selectedIds.has(m.id))
         .map((m) => ({ managerId: m.id, managerName: m.name, line: m.line }));
 
@@ -771,25 +743,23 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          date: data.date,
+          date: snapshot.date,
           department,
           managers,
         }),
       });
-      if (!res.ok) {
-        console.error("Active managers save error:", await res.text());
-      }
-      // Also update old schedule table for filtering compatibility
-      const entries = data.schedule.allManagers.map((m) => ({
+      if (!res.ok) console.error("Active managers save error:", await res.text());
+
+      const entries = snapshot.schedule.allManagers.map((m) => ({
         userId: m.id,
         isOnLine: selectedIds.has(m.id),
       }));
       await fetch("/api/daily/schedule", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: data.date, entries }),
+        body: JSON.stringify({ date: snapshot.date, entries }),
       });
-      // Refresh data to apply filtering
+
       await fetchData();
     } catch (e) {
       console.error("Active managers save error:", e);
@@ -798,46 +768,68 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     }
   };
 
-  // Date display
-  const dateDisplay = (() => {
-    switch (period) {
-      case "day":
-        return date.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
-      case "week": {
-        const d = new Date(date);
-        const day = d.getDay();
-        const diff = day === 0 ? -6 : 1 - day;
-        const monday = new Date(d);
-        monday.setDate(d.getDate() + diff);
-        const sunday = new Date(monday);
-        sunday.setDate(monday.getDate() + 6);
-        return `${monday.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })} — ${sunday.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" })}`;
-      }
-      case "month":
-        return date.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
-      case "year":
-        return `${date.getFullYear()} год`;
+  // Build column labels and snapshots for the summary table
+  const { columnLabels, columnSubLabels, snapshots } = useMemo(() => {
+    if (!data) return { columnLabels: [], columnSubLabels: [], snapshots: [] };
+
+    if (mode === "days" && data.days) {
+      return {
+        columnLabels: data.days.map((d) => formatDayLabel(d.date)),
+        columnSubLabels: data.days.map((d) => formatDaySubLabel(d.date)),
+        snapshots: data.days,
+      };
     }
-  })();
+
+    if (mode === "months" && data.months) {
+      return {
+        columnLabels: MONTH_NAMES_SHORT,
+        columnSubLabels: data.months.map((m) => m.periodDate || ""),
+        snapshots: data.months,
+      };
+    }
+
+    return { columnLabels: [], columnSubLabels: [], snapshots: [] };
+  }, [data, mode]);
+
+  // Selected day snapshot for per-manager table
+  const selectedDaySnapshot = mode === "days" && data?.days && selectedDayIdx !== null
+    ? data.days[selectedDayIdx]
+    : undefined;
+
+  // Monthly summary for per-manager table
+  const monthlySnapshot = data?.monthlySummary;
+
+  // Schedule from today's snapshot (for active managers panel)
+  const todaySchedule = useMemo(() => {
+    if (mode !== "days" || !data?.days) return undefined;
+    const today = new Date();
+    const todayIdx = data.days.findIndex((d) => {
+      const dd = new Date(d.date);
+      return dd.getDate() === today.getDate() && dd.getMonth() === today.getMonth() && dd.getFullYear() === today.getFullYear();
+    });
+    return todayIdx >= 0 ? data.days[todayIdx] : undefined;
+  }, [data, mode]);
+
+  const dateDisplay = mode === "days"
+    ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
+    : `${selectedMonth.getFullYear()} год`;
 
   return (
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
       {/* Controls */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-        {/* Period tabs + Calendar + View mode toggle */}
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner overflow-x-auto scrollbar-hide">
+          {/* Mode toggle */}
+          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
             {([
-              { id: "day", label: "День" },
-              { id: "week", label: "Неделя" },
-              { id: "month", label: "Месяц" },
-              { id: "year", label: "Год" },
-            ] as const).map((f) => (
+              { id: "days" as const, label: "Месяц (по дням)" },
+              { id: "months" as const, label: "Год (по месяцам)" },
+            ]).map((f) => (
               <button
                 key={f.id}
-                onClick={() => setPeriod(f.id)}
+                onClick={() => { setMode(f.id); setSelectedDayIdx(null); }}
                 className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
-                  period === f.id
+                  mode === f.id
                     ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
                     : "text-slate-400 hover:text-white"
                 }`}
@@ -846,39 +838,12 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
               </button>
             ))}
           </div>
-
-          {/* View mode toggle */}
-          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
-            {([
-              { id: "summary", label: "Общая статистика" },
-              { id: "managers", label: "Менеджеры" },
-            ] as const).map((v) => (
-              <button
-                key={v.id}
-                onClick={() => setViewMode(v.id)}
-                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
-                  viewMode === v.id
-                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {v.label}
-              </button>
-            ))}
-          </div>
-
-          <CalendarPicker
-            mode="single"
-            value={{ start: date, end: date }}
-            onChange={(range) => { if (range.start) setDate(range.start); }}
-            onClear={() => setDate(new Date())}
-          />
         </div>
 
         {/* Date navigator */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => shiftDate(-1)}
+            onClick={() => shiftMonth(-1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
             <ChevronLeft className="w-4 h-4" />
@@ -887,19 +852,17 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             {dateDisplay}
           </span>
           <button
-            onClick={() => shiftDate(1)}
+            onClick={() => shiftMonth(1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
-          {formatDate(date) !== formatDate(new Date()) && (
-            <button
-              onClick={() => setDate(new Date())}
-              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
-            >
-              Сегодня
-            </button>
-          )}
+          <button
+            onClick={() => { setSelectedMonth(new Date()); setSelectedDayIdx(null); }}
+            className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
+          >
+            Сейчас
+          </button>
           <button
             onClick={() => fetchData()}
             disabled={loading}
@@ -916,10 +879,10 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </div>
       </div>
 
-      {/* First load */}
+      {/* Loading */}
       {loading && !data && <DinoLoader />}
 
-      {/* Background refresh indicator */}
+      {/* Background refresh */}
       {loading && data && (
         <div className="flex items-center justify-center py-2">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20">
@@ -933,49 +896,65 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
       {error && (
         <div className="glass-panel rounded-2xl p-6 border border-red-500/20 bg-red-500/5">
           <p className="text-red-400 text-sm">Ошибка: {error}</p>
-          <button
-            onClick={() => fetchData()}
-            className="mt-3 text-xs text-red-300 underline hover:text-white"
-          >
+          <button onClick={() => fetchData()} className="mt-3 text-xs text-red-300 underline hover:text-white">
             Попробовать снова
           </button>
         </div>
       )}
 
-      {/* Active Managers Panel (only for day view) */}
-      {data && !loading && period === "day" && data.schedule && (
+      {/* Active Managers Panel (show when viewing days, for today) */}
+      {todaySchedule?.schedule && (
         <ActiveManagersPanel
-          schedule={data.schedule}
-          dateStr={data.date}
+          schedule={todaySchedule.schedule}
+          dateStr={todaySchedule.date}
           onSave={handleSaveActiveManagers}
           saving={saving}
         />
       )}
 
-      {/* Block data if active managers not set for day view */}
-      {data && !loading && period === "day" && data.schedule && !data.schedule.hasSchedule && (
-        <div className="glass-panel rounded-2xl p-8 border border-amber-500/20 bg-amber-500/5 text-center">
-          <p className="text-amber-400 text-sm font-medium">
-            Выберите активных менеджеров на сегодня и нажмите «Сохранить» чтобы увидеть данные
-          </p>
-        </div>
+      {/* Summary Time Table */}
+      {data && !loading && snapshots.length > 0 && (
+        <>
+          <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500">
+            Сводная таблица
+            {selectedDayIdx !== null && mode === "days" && data.days && (
+              <span className="ml-2 text-blue-400">
+                — выбран {formatDaySubLabel(data.days[selectedDayIdx].date)}
+              </span>
+            )}
+          </div>
+          <SummaryTimeTable
+            snapshots={snapshots}
+            columnLabels={columnLabels}
+            columnSubLabels={columnSubLabels}
+            selectedCol={selectedDayIdx}
+            onSelectCol={setSelectedDayIdx}
+          />
+        </>
       )}
 
-      {/* Unified table — hidden if schedule not set on day view */}
-      {data && !loading && (period !== "day" || !data.schedule || data.schedule.hasSchedule) && (
-        <UnifiedTable
-          sections={data.sections}
-          viewMode={viewMode}
-          onPlanSave={handlePlanSave}
+      {/* Per-manager: Monthly summary */}
+      {data && !loading && monthlySnapshot && mode === "days" && (
+        <ManagerMetricsTable
+          snapshot={monthlySnapshot}
+          title={`Месячный показатель — ${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
         />
       )}
 
-      {/* Data with loading overlay */}
-      {data && loading && (
-        <div className="fixed top-4 right-4 z-50 bg-slate-800/90 border border-white/10 rounded-xl px-4 py-2 flex items-center gap-2 shadow-xl">
-          <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
-          <span className="text-xs text-slate-400">Обновление...</span>
-        </div>
+      {/* Per-manager: Selected day */}
+      {data && !loading && selectedDaySnapshot && mode === "days" && (
+        <ManagerMetricsTable
+          snapshot={selectedDaySnapshot}
+          title={`Дневной показатель — ${formatDaySubLabel(selectedDaySnapshot.date)}`}
+        />
+      )}
+
+      {/* Per-manager for months mode: selected month */}
+      {data && !loading && mode === "months" && selectedDayIdx !== null && data.months?.[selectedDayIdx] && (
+        <ManagerMetricsTable
+          snapshot={data.months[selectedDayIdx]}
+          title={`${MONTH_NAMES[selectedDayIdx]} ${selectedMonth.getFullYear()}`}
+        />
       )}
     </div>
   );
