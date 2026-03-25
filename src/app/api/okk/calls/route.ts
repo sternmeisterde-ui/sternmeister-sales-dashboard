@@ -113,7 +113,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
     if (toParam) {
       const toDate = new Date(toParam);
       if (!isNaN(toDate.getTime())) {
-        toDate.setHours(23, 59, 59, 999);
+        toDate.setUTCHours(23, 59, 59, 999);
         conditions.push(lte(okkCalls.callCreatedAt, toDate));
       }
     }

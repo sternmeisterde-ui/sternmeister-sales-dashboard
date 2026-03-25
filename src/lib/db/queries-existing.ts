@@ -24,7 +24,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
   }
   if (toDate) {
     const end = new Date(toDate);
-    end.setHours(23, 59, 59, 999);
+    end.setUTCHours(23, 59, 59, 999);
     conditions.push(lte(calls.startedAt, end));
   }
 
