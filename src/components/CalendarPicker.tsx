@@ -93,8 +93,9 @@ export default function CalendarPicker({
   };
 
   const applyRange = () => {
-    if (draft.start && draft.end) {
-      onChange(draft);
+    if (draft.start) {
+      // Allow single-day selection: if no end date, use start as end
+      onChange({ start: draft.start, end: draft.end || draft.start });
       setOpen(false);
     }
   };
@@ -110,7 +111,9 @@ export default function CalendarPicker({
     ? mode === "single" && value.start
       ? fmtShort(value.start)
       : value.start && value.end
-      ? `${fmtShort(value.start)} – ${fmtShort(value.end)}`
+      ? isSameDay(value.start, value.end)
+        ? fmtShort(value.start)
+        : `${fmtShort(value.start)} – ${fmtShort(value.end)}`
       : null
     : null;
 
@@ -255,6 +258,8 @@ export default function CalendarPicker({
               <span>
                 {draft.end
                   ? draft.end.toLocaleDateString("ru-RU")
+                  : draft.start
+                  ? "Нажмите для одного дня"
                   : "Конец"}
               </span>
             </div>
@@ -266,10 +271,10 @@ export default function CalendarPicker({
               <>
                 <button
                   onClick={applyRange}
-                  disabled={!draft.start || !draft.end}
+                  disabled={!draft.start}
                   className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-semibold py-2 rounded-lg transition-colors"
                 >
-                  Применить
+                  {draft.start && !draft.end ? "Выбрать день" : "Применить"}
                 </button>
                 <button
                   onClick={clear}
