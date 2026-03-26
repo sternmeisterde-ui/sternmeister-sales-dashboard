@@ -260,13 +260,21 @@ export default function Dashboard() {
   const [isLoadingReal, setIsLoadingReal] = useState(true);
   const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
+  // Format date as YYYY-MM-DD in local timezone (not UTC)
+  const fmtLocalDate = (d: Date): string => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
   // Compute OKK date range from period/custom range
   const getOkkDateRange = useCallback((): { from: string; to: string } => {
     const now = new Date();
     if (aiCustomRange.start && aiCustomRange.end) {
       return {
-        from: aiCustomRange.start.toISOString().slice(0, 10),
-        to: aiCustomRange.end.toISOString().slice(0, 10),
+        from: fmtLocalDate(aiCustomRange.start),
+        to: fmtLocalDate(aiCustomRange.end),
       };
     }
     const end = new Date(now);
@@ -279,8 +287,8 @@ export default function Dashboard() {
       start.setDate(1); // first of month
     }
     return {
-      from: start.toISOString().slice(0, 10),
-      to: end.toISOString().slice(0, 10),
+      from: fmtLocalDate(start),
+      to: fmtLocalDate(end),
     };
   }, [aiDashPeriod, aiCustomRange]);
 
