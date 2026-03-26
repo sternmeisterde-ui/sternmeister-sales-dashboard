@@ -1099,12 +1099,18 @@ export default function Dashboard() {
 
                           <div className="flex gap-2">
                             <button
-                              onClick={() => { setActiveDateFilter(dateRange); setIsFilterOpen(false); }}
-                              disabled={!dateRange.start || !dateRange.end}
+                              onClick={() => {
+                                const range = { start: dateRange.start, end: dateRange.end || dateRange.start };
+                                setActiveDateFilter(range);
+                                // Also update the API date range so data is loaded from server
+                                setAiCustomRange(range);
+                                setIsFilterOpen(false);
+                              }}
+                              disabled={!dateRange.start}
                               className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-semibold py-2 rounded-lg transition-colors"
-                            >Применить</button>
+                            >{dateRange.start && !dateRange.end ? "Выбрать день" : "Применить"}</button>
                             <button
-                              onClick={() => { setDateRange({ start: null, end: null }); setActiveDateFilter({ start: null, end: null }); }}
+                              onClick={() => { setDateRange({ start: null, end: null }); setActiveDateFilter({ start: null, end: null }); setAiCustomRange({ start: null, end: null }); }}
                               className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold py-2 rounded-lg transition-colors"
                             >Сбросить</button>
                           </div>
