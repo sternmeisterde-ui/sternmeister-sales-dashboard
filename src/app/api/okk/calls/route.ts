@@ -103,7 +103,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
 
     const fromParam = sp.get("from");
     if (fromParam) {
-      const fromDate = new Date(fromParam);
+      // Parse as start of day in local (Berlin) timezone
+      const parts = fromParam.split("-").map(Number);
+      const fromDate = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
       if (!isNaN(fromDate.getTime())) {
         conditions.push(gte(okkCalls.callCreatedAt, fromDate));
       }
@@ -111,9 +113,10 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
 
     const toParam = sp.get("to");
     if (toParam) {
-      const toDate = new Date(toParam);
+      // Parse as end of day in local (Berlin) timezone
+      const parts = toParam.split("-").map(Number);
+      const toDate = new Date(parts[0], parts[1] - 1, parts[2], 23, 59, 59, 999);
       if (!isNaN(toDate.getTime())) {
-        toDate.setUTCHours(23, 59, 59, 999);
         conditions.push(lte(okkCalls.callCreatedAt, toDate));
       }
     }

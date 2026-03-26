@@ -20,12 +20,17 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
 
   const conditions: ReturnType<typeof eq>[] = [];
   if (fromDate) {
-    conditions.push(gte(calls.startedAt, new Date(fromDate)));
+    // Parse as start of day in Europe/Berlin
+    // "2026-03-25" → midnight Berlin time → convert to UTC
+    const fromParts = fromDate.split("-").map(Number);
+    const fromLocal = new Date(fromParts[0], fromParts[1] - 1, fromParts[2], 0, 0, 0, 0);
+    conditions.push(gte(calls.startedAt, fromLocal));
   }
   if (toDate) {
-    const end = new Date(toDate);
-    end.setUTCHours(23, 59, 59, 999);
-    conditions.push(lte(calls.startedAt, end));
+    // Parse as end of day in Europe/Berlin
+    const toParts = toDate.split("-").map(Number);
+    const toLocal = new Date(toParts[0], toParts[1] - 1, toParts[2], 23, 59, 59, 999);
+    conditions.push(lte(calls.startedAt, toLocal));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
