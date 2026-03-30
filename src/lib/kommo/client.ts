@@ -405,3 +405,59 @@ export async function getCallNotes(
     });
   });
 }
+
+/**
+ * Get lead_status_changed events for a date range.
+ * Returns count of leads that moved INTO specified target statuses.
+ */
+export async function getStatusChangeCount(
+  dateFrom: number,
+  dateTo: number,
+  targetPipelineId: number,
+  targetStatusIds: number[],
+  maxPages = 30
+): Promise<number> {
+  const cacheKey = `status-changes:${dateFrom}:${dateTo}:${targetPipelineId}:${targetStatusIds.join(",")}`;
+
+  return cached(cacheKey, CACHE_TTL.CALLS, async () => {
+    const baseUrl = await getBaseUrl();
+    const headers = await getAuthHeaders();
+
+    const targetSet = new Set(targetStatusIds);
+    let count = 0;
+    let page = 1;
+
+    while (page <= maxPages) {
+      const url = new URL(`${baseUrl}/events`);
+      url.searchParams.set("filter[type]", "lead_status_changed");
+      url.searchParams.set("filter[created_at][from]", String(dateFrom));
+      url.searchParams.set("filter[created_at][to]", String(dateTo));
+      url.searchParams.set("limit", "100");
+      url.searchParams.set("page", String(page));
+
+      const res = await rateLimitedFetch(url.toString(), { headers });
+      if (res.status === 204) break;
+      if (!res.ok) {
+        if (res.status === 404) break;
+        break;
+      }
+
+      const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+      const events = data._embedded?.events || [];
+
+      for (const ev of events) {
+        for (const va of ev.value_after || []) {
+          const ls = (va as Record<string, unknown>).lead_status as { id?: number; pipeline_id?: number } | undefined;
+          if (ls && ls.pipeline_id === targetPipelineId && targetSet.has(ls.id ?? 0)) {
+            count++;
+          }
+        }
+      }
+
+      if (!data._links?.next) break;
+      page++;
+    }
+
+    return count;
+  });
+}

@@ -19,9 +19,23 @@ export async function GET(req: NextRequest) {
       }
 
       const daysInMonth = new Date(year, month, 0).getDate();
+      // Data starts from March 24, 2026 — skip earlier dates
+      const DATA_START = new Date(2026, 2, 24); // March 24, 2026
       const dates: string[] = [];
       for (let d = 1; d <= daysInMonth; d++) {
-        dates.push(`${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+        const dateObj = new Date(year, month - 1, d);
+        if (dateObj >= DATA_START) {
+          dates.push(`${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+        }
+      }
+
+      if (dates.length === 0) {
+        return NextResponse.json({
+          mode: "days",
+          month: monthParam,
+          days: [],
+          monthlySummary: null,
+        });
       }
 
       // Fetch all days in parallel (each individually cached)

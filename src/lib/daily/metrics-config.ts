@@ -43,6 +43,14 @@ const funnelMetrics: MetricDef[] = [
   { key: "termsNew", label: "Переданы на термин новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "awaitTermTotal", label: "Ожидают термин всего", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "awaitTermNew", label: "Ожидают термин новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "termDCCancelled", label: "Термин ДЦ отменен/перенесен", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "termDCDone", label: "Термин ДЦ состоялся", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "termAATransferred", label: "Переведены на термин АА", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "termAACancelled", label: "Термин АА отменен/перенесен", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "termAACount", label: "Термин АА, шт.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "beraterReview", label: "На рассмотрении бератера", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "delayedStart", label: "Отложенный старт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "appeal", label: "Апелляция", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "gutscheinsApproved", label: "Одобрено гутшайнов", hasPlan: true, hasFact: true, unit: "шт", factSource: "kommo_leads" },
 ];
 

@@ -1,7 +1,7 @@
 // Shared logic for building Daily API responses
 // Used by both /api/daily and /api/daily/range routes
 import { cached } from "@/lib/kommo/cache";
-import { getCallNotes, getLeads, getTasks } from "@/lib/kommo/client";
+import { getCallNotes, getLeads, getTasks, getStatusChangeCount } from "@/lib/kommo/client";
 import {
   aggregateCallMetrics,
   aggregateLeadMetrics,
@@ -177,7 +177,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Terms = WON leads from first line closed in THIS period (not previous day)
   const termsDateFilter = { field: "closed_at" as const, from, to };
   const createdDateFilter = { field: "created_at" as const, from, to };
-  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod] = await Promise.all([
+  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod, termAACount] = await Promise.all([
     getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch((e) => {
       console.error("Kommo snapshot leads error:", e);
       return [] as KommoLead[];
@@ -206,6 +206,11 @@ export async function buildDailyResponse(department: string, period: string, dat
     getLeads([10935879], undefined, leadsPages, createdDateFilter).catch((e) => {
       console.error("Kommo new leads error:", e);
       return [] as KommoLead[];
+    }),
+    // Термин АА: events where leads moved INTO statuses 102183943/102183947 in berater pipeline
+    getStatusChangeCount(from, to, 12154099, [102183943, 102183947]).catch((e) => {
+      console.error("Kommo term AA events error:", e);
+      return 0;
     }),
   ]);
 
@@ -294,7 +299,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       }
 
       if (section.key === "funnel") {
-        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to, newLeadsInPeriod);
+        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to, newLeadsInPeriod, termAACount);
       } else {
         const facts = buildUserFacts(summaryCallMetrics, totalOverdue, section);
         fact = facts[metric.key] ?? null;
@@ -353,16 +358,29 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = "1";
                   break;
                 case "totalLeads": {
-                  fact = String(mgrNewLeads.length);
+                  // Exclude Неразобранное(83873487) and База(93485479)
+                  fact = String(mgrNewLeads.filter((l) => l.status_id !== 83873487 && l.status_id !== 93485479).length);
                   break;
                 }
                 case "qualLeads": {
-                  fact = String(mgrNewLeads.filter((l) => l.status_id !== 143).length);
+                  const nqE = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+                  fact = String(mgrNewLeads.filter((l) => {
+                    if (l.status_id === 83873487 || l.status_id === 93485479) return false;
+                    const cf = (l.custom_fields_values || []).find((f: { field_id: number }) => f.field_id === 879824);
+                    if (!cf) return true;
+                    return !nqE.has(cf.values?.[0]?.enum_id ?? -1);
+                  }).length);
                   break;
                 }
                 case "qualLeadsPercent": {
-                  const mgrQual = mgrNewLeads.filter((l) => l.status_id !== 143).length;
-                  fact = mgrNewLeads.length > 0 ? String(Math.round((mgrQual / mgrNewLeads.length) * 100)) : "0";
+                  const nqE2 = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+                  const mgrFiltered = mgrNewLeads.filter((l) => l.status_id !== 83873487 && l.status_id !== 93485479);
+                  const mgrQual = mgrFiltered.filter((l) => {
+                    const cf = (l.custom_fields_values || []).find((f: { field_id: number }) => f.field_id === 879824);
+                    if (!cf) return true;
+                    return !nqE2.has(cf.values?.[0]?.enum_id ?? -1);
+                  }).length;
+                  fact = mgrFiltered.length > 0 ? String(Math.round((mgrQual / mgrFiltered.length) * 100)) : "0";
                   break;
                 }
                 case "avgPortfolio":
@@ -481,6 +499,7 @@ function getFunnelFact(
   from?: number,
   to?: number,
   newLeadsInPeriod?: KommoLead[],
+  termAATransferredCount?: number,
 ): string | null {
   switch (key) {
     case "activeDeals": {
@@ -499,15 +518,22 @@ function getFunnelFact(
     case "managersOnLine":
       return String(managersOnLine);
     case "totalLeads": {
-      // All leads from first line created in period (including closed)
-      const allNew = (newLeadsInPeriod || []).filter((l) => !l.is_deleted);
+      // All leads from first line created in period, excluding Неразобранное(83873487) and База(93485479)
+      const excludeFromTotal = new Set([83873487, 93485479]);
+      const allNew = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !excludeFromTotal.has(l.status_id));
       return String(allNew.length);
     }
     case "qualLeads": {
-      // Qual = all new leads minus LOST (status 143)
-      const qualCount = (newLeadsInPeriod || []).filter(
-        (l) => !l.is_deleted && l.status_id !== 143
-      ).length;
+      // Qual = totalLeads minus leads with non-qual "Причина закрытия Госники" (field 879824)
+      // Non-qual = field has one of: Неправильный номер, Неквал лид/Доход/Образование/Возраст/Язык
+      const nonQualEnums = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+      const excludeS = new Set([83873487, 93485479]);
+      const qualCount = (newLeadsInPeriod || []).filter((l) => {
+        if (l.is_deleted || excludeS.has(l.status_id)) return false;
+        const cf = (l.custom_fields_values || []).find((f: { field_id: number }) => f.field_id === 879824);
+        if (!cf) return true; // no field = qual
+        return !nonQualEnums.has(cf.values?.[0]?.enum_id ?? -1);
+      }).length;
       return String(qualCount);
     }
     case "a2":
@@ -552,9 +578,63 @@ function getFunnelFact(
       return String(awaitingNew.length);
     }
     case "qualLeadsPercent": {
-      const allNewP = (newLeadsInPeriod || []).filter((l) => !l.is_deleted);
-      const qualP = allNewP.filter((l) => l.status_id !== 143).length;
+      const nonQualE = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+      const exS = new Set([83873487, 93485479]);
+      const allNewP = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !exS.has(l.status_id));
+      const qualP = allNewP.filter((l) => {
+        const cf = (l.custom_fields_values || []).find((f: { field_id: number }) => f.field_id === 879824);
+        if (!cf) return true;
+        return !nonQualE.has(cf.values?.[0]?.enum_id ?? -1);
+      }).length;
       return allNewP.length > 0 ? String(Math.round((qualP / allNewP.length) * 100)) : "0";
+    }
+    // ─── Berater pipeline snapshot metrics ───
+    case "termDCCancelled": {
+      // Термин ДЦ отменен/перенесен: status 93860875 in berater pipeline 12154099
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860875
+      ).length);
+    }
+    case "termDCDone": {
+      // Термин ДЦ состоялся: status 93886075 in berater pipeline
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93886075
+      ).length);
+    }
+    case "termAATransferred": {
+      // Переведены на термин АА: counted via Events API (status changes)
+      return String(termAATransferredCount ?? 0);
+    }
+    case "termAACancelled": {
+      // Термин АА отменен/перенесен: status 93860883 in berater pipeline
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860883
+      ).length);
+    }
+    case "termAACount": {
+      // Термин АА (на этапе): statuses 102183943 + 102183947 in berater pipeline
+      const aaStatuses = new Set([102183943, 102183947]);
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
+      ).length);
+    }
+    case "beraterReview": {
+      // На рассмотрении бератера: status 93860887
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860887
+      ).length);
+    }
+    case "delayedStart": {
+      // Отложенный старт: status 95515895 in berater pipeline
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 95515895
+      ).length);
+    }
+    case "appeal": {
+      // Апелляция: status 93860891
+      return String((snapshotLeads || []).filter(
+        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860891
+      ).length);
     }
     case "convQualTask":
       return fc.qualLeadsFlow > 0
