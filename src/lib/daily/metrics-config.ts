@@ -14,7 +14,7 @@ export interface MetricDef {
 }
 
 export interface SectionDef {
-  key: "funnel" | "qualifier" | "secondLine";
+  key: "funnel" | "qualifier" | "secondLine" | "thirdLine";
   title: string;
   icon: string; // lucide icon name
   /** DB line value: '1' for qualifier, '2' for secondLine, 'funnel' for funnel */
@@ -92,6 +92,25 @@ const secondLineMetrics: MetricDef[] = [
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
 ];
 
+// ====================== THIRD LINE (Доведение) SECTION ======================
+const thirdLineMetrics: MetricDef[] = [
+  { key: "staffCount", label: "Кол-во сотрудников", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
+  // --- Звонки ---
+  { key: "_grp_calls", label: "Звонки", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
+  { key: "callsTotal", label: "Количество звонков", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  { key: "callsConnected", label: "Дозвон от 1 сек.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  { key: "dialPercent", label: "% дозвона", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
+  { key: "missedIncoming", label: "Пропущенные входящие", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  // --- Время ---
+  { key: "_grp_time", label: "Время", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
+  { key: "totalMinutes", label: "Всего на линии (мин)", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  { key: "avgDialogPerEmployee", label: "Ср. время в диалоге на сотр.", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
+  { key: "avgDialogMinutes", label: "Ср. время диалога", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  // --- Качество ---
+  { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
+  { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
+];
+
 // ====================== SECTIONS EXPORT ======================
 
 export const dailySections: SectionDef[] = [
@@ -118,6 +137,14 @@ export const dailySections: SectionDef[] = [
     dbLine: "2",
     perManager: true,
     metrics: secondLineMetrics,
+  },
+  {
+    key: "thirdLine",
+    title: "Доведение (Третья линия)",
+    icon: "Activity",
+    dbLine: "3",
+    perManager: true,
+    metrics: thirdLineMetrics,
   },
 ];
 

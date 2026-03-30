@@ -65,7 +65,7 @@ export default function Dashboard() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls">("dashboard");
-  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2">("all");
+  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3">("all");
 
   // Load session on mount
   useEffect(() => {
@@ -765,7 +765,7 @@ export default function Dashboard() {
                       )}
                       {activeDepartment === "b2g" && manager.line && (
                         <span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-slate-700 text-slate-400">
-                          {manager.line === "1" ? "1я" : "2я"}
+                          {manager.line === "1" ? "1я" : manager.line === "2" ? "2я" : "3я"}
                         </span>
                       )}
                     </div>
@@ -806,10 +806,10 @@ export default function Dashboard() {
                 />
                 {activeDepartment === "b2g" && (
                   <div className="flex gap-1 ml-2">
-                    {(["all", "1", "2"] as const).map(val => (
+                    {(["all", "1", "2", "3"] as const).map(val => (
                       <button key={val} onClick={() => setLineFilter(val)}
                         className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
-                        {val === "all" ? "Все" : val === "1" ? "Квалиф." : "Бератер"}
+                        {val === "all" ? "Все" : val === "1" ? "Квалиф." : val === "2" ? "Бератер" : "Доведение"}
                       </button>
                     ))}
                   </div>

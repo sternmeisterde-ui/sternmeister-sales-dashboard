@@ -534,6 +534,7 @@ function ActiveManagersPanel({
 
   const line1 = schedule.allManagers.filter((m) => m.line === "1");
   const line2 = schedule.allManagers.filter((m) => m.line === "2");
+  const line3 = schedule.allManagers.filter((m) => m.line === "3");
   const activeCount = schedule.allManagers.filter((m) => m.isOnLine).length;
 
   return (
@@ -614,6 +615,30 @@ function ActiveManagersPanel({
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
                       selected.has(mgr.id)
                         ? "bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25"
+                        : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
+                    }`}
+                  >
+                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
+                    {mgr.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {line3.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-amber-400 font-bold mb-2">
+                Доведение (третья линия)
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {line3.map((mgr) => (
+                  <button
+                    key={mgr.id}
+                    onClick={() => toggle(mgr.id)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
+                      selected.has(mgr.id)
+                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 hover:bg-amber-500/25"
                         : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
                     }`}
                   >

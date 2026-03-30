@@ -331,7 +331,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     }> = [];
 
     if (section.key === "funnel") {
-      const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2");
+      const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2" || m.line === "3");
       if (funnelManagers.length > 0) {
         const excludeQual = new Set([142, 143, 93485479, 95514987, 83873487, 83873491, 90367079, 90367083]);
         const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
