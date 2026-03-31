@@ -128,6 +128,41 @@ export async function GET(
           : "",
       }));
 
+    // Extract mistakes/recommendations from evaluation blocks if text fields are stubs
+    const isStub = (s: string | null) => !s || s === "См. детальную оценку";
+    let mistakesText = call.mistakes || "";
+    let recommendationsText = call.recommendations || "";
+
+    if (isStub(mistakesText) && call.evaluationJson?.blocks) {
+      const errorLines: string[] = [];
+      let num = 1;
+      for (const b of call.evaluationJson.blocks) {
+        if (!b.criteria) continue;
+        for (const c of b.criteria) {
+          if (c.score === 0 && c.max_score > 0 && c.feedback) {
+            errorLines.push(`${num}. ${c.name}: ${c.feedback}`);
+            num++;
+          }
+        }
+      }
+      if (errorLines.length > 0) mistakesText = errorLines.join("\n\n");
+    }
+
+    if (isStub(recommendationsText) && call.evaluationJson?.blocks) {
+      const recBlock = call.evaluationJson.blocks.find((b) => b.name === "Рекомендации");
+      if (recBlock?.criteria) {
+        const lines: string[] = [];
+        let num = 1;
+        for (const c of recBlock.criteria) {
+          if (c.feedback) {
+            lines.push(`${num}. ${c.name}: ${c.feedback}`);
+            num++;
+          }
+        }
+        if (lines.length > 0) recommendationsText = lines.join("\n\n");
+      }
+    }
+
     const data = {
       id: call.id,
       name: call.userName || "Unknown",
@@ -139,8 +174,8 @@ export async function GET(
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${department}` : "#",
       kommoUrl: "#",
       transcript: call.transcript || "",
-      aiFeedback: call.recommendations || "",
-      summary: call.mistakes || "",
+      aiFeedback: recommendationsText,
+      summary: mistakesText,
       blocks,
     };
 
