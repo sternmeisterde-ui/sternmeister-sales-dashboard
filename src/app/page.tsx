@@ -11,6 +11,7 @@ import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
 import AnalyticsTab from "@/components/AnalyticsTab";
 import DashboardTab from "@/components/DashboardTab";
+import ManagersTab from "@/components/ManagersTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // Функция для очистки текста от markdown и специальных символов
@@ -64,7 +65,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3">("all");
 
   // Load session on mount
@@ -654,6 +655,7 @@ export default function Dashboard() {
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
+            { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
               key={item.id}
@@ -737,6 +739,11 @@ export default function Dashboard() {
         {/* --------------------- ANALYTICS VIEW --------------------- */}
         {activeTab === "analytics" && (
           <AnalyticsTab department={activeDepartment} />
+        )}
+
+        {/* --------------------- MANAGERS VIEW --------------------- */}
+        {activeTab === "managers" && (
+          <ManagersTab department={activeDepartment} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}

@@ -121,6 +121,25 @@ export const r1Calls = pgTable("r1_calls", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// ==================== MASTER MANAGERS ====================
+
+export const masterManagers = pgTable("master_managers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  telegramUsername: text("telegram_username"),
+  telegramId: text("telegram_id"),
+  department: text("department").notNull(),       // 'b2g' | 'b2b'
+  team: text("team").notNull().default("all"),
+  role: text("role").notNull().default("manager"), // 'manager' | 'rop' | 'admin'
+  line: text("line"),                              // '1' | '2' | '3'
+  kommoUserId: integer("kommo_user_id"),
+  inOkk: boolean("in_okk").default(false),
+  inRolevki: boolean("in_rolevki").default(false),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
 // ==================== SHARED TABLES ====================
 
 export const dailyPlans = pgTable("daily_plans", {
