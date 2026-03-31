@@ -333,10 +333,13 @@ async function softDeleteFromTargets(
     warnings.push(`OKK delete failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // Hard-delete from roleplay (no call history there)
+  // Soft-delete from roleplay (may have call history via foreign key)
   if (telegramId) {
     try {
-      await roleplayDb.delete(usersTable).where(eq(usersTable.telegramId, telegramId));
+      await roleplayDb
+        .update(usersTable)
+        .set({ isActive: false, updatedAt: new Date() })
+        .where(eq(usersTable.telegramId, telegramId));
     } catch (err) {
       warnings.push(`Roleplay delete failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
     }
