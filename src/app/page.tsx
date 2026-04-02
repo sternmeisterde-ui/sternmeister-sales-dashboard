@@ -1143,6 +1143,9 @@ export default function Dashboard() {
                       <th className="px-5 py-3 font-semibold">Сотрудник</th>
                       <th className="px-5 py-3 font-semibold">Время & Дата</th>
                       <th className="px-5 py-3 font-semibold text-center">Длительность</th>
+                      {activeTab === "real_calls" && (
+                        <th className="px-5 py-3 font-semibold text-center">№</th>
+                      )}
                       <th className="px-5 py-3 font-semibold text-center">Транскрибация</th>
                       {activeTab === "real_calls" && (
                         <th className="px-5 py-3 font-semibold text-center">CRM</th>
@@ -1164,6 +1167,15 @@ export default function Dashboard() {
                         </td>
                         <td className="px-5 py-3 text-slate-400 whitespace-nowrap">{call.date}</td>
                         <td className="px-5 py-3 text-slate-300 font-mono text-center">{call.callDuration}</td>
+                        {activeTab === "real_calls" && (
+                          <td className="px-5 py-3 text-center">
+                            {call.callNumber ? (
+                              <span className="px-2 py-0.5 rounded bg-slate-700/50 text-slate-300 text-xs font-mono">{call.callNumber}</span>
+                            ) : (
+                              <span className="text-slate-600">—</span>
+                            )}
+                          </td>
+                        )}
                         <td className="px-5 py-3 text-center">
                           <button
                             onClick={() => handleSelectCall(call, "transcript")}

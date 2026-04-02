@@ -3,6 +3,7 @@ export interface ManagerCall {
     name: string;
     avatarUrl: string;
     callDuration: string;
+    callNumber?: string;
     score: number;
     audioUrl: string;
     kommoUrl: string;

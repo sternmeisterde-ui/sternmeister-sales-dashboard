@@ -155,6 +155,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
           // Evaluation — only score + blocks summary (no transcript/mistakes/recommendations)
           totalScore: okkEvaluations.totalScore,
           evaluationJson: okkEvaluations.evaluationJson,
+          callNumber: okkEvaluations.callNumber,
         })
         .from(okkCalls)
         .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
@@ -220,6 +221,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         name: row.managerName || "—",
         avatarUrl: "",
         callDuration: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
+        callNumber: row.callNumber || "",
         date: formatDate(row.callCreatedAt),
         score: row.totalScore || 0,
         hasRecording: !!row.recordingUrl,

@@ -116,6 +116,7 @@ export const okkEvaluations = pgTable("evaluations", {
   recommendations: text("recommendations"),
   modelUsed: text("model_used"),
   tokensUsed: integer("tokens_used"),
+  callNumber: text("call_number"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
