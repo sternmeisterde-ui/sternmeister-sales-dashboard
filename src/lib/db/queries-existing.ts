@@ -5,6 +5,14 @@ import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 // Тип отдела
 export type DepartmentType = "b2g" | "b2b";
 
+// Bug #11: minimum call duration thresholds for roleplay tables
+// R1 (commercial): 300 s (5 min), D1 (qualifier: 600 s, berater/dovedenie: 300 s)
+// Use the lowest per-department floor so very short calls (hung up, test calls) never appear.
+const MIN_DURATION_ROLEPLAY: Record<DepartmentType, number> = {
+  b2b: 300, // R1 — 5 min minimum
+  b2g: 300, // D1 — 5 min minimum (qualifier is 10 min, but berater/dovedenie is 5 min)
+};
+
 // Получить таблицы по типу отдела
 // D1 таблицы → Госники (B2G) на ветке D1, R1 таблицы → Коммерсы (B2B) на ветке R1
 function getTables(departmentType: DepartmentType) {
@@ -32,6 +40,9 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
     const toLocal = new Date(toParts[0], toParts[1] - 1, toParts[2], 23, 59, 59, 999);
     conditions.push(lte(calls.startedAt, toLocal));
   }
+
+  // Bug #11: exclude calls shorter than the roleplay minimum threshold
+  conditions.push(gte(calls.durationSeconds, MIN_DURATION_ROLEPLAY[departmentType]));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
@@ -86,6 +97,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
       transcript: "",
       aiFeedback: "",
       summary: "",
+      evalSummary: "",
       blocks,
     };
   });

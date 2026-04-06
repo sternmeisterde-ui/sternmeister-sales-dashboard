@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -12,6 +12,7 @@ import DailyTab from "@/components/DailyTab";
 import AnalyticsTab from "@/components/AnalyticsTab";
 import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
+import CriteriaTab from "@/components/CriteriaTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // Функция для очистки текста от markdown и специальных символов
@@ -65,7 +66,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3">("all");
 
   // Load session on mount
@@ -112,6 +113,7 @@ export default function Dashboard() {
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [searchQuery, setSearchQuery] = useState("");
+  const [crmSearchUrl, setCrmSearchUrl] = useState("");
 
   // AI Dashboard period filter
   const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("week");
@@ -270,6 +272,9 @@ export default function Dashboard() {
   };
 
   // Compute OKK date range from period/custom range
+  // "end" is set to tomorrow to capture calls that arrive with UTC timestamps
+  // ahead of the local date (e.g. a call at 18:00 UTC on April 3rd is still
+  // April 3rd in Moscow/Berlin, but appears as "future" if the browser is UTC).
   const getOkkDateRange = useCallback((): { from: string; to: string } => {
     const now = new Date();
     if (aiCustomRange.start && aiCustomRange.end) {
@@ -278,10 +283,12 @@ export default function Dashboard() {
         to: fmtLocalDate(aiCustomRange.end),
       };
     }
+    // Set end to tomorrow so same-day calls stored in UTC don't get cut off
     const end = new Date(now);
+    end.setDate(end.getDate() + 1);
     const start = new Date(now);
     if (aiDashPeriod === "day") {
-      // today
+      // today only — keep start = today, end = tomorrow covers late UTC calls
     } else if (aiDashPeriod === "week") {
       start.setDate(start.getDate() - 6);
     } else {
@@ -548,9 +555,17 @@ export default function Dashboard() {
       return false;
     }
 
-    // Filter by search query
-    if (searchQuery.trim()) {
-      return call.name.toLowerCase().includes(searchQuery.toLowerCase());
+    // Filter by selected manager
+    if (searchQuery) {
+      if (call.name !== searchQuery) return false;
+    }
+
+    // Filter by CRM link — match lead ID from pasted URL
+    if (crmSearchUrl.trim()) {
+      const leadIdMatch = crmSearchUrl.match(/leads\/detail\/(\d+)|leads\/(\d+)/);
+      const searchId = leadIdMatch?.[1] || leadIdMatch?.[2] || crmSearchUrl.trim();
+      const callUrl = call.kommoUrl || "";
+      if (!callUrl.includes(searchId)) return false;
     }
 
     return true;
@@ -629,7 +644,7 @@ export default function Dashboard() {
       <div className="absolute top-[40%] left-[30%] w-[20%] h-[20%] bg-sky-400/5 blur-[100px] rounded-full pointer-events-none" />
 
       {/* COLLAPSIBLE SIDEBAR */}
-      <aside className={`glass-panel rounded-3xl p-5 flex flex-col gap-6 shadow-2xl relative z-20 border border-white/5 transition-all duration-300 ${isSidebarOpen ? "w-full sm:w-64" : "w-full sm:w-20 items-center"
+      <aside className={`glass-panel rounded-3xl p-4 flex flex-col gap-5 shadow-2xl relative z-20 border border-white/5 transition-all duration-300 ${isSidebarOpen ? "w-full sm:w-48" : "w-full sm:w-16 items-center"
         }`}>
         <div className="flex items-center justify-between w-full">
           <div className="flex items-center gap-3">
@@ -656,6 +671,7 @@ export default function Dashboard() {
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
             { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
+            { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
               key={item.id}
@@ -744,6 +760,11 @@ export default function Dashboard() {
         {/* --------------------- MANAGERS VIEW --------------------- */}
         {activeTab === "managers" && (
           <ManagersTab department={activeDepartment} />
+        )}
+
+        {/* --------------------- CRITERIA VIEW --------------------- */}
+        {activeTab === "criteria" && (
+          <CriteriaTab department={activeDepartment} lineFilter={lineFilter} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
@@ -1002,24 +1023,24 @@ export default function Dashboard() {
                     />
                     <span className="text-xs font-bold text-blue-400 w-8 text-right">{scoreFilter}%</span>
                   </div>
-                  <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5">
-                    <Search className="w-3.5 h-3.5 text-slate-400 mr-2" />
-                    <input
-                      type="text"
-                      placeholder="Поиск менеджера..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="bg-transparent border-none outline-none text-xs text-slate-200 w-32 placeholder-slate-500"
-                    />
-                    {searchQuery && (
-                      <button
-                        onClick={() => setSearchQuery("")}
-                        className="ml-1 text-slate-500 hover:text-slate-300 transition-colors"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
+                  {/* CRM link search — only for real calls */}
+                  {activeTab === "real_calls" && (
+                    <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5">
+                      <Activity className="w-3.5 h-3.5 text-cyan-400 mr-2 shrink-0" />
+                      <input
+                        type="text"
+                        placeholder="Вставьте ссылку CRM..."
+                        value={crmSearchUrl}
+                        onChange={(e) => setCrmSearchUrl(e.target.value)}
+                        className="bg-transparent border-none outline-none text-xs text-slate-200 w-44 placeholder-slate-500"
+                      />
+                      {crmSearchUrl && (
+                        <button onClick={() => setCrmSearchUrl("")} className="ml-1 text-slate-500 hover:text-slate-300 transition-colors">
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {/* Filter & Date button */}
                   <div className="relative">
@@ -1036,6 +1057,26 @@ export default function Dashboard() {
 
                     {isFilterOpen && (
                       <div className="absolute top-10 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2">
+                        {/* Manager filter inside widget */}
+                        <div>
+                          <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+                            <Search className="w-3.5 h-3.5 text-blue-400" /> Менеджер
+                          </label>
+                          <select
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            className="w-full bg-slate-800 border border-white/10 rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500/50 cursor-pointer"
+                          >
+                            <option value="" className="bg-slate-900">Все менеджеры</option>
+                            {(() => {
+                              const names = [...new Set(activeCalls.map(c => c.name))].sort();
+                              return names.map(n => (
+                                <option key={n} value={n} className="bg-slate-900">{n}</option>
+                              ));
+                            })()}
+                          </select>
+                        </div>
+
                         <div>
                           <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
                             <Calendar className="w-3.5 h-3.5 text-blue-400" /> Выбрать период
@@ -1186,12 +1227,19 @@ export default function Dashboard() {
                         </td>
                         {activeTab === "real_calls" && (
                           <td className="px-5 py-3 text-center">
-                            {call.kommoUrl ? (
-                              <a href={call.kommoUrl} target="_blank" rel="noreferrer" className="inline-block p-1.5 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all shadow-inner border border-cyan-500/20">
-                                <Activity className="w-3.5 h-3.5" />
+                            {call.kommoUrl && call.kommoUrl !== "#" ? (
+                              <a
+                                href={call.kommoUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-all border border-cyan-500/20 text-[10px] font-medium max-w-[120px] truncate"
+                                title={call.kommoUrl}
+                              >
+                                <Activity className="w-3 h-3 shrink-0" />
+                                CRM
                               </a>
                             ) : (
-                              <span className="text-slate-600">—</span>
+                              <span className="text-slate-600 text-[10px]">—</span>
                             )}
                           </td>
                         )}
@@ -1449,7 +1497,13 @@ export default function Dashboard() {
                   </div>
                   <div className="flex-1">
                     <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
-                    <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
+                    {selectedCall.totalMaxScore ? (
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {Math.round(selectedCall.score / 100 * selectedCall.totalMaxScore)}/{selectedCall.totalMaxScore} баллов
+                      </p>
+                    ) : (
+                      <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
+                    )}
                   </div>
                   {/* Mini client scoring in the same row (only for real calls) */}
                   {activeTab === "real_calls" && selectedCall.clientScoring && (() => {
@@ -1466,86 +1520,122 @@ export default function Dashboard() {
                   })()}
                 </div>
 
-                {/* ── Evaluation Blocks Accordion ── */}
+                {/* ── AI Narrative Summary (evaluationJson.summary) ── */}
+                {selectedCall.evalSummary && (
+                  <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex flex-col gap-3 shadow-inner">
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 shrink-0">
+                      <Bot className="w-4 h-4 text-blue-400" /> Итоговый вывод
+                    </h4>
+                    <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">{cleanText(selectedCall.evalSummary)}</p>
+                  </div>
+                )}
+
+                {/* ── Evaluation Blocks ── */}
                 {selectedCall.blocks && selectedCall.blocks.length > 0 && (
-                  <div className="flex flex-col gap-2">
-                    <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">Детальный разбор по блокам</h4>
+                  <div className="flex flex-col gap-3">
+                    <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1">Детальный разбор</h4>
                     {selectedCall.blocks.map((block) => {
                       const isOpen = openBlocks.has(block.id);
-                      const isInfoBlock = block.maxScore === 0; // informational block (tags, recommendations, etc.)
+                      const isInfoBlock = block.maxScore === 0;
                       const blockPct = block.maxScore > 0 ? (block.score / block.maxScore) * 100 : -1;
-                      const blockColor = isInfoBlock
-                        ? "text-blue-400"
-                        : blockPct >= 70 ? "text-emerald-400"
-                        : blockPct >= 40 ? "text-amber-400"
-                        : "text-rose-400";
-                      const blockBorder = isInfoBlock
-                        ? "border-blue-500/20"
-                        : blockPct >= 70 ? "border-emerald-500/20"
-                        : blockPct >= 40 ? "border-amber-500/20"
-                        : "border-rose-500/20";
+                      const blockAccent = isInfoBlock
+                        ? { text: "text-blue-400", bg: "bg-blue-500/10", border: "border-blue-500/20", bar: "bg-blue-500" }
+                        : blockPct >= 70 ? { text: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/20", bar: "bg-emerald-500" }
+                        : blockPct >= 40 ? { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/20", bar: "bg-amber-500" }
+                        : { text: "text-rose-400", bg: "bg-rose-500/10", border: "border-rose-500/20", bar: "bg-rose-500" };
 
                       return (
-                        <div key={block.id} className={`rounded-xl border bg-slate-900/40 overflow-hidden transition-all duration-200 ${blockBorder}`}>
-                          {/* Accordion Header */}
+                        <div key={block.id} className={`rounded-xl border overflow-hidden ${blockAccent.border} bg-slate-900/30`}>
+                          {/* Block header */}
                           <button
                             onClick={() => toggleBlock(block.id)}
-                            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/[0.03] transition-colors"
+                            className="w-full flex items-center justify-between px-5 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
                             aria-expanded={isOpen}
                           >
                             <div className="flex items-center gap-3 min-w-0">
-                              <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform duration-200 ${isOpen ? "" : "-rotate-90"}`} />
-                              <span className="text-sm font-semibold text-slate-100 truncate">{block.name}</span>
+                              <ChevronDown className={`w-4 h-4 shrink-0 transition-transform duration-200 ${isOpen ? blockAccent.text : "text-slate-500 -rotate-90"}`} />
+                              <span className="text-sm font-bold text-white truncate">{block.name}</span>
                             </div>
-                            <span className={`text-xs font-bold shrink-0 ml-3 ${blockColor}`}>
-                              {isInfoBlock ? "Инфо" : `${block.score}/${block.maxScore}`}
-                            </span>
+                            {isInfoBlock ? (
+                              <span className="text-[11px] text-blue-400 bg-blue-500/10 px-2.5 py-1 rounded-lg border border-blue-500/20 font-medium shrink-0 ml-3">Аналитика</span>
+                            ) : (
+                              <div className="flex items-center gap-2.5 shrink-0 ml-3">
+                                <div className="w-20 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                                  <div className={`h-full rounded-full ${blockAccent.bar}`} style={{ width: `${Math.min(blockPct, 100)}%` }} />
+                                </div>
+                                <span className={`text-sm font-bold tabular-nums ${blockAccent.text}`}>{Math.round(blockPct)}%</span>
+                                <span className="text-[10px] text-slate-500">{block.score}/{block.maxScore}</span>
+                              </div>
+                            )}
                           </button>
 
-                          {/* Accordion Content */}
+                          {/* Criteria */}
                           {isOpen && (
-                            <div className="px-4 pb-4 pt-1 flex flex-col gap-3 border-t border-white/5">
+                            <div className="border-t border-white/[0.04]">
                               {block.criteria && block.criteria.length > 0 ? (
-                                block.criteria.map((criterion) => {
+                                block.criteria.map((criterion, cidx) => {
                                   const isBinary = criterion.maxScore === 1;
                                   const isInfo = criterion.maxScore === 0;
+                                  const passed = isBinary && criterion.score === 1;
+                                  const failed = isBinary && criterion.score === 0;
 
-                                  const badge = isBinary
-                                    ? criterion.score === 1
-                                      ? { label: "✅", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" }
-                                      : { label: "❌", color: "text-rose-400 bg-rose-500/10 border-rose-500/30" }
-                                    : { label: "ℹ️", color: "text-blue-400 bg-blue-500/10 border-blue-500/30" };
-
-                                  const borderColor = isBinary
-                                    ? criterion.score === 1 ? "border-emerald-500/30" : "border-rose-500/30"
-                                    : "border-blue-500/30";
+                                  const rowBg = failed ? "bg-rose-500/[0.04]" : isInfo ? "bg-slate-800/20" : "";
+                                  const accentBar = failed ? "bg-rose-500" : passed ? "bg-emerald-500" : "bg-slate-600";
 
                                   return (
-                                    <div key={criterion.id} className={`flex flex-col gap-1.5 pl-3 border-l-2 ${borderColor}`}>
-                                      {/* Criterion name + badge */}
-                                      <div className="flex items-start gap-2">
-                                        <span className={`inline-flex items-center shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded border mt-0.5 ${badge.color}`}>
-                                          {badge.label}
-                                        </span>
-                                        <span className="text-xs font-semibold text-slate-200 leading-relaxed">{criterion.name}</span>
+                                    <div key={criterion.id} className={`relative ${rowBg} ${cidx > 0 ? "border-t border-white/[0.03]" : ""}`}>
+                                      {/* Left accent bar */}
+                                      <div className={`absolute left-0 top-0 bottom-0 w-[3px] ${accentBar}`} />
+
+                                      <div className="pl-6 pr-5 py-4">
+                                        {/* Row 1: Status + Criterion name */}
+                                        <div className="flex items-start gap-3">
+                                          {/* Status badge */}
+                                          <div className="shrink-0 mt-0.5">
+                                            {passed ? (
+                                              <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-emerald-500/15 text-emerald-400 text-xs font-bold">✓</span>
+                                            ) : failed ? (
+                                              <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-rose-500/15 text-rose-400 text-xs font-bold">✗</span>
+                                            ) : (
+                                              <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-700/40 text-slate-500 text-[10px] font-bold">—</span>
+                                            )}
+                                          </div>
+
+                                          {/* Name + number */}
+                                          <div className="flex-1 min-w-0">
+                                            <div className="flex items-baseline gap-2">
+                                              <span className="text-[10px] text-slate-500 font-mono shrink-0">#{criterion.id}</span>
+                                              <span className={`text-sm font-semibold leading-snug ${failed ? "text-rose-200" : passed ? "text-white" : "text-slate-300"}`}>
+                                                {criterion.name}
+                                              </span>
+                                            </div>
+
+                                            {/* Feedback — always visible, distinct from name */}
+                                            {criterion.feedback && (
+                                              <p className={`mt-2 text-xs leading-relaxed ${failed ? "text-rose-300/70" : "text-slate-400"}`}>
+                                                {cleanText(criterion.feedback)}
+                                              </p>
+                                            )}
+
+                                            {/* Quote — visually separated */}
+                                            {criterion.quote && criterion.quote !== "Не применимо" && criterion.quote.length > 2 && (
+                                              <div className="mt-2.5 flex gap-2">
+                                                <div className="w-[2px] rounded-full bg-cyan-500/30 shrink-0" />
+                                                <p className="text-[11px] text-cyan-300/60 italic leading-relaxed">
+                                                  {criterion.quote}
+                                                </p>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
                                       </div>
-
-                                      {/* Feedback text */}
-                                      {criterion.feedback && (
-                                        <p className="text-xs text-slate-400 leading-relaxed pl-8">{cleanText(criterion.feedback)}</p>
-                                      )}
-
-                                      {/* Quote block */}
-                                      {criterion.quote && criterion.quote !== "Не применимо" && (
-                                        <blockquote className="ml-8 pl-3 border-l-2 border-blue-500/40 italic text-[11px] text-slate-400 leading-relaxed">
-                                          {"\u201c"}{criterion.quote}{"\u201d"}
-                                        </blockquote>
-                                      )}
                                     </div>
                                   );
                                 })
                               ) : block.feedback ? (
-                                <p className="text-xs text-slate-400 leading-relaxed pl-7">{cleanText(block.feedback)}</p>
+                                <div className="px-6 py-4">
+                                  <p className="text-xs text-slate-400 leading-relaxed">{cleanText(block.feedback)}</p>
+                                </div>
                               ) : null}
                             </div>
                           )}
@@ -1565,9 +1655,9 @@ export default function Dashboard() {
                   const borderColor = pct >= 70 ? "border-purple-500/20" : pct >= 40 ? "border-purple-500/20" : "border-purple-500/20";
                   const isOpen = openBlocks.has("client_scoring");
 
-                  const items = [
+                  const items: { label: string; value: number; max: number }[] = [
                     { label: "Срочность", value: cs.urgency, max: 10 },
-                    ...(hasSolvency ? [{ label: "Платежеспособность", value: cs.solvency, max: 10 }] : []),
+                    ...(hasSolvency ? [{ label: "Платежеспособность", value: cs.solvency as number, max: 10 }] : []),
                     { label: "Потребность", value: cs.need, max: 10 },
                   ];
 
@@ -1619,59 +1709,89 @@ export default function Dashboard() {
                   );
                 })()}
 
-                {/* ── AI Summary - Mistakes ── */}
-                {selectedCall.summary && (
-                  <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex flex-col gap-3 shadow-inner">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 shrink-0">
-                      <Bot className="w-4 h-4 text-rose-400" /> Ошибки и Недоработки
-                    </h4>
-                    <div className="text-sm text-slate-200 leading-relaxed overflow-y-auto max-h-[300px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50 pr-2">
-                      {selectedCall.summary.split(/(?=\d+[\.\)]\s)/).filter(Boolean).map((point, idx) => {
-                        const match = point.match(/^(\d+)[\.\)]\s+([\s\S]+)/);
-                        if (match) {
-                          return (
-                            <div key={idx} className="mb-4 p-3 bg-rose-500/5 border border-rose-500/20 rounded-xl">
-                              <div className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center text-xs font-bold">
-                                  {match[1]}
-                                </span>
-                                <p className="flex-1 text-slate-200 whitespace-pre-wrap">{cleanText(match[2])}</p>
-                              </div>
-                            </div>
-                          );
-                        }
-                        return <p key={idx} className="text-slate-200 mb-3 whitespace-pre-wrap">{cleanText(point)}</p>;
-                      })}
-                    </div>
-                  </div>
-                )}
+                {/* ── Quick Summary: Failures + Strengths ── */}
+                {selectedCall.blocks && selectedCall.blocks.length > 0 && (() => {
+                  // Collect failed criteria and strengths from blocks
+                  const failures: Array<{name: string; feedback: string}> = [];
+                  const strengths: Array<{name: string; feedback: string}> = [];
 
-                {/* ── AI Feedback - Recommendations ── */}
-                {selectedCall.aiFeedback && (
-                  <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex flex-col gap-3 shadow-inner">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 shrink-0">
-                      <Bot className="w-4 h-4 text-emerald-400" /> Рекомендации и Сильные Стороны
-                    </h4>
-                    <div className="text-sm text-slate-200 leading-relaxed overflow-y-auto max-h-[300px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50 pr-2">
-                      {selectedCall.aiFeedback.split(/(?=\d+[\.\)]\s)/).filter(Boolean).map((point, idx) => {
-                        const match = point.match(/^(\d+)[\.\)]\s+([\s\S]+)/);
-                        if (match) {
-                          return (
-                            <div key={idx} className="mb-4 p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-xl">
-                              <div className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs font-bold">
-                                  {match[1]}
-                                </span>
-                                <p className="flex-1 text-slate-200 whitespace-pre-wrap">{cleanText(match[2])}</p>
+                  for (const block of selectedCall.blocks) {
+                    if (!block.criteria) continue;
+                    for (const c of block.criteria) {
+                      if (c.maxScore === 1 && c.score === 0) {
+                        failures.push({ name: c.name, feedback: c.feedback || "" });
+                      }
+                      if (c.maxScore === 0 && c.feedback && (
+                        c.name.toLowerCase().includes("рекоменда") ||
+                        c.name.toLowerCase().includes("зоны роста") ||
+                        c.name.toLowerCase().includes("лучшие практики")
+                      )) {
+                        strengths.push({ name: c.name, feedback: c.feedback });
+                      }
+                    }
+                  }
+
+                  if (failures.length === 0 && strengths.length === 0) return null;
+
+                  return (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {/* Left: What to improve */}
+                      {failures.length > 0 && (
+                        <div className="rounded-xl border border-rose-500/15 bg-rose-500/[0.03] p-4">
+                          <h4 className="text-[10px] font-bold text-rose-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                            Что улучшить ({failures.length})
+                          </h4>
+                          <div className="flex flex-col gap-2">
+                            {failures.slice(0, 8).map((f, i) => (
+                              <div key={i} className="flex gap-2 items-start">
+                                <span className="text-rose-400 text-xs mt-0.5 shrink-0">✗</span>
+                                <div className="min-w-0">
+                                  <span className="text-xs font-semibold text-rose-200">{f.name}</span>
+                                  {f.feedback && (
+                                    <p className="text-[11px] text-rose-300/50 leading-relaxed mt-0.5 line-clamp-2">{cleanText(f.feedback)}</p>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        }
-                        return <p key={idx} className="text-slate-200 mb-3 whitespace-pre-wrap">{cleanText(point)}</p>;
-                      })}
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Right: Strengths & Recommendations */}
+                      {strengths.length > 0 && (
+                        <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/[0.03] p-4">
+                          <h4 className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            Рекомендации и сильные стороны
+                          </h4>
+                          <div className="flex flex-col gap-2">
+                            {strengths.map((s, i) => {
+                              // Parse ✅ and ❌ items from feedback
+                              const items = s.feedback.split(/(?=✅|❌)/).filter(Boolean).slice(0, 4);
+                              return items.map((item, j) => {
+                                const isPositive = item.startsWith("✅");
+                                const isNegative = item.startsWith("❌");
+                                const text = item.replace(/^[✅❌]\s*/, "").trim();
+                                const firstLine = text.split("\n")[0];
+                                return (
+                                  <div key={`${i}-${j}`} className="flex gap-2 items-start">
+                                    <span className={`text-xs mt-0.5 shrink-0 ${isNegative ? "text-amber-400" : "text-emerald-400"}`}>
+                                      {isNegative ? "△" : "✓"}
+                                    </span>
+                                    <p className={`text-[11px] leading-relaxed line-clamp-2 ${isNegative ? "text-amber-200/70" : "text-emerald-200/70"}`}>
+                                      {cleanText(firstLine)}
+                                    </p>
+                                  </div>
+                                );
+                              });
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             )}
 

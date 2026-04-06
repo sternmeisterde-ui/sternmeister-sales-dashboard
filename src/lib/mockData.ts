@@ -5,12 +5,17 @@ export interface ManagerCall {
     callDuration: string;
     callNumber?: string;
     score: number;
+    /** Raw max score from evaluationJson.total_max_score (e.g. 33), used to display "8/33 (24%)" */
+    totalMaxScore?: number;
     audioUrl: string;
     kommoUrl: string;
     date: string;
     transcript: string;
     aiFeedback: string;
+    /** Mistakes text from the evaluations.mistakes column */
     summary: string;
+    /** Narrative summary from evaluationJson.summary (the AI overall conclusion) */
+    evalSummary?: string;
     hasRecording: boolean;
     blocks: {
         id: string;
@@ -20,7 +25,7 @@ export interface ManagerCall {
         feedback: string;
         criteria: { id: number; name: string; score: number; maxScore: number; feedback: string; quote: string }[];
     }[];
-    clientScoring?: { urgency: number; solvency: number; need: number; total: number };
+    clientScoring?: { urgency: number; solvency?: number; need: number; total: number };
 }
 
 export interface ManagerStat {

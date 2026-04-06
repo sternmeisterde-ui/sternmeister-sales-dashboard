@@ -7,6 +7,7 @@ import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkManagers } from "@/lib/db/schema-okk";
 import { eq, and } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
+import { getUsers as getKommoUsers } from "@/lib/kommo/client";
 
 // ─── GET: fetch managers for department ───────────────────────
 
@@ -39,6 +40,8 @@ interface ManagerInput {
   id?: string;
   name: string;
   telegramUsername: string | null;
+  telegramId: string | null;
+  kommoUserId: number | null;
   role: string;
   line: string | null;
   inOkk: boolean;
@@ -107,16 +110,20 @@ export async function POST(request: NextRequest) {
       const cleanUsername = mgr.telegramUsername?.replace(/^@/, "").trim() || null;
       const existing = mgr.id ? existingMap.get(mgr.id) : null;
 
-      if (!cleanUsername) return null;
+      // If frontend already sent a telegramId (e.g. pre-filled or kept from state), use it directly
+      const clientTelegramId = mgr.telegramId?.trim() || null;
+
+      if (!cleanUsername) return clientTelegramId;
 
       // Check if username changed — force re-resolve
       const existingUsername = existing?.telegramUsername?.replace(/^@/, "").trim() || null;
       const usernameChanged = cleanUsername !== existingUsername;
 
       // Skip if ID already known, is real, and username unchanged
-      const isPlaceholder = existing?.telegramId && Number(existing.telegramId) < 1000000;
-      if (existing?.telegramId && !isPlaceholder && !usernameChanged) {
-        return existing.telegramId;
+      const knownId = clientTelegramId || existing?.telegramId || null;
+      const isPlaceholder = knownId && Number(knownId) < 1000000;
+      if (knownId && !isPlaceholder && !usernameChanged) {
+        return knownId;
       }
 
       const resolved = await resolveTelegramUsername(cleanUsername);
@@ -126,6 +133,22 @@ export async function POST(request: NextRequest) {
 
     const resolvedIds = await Promise.all(resolvePromises);
 
+    // ── Step 3.5: Auto-resolve Kommo User IDs by name ──
+    let kommoUserMap = new Map<string, number>(); // lowercase name → kommo user id
+    try {
+      const kommoUsers = await getKommoUsers();
+      for (const ku of kommoUsers) {
+        if (ku.id && ku.name) {
+          kommoUserMap.set(ku.name.toLowerCase().trim(), ku.id);
+        }
+      }
+      if (kommoUserMap.size > 0) {
+        console.log(`[Managers API] Loaded ${kommoUserMap.size} Kommo users for auto-matching`);
+      }
+    } catch (err) {
+      warnings.push(`Не удалось загрузить пользователей из Kommo: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // ── Step 4: Upsert each manager ──
     const results: (typeof masterManagers.$inferSelect)[] = [];
 
@@ -133,6 +156,12 @@ export async function POST(request: NextRequest) {
       const mgr = safeManagers[idx];
       const existing = mgr.id ? existingMap.get(mgr.id) : null;
       const telegramId = resolvedIds[idx] || existing?.telegramId || null;
+
+      // kommoUserId: auto-resolve from Kommo API only for OKK managers
+      const autoMatchedKommoId = mgr.inOkk
+        ? (kommoUserMap.get(mgr.name.trim().toLowerCase()) ?? null)
+        : null;
+      const kommoUserId = existing?.kommoUserId ?? autoMatchedKommoId ?? mgr.kommoUserId ?? null;
 
       const values = {
         name: mgr.name.trim(),
@@ -142,7 +171,7 @@ export async function POST(request: NextRequest) {
         team,
         role: mgr.role || "manager",
         line: mgr.line || null,
-        kommoUserId: existing?.kommoUserId ?? null,
+        kommoUserId,
         inOkk: mgr.inOkk,
         inRolevki: mgr.inRolevki,
         isActive: true,
@@ -230,6 +259,7 @@ async function syncToTargets(
               role: row.role,
               line: row.line,
               telegramId: row.telegramId,
+              kommoUserId: row.kommoUserId,
               isActive: true,
             })
             .where(eq(okkManagers.id, existing.id));
@@ -237,6 +267,7 @@ async function syncToTargets(
           await okkDb.insert(okkManagers).values({
             name: row.name,
             telegramId: row.telegramId,
+            kommoUserId: row.kommoUserId,
             department: okkDept,
             role: row.role,
             line: row.line,

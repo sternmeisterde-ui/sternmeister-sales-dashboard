@@ -131,6 +131,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       );
     }
 
+    // Bug #11: Exclude short calls — OKK minimum threshold is 600 s (10 min)
+    conditions.push(gte(okkCalls.durationSeconds, 600));
+
     const managerIdParam = sp.get("manager_id");
     if (managerIdParam) {
       conditions.push(eq(okkCalls.managerId, managerIdParam));
@@ -200,9 +203,11 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       const mins = Math.floor(dSec / 60);
       const secs = dSec % 60;
 
-      // Extract client scoring from evaluation JSON
-      const evalJson = row.evaluationJson as any;
-      const clientScoring = evalJson?.client_scoring || evalJson?.summary?.client_scoring || null;
+      // Extract client scoring and raw max score from evaluation JSON
+      const evalJson = row.evaluationJson as Record<string, unknown> | null;
+      const clientScoring = (evalJson?.client_scoring as unknown) || null;
+      const totalMaxScore =
+        typeof evalJson?.total_max_score === "number" ? evalJson.total_max_score : undefined;
 
       // LIGHT blocks: only id/name/score/maxScore — no criteria (loaded on-demand via /api/okk/calls/[callId])
       const blocks = (row.evaluationJson?.blocks || [])
@@ -212,7 +217,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
           name: b.name || "",
           score: b.block_score ?? b.score ?? 0,
           maxScore: b.max_block_score ?? b.max_score ?? 0,
-          criteria: [] as any[],
+          criteria: [] as { id: number; name: string; score: number; maxScore: number; feedback: string; quote: string }[],
           feedback: "",
         }));
 
@@ -224,6 +229,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         callNumber: row.callNumber || "",
         date: formatDate(row.callCreatedAt),
         score: row.totalScore || 0,
+        totalMaxScore,
         hasRecording: !!row.recordingUrl,
         audioUrl: row.recordingUrl
           ? `/api/okk/audio/${row.id}?dept=${department}`
@@ -233,6 +239,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         transcript: "",
         aiFeedback: "",
         summary: "",
+        evalSummary: "",
         blocks,
         clientScoring,
       };

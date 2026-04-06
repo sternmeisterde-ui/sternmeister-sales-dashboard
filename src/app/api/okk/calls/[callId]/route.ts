@@ -143,12 +143,19 @@ export async function GET(
     const mins = Math.floor(dSec / 60);
     const secs = dSec % 60;
 
-    // ── Client scoring from evaluation JSON ───────────────────
+    // ── Client scoring and narrative summary from evaluation JSON ─────────
     const evalJson = row.evaluationJson as Record<string, unknown> | null;
     const clientScoring =
       (evalJson?.client_scoring as unknown) ||
-      ((evalJson?.summary as Record<string, unknown> | undefined)?.client_scoring as unknown) ||
       null;
+
+    // Narrative summary string from evaluationJson.summary
+    const evalSummary =
+      typeof evalJson?.summary === "string" ? evalJson.summary : null;
+
+    // Raw max score for displaying fraction (e.g. "8/33 (24%)")
+    const totalMaxScore =
+      typeof evalJson?.total_max_score === "number" ? evalJson.total_max_score : null;
 
     // ── Evaluation blocks with full criteria ──────────────────
     // Includes: name, score, maxScore, and per-criterion feedback/quote
@@ -209,6 +216,8 @@ export async function GET(
         "",
       aiFeedback: row.recommendations || "",
       summary: row.mistakes || "",
+      evalSummary: evalSummary || "",
+      totalMaxScore: totalMaxScore ?? undefined,
       blocks,
       clientScoring,
     };

@@ -125,6 +125,8 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             id: m.id || undefined,
             name: m.name,
             telegramUsername: m.telegramUsername,
+            telegramId: m.telegramId,
+            kommoUserId: m.kommoUserId,
             role: m.role,
             line: m.line,
             inOkk: m.inOkk,
@@ -317,8 +319,8 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                       </span>
                     </td>
                     <td className="px-4 py-2 text-center">
-                      <span className="text-xs font-mono text-slate-600">
-                        {mgr.kommoUserId || "—"}
+                      <span className={`text-xs font-mono ${mgr.kommoUserId ? "text-slate-400" : mgr.inOkk ? "text-amber-400" : "text-slate-600"}`}>
+                        {mgr.kommoUserId || (mgr.inOkk ? "⏳" : "—")}
                       </span>
                     </td>
                     <td className="px-4 py-2 text-center">

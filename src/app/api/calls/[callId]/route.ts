@@ -163,6 +163,15 @@ export async function GET(
       }
     }
 
+    // Extract narrative summary and raw max score from evaluationJson
+    const evalJsonRaw = call.evaluationJson as Record<string, unknown> | null;
+    const evalSummary =
+      typeof evalJsonRaw?.summary === "string" ? evalJsonRaw.summary : "";
+    const totalMaxScore =
+      typeof evalJsonRaw?.total_max_score === "number"
+        ? evalJsonRaw.total_max_score
+        : undefined;
+
     const data = {
       id: call.id,
       name: call.userName || "Unknown",
@@ -170,12 +179,14 @@ export async function GET(
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
       date: formatDate(call.startedAt),
       score: call.score || 0,
+      totalMaxScore,
       hasRecording: !!call.recordingPath,
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${department}` : "#",
       kommoUrl: "#",
       transcript: call.transcript || "",
       aiFeedback: recommendationsText,
       summary: mistakesText,
+      evalSummary,
       blocks,
     };
 

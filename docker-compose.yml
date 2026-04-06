@@ -9,6 +9,7 @@ services:
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3008
+      - TZ=Europe/Berlin
       - DATABASE_URL=${DATABASE_URL}
       - R1_DATABASE_URL=${R1_DATABASE_URL}
       - D1_API_URL=${D1_API_URL}
