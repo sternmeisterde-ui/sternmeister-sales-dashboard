@@ -1766,26 +1766,14 @@ export default function Dashboard() {
                             Рекомендации и сильные стороны
                           </h4>
                           <div className="flex flex-col gap-2">
-                            {strengths.map((s, i) => {
-                              // Parse ✅ and ❌ items from feedback
-                              const items = s.feedback.split(/(?=✅|❌)/).filter(Boolean).slice(0, 4);
-                              return items.map((item, j) => {
-                                const isPositive = item.startsWith("✅");
-                                const isNegative = item.startsWith("❌");
-                                const text = item.replace(/^[✅❌]\s*/, "").trim();
-                                const firstLine = text.split("\n")[0];
-                                return (
-                                  <div key={`${i}-${j}`} className="flex gap-2 items-start">
-                                    <span className={`text-xs mt-0.5 shrink-0 ${isNegative ? "text-amber-400" : "text-emerald-400"}`}>
-                                      {isNegative ? "△" : "✓"}
-                                    </span>
-                                    <p className={`text-[11px] leading-relaxed ${isNegative ? "text-amber-200/70" : "text-emerald-200/70"}`}>
-                                      {cleanText(firstLine)}
-                                    </p>
-                                  </div>
-                                );
-                              });
-                            })}
+                            {strengths.map((s, i) => (
+                              <div key={i} className="flex gap-2 items-start">
+                                <span className="text-emerald-400 text-xs mt-0.5 shrink-0">✓</span>
+                                <p className="text-[11px] leading-relaxed text-emerald-200/70 whitespace-pre-wrap">
+                                  {cleanText(s.feedback)}
+                                </p>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       )}
