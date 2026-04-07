@@ -1734,13 +1734,30 @@ export default function Dashboard() {
 
                   if (failures.length === 0 && growthAreas.length === 0 && bestPractices.length === 0) return null;
 
-                  // Parse ❌/✅ items from feedback text
-                  const parseItems = (text: string) => {
-                    const items = text.split(/(?=❌|✅)/).filter(Boolean);
-                    if (items.length > 1) return items;
-                    // No ❌/✅ markers — split by numbered items or return as single
-                    const numbered = text.split(/(?=\d+[\.\)]\s)/).filter(Boolean);
-                    return numbered.length > 1 ? numbered : [text];
+                  // Parse individual items from feedback — split by ❌/✅ or numbered 1)/2)/3)
+                  const parseItems = (text: string): Array<{text: string; type: "pos" | "neg" | "neutral"}> => {
+                    // First try ❌/✅ split
+                    const emojiParts = text.split(/(?=❌|✅)/).filter(Boolean);
+                    if (emojiParts.length > 1) {
+                      return emojiParts.map(p => ({
+                        text: p.replace(/^[❌✅]\s*/, "").trim(),
+                        type: p.startsWith("✅") ? "pos" as const : p.startsWith("❌") ? "neg" as const : "neutral" as const,
+                      }));
+                    }
+                    // Try numbered: "1) text; 2) text" or "1. text 2. text"
+                    const numbered = text.split(/(?=\d+[\.\)]\s)/).filter(s => s.trim());
+                    if (numbered.length > 1) {
+                      return numbered.map(p => ({
+                        text: p.replace(/^\d+[\.\)]\s*/, "").trim(),
+                        type: "neutral" as const,
+                      }));
+                    }
+                    // Try semicolons
+                    const semicolons = text.split(/;\s*/).filter(s => s.trim().length > 10);
+                    if (semicolons.length > 1) {
+                      return semicolons.map(p => ({ text: p.trim(), type: "neutral" as const }));
+                    }
+                    return [{ text, type: "neutral" }];
                   };
 
                   return (
@@ -1776,19 +1793,17 @@ export default function Dashboard() {
                               <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                               Зоны роста
                             </h4>
-                            <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-2">
                               {growthAreas.map((s, i) => {
                                 const items = parseItems(s.feedback);
-                                return items.map((item, j) => {
-                                  const isNeg = item.startsWith("❌");
-                                  const text = item.replace(/^[❌✅]\s*/, "").replace(/^\d+[\.\)]\s*/, "").trim();
-                                  return (
-                                    <div key={`${i}-${j}`} className="flex gap-2 items-start">
-                                      <span className="text-amber-400 text-xs mt-0.5 shrink-0">{isNeg ? "△" : "•"}</span>
-                                      <p className="text-[11px] leading-relaxed text-amber-200/70 whitespace-pre-wrap">{cleanText(text)}</p>
+                                return items.map((item, j) => (
+                                  <div key={`${i}-${j}`} className="p-2.5 rounded-lg bg-amber-500/[0.04] border border-amber-500/10">
+                                    <div className="flex gap-2 items-start">
+                                      <span className="text-amber-400 text-[11px] mt-0.5 shrink-0 font-bold">{j + 1}.</span>
+                                      <p className="text-[11px] leading-relaxed text-amber-200/80">{cleanText(item.text)}</p>
                                     </div>
-                                  );
-                                });
+                                  </div>
+                                ));
                               })}
                             </div>
                           </div>
@@ -1801,19 +1816,17 @@ export default function Dashboard() {
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                               Сильные стороны
                             </h4>
-                            <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-2">
                               {bestPractices.map((s, i) => {
                                 const items = parseItems(s.feedback);
-                                return items.map((item, j) => {
-                                  const isPos = item.startsWith("✅");
-                                  const text = item.replace(/^[❌✅]\s*/, "").replace(/^\d+[\.\)]\s*/, "").trim();
-                                  return (
-                                    <div key={`${i}-${j}`} className="flex gap-2 items-start">
-                                      <span className="text-emerald-400 text-xs mt-0.5 shrink-0">{isPos ? "✓" : "•"}</span>
-                                      <p className="text-[11px] leading-relaxed text-emerald-200/70 whitespace-pre-wrap">{cleanText(text)}</p>
+                                return items.map((item, j) => (
+                                  <div key={`${i}-${j}`} className="p-2.5 rounded-lg bg-emerald-500/[0.04] border border-emerald-500/10">
+                                    <div className="flex gap-2 items-start">
+                                      <span className="text-emerald-400 text-[11px] mt-0.5 shrink-0 font-bold">{j + 1}.</span>
+                                      <p className="text-[11px] leading-relaxed text-emerald-200/80">{cleanText(item.text)}</p>
                                     </div>
-                                  );
-                                });
+                                  </div>
+                                ));
                               })}
                             </div>
                           </div>
