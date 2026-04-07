@@ -1709,11 +1709,11 @@ export default function Dashboard() {
                   );
                 })()}
 
-                {/* ── Quick Summary: Failures + Strengths ── */}
+                {/* ── Quick Summary: Failures + Growth + Strengths ── */}
                 {selectedCall.blocks && selectedCall.blocks.length > 0 && (() => {
-                  // Collect failed criteria and strengths from blocks
                   const failures: Array<{name: string; feedback: string}> = [];
-                  const strengths: Array<{name: string; feedback: string}> = [];
+                  const growthAreas: Array<{name: string; feedback: string}> = [];
+                  const bestPractices: Array<{name: string; feedback: string}> = [];
 
                   for (const block of selectedCall.blocks) {
                     if (!block.criteria) continue;
@@ -1721,28 +1721,38 @@ export default function Dashboard() {
                       if (c.maxScore === 1 && c.score === 0) {
                         failures.push({ name: c.name, feedback: c.feedback || "" });
                       }
-                      if (c.maxScore === 0 && c.feedback && (
-                        c.name.toLowerCase().includes("рекоменда") ||
-                        c.name.toLowerCase().includes("зоны роста") ||
-                        c.name.toLowerCase().includes("лучшие практики")
-                      )) {
-                        strengths.push({ name: c.name, feedback: c.feedback });
+                      if (c.maxScore === 0 && c.feedback) {
+                        const nl = c.name.toLowerCase();
+                        if (nl.includes("зоны роста") || nl.includes("рекомендации продавцу: зоны")) {
+                          growthAreas.push({ name: c.name, feedback: c.feedback });
+                        } else if (nl.includes("лучшие практики")) {
+                          bestPractices.push({ name: c.name, feedback: c.feedback });
+                        }
                       }
                     }
                   }
 
-                  if (failures.length === 0 && strengths.length === 0) return null;
+                  if (failures.length === 0 && growthAreas.length === 0 && bestPractices.length === 0) return null;
+
+                  // Parse ❌/✅ items from feedback text
+                  const parseItems = (text: string) => {
+                    const items = text.split(/(?=❌|✅)/).filter(Boolean);
+                    if (items.length > 1) return items;
+                    // No ❌/✅ markers — split by numbered items or return as single
+                    const numbered = text.split(/(?=\d+[\.\)]\s)/).filter(Boolean);
+                    return numbered.length > 1 ? numbered : [text];
+                  };
 
                   return (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                      {/* Left: What to improve */}
+                    <div className="flex flex-col gap-3">
+                      {/* Failures — red */}
                       {failures.length > 0 && (
                         <div className="rounded-xl border border-rose-500/15 bg-rose-500/[0.03] p-4">
                           <h4 className="text-[10px] font-bold text-rose-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                            Что улучшить ({failures.length})
+                            Невыполненные критерии ({failures.length})
                           </h4>
-                          <div className="flex flex-col gap-2">
+                          <div className="flex flex-col gap-2.5">
                             {failures.slice(0, 8).map((f, i) => (
                               <div key={i} className="flex gap-2 items-start">
                                 <span className="text-rose-400 text-xs mt-0.5 shrink-0">✗</span>
@@ -1758,25 +1768,57 @@ export default function Dashboard() {
                         </div>
                       )}
 
-                      {/* Right: Strengths & Recommendations */}
-                      {strengths.length > 0 && (
-                        <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/[0.03] p-4">
-                          <h4 className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                            Рекомендации и сильные стороны
-                          </h4>
-                          <div className="flex flex-col gap-2">
-                            {strengths.map((s, i) => (
-                              <div key={i} className="flex gap-2 items-start">
-                                <span className="text-emerald-400 text-xs mt-0.5 shrink-0">✓</span>
-                                <p className="text-[11px] leading-relaxed text-emerald-200/70 whitespace-pre-wrap">
-                                  {cleanText(s.feedback)}
-                                </p>
-                              </div>
-                            ))}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        {/* Growth areas — amber */}
+                        {growthAreas.length > 0 && (
+                          <div className="rounded-xl border border-amber-500/15 bg-amber-500/[0.03] p-4">
+                            <h4 className="text-[10px] font-bold text-amber-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                              Зоны роста
+                            </h4>
+                            <div className="flex flex-col gap-3">
+                              {growthAreas.map((s, i) => {
+                                const items = parseItems(s.feedback);
+                                return items.map((item, j) => {
+                                  const isNeg = item.startsWith("❌");
+                                  const text = item.replace(/^[❌✅]\s*/, "").replace(/^\d+[\.\)]\s*/, "").trim();
+                                  return (
+                                    <div key={`${i}-${j}`} className="flex gap-2 items-start">
+                                      <span className="text-amber-400 text-xs mt-0.5 shrink-0">{isNeg ? "△" : "•"}</span>
+                                      <p className="text-[11px] leading-relaxed text-amber-200/70 whitespace-pre-wrap">{cleanText(text)}</p>
+                                    </div>
+                                  );
+                                });
+                              })}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
+
+                        {/* Best practices — green */}
+                        {bestPractices.length > 0 && (
+                          <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/[0.03] p-4">
+                            <h4 className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                              Сильные стороны
+                            </h4>
+                            <div className="flex flex-col gap-3">
+                              {bestPractices.map((s, i) => {
+                                const items = parseItems(s.feedback);
+                                return items.map((item, j) => {
+                                  const isPos = item.startsWith("✅");
+                                  const text = item.replace(/^[❌✅]\s*/, "").replace(/^\d+[\.\)]\s*/, "").trim();
+                                  return (
+                                    <div key={`${i}-${j}`} className="flex gap-2 items-start">
+                                      <span className="text-emerald-400 text-xs mt-0.5 shrink-0">{isPos ? "✓" : "•"}</span>
+                                      <p className="text-[11px] leading-relaxed text-emerald-200/70 whitespace-pre-wrap">{cleanText(text)}</p>
+                                    </div>
+                                  );
+                                });
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
                 })()}
