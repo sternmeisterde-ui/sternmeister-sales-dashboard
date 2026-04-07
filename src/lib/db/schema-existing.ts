@@ -133,6 +133,7 @@ export const masterManagers = pgTable("master_managers", {
   role: text("role").notNull().default("manager"), // 'manager' | 'rop' | 'admin'
   line: text("line"),                              // '1' | '2' | '3'
   kommoUserId: integer("kommo_user_id"),
+  cloudtalkAgentId: text("cloudtalk_agent_id"),
   inOkk: boolean("in_okk").default(false),
   inRolevki: boolean("in_rolevki").default(false),
   isActive: boolean("is_active").default(true),

@@ -12,6 +12,7 @@ interface ManagerRow {
   role: string;
   line: string | null;
   kommoUserId: number | null;
+  cloudtalkAgentId: string | null;
   inOkk: boolean;
   inRolevki: boolean;
   isNew?: boolean;
@@ -92,6 +93,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
         role: "manager",
         line: null,
         kommoUserId: null,
+        cloudtalkAgentId: null,
         inOkk: true,
         inRolevki: true,
         isNew: true,
@@ -230,6 +232,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 <th className="text-center px-4 py-2 font-semibold">Ролевки</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">TG ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">Kommo ID</th>
+                <th className="text-center px-4 py-2 font-semibold text-slate-600">CloudTalk ID</th>
                 <th className="w-10" />
               </tr>
             </thead>
@@ -321,6 +324,11 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                     <td className="px-4 py-2 text-center">
                       <span className={`text-xs font-mono ${mgr.kommoUserId ? "text-slate-400" : mgr.inOkk ? "text-amber-400" : "text-slate-600"}`}>
                         {mgr.kommoUserId || (mgr.inOkk ? "⏳" : "—")}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <span className={`text-xs font-mono ${mgr.cloudtalkAgentId ? "text-slate-400" : "text-slate-600"}`}>
+                        {mgr.cloudtalkAgentId || "—"}
                       </span>
                     </td>
                     <td className="px-4 py-2 text-center">
