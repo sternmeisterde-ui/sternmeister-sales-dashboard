@@ -1749,7 +1749,7 @@ export default function Dashboard() {
                                 <div className="min-w-0">
                                   <span className="text-xs font-semibold text-rose-200">{f.name}</span>
                                   {f.feedback && (
-                                    <p className="text-[11px] text-rose-300/50 leading-relaxed mt-0.5 line-clamp-2">{cleanText(f.feedback)}</p>
+                                    <p className="text-[11px] text-rose-300/50 leading-relaxed mt-0.5">{cleanText(f.feedback)}</p>
                                   )}
                                 </div>
                               </div>
@@ -1779,7 +1779,7 @@ export default function Dashboard() {
                                     <span className={`text-xs mt-0.5 shrink-0 ${isNegative ? "text-amber-400" : "text-emerald-400"}`}>
                                       {isNegative ? "△" : "✓"}
                                     </span>
-                                    <p className={`text-[11px] leading-relaxed line-clamp-2 ${isNegative ? "text-amber-200/70" : "text-emerald-200/70"}`}>
+                                    <p className={`text-[11px] leading-relaxed ${isNegative ? "text-amber-200/70" : "text-emerald-200/70"}`}>
                                       {cleanText(firstLine)}
                                     </p>
                                   </div>
