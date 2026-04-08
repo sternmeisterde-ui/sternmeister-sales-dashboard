@@ -19,13 +19,18 @@ export const okkManagers = pgTable("managers", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
   telegramId: text("telegram_id"),
-  department: text("department"),           // 'b2g' | 'b2b'
+  telegramUsername: text("telegram_username"),
+  department: text("department"),           // 'd2' | 'r2'
+  team: text("team"),
   role: text("role"),                       // 'manager' | 'rop' | 'admin'
-  line: text("line"),                       // '1' (квалификатор) | '2' (бератер)
+  line: text("line"),                       // '1' (квалификатор) | '2' (бератер) | '3' (доведение)
   isActive: boolean("is_active").default(true),
   kommoUserId: integer("kommo_user_id"),
   callgearEmployeeId: text("callgear_employee_id"),
+  cloudtalkAgentId: text("cloudtalk_agent_id"),
+  inRolevki: boolean("in_rolevki").default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 // ─── calls ──────────────────────────────────────────────────

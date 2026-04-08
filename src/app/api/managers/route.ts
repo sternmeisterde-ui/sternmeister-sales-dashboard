@@ -126,9 +126,15 @@ export async function POST(request: NextRequest) {
         return knownId;
       }
 
-      const resolved = await resolveTelegramUsername(cleanUsername);
-      if (!resolved) warnings.push(`Не удалось найти Telegram ID для @${cleanUsername}`);
-      return resolved;
+      try {
+        const resolved = await resolveTelegramUsername(cleanUsername);
+        if (!resolved) warnings.push(`Telegram: @${cleanUsername} — не удалось зарезолвить (проверьте /api/telegram?username=${cleanUsername})`);
+        return resolved;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        warnings.push(`Telegram resolve error для @${cleanUsername}: ${msg}`);
+        return clientTelegramId;
+      }
     });
 
     const resolvedIds = await Promise.all(resolvePromises);
