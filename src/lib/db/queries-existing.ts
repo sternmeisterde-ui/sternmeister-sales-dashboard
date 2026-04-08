@@ -1,4 +1,4 @@
-import { eq, and, desc, gte, lte } from "drizzle-orm";
+import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { getDbForDepartment } from "./index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
 
@@ -41,8 +41,9 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
     conditions.push(lte(calls.startedAt, toLocal));
   }
 
-  // Bug #11: exclude calls shorter than the roleplay minimum threshold
+  // Only show calls that have been evaluated (have a score)
   conditions.push(gte(calls.durationSeconds, MIN_DURATION_ROLEPLAY[departmentType]));
+  conditions.push(sql`${calls.score} IS NOT NULL`);
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

@@ -131,8 +131,8 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       );
     }
 
-    // Bug #11: Exclude short calls — OKK minimum threshold is 600 s (10 min)
-    conditions.push(gte(okkCalls.durationSeconds, 600));
+    // Only show calls that have been evaluated (skip short/unevaluated)
+    conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE total_score IS NOT NULL)`);
 
     const managerIdParam = sp.get("manager_id");
     if (managerIdParam) {
