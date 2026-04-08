@@ -436,7 +436,7 @@ export default function Dashboard() {
   const callsDashStats = (() => {
     const allCalls = activeCalls;
     const managers = activeManagers
-      .filter(m => !m.role || m.role === "manager")
+      .filter(m => !m.role || m.role === "manager" || m.role === "rop")
       .filter(m => lineFilter === "all" || m.line === lineFilter);
     const managerNames = new Set(managers.map(m => m.name));
 
@@ -524,7 +524,7 @@ export default function Dashboard() {
 
   // Filter managers by role + line — totalCalls & avgScore come directly from the API
   const filteredManagers = activeManagers
-    .filter(m => !m.role || m.role === "manager")
+    .filter(m => !m.role || m.role === "manager" || m.role === "rop")
     .filter(m => lineFilter === "all" || m.line === lineFilter);
 
   // Set of manager names matching current line filter (for call filtering)
