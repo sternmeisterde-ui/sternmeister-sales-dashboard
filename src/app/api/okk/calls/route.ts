@@ -131,8 +131,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       );
     }
 
-    // Only show calls that have been evaluated (skip short/unevaluated)
+    // Only show calls that have been evaluated AND have a linked manager
     conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE total_score IS NOT NULL)`);
+    conditions.push(sql`${okkCalls.managerId} IS NOT NULL`);
 
     const managerIdParam = sp.get("manager_id");
     if (managerIdParam) {
@@ -178,7 +179,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .where(
           and(
             eq(okkManagers.isActive, true),
-            eq(okkManagers.role, "manager"),
+            sql`${okkManagers.role} IN ('manager', 'rop')`,
           )
         )
         .orderBy(okkManagers.name),
