@@ -15,7 +15,7 @@ import { cached, CACHE_TTL } from "./cache";
 // Mutex-based: ensures at most 1 HTTP request per RATE_LIMIT_MS,
 // even when multiple parallel chains call rateLimitedFetch concurrently.
 
-const RATE_LIMIT_MS = 100; // ~10 req/sec (Kommo allows 10 on most plans)
+const RATE_LIMIT_MS = 145; // ~6.9 req/sec (Kommo limit is 7 req/sec)
 
 let lastRequestTime = 0;
 let rateLimitMutex: Promise<void> = Promise.resolve();
@@ -41,13 +41,28 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
   }
 
   // Fetch with 1 retry on socket/network errors
+  let res: Response;
   try {
-    return await fetch(url, options);
+    res = await fetch(url, options);
   } catch (err) {
     // Retry once on network errors (socket closed, timeout, etc.)
     await new Promise<void>((r) => setTimeout(r, 500));
+    res = await fetch(url, options);
+  }
+
+  // 429 Too Many Requests — wait and retry once
+  if (res.status === 429) {
+    let retryAfterMs = 1500;
+    try {
+      const body = await res.clone().json() as { retry_after?: number };
+      if (body.retry_after) retryAfterMs = body.retry_after * 1000;
+    } catch { /* use default */ }
+    console.warn(`[Kommo] 429 rate limited, retrying after ${retryAfterMs}ms`);
+    await new Promise<void>((r) => setTimeout(r, retryAfterMs));
     return fetch(url, options);
   }
+
+  return res;
 }
 
 // ==================== KOMMO CONFIG (env → DB fallback) ====================
@@ -104,7 +119,10 @@ function ensureKommoConfig(): Promise<void> {
       );
     })();
 
-    _configPromise = newPromise;
+    _configPromise = newPromise.catch((err) => {
+      _configPromise = null; // allow retry on next call instead of permanently broken
+      throw err;
+    });
   }
   return _configPromise;
 }
@@ -394,7 +412,7 @@ export async function getCallNotes(
     const BATCH_SIZE = 100;
     for (let i = 0; i < noteIds.length; i += BATCH_SIZE) {
       const batch = noteIds.slice(i, i + BATCH_SIZE);
-      const notesUrl = new URL(`${baseUrl}/contacts/notes`);
+      const notesUrl = new URL(`${baseUrl}/leads/notes`);
       batch.forEach((id) =>
         notesUrl.searchParams.append("filter[id][]", String(id))
       );
@@ -465,7 +483,7 @@ export async function getStatusChangeCount(
 
     while (page <= maxPages) {
       const url = new URL(`${baseUrl}/events`);
-      url.searchParams.set("filter[type]", "lead_status_changed");
+      url.searchParams.append("filter[type][]", "lead_status_changed");
       url.searchParams.set("filter[created_at][from]", String(dateFrom));
       url.searchParams.set("filter[created_at][to]", String(dateTo));
       url.searchParams.set("limit", "100");
@@ -475,6 +493,9 @@ export async function getStatusChangeCount(
       if (res.status === 204) break;
       if (!res.ok) {
         if (res.status === 404) break;
+        _consecutiveFailures++;
+        const text = await res.text();
+        console.error(`[Kommo] Status change events API ${res.status}: ${text}`);
         break;
       }
 
