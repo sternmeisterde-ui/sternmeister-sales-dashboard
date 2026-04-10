@@ -175,6 +175,16 @@ export const kommoTokens = pgTable("kommo_tokens", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
+export const dailySnapshots = pgTable("daily_snapshots", {
+  id: serial("id").primaryKey(),
+  date: text("date").notNull(),                        // 'YYYY-MM-DD'
+  department: text("department").notNull(),             // 'b2g' | 'b2b'
+  period: text("period").notNull().default("day"),     // 'day' | 'month'
+  responseJson: text("response_json").notNull(),       // full JSON response
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
 // ==================== RELATIONS ====================
 
 export const d1UsersRelations = relations(d1Users, ({ many }) => ({

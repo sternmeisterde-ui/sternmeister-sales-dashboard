@@ -1,7 +1,7 @@
 // DB queries for the Daily tab — plans CRUD + manager-kommo mapping
 import { eq, and, sql } from "drizzle-orm";
 import { db, getDbForDepartment } from "./index";
-import { d1Users, r1Users, dailyPlans, managerSchedule } from "./schema-existing";
+import { d1Users, r1Users, dailyPlans, managerSchedule, dailySnapshots } from "./schema-existing";
 
 export interface ManagerRow {
   id: string;
@@ -212,5 +212,70 @@ export async function bulkSetSchedule(
 ): Promise<void> {
   for (const entry of entries) {
     await setSchedule(entry.userId, dateStr, entry.isOnLine);
+  }
+}
+
+// ==================== DAILY SNAPSHOTS ====================
+
+/**
+ * Load a stored daily snapshot from the database.
+ * Returns parsed JSON or null if no snapshot exists.
+ */
+export async function getSnapshot(
+  date: string,
+  department: string,
+  period: string
+): Promise<unknown | null> {
+  const rows = await db
+    .select({ responseJson: dailySnapshots.responseJson })
+    .from(dailySnapshots)
+    .where(
+      and(
+        eq(dailySnapshots.date, date),
+        eq(dailySnapshots.department, department),
+        eq(dailySnapshots.period, period)
+      )
+    )
+    .limit(1);
+
+  if (rows.length === 0) return null;
+  return JSON.parse(rows[0].responseJson);
+}
+
+/**
+ * Save (upsert) a daily snapshot. Overwrites if already exists for this date/department/period.
+ */
+export async function saveSnapshot(
+  date: string,
+  department: string,
+  period: string,
+  data: unknown
+): Promise<void> {
+  const json = JSON.stringify(data);
+
+  const existing = await db
+    .select({ id: dailySnapshots.id })
+    .from(dailySnapshots)
+    .where(
+      and(
+        eq(dailySnapshots.date, date),
+        eq(dailySnapshots.department, department),
+        eq(dailySnapshots.period, period)
+      )
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
+    await db
+      .update(dailySnapshots)
+      .set({ responseJson: json, updatedAt: new Date() })
+      .where(eq(dailySnapshots.id, existing[0].id));
+  } else {
+    await db.insert(dailySnapshots).values({
+      date,
+      department,
+      period,
+      responseJson: json,
+    });
   }
 }

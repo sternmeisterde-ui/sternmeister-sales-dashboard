@@ -10,11 +10,57 @@ import {
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getManagersWithKommo, getPlans, getScheduleForDate } from "@/lib/db/queries-daily";
+import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { dailySections, type SectionDef } from "@/lib/daily/metrics-config";
 import { B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
-import type { KommoLead } from "@/lib/kommo/types";
+import type { KommoLead, KommoTask, KommoCallNote } from "@/lib/kommo/types";
+
+// ==================== Timezone helpers ====================
+
+/** Business timezone — all date ranges are computed in this timezone */
+const BUSINESS_TZ = "Europe/Berlin";
+
+/**
+ * Get UTC offset in milliseconds for a given date in the business timezone.
+ * Handles DST automatically (CET = UTC+1, CEST = UTC+2).
+ */
+function getTzOffsetMs(date: Date): number {
+  const utcStr = date.toLocaleString("en-US", { timeZone: "UTC" });
+  const tzStr = date.toLocaleString("en-US", { timeZone: BUSINESS_TZ });
+  return new Date(tzStr).getTime() - new Date(utcStr).getTime();
+}
+
+/**
+ * Convert a business-timezone date string to UTC Unix timestamps for start/end of day.
+ * Example: "2026-04-08" in Europe/Berlin (CEST, UTC+2) →
+ *   from = April 7 22:00 UTC, to = April 8 21:59:59 UTC
+ */
+function businessDayToUtc(dateStr: string): { from: number; to: number } {
+  const midnightUtc = new Date(`${dateStr}T00:00:00Z`);
+  const offsetMs = getTzOffsetMs(midnightUtc);
+  const startMs = midnightUtc.getTime() - offsetMs;
+  const endMs = startMs + 24 * 60 * 60 * 1000 - 1;
+  return {
+    from: Math.floor(startMs / 1000),
+    to: Math.floor(endMs / 1000),
+  };
+}
+
+/** Get today's date string in business timezone */
+export function getBusinessToday(): string {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  const d = parts.find((p) => p.type === "day")!.value;
+  return `${y}-${m}-${d}`;
+}
 
 // ==================== Period helpers ====================
 
@@ -22,54 +68,59 @@ function getDateRange(
   period: string,
   dateStr: string
 ): { from: number; to: number; periodType: string; periodDate: string } {
-  const base = new Date(`${dateStr}T00:00:00Z`);
+  const [yearNum, monthNum] = dateStr.split("-").map(Number);
 
   switch (period) {
     case "week": {
+      const base = new Date(`${dateStr}T12:00:00Z`);
       const day = base.getUTCDay();
       const diff = day === 0 ? -6 : 1 - day;
       const monday = new Date(base);
       monday.setUTCDate(base.getUTCDate() + diff);
-      monday.setUTCHours(0, 0, 0, 0);
+      const mondayStr = monday.toISOString().slice(0, 10);
       const sunday = new Date(monday);
       sunday.setUTCDate(monday.getUTCDate() + 6);
-      sunday.setUTCHours(23, 59, 59, 999);
+      const sundayStr = sunday.toISOString().slice(0, 10);
+
+      const { from } = businessDayToUtc(mondayStr);
+      const { to } = businessDayToUtc(sundayStr);
       const weekNum = getISOWeek(monday);
       return {
-        from: Math.floor(monday.getTime() / 1000),
-        to: Math.floor(sunday.getTime() / 1000),
+        from,
+        to,
         periodType: "week",
         periodDate: `${monday.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`,
       };
     }
     case "month": {
-      const firstDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
-      const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+      const firstDayStr = `${yearNum}-${String(monthNum).padStart(2, "0")}-01`;
+      const lastDayNum = new Date(yearNum, monthNum, 0).getDate();
+      const lastDayStr = `${yearNum}-${String(monthNum).padStart(2, "0")}-${String(lastDayNum).padStart(2, "0")}`;
+
+      const { from } = businessDayToUtc(firstDayStr);
+      const { to } = businessDayToUtc(lastDayStr);
       return {
-        from: Math.floor(firstDay.getTime() / 1000),
-        to: Math.floor(lastDay.getTime() / 1000),
+        from,
+        to,
         periodType: "month",
-        periodDate: `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, "0")}`,
+        periodDate: `${yearNum}-${String(monthNum).padStart(2, "0")}`,
       };
     }
     case "year": {
-      const yearStart = new Date(Date.UTC(base.getUTCFullYear(), 0, 1, 0, 0, 0, 0));
-      const yearEnd = new Date(Date.UTC(base.getUTCFullYear(), 11, 31, 23, 59, 59, 999));
+      const { from } = businessDayToUtc(`${yearNum}-01-01`);
+      const { to } = businessDayToUtc(`${yearNum}-12-31`);
       return {
-        from: Math.floor(yearStart.getTime() / 1000),
-        to: Math.floor(yearEnd.getTime() / 1000),
+        from,
+        to,
         periodType: "year",
-        periodDate: String(base.getUTCFullYear()),
+        periodDate: String(yearNum),
       };
     }
     default: {
-      const dayStart = new Date(base);
-      dayStart.setUTCHours(0, 0, 0, 0);
-      const dayEnd = new Date(base);
-      dayEnd.setUTCHours(23, 59, 59, 999);
+      const { from, to } = businessDayToUtc(dateStr);
       return {
-        from: Math.floor(dayStart.getTime() / 1000),
-        to: Math.floor(dayEnd.getTime() / 1000),
+        from,
+        to,
         periodType: "day",
         periodDate: dateStr,
       };
@@ -121,14 +172,48 @@ function buildUserFacts(
 // ==================== Response cache ====================
 const RESPONSE_CACHE_TTL = 5 * 60 * 1000;
 
+/** Track Kommo API failures for diagnostics */
+let _lastKommoError: { message: string; at: string } | null = null;
+export function getLastKommoError() { return _lastKommoError; }
+
 export async function buildDailyResponseCached(department: string, period: string, dateStr: string) {
+  const today = getBusinessToday();
+  const isPast = dateStr < today;
+
+  // Past dates: load stored snapshot from DB (fast, no Kommo calls)
+  if (isPast) {
+    try {
+      const stored = await getSnapshot(dateStr, department, period);
+      if (stored) return stored;
+    } catch (e) {
+      console.warn(`[Daily] Snapshot load failed for ${dateStr}:`, e);
+    }
+    // No stored snapshot — compute with historical flag (skip non-date-filtered calls)
+    const cacheKey = `daily-response:${department}:${period}:${dateStr}:hist`;
+    return cached(cacheKey, RESPONSE_CACHE_TTL, () => buildDailyResponse(department, period, dateStr, true));
+  }
+
+  // Compute fresh from Kommo (with in-memory TTL cache)
   const cacheKey = `daily-response:${department}:${period}:${dateStr}`;
-  return cached(cacheKey, RESPONSE_CACHE_TTL, () => buildDailyResponse(department, period, dateStr));
+  const result = await cached(cacheKey, RESPONSE_CACHE_TTL, () => buildDailyResponse(department, period, dateStr, false));
+
+  // Save snapshot for today (accurate point-in-time data for future historical queries)
+  saveSnapshot(dateStr, department, period, result).catch((e) => {
+    console.error(`[Daily] Snapshot save failed for ${dateStr}:`, e);
+  });
+
+  return result;
 }
 
 // ==================== MAIN BUILD FUNCTION ====================
 
-export async function buildDailyResponse(department: string, period: string, dateStr: string) {
+/**
+ * @param isHistorical — true for past dates without stored snapshots.
+ *   Skips non-date-filtered Kommo calls (snapshot leads, tasks) that would
+ *   return today's data instead of the historical date's data.
+ *   Affected metrics get fact=null so the UI shows "—" instead of wrong numbers.
+ */
+export async function buildDailyResponse(department: string, period: string, dateStr: string, isHistorical = false) {
   const { from, to, periodType, periodDate } = getDateRange(period, dateStr);
   const { leadsPages, closedPages, callPages } = getMaxPages(period);
 
@@ -177,63 +262,108 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Terms = WON leads from first line closed in THIS period (not previous day)
   const termsDateFilter = { field: "closed_at" as const, from, to };
   const createdDateFilter = { field: "created_at" as const, from, to };
-  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod, termAACount] = await Promise.all([
-    getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch((e) => {
-      console.error("Kommo snapshot leads error:", e);
-      return [] as KommoLead[];
-    }),
-    getTasks(false).catch((e) => {
-      console.error("Kommo tasks error:", e);
-      return [];
-    }),
-    getLeads(B2G_ALL_PIPELINE_IDS, [142], closedPages, closedDateFilter).catch((e) => {
-      console.error("Kommo won leads error:", e);
-      return [] as KommoLead[];
-    }),
-    getLeads(B2G_ALL_PIPELINE_IDS, [143], closedPages, closedDateFilter).catch((e) => {
-      console.error("Kommo lost leads error:", e);
-      return [] as KommoLead[];
-    }),
-    getCallNotes(from, to, kommoUserIds, callPages).catch((e) => {
-      console.error("Kommo call notes error:", e);
-      return [];
-    }),
-    getLeads([10935879], [142], closedPages, termsDateFilter).catch((e) => {
-      console.error("Kommo terms won leads error:", e);
-      return [] as KommoLead[];
-    }),
-    // ALL leads from first line created in period (including closed) — for totalLeads/qualLeads
-    getLeads([10935879], undefined, leadsPages, createdDateFilter).catch((e) => {
-      console.error("Kommo new leads error:", e);
-      return [] as KommoLead[];
-    }),
-    // Термин АА: events where leads moved INTO statuses 102183943/102183947 in berater pipeline
-    getStatusChangeCount(from, to, 12154099, [102183943, 102183947]).catch((e) => {
-      console.error("Kommo term AA events error:", e);
-      return 0;
-    }),
-  ]);
+  const trackError = (label: string) => (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[Kommo] ${label}: ${msg}`);
+    _lastKommoError = { message: `${label}: ${msg}`, at: new Date().toISOString() };
+    return undefined;
+  };
 
-  const activeOnly = snapshotActiveLeads.filter((l) => !l.closed_at);
+  // ── Historical reconstruction ──
+  // For past dates without DB snapshots, we reconstruct `activeDeals`:
+  //   activeDeals(D) = currentActive.filter(created <= D)
+  //                  + closedAfterD.filter(created <= D)
+  // i.e. leads that are still active + leads that WERE active on D but closed since.
+  // Pipeline-specific status metrics (berater stages) can't be reconstructed
+  // because we don't know which status a lead was in on day D.
+
+  // For historical dates: also fetch leads closed AFTER this date (to reconstruct activeDeals)
+  const todayRange = isHistorical ? businessDayToUtc(getBusinessToday()) : null;
+  const closedAfterDateFilter = isHistorical
+    ? { field: "closed_at" as const, from: to + 1, to: todayRange!.to }
+    : null;
+
+  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod, termAACount, closedAfterDate] = await Promise.all([
+    // Snapshot leads: always fetch (cached across all days in range, one Kommo call)
+    getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch(trackError("snapshot leads")),
+    isHistorical ? Promise.resolve([] as KommoTask[]) : getTasks(false).catch(trackError("tasks")),
+    getLeads(B2G_ALL_PIPELINE_IDS, [142], closedPages, closedDateFilter).catch(trackError("won leads")),
+    getLeads(B2G_ALL_PIPELINE_IDS, [143], closedPages, closedDateFilter).catch(trackError("lost leads")),
+    getCallNotes(from, to, kommoUserIds, callPages).catch(trackError("call notes")),
+    getLeads([10935879], [142], closedPages, termsDateFilter).catch(trackError("terms won")),
+    getLeads([10935879], undefined, leadsPages, createdDateFilter).catch(trackError("new leads")),
+    getStatusChangeCount(from, to, 12154099, [102183943, 102183947]).catch(trackError("term AA events")),
+    // Historical: fetch leads closed AFTER this date (they were active on this date)
+    closedAfterDateFilter
+      ? getLeads(B2G_ALL_PIPELINE_IDS, [142, 143], 20, closedAfterDateFilter).catch(trackError("closed after date"))
+      : Promise.resolve([] as KommoLead[]),
+  ]) as [
+    KommoLead[] | undefined, KommoTask[] | undefined, KommoLead[] | undefined,
+    KommoLead[] | undefined, KommoCallNote[] | undefined, KommoLead[] | undefined,
+    KommoLead[] | undefined, number | undefined, KommoLead[] | undefined
+  ];
+
+  // Default to empty on API failure — but now we track it
+  const safeSnapshotActiveLeads = snapshotActiveLeads ?? [];
+  const safeTasks = tasks ?? [];
+  const safeWonLeads = wonLeads ?? [];
+  const safeLostLeads = lostLeads ?? [];
+  const safeCallNotes = callNotes ?? [];
+  const safeTermsWonLeads = termsWonLeads ?? [];
+  const safeNewLeadsInPeriod = newLeadsInPeriod ?? [];
+  const safeTermAACount = termAACount ?? 0;
+  const safeClosedAfterDate = closedAfterDate ?? [];
+
+  // Flag: snapshot metrics unavailable for historical dates without stored snapshots
+  const hasSnapshotData = !isHistorical;
+
+  // ── Reconstruct historical activeDeals ──
+  // For past dates: combine current active leads (created before date) +
+  // leads closed after date (they were alive on this date but got closed since)
+  let reconstructedActiveDeals: number | null = null;
+  let reconstructedActiveDealsPerUser: Map<number, number> | null = null;
+  if (isHistorical && safeSnapshotActiveLeads.length > 0) {
+    const endOfDay = to; // end of this day in unix seconds
+
+    // Current active leads that existed on this date
+    const activeOnDate = safeSnapshotActiveLeads.filter(
+      (l) => !l.is_deleted && !l.closed_at && l.created_at <= endOfDay
+    );
+    // Leads closed AFTER this date that existed on this date (they were active then)
+    const closedButWasActive = safeClosedAfterDate.filter(
+      (l) => !l.is_deleted && l.created_at <= endOfDay
+    );
+
+    reconstructedActiveDeals = activeOnDate.length + closedButWasActive.length;
+
+    // Per-user breakdown for funnel manager data
+    reconstructedActiveDealsPerUser = new Map();
+    for (const lead of [...activeOnDate, ...closedButWasActive]) {
+      const uid = lead.responsible_user_id;
+      reconstructedActiveDealsPerUser.set(uid, (reconstructedActiveDealsPerUser.get(uid) ?? 0) + 1);
+    }
+  }
+
+  const activeOnly = safeSnapshotActiveLeads.filter((l) => !l.closed_at);
   const byPipeline: Record<number, number> = {};
-  for (const l of snapshotActiveLeads) {
+  for (const l of safeSnapshotActiveLeads) {
     byPipeline[l.pipeline_id] = (byPipeline[l.pipeline_id] || 0) + 1;
   }
   console.log(
-    `[Daily API] ${department}/${period}/${dateStr}: allLeads=${snapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${wonLeads.length} lost=${lostLeads.length} calls=${callNotes.length} terms=${termsWonLeads.length} managers=${managers.length} line1=${managers.filter((m) => m.line === "1").length}`
+    `[Daily API] ${department}/${period}/${dateStr}: allLeads=${safeSnapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${safeWonLeads.length} lost=${safeLostLeads.length} calls=${safeCallNotes.length} terms=${safeTermsWonLeads.length} managers=${managers.length} line1=${managers.filter((m) => m.line === "1").length}`
   );
 
-  const flowActiveLeads = snapshotActiveLeads.filter(
+  const flowActiveLeads = safeSnapshotActiveLeads.filter(
     (lead) => lead.updated_at >= from && lead.updated_at <= to
   );
 
-  const snapshotLeads = [...snapshotActiveLeads, ...wonLeads, ...lostLeads];
-  const flowLeads = [...flowActiveLeads, ...wonLeads, ...lostLeads];
+  const snapshotLeads = [...safeSnapshotActiveLeads, ...safeWonLeads, ...safeLostLeads];
+  const flowLeads = [...flowActiveLeads, ...safeWonLeads, ...safeLostLeads];
 
-  const callMetricsMap = aggregateCallMetrics(callNotes);
+  const callMetricsMap = aggregateCallMetrics(safeCallNotes);
   const leadMetricsMap = aggregateLeadMetrics(snapshotLeads, from, to);
   const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to);
-  const taskMetricsMap = aggregateTaskMetrics(tasks);
+  const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
   const planLookup = new Map<string, string>();
   for (const p of plans) {
@@ -299,10 +429,15 @@ export async function buildDailyResponse(department: string, period: string, dat
       }
 
       if (section.key === "funnel") {
-        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, termsWonLeads, from, to, newLeadsInPeriod, termAACount);
+        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals);
       } else {
-        const facts = buildUserFacts(summaryCallMetrics, totalOverdue, section);
-        fact = facts[metric.key] ?? null;
+        // For per-manager sections: overdueTasks is snapshot-only (no date filter)
+        if (metric.key === "overdueTasks" && !hasSnapshotData) {
+          fact = null;
+        } else {
+          const facts = buildUserFacts(summaryCallMetrics, totalOverdue, section);
+          fact = facts[metric.key] ?? null;
+        }
         if (metric.key === "staffCount") {
           fact = String(sectionManagers.length);
         }
@@ -343,16 +478,25 @@ export async function buildDailyResponse(department: string, period: string, dat
           const uid = mgr.kommoUserId;
           const mgrLeads = uid ? snapshotLeads.filter((l) => l.responsible_user_id === uid) : [];
           const mgrActiveLeads = mgrLeads.filter((l) => !l.is_deleted && !l.closed_at);
-          const mgrTermsWon = uid ? (termsWonLeads || []).filter((l) => l.responsible_user_id === uid) : [];
-          const mgrNewLeads = uid ? (newLeadsInPeriod || []).filter((l) => l.responsible_user_id === uid && !l.is_deleted) : [];
+          const mgrTermsWon = uid ? safeTermsWonLeads.filter((l) => l.responsible_user_id === uid) : [];
+          const mgrNewLeads = uid ? safeNewLeadsInPeriod.filter((l) => l.responsible_user_id === uid && !l.is_deleted) : [];
 
           const mgrMetrics = section.metrics
             .filter((m) => !m.isGroupHeader)
             .map((metric) => {
+              // Skip snapshot-only metrics for historical dates without stored snapshots
+              if (!hasSnapshotData && SNAPSHOT_ONLY_METRICS.has(metric.key)) {
+                return { key: metric.key, plan: null as string | null, fact: null as string | null, percent: null as number | null };
+              }
               let fact: string | null = null;
               switch (metric.key) {
                 case "activeDeals":
-                  fact = String(mgrActiveLeads.length);
+                  // Use reconstructed per-user count for historical dates
+                  if (!hasSnapshotData && reconstructedActiveDealsPerUser && uid) {
+                    fact = String(reconstructedActiveDealsPerUser.get(uid) ?? 0);
+                  } else {
+                    fact = String(mgrActiveLeads.length);
+                  }
                   break;
                 case "managersOnLine":
                   fact = "1";
@@ -408,7 +552,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "gutscheinsApproved": {
-                  const mgrGut = uid ? wonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
+                  const mgrGut = uid ? safeWonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
                   fact = String(mgrGut);
                   break;
                 }
@@ -432,7 +576,13 @@ export async function buildDailyResponse(department: string, period: string, dat
           .filter((m) => !m.isGroupHeader)
           .map((metric) => {
             const plan = getPlan(section.dbLine, mgr.id, metric.key);
-            let fact = mgrFacts[metric.key] ?? null;
+            let fact: string | null = null;
+            // overdueTasks is not date-filtered — skip for historical
+            if (metric.key === "overdueTasks" && !hasSnapshotData) {
+              fact = null;
+            } else {
+              fact = mgrFacts[metric.key] ?? null;
+            }
             if (metric.key === "staffCount") fact = "1";
             if (metric.key === "avgDialogPerEmployee" && mgrCallMetrics) {
               fact = String(mgrCallMetrics.totalMinutes);
@@ -489,6 +639,16 @@ export async function buildDailyResponse(department: string, period: string, dat
 
 // ==================== FUNNEL FACT RESOLVER ====================
 
+/** Metrics that depend on non-date-filtered snapshot data (current Kommo state).
+ *  `activeDeals` is reconstructable for historical dates, so it's NOT in this set. */
+const SNAPSHOT_ONLY_METRICS = new Set([
+  "avgPortfolio",
+  "awaitTermTotal", "awaitTermNew",
+  "termDCCancelled", "termDCDone", "termAACount",
+  "beraterReview", "delayedStart", "appeal",
+  "a2", "b1", "b2plus",
+]);
+
 function getFunnelFact(
   key: string,
   fc: LeadFunnelCounts,
@@ -497,12 +657,23 @@ function getFunnelFact(
   line1ManagerCount?: number,
   termsWonLeads?: KommoLead[],
   from?: number,
-  to?: number,
+  _to?: number,
   newLeadsInPeriod?: KommoLead[],
   termAATransferredCount?: number,
+  hasSnapshotData = true,
+  reconstructedActiveDeals?: number | null,
 ): string | null {
+  // For historical dates without stored snapshots, snapshot-only metrics are unavailable
+  if (!hasSnapshotData && SNAPSHOT_ONLY_METRICS.has(key)) {
+    return null;
+  }
+
   switch (key) {
     case "activeDeals": {
+      // Use reconstructed count for historical dates
+      if (!hasSnapshotData && reconstructedActiveDeals != null) {
+        return String(reconstructedActiveDeals);
+      }
       const adCount = (snapshotLeads || []).filter((l) => !l.is_deleted && !l.closed_at).length;
       return String(adCount);
     }

@@ -1,7 +1,29 @@
 // GET /api/daily/range?department=b2g&month=2026-03&mode=days
 // Returns array of daily snapshots for every day in a month (or every month in a year)
 import { NextRequest, NextResponse } from "next/server";
-import { buildDailyResponseCached } from "@/lib/daily/build-response";
+import { buildDailyResponseCached, getBusinessToday } from "@/lib/daily/build-response";
+
+// Sequential fetch with concurrency limit to avoid hammering Kommo API.
+// Past dates with DB snapshots resolve instantly; only "live" dates hit Kommo.
+async function fetchWithConcurrency<T>(
+  items: string[],
+  fetcher: (item: string) => Promise<T>,
+  concurrency = 3,
+): Promise<T[]> {
+  const results: T[] = new Array(items.length);
+  let idx = 0;
+
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fetcher(items[i]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -19,13 +41,16 @@ export async function GET(req: NextRequest) {
       }
 
       const daysInMonth = new Date(year, month, 0).getDate();
+      const today = getBusinessToday();
       // Data starts from March 24, 2026 — skip earlier dates
       const DATA_START = new Date(2026, 2, 24); // March 24, 2026
       const dates: string[] = [];
       for (let d = 1; d <= daysInMonth; d++) {
         const dateObj = new Date(year, month - 1, d);
-        if (dateObj >= DATA_START) {
-          dates.push(`${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+        const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+        // Skip future dates and dates before data start
+        if (dateObj >= DATA_START && dateStr <= today) {
+          dates.push(dateStr);
         }
       }
 
@@ -38,9 +63,12 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      // Fetch all days in parallel (each individually cached)
-      const results = await Promise.all(
-        dates.map((dateStr) => buildDailyResponseCached(department, "day", dateStr))
+      // Fetch days with limited concurrency — past dates with snapshots are instant,
+      // only today (and days without snapshots) hit Kommo API
+      const results = await fetchWithConcurrency(
+        dates,
+        (dateStr) => buildDailyResponseCached(department, "day", dateStr),
+        3,
       );
 
       // Also fetch the full month summary
@@ -62,8 +90,10 @@ export async function GET(req: NextRequest) {
         dates.push(`${year}-${String(m).padStart(2, "0")}-01`);
       }
 
-      const results = await Promise.all(
-        dates.map((dateStr) => buildDailyResponseCached(department, "month", dateStr))
+      const results = await fetchWithConcurrency(
+        dates,
+        (dateStr) => buildDailyResponseCached(department, "month", dateStr),
+        3,
       );
 
       return NextResponse.json({

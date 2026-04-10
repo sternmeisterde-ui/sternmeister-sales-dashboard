@@ -57,14 +57,29 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
 let _configPromise: Promise<void> | null = null;
 let _cachedToken: string | null = null;
 let _cachedDomain: string | null = null;
+let _configLoadedAt = 0;
+
+/** Re-check token from DB every 30 minutes (picks up refreshed tokens without restart) */
+const CONFIG_REFRESH_MS = 30 * 60 * 1000;
+
+/** Track consecutive API failures for diagnostics */
+let _consecutiveFailures = 0;
+export function getKommoHealth() {
+  return { consecutiveFailures: _consecutiveFailures, tokenLoadedAt: _configLoadedAt ? new Date(_configLoadedAt).toISOString() : null };
+}
 
 function ensureKommoConfig(): Promise<void> {
-  if (!_configPromise) {
-    _configPromise = (async () => {
+  const needsRefresh = _configLoadedAt > 0 && (Date.now() - _configLoadedAt) > CONFIG_REFRESH_MS;
+
+  if (!_configPromise || needsRefresh) {
+    // If refreshing, don't null out _configPromise until new one resolves
+    // (prevents concurrent requests from all hitting DB at once)
+    const newPromise = (async () => {
       // 1. Check env vars first
       if (process.env.KOMMO_ACCESS_TOKEN) {
         _cachedToken = process.env.KOMMO_ACCESS_TOKEN;
         _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+        _configLoadedAt = Date.now();
         return;
       }
 
@@ -76,19 +91,28 @@ function ensureKommoConfig(): Promise<void> {
         if (rows.length > 0) {
           _cachedToken = rows[0].accessToken;
           _cachedDomain = `${rows[0].subdomain}.kommo.com`;
-          console.log("Kommo token loaded from DB (kommo_tokens table)");
+          _configLoadedAt = Date.now();
+          console.log(`[Kommo] Token loaded from DB (expires: ${rows[0].expiresAt?.toISOString() ?? "unknown"})`);
           return;
         }
       } catch (e) {
-        console.error("Failed to load Kommo token from DB:", e);
+        console.error("[Kommo] Failed to load token from DB:", e);
       }
 
       throw new Error(
         "KOMMO_ACCESS_TOKEN not set and no token found in kommo_tokens table"
       );
     })();
+
+    _configPromise = newPromise;
   }
   return _configPromise;
+}
+
+/** Force re-load config on next call (e.g. after detecting 401) */
+export function resetKommoConfig(): void {
+  _configPromise = null;
+  _configLoadedAt = 0;
 }
 
 // ==================== HELPERS ====================
@@ -115,9 +139,15 @@ async function kommoGet<T>(path: string, params?: Record<string, string>): Promi
   }
   const res = await rateLimitedFetch(url.toString(), { headers: await getAuthHeaders() });
   if (!res.ok) {
+    _consecutiveFailures++;
+    if (res.status === 401) {
+      console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+      resetKommoConfig();
+    }
     const text = await res.text();
     throw new Error(`Kommo API ${res.status}: ${text}`);
   }
+  _consecutiveFailures = 0;
   return res.json();
 }
 
@@ -146,9 +176,15 @@ async function kommoGetAll<T>(
 
     if (res.status === 204) break;
     if (!res.ok) {
+      _consecutiveFailures++;
+      if (res.status === 401) {
+        console.error("[Kommo] 401 Unauthorized in paginated request — resetting config");
+        resetKommoConfig();
+      }
       const text = await res.text();
       throw new Error(`Kommo API ${res.status}: ${text}`);
     }
+    _consecutiveFailures = 0;
 
     const data = (await res.json()) as KommoPaginatedResponse<T>;
     const items = data._embedded?.[embeddedKey] || [];
