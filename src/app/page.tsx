@@ -14,6 +14,7 @@ import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
+import CallsChart from "@/components/CallsChart";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -844,14 +845,14 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* Stats Row: compact KPIs left + wide manager list right */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-stretch">
-                {/* Left column: KPI cards stacked */}
-                <div className="flex flex-col gap-3">
+              {/* Stats Row: KPIs (narrow) + Manager Scores (column) + Chart */}
+              <div className="grid grid-cols-2 lg:grid-cols-12 gap-3 items-stretch">
+                {/* KPI cards: 2 columns on mobile, narrow strip on desktop */}
+                <div className="col-span-2 lg:col-span-2 grid grid-cols-2 lg:grid-cols-1 gap-2">
                   {/* KPI: Average Score */}
-                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
-                    <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Ср. балл отдела</span>
-                    <span className={`text-2xl font-black ${
+                  <div className="glass-panel rounded-2xl px-3 py-2 border border-white/5 flex items-center justify-between">
+                    <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">Ср. балл</span>
+                    <span className={`text-xl font-black ${
                       callsDashStats.avgScore >= 66 ? "text-emerald-400" :
                       callsDashStats.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
                     }`}>
@@ -860,33 +861,28 @@ export default function Dashboard() {
                   </div>
 
                   {/* KPI: Total Calls */}
-                  <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
-                    <div className="flex flex-col">
-                      <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">
-                        {activeTab === "ai_calls" ? "Ролевок" : "Звонков"}
-                      </span>
-                      <span className="text-[10px] text-slate-500">
-                        {aiDashPeriod === "day" ? "за сегодня" : aiDashPeriod === "week" ? "за неделю" : "за месяц"}
-                      </span>
-                    </div>
-                    <span className="text-2xl font-black text-white">{callsDashStats.totalCalls}</span>
+                  <div className="glass-panel rounded-2xl px-3 py-2 border border-white/5 flex items-center justify-between">
+                    <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">
+                      {activeTab === "ai_calls" ? "Ролевок" : "Звонков"}
+                    </span>
+                    <span className="text-xl font-black text-white">{callsDashStats.totalCalls}</span>
                   </div>
 
                   {/* KPI: Best by Score */}
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.avgScore - a.avgScore)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
-                        <div className="flex flex-col min-w-0">
-                          <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по качеству</span>
-                          <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
+                      <div className="glass-panel rounded-2xl px-3 py-2 border border-white/5 flex flex-col">
+                        <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">Лучший балл</span>
+                        <div className="flex items-center justify-between mt-0.5">
+                          <span className="text-[11px] text-white font-medium truncate mr-1">{best?.name?.split(" ")[0] || "—"}</span>
+                          <span className={`text-lg font-black shrink-0 ${
+                            best && best.avgScore >= 66 ? "text-emerald-400" :
+                            best && best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                          }`}>
+                            {best ? `${best.avgScore}%` : "—"}
+                          </span>
                         </div>
-                        <span className={`text-2xl font-black shrink-0 ${
-                          best && best.avgScore >= 66 ? "text-emerald-400" :
-                          best && best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
-                        }`}>
-                          {best ? `${best.avgScore}%` : "—"}
-                        </span>
                       </div>
                     );
                   })()}
@@ -895,32 +891,32 @@ export default function Dashboard() {
                   {(() => {
                     const best = callsDashStats.perManager.filter(m => m.count > 0).sort((a, b) => b.count - a.count)[0];
                     return (
-                      <div className="glass-panel rounded-2xl px-4 py-3 border border-white/5 flex items-center justify-between flex-1">
-                        <div className="flex flex-col min-w-0">
-                          <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Лучший по количеству</span>
-                          <span className="text-xs text-white font-medium truncate">{best?.name || "—"}</span>
+                      <div className="glass-panel rounded-2xl px-3 py-2 border border-white/5 flex flex-col">
+                        <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">Больше всех</span>
+                        <div className="flex items-center justify-between mt-0.5">
+                          <span className="text-[11px] text-white font-medium truncate mr-1">{best?.name?.split(" ")[0] || "—"}</span>
+                          <span className="text-lg font-black text-white shrink-0">
+                            {best ? best.count : "—"}
+                          </span>
                         </div>
-                        <span className="text-2xl font-black text-white shrink-0">
-                          {best ? best.count : "—"}
-                        </span>
                       </div>
                     );
                   })()}
                 </div>
 
-                {/* Right column: Per-Manager Scores (2/3 width) */}
-                <div className="lg:col-span-2 glass-panel rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
+                {/* Manager Scores: single column with scroll */}
+                <div className="col-span-2 lg:col-span-4 glass-panel rounded-2xl p-3 border border-white/5 flex flex-col gap-2">
                   <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Оценки менеджеров</span>
                   {callsDashStats.perManager.length === 0 ? (
                     <span className="text-sm text-slate-500">Нет данных за период</span>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+                    <div className="flex flex-col gap-0 overflow-y-auto max-h-[200px] pr-1 custom-scrollbar">
                       {callsDashStats.perManager.map((m) => (
                         <div key={m.name} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
                           <span className="text-sm text-slate-200 truncate mr-3">{m.name}</span>
-                          <div className="flex items-center gap-4 shrink-0">
-                            <span className="text-sm font-bold text-white">{m.count} <span className="text-xs font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
-                            <span className={`text-sm font-bold min-w-[40px] text-right ${
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-sm font-bold text-white">{m.count} <span className="text-[10px] font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
+                            <span className={`text-sm font-bold min-w-[36px] text-right ${
                               m.avgScore >= 66 ? "text-emerald-400" :
                               m.avgScore >= 41 ? "text-amber-400" :
                               m.count === 0 ? "text-slate-600" : "text-rose-400"
@@ -932,6 +928,25 @@ export default function Dashboard() {
                       ))}
                     </div>
                   )}
+                </div>
+
+                {/* Charts: Score trend + Call count trend */}
+                <div className="col-span-2 lg:col-span-6 glass-panel rounded-2xl p-3 border border-white/5 flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Динамика</span>
+                  <CallsChart
+                    calls={(() => {
+                      const allCalls = activeTab === "real_calls" ? realCalls : aiCalls;
+                      const managers = activeManagers
+                        .filter(m => !m.role || m.role === "manager" || m.role === "rop")
+                        .filter(m => lineFilter === "all" || m.line === lineFilter);
+                      const managerNames = new Set(managers.map(m => m.name));
+                      return allCalls.filter(c => managerNames.has(c.name));
+                    })()}
+                    period={aiDashPeriod}
+                    customRange={aiCustomRange}
+                    parseCallDate={parseCallDate}
+                    type={activeTab === "real_calls" ? "real_calls" : "ai_calls"}
+                  />
                 </div>
               </div>
             </div>

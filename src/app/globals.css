@@ -32,6 +32,21 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
+/* Custom Scrollbar — compact for manager lists */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.4);
+  border-radius: 2px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.7);
+}
+
 /* Custom Scrollbar Styles */
 .scrollbar-thin::-webkit-scrollbar {
   width: 6px;
