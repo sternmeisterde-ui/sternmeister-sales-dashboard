@@ -5,7 +5,7 @@ import { masterManagers, d1Users, r1Users } from "@/lib/db/schema-existing";
 import { getDbForDepartment } from "@/lib/db/index";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkManagers } from "@/lib/db/schema-okk";
-import { eq, and } from "drizzle-orm";
+import { eq, and, notInArray, sql } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
 import { getUsers as getKommoUsers } from "@/lib/kommo/client";
 
@@ -206,6 +206,9 @@ export async function POST(request: NextRequest) {
     // ── Step 5: Sync to target tables (with error isolation) ──
     await syncToTargets(department, okkDept, results, existingMap, warnings);
 
+    // ── Step 6: Deactivate orphans in targets (managers active in targets but not in master) ──
+    await deactivateOrphans(department, okkDept, warnings);
+
     // Return updated list
     const updatedRows = await db
       .select()
@@ -380,5 +383,72 @@ async function softDeleteFromTargets(
     } catch (err) {
       warnings.push(`Roleplay delete failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+}
+
+/**
+ * Deactivate orphan managers in target tables — managers that are active in
+ * OKK/Roleplay but have no matching active record in master_managers.
+ * This cleans up ghosts from failed syncs, direct DB edits, or pre-migration data.
+ */
+async function deactivateOrphans(
+  department: "b2g" | "b2b",
+  okkDept: string,
+  warnings: string[],
+) {
+  const okkDb = getOkkDbForDepartment(department);
+  const roleplayDb = getDbForDepartment(department);
+  const usersTable = department === "b2g" ? d1Users : r1Users;
+
+  // Get all active master manager names and telegramIds for this department
+  const masterRows = await db
+    .select({ name: masterManagers.name, telegramId: masterManagers.telegramId })
+    .from(masterManagers)
+    .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
+
+  const masterNames = masterRows.map((r) => r.name);
+  const masterTelegramIds = masterRows
+    .map((r) => r.telegramId)
+    .filter((id): id is string => id !== null && id !== "");
+
+  // ── Deactivate OKK orphans ──
+  try {
+    if (masterNames.length > 0) {
+      await okkDb
+        .update(okkManagers)
+        .set({ isActive: false })
+        .where(
+          and(
+            eq(okkManagers.department, okkDept),
+            eq(okkManagers.isActive, true),
+            notInArray(okkManagers.name, masterNames),
+          )
+        );
+      console.log(`[Managers] OKK orphan cleanup for ${department}: deactivated orphans`);
+    }
+  } catch (err) {
+    warnings.push(`OKK orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // ── Deactivate Roleplay orphans ──
+  try {
+    if (masterTelegramIds.length > 0) {
+      await roleplayDb
+        .update(usersTable)
+        .set({ isActive: false, updatedAt: new Date() })
+        .where(
+          and(
+            eq(usersTable.isActive, true),
+            notInArray(usersTable.telegramId, masterTelegramIds),
+          )
+        );
+      console.log(`[Managers] Roleplay orphan cleanup for ${department}: deactivated orphans`);
+    } else {
+      // No master managers with telegramIds — deactivate ALL active roleplay users for safety
+      // (unlikely scenario, but prevents data leaks)
+      warnings.push(`No master managers with telegramId for ${department} — skipping roleplay orphan cleanup`);
+    }
+  } catch (err) {
+    warnings.push(`Roleplay orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
