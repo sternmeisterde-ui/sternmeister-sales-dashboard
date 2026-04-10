@@ -58,6 +58,7 @@ export const d1Calls = pgTable("d1_calls", {
   livekitRoomId: text("livekit_room_id"),
   recordingPath: text("recording_path"),
   recordingExpiresAt: timestamp("recording_expires_at", { withTimezone: true }),
+  callType: text("call_type"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
@@ -118,6 +119,7 @@ export const r1Calls = pgTable("r1_calls", {
   livekitRoomId: text("livekit_room_id"),
   recordingPath: text("recording_path"),
   recordingExpiresAt: timestamp("recording_expires_at", { withTimezone: true }),
+  callType: text("call_type"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
