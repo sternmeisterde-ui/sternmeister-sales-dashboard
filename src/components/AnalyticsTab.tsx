@@ -366,7 +366,7 @@ function ManagerTable({
               </th>
               {managers.map((m) => (
                 <th key={m.id} className="px-2 py-2 text-center min-w-[75px]">
-                  <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold leading-tight">{m.name.split(" ")[0]}</div>
+                  <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold leading-tight whitespace-nowrap">{m.name}</div>
                   <div className="text-[8px] text-slate-600">{m.callCount} зв.</div>
                 </th>
               ))}
