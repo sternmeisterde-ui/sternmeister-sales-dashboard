@@ -1,444 +1,153 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, AlertTriangle, Loader2 } from "lucide-react";
+import {
+  RefreshCw,
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 
 // ==================== Types ====================
 
-interface BlockScore {
-  blockName: string;
+interface CriterionScore {
+  name: string;
   scores: Record<string, number>;
 }
 
-interface ClientScoringEntry {
-  type: "urgency" | "solvency" | "need";
-  distribution: Record<string, { hot: number; warm: number; cold: number }>;
+interface BlockData {
+  name: string;
+  scores: Record<string, number>;
+  criteria: CriterionScore[];
+}
+
+interface ManagerCriterion {
+  name: string;
+  score: number;
+}
+
+interface ManagerBlock {
+  name: string;
+  score: number;
+  criteria: ManagerCriterion[];
+}
+
+interface ManagerBreakdown {
+  id: string;
+  name: string;
+  overallScore: number;
+  callCount: number;
+  blocks: ManagerBlock[];
 }
 
 interface AnalyticsData {
-  department: string;
-  months: string[];
-  blockScores: BlockScore[];
-  clientScoring: ClientScoringEntry[];
-  categories: Record<string, Record<string, number>>;
+  periods: string[];
+  blocks: BlockData[];
   overallScores: Record<string, number>;
-  callVolume: Record<string, number>;
+  managers: Array<{ id: string; name: string }>;
+  managerBreakdown: ManagerBreakdown[];
+  totalCalls: number;
+  source: string;
+  department: string;
 }
 
 // ==================== Helpers ====================
 
-/** Returns a Tailwind text colour class based on a 0–100 score. */
-function scoreColor(score: number): string {
-  if (score >= 70) return "text-emerald-400";
-  if (score >= 40) return "text-amber-400";
+function getCriteriaColor(value: number | undefined): string {
+  if (value === undefined) return "text-slate-600";
+  if (value >= 80) return "text-emerald-400";
+  if (value >= 50) return "text-amber-400";
   return "text-rose-400";
 }
 
-/** Returns a subtle background tint matching the score colour. */
-function scoreBg(score: number): string {
-  if (score >= 70) return "bg-emerald-500/10";
-  if (score >= 40) return "bg-amber-500/10";
-  return "bg-rose-500/10";
+function getCriteriaBg(value: number | undefined): string {
+  if (value === undefined) return "";
+  if (value >= 80) return "bg-emerald-500/5";
+  if (value >= 50) return "bg-amber-500/5";
+  return "bg-rose-500/5";
 }
 
-/** Colours for lead categories A–E. */
-const CATEGORY_COLOR: Record<string, string> = {
-  A: "text-emerald-400",
-  B: "text-blue-400",
-  C: "text-amber-400",
-  D: "text-orange-400",
-  E: "text-rose-400",
-};
-
-const CATEGORY_BG: Record<string, string> = {
-  A: "bg-emerald-500/10",
-  B: "bg-blue-500/10",
-  C: "bg-amber-500/10",
-  D: "bg-orange-500/10",
-  E: "bg-rose-500/10",
-};
-
-/** Human-readable labels for client scoring types. */
-const SCORING_LABEL: Record<ClientScoringEntry["type"], string> = {
-  urgency: "Срочность",
-  solvency: "Платежеспособность",
-  need: "Потребность",
-};
-
-/** Formats a YYYY-MM string to a short Russian month label, e.g. "Янв 25". */
-function formatMonth(ym: string): string {
-  const [year, month] = ym.split("-");
-  const date = new Date(Number(year), Number(month) - 1, 1);
-  const short = date.toLocaleDateString("ru-RU", { month: "short" });
-  return `${short.charAt(0).toUpperCase()}${short.slice(1).replace(".", "")} ${String(year).slice(2)}`;
+function formatPeriodLabel(period: string, groupBy: string): string {
+  if (groupBy === "month") {
+    const [y, m] = period.split("-");
+    const months = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
+    return `${months[Number(m) - 1]} ${y.slice(2)}`;
+  }
+  if (groupBy === "week") return period;
+  const parts = period.split("-");
+  if (parts.length === 3) return `${parts[2]}.${parts[1]}`;
+  return period;
 }
 
-// ==================== Sub-components ====================
-
-/** Shared sticky-header table wrapper. */
-function SectionPanel({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5">
-      <h3 className="text-[10px] uppercase tracking-widest text-slate-300 font-bold mb-4">
-        {title}
-      </h3>
-      <div className="overflow-x-auto">{children}</div>
-    </div>
-  );
+function formatDateForInput(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-/** Shared table header/body styles. */
-const TH =
-  "px-3 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-right whitespace-nowrap";
-const TH_LEFT =
-  "px-3 py-2 text-[10px] uppercase tracking-widest text-slate-500 font-semibold text-left whitespace-nowrap sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10 min-w-[160px]";
-const TD = "px-3 py-2 text-right text-sm font-mono font-bold";
-const TD_LEFT =
-  "px-3 py-2 text-left text-sm text-slate-300 font-medium sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10 truncate max-w-[200px]";
-const TR = "border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors";
+// ==================== Main Component ====================
 
-// ==================== Section 1: Block quality dynamics ====================
-
-function BlockScoresTable({
-  months,
-  blockScores,
-  overallScores,
-}: {
-  months: string[];
-  blockScores: BlockScore[];
-  overallScores: Record<string, number>;
-}) {
-  return (
-    <SectionPanel title="Динамика качества по блокам">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="border-b border-white/10">
-            <th className={TH_LEFT}>Блок</th>
-            {months.map((m) => (
-              <th key={m} className={TH}>
-                {formatMonth(m)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {blockScores.map((block) => (
-            <tr key={block.blockName} className={TR}>
-              <td className={TD_LEFT}>{block.blockName}</td>
-              {months.map((m) => {
-                const val = block.scores[m];
-                if (val === undefined || val === null) {
-                  return (
-                    <td key={m} className={`${TD} text-slate-600`}>
-                      —
-                    </td>
-                  );
-                }
-                return (
-                  <td
-                    key={m}
-                    className={`${TD} ${scoreColor(val)} ${scoreBg(val)}`}
-                  >
-                    {val}%
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-
-          {/* Overall average row */}
-          <tr className="border-t-2 border-white/10 bg-slate-800/30">
-            <td className={`${TD_LEFT} text-white font-bold bg-slate-800/40`}>
-              Среднее
-            </td>
-            {months.map((m) => {
-              const val = overallScores[m];
-              if (val === undefined || val === null) {
-                return (
-                  <td key={m} className={`${TD} text-slate-600`}>
-                    —
-                  </td>
-                );
-              }
-              return (
-                <td
-                  key={m}
-                  className={`${TD} font-extrabold ${scoreColor(val)} ${scoreBg(val)}`}
-                >
-                  {val}%
-                </td>
-              );
-            })}
-          </tr>
-        </tbody>
-      </table>
-    </SectionPanel>
-  );
-}
-
-// ==================== Section 2: Client scoring ====================
-
-function ClientScoringTable({
-  entry,
-  months,
-}: {
-  entry: ClientScoringEntry;
-  months: string[];
-}) {
-  const rows: Array<{
-    label: string;
-    key: keyof (typeof entry.distribution)[string];
-    textColor: string;
-    bgColor: string;
-  }> = [
-    {
-      label: "Горячие (7–10)",
-      key: "hot",
-      textColor: "text-emerald-400",
-      bgColor: "bg-emerald-500/10",
-    },
-    {
-      label: "Тёплые (4–6)",
-      key: "warm",
-      textColor: "text-amber-400",
-      bgColor: "bg-amber-500/10",
-    },
-    {
-      label: "Холодные (0–3)",
-      key: "cold",
-      textColor: "text-rose-400",
-      bgColor: "bg-rose-500/10",
-    },
-  ];
-
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold mb-2 mt-4">
-        {SCORING_LABEL[entry.type]}
-      </div>
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="border-b border-white/10">
-            <th className={TH_LEFT}>Сегмент</th>
-            {months.map((m) => (
-              <th key={m} className={TH}>
-                {formatMonth(m)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(({ label, key, textColor, bgColor }) => (
-            <tr key={key} className={TR}>
-              <td className={TD_LEFT}>
-                <span className={`${textColor} font-medium`}>{label}</span>
-              </td>
-              {months.map((m) => {
-                const bucket = entry.distribution[m];
-                const val = bucket ? bucket[key] : null;
-                if (val === null || val === undefined) {
-                  return (
-                    <td key={m} className={`${TD} text-slate-600`}>
-                      —
-                    </td>
-                  );
-                }
-                return (
-                  <td key={m} className={`${TD} ${textColor} ${bgColor}`}>
-                    {val}%
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ClientScoringSection({
-  clientScoring,
-  months,
-}: {
-  clientScoring: ClientScoringEntry[];
-  months: string[];
-}) {
-  // Hide solvency entirely if all distribution values are null (госники)
-  const visibleEntries = clientScoring.filter((entry) => {
-    if (entry.type !== "solvency") return true;
-    return months.some((m) => {
-      const bucket = entry.distribution[m];
-      return (
-        bucket !== null &&
-        bucket !== undefined &&
-        (bucket.hot !== null || bucket.warm !== null || bucket.cold !== null)
-      );
-    });
+export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
+  const [source, setSource] = useState<"okk" | "roleplay">("okk");
+  const [line, setLine] = useState("1");
+  const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
+  const [managerId, setManagerId] = useState<string>("");
+  const [fromDate, setFromDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return formatDateForInput(d);
   });
+  const [toDate, setToDate] = useState<string>(() => formatDateForInput(new Date()));
 
-  if (visibleEntries.length === 0) return null;
-
-  return (
-    <SectionPanel title="Скоринг клиентов">
-      <div className="overflow-x-auto">
-        {visibleEntries.map((entry) => (
-          <ClientScoringTable key={entry.type} entry={entry} months={months} />
-        ))}
-      </div>
-    </SectionPanel>
-  );
-}
-
-// ==================== Section 3: Lead categories ====================
-
-function LeadCategoriesTable({
-  categories,
-  months,
-}: {
-  categories: Record<string, Record<string, number>>;
-  months: string[];
-}) {
-  const catKeys = Object.keys(categories).sort();
-  if (catKeys.length === 0) return null;
-
-  return (
-    <SectionPanel title="Категории лидов">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="border-b border-white/10">
-            <th className={TH_LEFT}>Категория</th>
-            {months.map((m) => (
-              <th key={m} className={TH}>
-                {formatMonth(m)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {catKeys.map((cat) => {
-            const textColor = CATEGORY_COLOR[cat] ?? "text-slate-300";
-            const bgColor = CATEGORY_BG[cat] ?? "";
-            return (
-              <tr key={cat} className={TR}>
-                <td className={TD_LEFT}>
-                  <span className={`${textColor} font-bold`}>{cat}</span>
-                </td>
-                {months.map((m) => {
-                  const val = categories[cat]?.[m];
-                  if (val === undefined || val === null) {
-                    return (
-                      <td key={m} className={`${TD} text-slate-600`}>
-                        —
-                      </td>
-                    );
-                  }
-                  return (
-                    <td key={m} className={`${TD} ${textColor} ${bgColor}`}>
-                      {val}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </SectionPanel>
-  );
-}
-
-// ==================== Section 4: Call volume ====================
-
-function CallVolumeSection({
-  callVolume,
-  months,
-}: {
-  callVolume: Record<string, number>;
-  months: string[];
-}) {
-  return (
-    <SectionPanel title="Объём звонков">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="border-b border-white/10">
-            <th className={TH_LEFT}>Показатель</th>
-            {months.map((m) => (
-              <th key={m} className={TH}>
-                {formatMonth(m)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          <tr className={TR}>
-            <td className={TD_LEFT}>Звонков за месяц</td>
-            {months.map((m) => {
-              const val = callVolume[m];
-              if (val === undefined || val === null) {
-                return (
-                  <td key={m} className={`${TD} text-slate-600`}>
-                    —
-                  </td>
-                );
-              }
-              return (
-                <td key={m} className={`${TD} text-blue-400`}>
-                  {val.toLocaleString("ru-RU")}
-                </td>
-              );
-            })}
-          </tr>
-        </tbody>
-      </table>
-    </SectionPanel>
-  );
-}
-
-// ==================== Main component ====================
-
-export default function AnalyticsTab({
-  department,
-}: {
-  department: "b2g" | "b2b";
-}) {
-  const [months, setMonths] = useState<3 | 6 | 12>(6);
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(new Set());
+  const [collapsedMgrBlocks, setCollapsedMgrBlocks] = useState<Set<string>>(new Set());
+
+  const toggleBlock = (blockName: string) => {
+    setCollapsedBlocks((prev) => {
+      const next = new Set(prev);
+      if (next.has(blockName)) next.delete(blockName);
+      else next.add(blockName);
+      return next;
+    });
+  };
+
+  const toggleMgrBlock = (blockName: string) => {
+    setCollapsedMgrBlocks((prev) => {
+      const next = new Set(prev);
+      if (next.has(blockName)) next.delete(blockName);
+      else next.add(blockName);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (department === "b2b") setLine("1");
+  }, [department]);
 
   const fetchData = useCallback(
     async (signal?: AbortSignal) => {
-      setLoading(true);
+      if (!data) setLoading(true);
       setError(null);
       try {
-        const res = await fetch(
-          `/api/analytics?department=${department}&months=${months}`,
-          { signal }
-        );
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`API error ${res.status}: ${text}`);
-        }
+        const params = new URLSearchParams({ department, source, line, groupBy, from: fromDate, to: toDate });
+        if (managerId) params.set("managerId", managerId);
+        const res = await fetch(`/api/analytics?${params}`, { signal });
+        if (!res.ok) throw new Error(`API error ${res.status}`);
         const json = await res.json();
-        setData(json.data ?? json);
+        if (!json.success) throw new Error(json.error || "Unknown error");
+        setData(json.data);
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
-        if (e instanceof TypeError && e.message === "Failed to fetch") return;
-        console.error("Analytics fetch error:", e);
         setError(String(e));
       } finally {
         setLoading(false);
       }
     },
-    [department, months]
+    [department, source, line, groupBy, fromDate, toDate, managerId],
   );
 
   useEffect(() => {
@@ -447,107 +156,364 @@ export default function AnalyticsTab({
     return () => ac.abort();
   }, [fetchData]);
 
-  // ---- Full-page loader on first load ----
-  if (loading && !data) {
-    return <DinoLoader />;
-  }
+  const shiftDate = (dir: -1 | 1) => {
+    const days = groupBy === "month" ? 30 : groupBy === "week" ? 7 : 1;
+    const shift = days * dir;
+    const f = new Date(fromDate);
+    const t = new Date(toDate);
+    f.setDate(f.getDate() + shift);
+    t.setDate(t.getDate() + shift);
+    setFromDate(formatDateForInput(f));
+    setToDate(formatDateForInput(t));
+  };
 
-  // ---- Full-page error (no cached data) ----
-  if (error && !data) {
-    return (
-      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
-        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
-        <p className="text-red-400 text-sm">{error}</p>
-        <button
-          onClick={() => fetchData()}
-          className="mt-4 px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg text-sm transition-colors"
-        >
-          Попробовать снова
-        </button>
-      </div>
-    );
-  }
+  const setQuickRange = (days: number) => {
+    const t = new Date();
+    const f = new Date();
+    f.setDate(f.getDate() - days);
+    setFromDate(formatDateForInput(f));
+    setToDate(formatDateForInput(t));
+  };
+
+  const periods = data?.periods ?? [];
 
   return (
-    <div className="flex flex-col gap-4 fade-in">
-      {/* ---- Filter bar ---- */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        {/* Month range selector */}
-        <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
-          {([3, 6, 12] as const).map((n) => (
-            <button
-              key={n}
-              onClick={() => setMonths(n)}
-              className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 ${
-                months === n
-                  ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                  : "text-slate-400 hover:text-white"
-              }`}
+    <div className="flex flex-col gap-5 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
+      {/* ── Filter Bar ── */}
+      <div className="flex flex-col gap-3">
+        {/* Row 1: Source + Line + Manager */}
+        <div className="flex flex-wrap gap-3 items-center">
+          {/* Source toggle */}
+          <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
+            {(["okk", "roleplay"] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setSource(s)}
+                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+                  source === s
+                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {s === "okk" ? "OKK (реальные)" : "Ролевки (AI)"}
+              </button>
+            ))}
+          </div>
+
+          {/* Line toggle (B2G only) */}
+          {department === "b2g" && (
+            <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
+              {[
+                { id: "1", label: "Квалификатор" },
+                { id: "2", label: "Бератер" },
+                { id: "3", label: "Доведение" },
+              ].map((l) => (
+                <button
+                  key={l.id}
+                  onClick={() => { setLine(l.id); setManagerId(""); }}
+                  className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
+                    line === l.id
+                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Manager dropdown */}
+          {data?.managers && data.managers.length > 0 && (
+            <select
+              value={managerId}
+              onChange={(e) => setManagerId(e.target.value)}
+              className="bg-slate-800/50 border border-white/10 rounded-xl px-3 py-2 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40 min-w-[180px]"
             >
-              {n === 3 ? "3 мес" : n === 6 ? "6 мес" : "12 мес"}
-            </button>
-          ))}
+              <option value="">Все менеджеры</option>
+              {data.managers.map((m) => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          )}
+
+          <button
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors disabled:opacity-30"
+            title="Обновить"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+          {data && (
+            <span className="text-[10px] text-slate-500">{data.totalCalls} звонков</span>
+          )}
         </div>
 
-        {/* Refresh button */}
-        <button
-          onClick={() => fetchData()}
-          disabled={loading}
-          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-          title="Обновить"
-        >
-          {loading ? (
-            <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-          ) : (
-            <RefreshCw className="w-4 h-4" />
-          )}
-        </button>
+        {/* Row 2: GroupBy + Date range + presets */}
+        <div className="flex flex-wrap gap-3 items-center">
+          <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
+            {(["day", "week", "month"] as const).map((g) => (
+              <button
+                key={g}
+                onClick={() => setGroupBy(g)}
+                className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
+                  groupBy === g
+                    ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                {g === "day" ? "Дни" : g === "week" ? "Недели" : "Месяцы"}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button onClick={() => shiftDate(-1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5">
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)}
+              className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40" />
+            <span className="text-slate-500 text-[10px]">—</span>
+            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)}
+              className="bg-slate-800/50 border border-white/10 rounded-lg px-2 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40" />
+            <button onClick={() => shiftDate(1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5">
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex gap-1">
+            {[{ days: 7, label: "7д" }, { days: 30, label: "30д" }, { days: 90, label: "3м" }, { days: 180, label: "6м" }].map((p) => (
+              <button key={p.days} onClick={() => setQuickRange(p.days)}
+                className="px-2 py-1 rounded-lg text-[10px] text-slate-400 hover:text-white bg-slate-800/30 hover:bg-slate-700/50 border border-white/5 transition-colors">
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {/* Soft error banner when we still have stale data */}
-      {error && data && (
-        <div className="glass-panel rounded-xl px-4 py-3 border border-red-500/20 bg-red-500/5 flex items-center gap-3">
-          <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-          <p className="text-red-400 text-xs">{error}</p>
+      {/* Loading */}
+      {loading && !data && <DinoLoader />}
+      {loading && data && (
+        <div className="flex items-center justify-center py-2">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+            <span className="text-[10px] text-blue-400 font-medium">Обновление...</span>
+          </div>
         </div>
       )}
 
-      {data && (
+      {error && (
+        <div className="glass-panel rounded-2xl p-6 border border-red-500/20 bg-red-500/5">
+          <p className="text-red-400 text-sm">{error}</p>
+          <button onClick={() => fetchData()} className="mt-2 text-xs text-red-300 underline hover:text-white">Попробовать снова</button>
+        </div>
+      )}
+
+      {/* ── Table 1: Criteria × Time (динамика по дням/неделям/месяцам) ── */}
+      {data && periods.length > 0 && (
         <>
-          {/* Section 1 */}
-          <BlockScoresTable
-            months={data.months}
-            blockScores={data.blockScores}
-            overallScores={data.overallScores}
-          />
-
-          {/* Section 2 */}
-          <ClientScoringSection
-            clientScoring={data.clientScoring}
-            months={data.months}
-          />
-
-          {/* Section 3 */}
-          <LeadCategoriesTable
-            categories={data.categories}
-            months={data.months}
-          />
-
-          {/* Section 4 */}
-          <CallVolumeSection
-            callVolume={data.callVolume}
-            months={data.months}
-          />
+          <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500">
+            Динамика по критериям
+          </div>
+          <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
+            <div className="w-full overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
+                      Критерий
+                    </th>
+                    {periods.map((p) => (
+                      <th key={p} className="px-2 py-2 text-center min-w-[55px]">
+                        <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold leading-tight">
+                          {formatPeriodLabel(p, groupBy)}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="text-sm">
+                  {data.blocks.map((block) => (
+                    <BlockTimeRows
+                      key={block.name}
+                      block={block}
+                      periods={periods}
+                      isCollapsed={collapsedBlocks.has(block.name)}
+                      onToggle={() => toggleBlock(block.name)}
+                    />
+                  ))}
+                  <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+                    <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                      Общий средний балл
+                    </td>
+                    {periods.map((p) => {
+                      const val = data.overallScores[p];
+                      return (
+                        <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(val)}`}>
+                          {val !== undefined ? `${val}%` : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       )}
 
-      {/* Subtle refresh overlay when re-fetching with existing data */}
-      {data && loading && (
-        <div className="fixed top-4 right-4 z-50 bg-slate-800/90 border border-white/10 rounded-xl px-4 py-2 flex items-center gap-2 shadow-xl">
-          <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
-          <span className="text-xs text-slate-400">Обновление...</span>
+      {/* ── Table 2: Criteria × Managers (разбивка по менеджерам) ── */}
+      {data && data.managerBreakdown.length > 0 && !managerId && (
+        <>
+          <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500 mt-2">
+            Разбивка по менеджерам
+          </div>
+          <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
+            <div className="w-full overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
+                      Критерий
+                    </th>
+                    {data.managerBreakdown.map((mgr) => (
+                      <th key={mgr.id} className="px-2 py-2 text-center min-w-[80px]">
+                        <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold leading-tight">
+                          {mgr.name.split(" ")[0]}
+                        </div>
+                        <div className="text-[8px] text-slate-600">{mgr.callCount} зв.</div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="text-sm">
+                  {data.blocks.map((block, blockIdx) => (
+                    <BlockManagerRows
+                      key={block.name}
+                      blockName={block.name}
+                      blockIdx={blockIdx}
+                      criteriaNames={block.criteria.map((c) => c.name)}
+                      managers={data.managerBreakdown}
+                      isCollapsed={collapsedMgrBlocks.has(block.name)}
+                      onToggle={() => toggleMgrBlock(block.name)}
+                    />
+                  ))}
+                  {/* Overall row */}
+                  <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+                    <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                      Общий средний балл
+                    </td>
+                    {data.managerBreakdown.map((mgr) => (
+                      <td key={mgr.id} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(mgr.overallScore)}`}>
+                        {mgr.overallScore}%
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* No data */}
+      {data && !loading && data.totalCalls === 0 && (
+        <div className="glass-panel rounded-2xl p-8 border border-white/5 text-center">
+          <p className="text-slate-500 text-sm">Нет данных за выбранный период</p>
         </div>
       )}
     </div>
+  );
+}
+
+// ==================== Block × Time Rows ====================
+
+function BlockTimeRows({
+  block, periods, isCollapsed, onToggle,
+}: {
+  block: BlockData; periods: string[]; isCollapsed: boolean; onToggle: () => void;
+}) {
+  return (
+    <>
+      <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={onToggle}>
+        <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
+          <div className="flex items-center gap-2">
+            {isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />}
+            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{block.name}</span>
+          </div>
+        </td>
+        {periods.map((p) => {
+          const val = block.scores[p];
+          return (
+            <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(val)} ${getCriteriaBg(val)}`}>
+              {val !== undefined ? `${val}%` : "—"}
+            </td>
+          );
+        })}
+      </tr>
+      {!isCollapsed && block.criteria.map((c) => (
+        <tr key={`${block.name}-${c.name}`} className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]">
+          <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
+          {periods.map((p) => {
+            const val = c.scores[p];
+            return (
+              <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(val)}`}>
+                {val !== undefined ? `${val}%` : "—"}
+              </td>
+            );
+          })}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+// ==================== Block × Managers Rows ====================
+
+function BlockManagerRows({
+  blockName, blockIdx, criteriaNames, managers, isCollapsed, onToggle,
+}: {
+  blockName: string; blockIdx: number; criteriaNames: string[]; managers: ManagerBreakdown[];
+  isCollapsed: boolean; onToggle: () => void;
+}) {
+  return (
+    <>
+      {/* Block header */}
+      <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={onToggle}>
+        <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
+          <div className="flex items-center gap-2">
+            {isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />}
+            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{blockName}</span>
+          </div>
+        </td>
+        {managers.map((mgr) => {
+          const block = mgr.blocks[blockIdx];
+          const val = block?.score;
+          return (
+            <td key={mgr.id} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(val)} ${getCriteriaBg(val)}`}>
+              {val !== undefined ? `${val}%` : "—"}
+            </td>
+          );
+        })}
+      </tr>
+      {/* Criteria rows */}
+      {!isCollapsed && criteriaNames.map((cName, cIdx) => (
+        <tr key={`${blockName}-mgr-${cName}`} className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]">
+          <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
+          {managers.map((mgr) => {
+            const block = mgr.blocks[blockIdx];
+            const criterion = block?.criteria[cIdx];
+            const val = criterion?.score;
+            return (
+              <td key={mgr.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(val)}`}>
+                {val !== undefined ? `${val}%` : "—"}
+              </td>
+            );
+          })}
+        </tr>
+      ))}
+    </>
   );
 }

@@ -1,319 +1,447 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
+import { getDbForDepartment } from "@/lib/db";
 import {
   okkCalls,
   okkEvaluations,
+  okkManagers,
   type EvalBlock,
+  type EvalCriterion,
   getBlockScore,
   getBlockMaxScore,
 } from "@/lib/db/schema-okk";
-import { eq, sql } from "drizzle-orm";
+import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
+import { eq, sql, and, gte, lte, isNotNull } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const CACHE_TTL = 2 * 60 * 1000;
 
-const ANALYTICS_CACHE_TTL = 2 * 60 * 1000; // 2 minutes
+const EXCLUDED_BLOCKS = new Set([
+  "Рекомендации",
+  "Фильтры",
+  "Скоринг",
+  "Скоринг клиента",
+]);
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ──────────────────────────────────────────────────
 
-interface BlockScoreSeries {
-  blockName: string;
+interface CriterionScore {
+  name: string;
   scores: Record<string, number>;
 }
 
-interface ClientScoringBucket {
-  hot: number;
-  warm: number;
-  cold: number;
+interface BlockData {
+  name: string;
+  scores: Record<string, number>;
+  criteria: CriterionScore[];
 }
 
-interface ClientScoringSeries {
-  type: "urgency" | "solvency" | "need";
-  distribution: Record<string, ClientScoringBucket>;
+interface ManagerCriterionScore {
+  name: string;
+  score: number;
+}
+
+interface ManagerBlockScore {
+  name: string;
+  score: number;
+  criteria: ManagerCriterionScore[];
+}
+
+interface ManagerBreakdown {
+  id: string;
+  name: string;
+  overallScore: number;
+  callCount: number;
+  blocks: ManagerBlockScore[];
 }
 
 interface AnalyticsResponse {
-  department: string;
-  months: string[];
-  blockScores: BlockScoreSeries[];
-  clientScoring: ClientScoringSeries[];
-  categories: Record<string, Record<string, number>>;
+  periods: string[];
+  blocks: BlockData[];
   overallScores: Record<string, number>;
-  callVolume: Record<string, number>;
+  managers: Array<{ id: string; name: string }>;
+  managerBreakdown: ManagerBreakdown[];
+  totalCalls: number;
+  source: string;
+  department: string;
 }
 
-// Per-month accumulators (mutable, used only during aggregation)
-interface MonthAccumulator {
+// ─── Period helpers ─────────────────────────────────────────
+
+function getISOWeek(d: Date): string {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil(((date.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+}
+
+function toPeriodKey(date: Date, groupBy: string): string {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  switch (groupBy) {
+    case "day": return `${y}-${m}-${d}`;
+    case "week": return getISOWeek(date);
+    case "month": return `${y}-${m}`;
+    default: return `${y}-${m}-${d}`;
+  }
+}
+
+function buildPeriodRange(from: Date, to: Date, groupBy: string): string[] {
+  const periods = new Set<string>();
+  const cur = new Date(from);
+  while (cur <= to) {
+    periods.add(toPeriodKey(cur, groupBy));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return [...periods].sort();
+}
+
+// ─── Prompt type mapping ────────────────────────────────────
+
+function getOkkPromptType(department: string, line: string): string | null {
+  if (department === "b2b") return "r2_commercial";
+  switch (line) {
+    case "1": return "d2_qualifier";
+    case "2": return "d2_berater";
+    case "3": return "d2_dovedenie";
+    default: return null;
+  }
+}
+
+// ─── Accumulator ────────────────────────────────────────────
+
+interface PeriodAcc {
   totalScoreSum: number;
   totalScoreCount: number;
-  // blockName → { scoreSum, count }
   blocks: Map<string, { scoreSum: number; count: number }>;
-  // scoring type → raw values
-  urgencyValues: number[];
-  solvencyValues: number[];
-  needValues: number[];
-  // category → count
-  categories: Map<string, number>;
+  criteria: Map<string, { scoreSum: number; count: number }>;
   callCount: number;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Format a Date to YYYY-MM using UTC calendar month */
-function toYearMonth(date: Date): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-/** Build an ordered list of YYYY-MM strings covering the last `count` months */
-function buildMonthRange(count: number): string[] {
-  const now = new Date();
-  const result: string[] = [];
-  for (let i = count - 1; i >= 0; i--) {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
-    result.push(toYearMonth(d));
-  }
-  return result;
-}
-
-/** Classify a 0–10 score into hot / warm / cold bucket */
-function scoreBucket(value: number): "hot" | "warm" | "cold" {
-  if (value >= 7) return "hot";
-  if (value >= 4) return "warm";
-  return "cold";
-}
-
-/** Convert a raw array of 0–10 scores to a percentage distribution */
-function toDistribution(values: number[]): ClientScoringBucket {
-  const total = values.length;
-  if (total === 0) return { hot: 0, warm: 0, cold: 0 };
-  let hot = 0;
-  let warm = 0;
-  let cold = 0;
-  for (const v of values) {
-    const bucket = scoreBucket(v);
-    if (bucket === "hot") hot++;
-    else if (bucket === "warm") warm++;
-    else cold++;
-  }
+function newAcc(): PeriodAcc {
   return {
-    hot: Math.round((hot / total) * 100),
-    warm: Math.round((warm / total) * 100),
-    cold: Math.round((cold / total) * 100),
+    totalScoreSum: 0,
+    totalScoreCount: 0,
+    blocks: new Map(),
+    criteria: new Map(),
+    callCount: 0,
   };
 }
 
-/** Calculate block percentage score, handling both schema formats */
-function blockPct(block: EvalBlock): number | null {
-  const score = getBlockScore(block);
-  const max = getBlockMaxScore(block);
-  if (max <= 0) return null;
-  return Math.round((score / max) * 100);
+function processBlocks(
+  blocks: EvalBlock[],
+  acc: PeriodAcc,
+  totalScore: number | null,
+) {
+  if (totalScore !== null && totalScore !== undefined) {
+    acc.totalScoreSum += totalScore;
+    acc.totalScoreCount++;
+  }
+  acc.callCount++;
+
+  for (const block of blocks) {
+    if (!block.name || EXCLUDED_BLOCKS.has(block.name)) continue;
+    const maxBlock = getBlockMaxScore(block);
+    if (maxBlock <= 0) continue;
+
+    const blockPct = Math.round((getBlockScore(block) / maxBlock) * 100);
+    const be = acc.blocks.get(block.name);
+    if (be) { be.scoreSum += blockPct; be.count++; }
+    else acc.blocks.set(block.name, { scoreSum: blockPct, count: 1 });
+
+    const criteria: EvalCriterion[] = block.criteria ?? [];
+    for (const c of criteria) {
+      if (!c.name || c.max_score <= 0) continue;
+      const pct = Math.round((c.score / c.max_score) * 100);
+      const key = `${block.name}::${c.name}`;
+      const ce = acc.criteria.get(key);
+      if (ce) { ce.scoreSum += pct; ce.count++; }
+      else acc.criteria.set(key, { scoreSum: pct, count: 1 });
+    }
+  }
 }
 
-// ─── Core aggregation ────────────────────────────────────────────────────────
+// ─── OKK data fetcher ───────────────────────────────────────
 
-async function buildAnalytics(
+async function fetchOkkData(
   department: "b2g" | "b2b",
-  monthCount: number,
+  line: string,
+  from: Date,
+  to: Date,
+  groupBy: string,
+  managerId: string | null,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
+  const promptType = getOkkPromptType(department, line);
 
-  // Date boundary: start of the earliest month in the range
-  const now = new Date();
-  const fromDate = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (monthCount - 1), 1),
-  );
-
-  // Pull all relevant calls joined with evaluations.
-  // kommo_custom_fields is not mapped in the Drizzle schema, so we read it
-  // via a raw SQL expression — returns null gracefully if the column is absent.
-  const rows = await db
-    .select({
-      callCreatedAt: okkCalls.callCreatedAt,
-      totalScore: okkEvaluations.totalScore,
-      evaluationJson: okkEvaluations.evaluationJson,
-      // Raw JSONB extraction for the lead category custom field
-      leadCategory: sql<string | null>`("calls".kommo_custom_fields->>'field_866934')`,
-    })
-    .from(okkCalls)
-    .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
-    .where(
-      sql`${okkCalls.callCreatedAt} >= ${fromDate}
-        AND ${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
-    )
-    .orderBy(okkCalls.callCreatedAt);
-
-  // ── Initialise per-month accumulators ─────────────────────────────────────
-  const monthRange = buildMonthRange(monthCount);
-  const accumulators = new Map<string, MonthAccumulator>();
-  for (const m of monthRange) {
-    accumulators.set(m, {
-      totalScoreSum: 0,
-      totalScoreCount: 0,
-      blocks: new Map(),
-      urgencyValues: [],
-      solvencyValues: [],
-      needValues: [],
-      categories: new Map(),
-      callCount: 0,
-    });
-  }
-
-  // ── Aggregate rows into month buckets ─────────────────────────────────────
-  for (const row of rows) {
-    if (!row.callCreatedAt) continue;
-    const month = toYearMonth(row.callCreatedAt);
-    const acc = accumulators.get(month);
-    if (!acc) continue; // outside our month window — skip
-
-    acc.callCount++;
-
-    // Overall score
-    if (row.totalScore !== null && row.totalScore !== undefined) {
-      acc.totalScoreSum += row.totalScore;
-      acc.totalScoreCount++;
-    }
-
-    // Block scores
-    const blocks = row.evaluationJson?.blocks ?? [];
-    for (const block of blocks) {
-      if (!block.name) continue;
-      const pct = blockPct(block);
-      if (pct === null) continue;
-      const existing = acc.blocks.get(block.name);
-      if (existing) {
-        existing.scoreSum += pct;
-        existing.count++;
-      } else {
-        acc.blocks.set(block.name, { scoreSum: pct, count: 1 });
-      }
-    }
-
-    // Client scoring
-    const cs = row.evaluationJson?.client_scoring;
-    if (cs) {
-      if (typeof cs.urgency === "number") acc.urgencyValues.push(cs.urgency);
-      if (typeof cs.solvency === "number") acc.solvencyValues.push(cs.solvency);
-      if (typeof cs.need === "number") acc.needValues.push(cs.need);
-    }
-
-    // Lead category
-    const cat = row.leadCategory;
-    if (cat) {
-      acc.categories.set(cat, (acc.categories.get(cat) ?? 0) + 1);
-    }
-  }
-
-  // ── Collect all block names seen across all months (stable order) ─────────
-  const allBlockNames = new Set<string>();
-  for (const acc of accumulators.values()) {
-    for (const name of acc.blocks.keys()) {
-      allBlockNames.add(name);
-    }
-  }
-
-  // ── Build blockScores output ──────────────────────────────────────────────
-  const blockScores: BlockScoreSeries[] = [];
-  for (const blockName of allBlockNames) {
-    const scores: Record<string, number> = {};
-    for (const month of monthRange) {
-      const acc = accumulators.get(month);
-      const entry = acc?.blocks.get(blockName);
-      if (entry && entry.count > 0) {
-        scores[month] = Math.round(entry.scoreSum / entry.count);
-      }
-    }
-    blockScores.push({ blockName, scores });
-  }
-
-  // ── Build clientScoring output ────────────────────────────────────────────
-  const scoringTypes: Array<"urgency" | "solvency" | "need"> = [
-    "urgency",
-    "solvency",
-    "need",
+  const conditions = [
+    sql`${okkCalls.callCreatedAt} >= ${from}`,
+    sql`${okkCalls.callCreatedAt} <= ${to}`,
+    sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
+    isNotNull(okkEvaluations.totalScore),
   ];
-  const clientScoring: ClientScoringSeries[] = scoringTypes.map((type) => {
-    const distribution: Record<string, ClientScoringBucket> = {};
-    for (const month of monthRange) {
-      const acc = accumulators.get(month);
-      if (!acc) continue;
-      const values =
-        type === "urgency"
-          ? acc.urgencyValues
-          : type === "solvency"
-            ? acc.solvencyValues
-            : acc.needValues;
-      if (values.length > 0) {
-        distribution[month] = toDistribution(values);
-      }
-    }
-    return { type, distribution };
-  });
-
-  // ── Build categories output (cat → month → count) ─────────────────────────
-  const categories: Record<string, Record<string, number>> = {};
-  for (const month of monthRange) {
-    const acc = accumulators.get(month);
-    if (!acc || acc.categories.size === 0) continue;
-    for (const [cat, count] of acc.categories) {
-      if (!categories[cat]) categories[cat] = {};
-      categories[cat][month] = count;
-    }
+  if (promptType) {
+    conditions.push(sql`${okkEvaluations.promptType} = ${promptType}`);
+  }
+  if (managerId) {
+    conditions.push(eq(okkEvaluations.managerId, managerId));
   }
 
-  // ── Build overallScores and callVolume ────────────────────────────────────
-  const overallScores: Record<string, number> = {};
-  const callVolume: Record<string, number> = {};
-  for (const month of monthRange) {
-    const acc = accumulators.get(month);
+  // Filter managers by line for B2G
+  const managerConditions = [
+    eq(okkManagers.isActive, true),
+    sql`${okkManagers.role} IN ('manager', 'rop')`,
+  ];
+  if (department === "b2g" && line) {
+    managerConditions.push(eq(okkManagers.line, line));
+  }
+
+  const [rows, managers] = await Promise.all([
+    db
+      .select({
+        callCreatedAt: okkCalls.callCreatedAt,
+        totalScore: okkEvaluations.totalScore,
+        evaluationJson: okkEvaluations.evaluationJson,
+        managerId: okkEvaluations.managerId,
+      })
+      .from(okkCalls)
+      .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
+      .where(sql.join(conditions, sql` AND `))
+      .orderBy(okkCalls.callCreatedAt),
+    db
+      .select({ id: okkManagers.id, name: okkManagers.name })
+      .from(okkManagers)
+      .where(and(...managerConditions)),
+  ]);
+
+  const periods = buildPeriodRange(from, to, groupBy);
+  const accMap = new Map<string, PeriodAcc>();
+  for (const p of periods) accMap.set(p, newAcc());
+
+  // Per-manager accumulators (aggregate across all periods)
+  const managerAccMap = new Map<string, PeriodAcc>();
+
+  let processedCount = 0;
+  for (const row of rows) {
+    if (!row.callCreatedAt || !row.evaluationJson?.blocks) continue;
+    const p = toPeriodKey(row.callCreatedAt, groupBy);
+    const acc = accMap.get(p);
     if (!acc) continue;
-    if (acc.totalScoreCount > 0) {
-      overallScores[month] = Math.round(
-        acc.totalScoreSum / acc.totalScoreCount,
-      );
+    processedCount++;
+    processBlocks(row.evaluationJson.blocks, acc, row.totalScore);
+
+    // Per-manager accumulation
+    if (row.managerId) {
+      if (!managerAccMap.has(row.managerId)) managerAccMap.set(row.managerId, newAcc());
+      processBlocks(row.evaluationJson.blocks, managerAccMap.get(row.managerId)!, row.totalScore);
     }
-    callVolume[month] = acc.callCount;
   }
 
-  return {
-    department,
-    months: monthRange,
-    blockScores,
-    clientScoring,
-    categories,
-    overallScores,
-    callVolume,
-  };
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount);
 }
 
-// ─── Route handler ────────────────────────────────────────────────────────────
+// ─── Roleplay data fetcher ──────────────────────────────────
+
+async function fetchRoleplayData(
+  department: "b2g" | "b2b",
+  line: string,
+  from: Date,
+  to: Date,
+  groupBy: string,
+  managerId: string | null,
+): Promise<AnalyticsResponse> {
+  const db = getDbForDepartment(department);
+  const callsTable = department === "b2b" ? r1Calls : d1Calls;
+  const usersTable = department === "b2b" ? r1Users : d1Users;
+
+  const conditions = [
+    gte(callsTable.startedAt, from),
+    lte(callsTable.startedAt, to),
+    isNotNull(callsTable.score),
+    isNotNull(callsTable.evaluationJson),
+  ];
+  if (managerId) {
+    conditions.push(eq(callsTable.userId, managerId));
+  }
+
+  // Filter managers by line for B2G
+  const managerConditions = [
+    eq(usersTable.isActive, true),
+    sql`${usersTable.role} IN ('manager', 'rop')`,
+  ];
+  if (department === "b2g" && line) {
+    managerConditions.push(eq(usersTable.line, line));
+  }
+
+  const [rows, managers] = await Promise.all([
+    db
+      .select({
+        startedAt: callsTable.startedAt,
+        score: callsTable.score,
+        evaluationJson: callsTable.evaluationJson,
+        userId: callsTable.userId,
+      })
+      .from(callsTable)
+      .where(and(...conditions))
+      .orderBy(callsTable.startedAt),
+    db
+      .select({ id: usersTable.id, name: usersTable.name })
+      .from(usersTable)
+      .where(and(...managerConditions)),
+  ]);
+
+  const periods = buildPeriodRange(from, to, groupBy);
+  const accMap = new Map<string, PeriodAcc>();
+  for (const p of periods) accMap.set(p, newAcc());
+
+  const managerAccMap = new Map<string, PeriodAcc>();
+
+  let processedCount = 0;
+  for (const row of rows) {
+    if (!row.startedAt || !row.evaluationJson?.blocks) continue;
+    const p = toPeriodKey(row.startedAt, groupBy);
+    const acc = accMap.get(p);
+    if (!acc) continue;
+    processedCount++;
+    processBlocks(row.evaluationJson.blocks, acc, row.score ?? null);
+
+    if (row.userId) {
+      if (!managerAccMap.has(row.userId)) managerAccMap.set(row.userId, newAcc());
+      processBlocks(row.evaluationJson.blocks, managerAccMap.get(row.userId)!, row.score ?? null);
+    }
+  }
+
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount);
+}
+
+// ─── Build response from accumulators ───────────────────────
+
+function buildResponse(
+  periods: string[],
+  accMap: Map<string, PeriodAcc>,
+  managers: Array<{ id: string; name: string }>,
+  managerAccMap: Map<string, PeriodAcc>,
+  source: string,
+  department: string,
+  totalCalls: number,
+): AnalyticsResponse {
+  const blockOrder: string[] = [];
+  const blockCriteriaOrder = new Map<string, string[]>();
+
+  // Collect block/criteria order from both period and manager accumulators
+  const allAccs = [...accMap.values(), ...managerAccMap.values()];
+  for (const acc of allAccs) {
+    for (const bName of acc.blocks.keys()) {
+      if (!blockOrder.includes(bName)) blockOrder.push(bName);
+    }
+    for (const key of acc.criteria.keys()) {
+      const [bName, cName] = key.split("::");
+      if (!blockCriteriaOrder.has(bName)) blockCriteriaOrder.set(bName, []);
+      const arr = blockCriteriaOrder.get(bName)!;
+      if (!arr.includes(cName)) arr.push(cName);
+    }
+  }
+
+  // Period-based blocks (criteria × time)
+  const blocks: BlockData[] = blockOrder.map((blockName) => {
+    const scores: Record<string, number> = {};
+    for (const p of periods) {
+      const acc = accMap.get(p);
+      const be = acc?.blocks.get(blockName);
+      if (be && be.count > 0) scores[p] = Math.round(be.scoreSum / be.count);
+    }
+
+    const criteriaNames = blockCriteriaOrder.get(blockName) ?? [];
+    const criteria: CriterionScore[] = criteriaNames.map((cName) => {
+      const key = `${blockName}::${cName}`;
+      const cScores: Record<string, number> = {};
+      for (const p of periods) {
+        const acc = accMap.get(p);
+        const ce = acc?.criteria.get(key);
+        if (ce && ce.count > 0) cScores[p] = Math.round(ce.scoreSum / ce.count);
+      }
+      return { name: cName, scores: cScores };
+    });
+
+    return { name: blockName, scores, criteria };
+  });
+
+  const overallScores: Record<string, number> = {};
+  for (const p of periods) {
+    const acc = accMap.get(p);
+    if (acc && acc.totalScoreCount > 0) {
+      overallScores[p] = Math.round(acc.totalScoreSum / acc.totalScoreCount);
+    }
+  }
+
+  // Per-manager breakdown (aggregate across all periods)
+  const managerBreakdown: ManagerBreakdown[] = managers
+    .map((mgr) => {
+      const acc = managerAccMap.get(mgr.id);
+      if (!acc || acc.callCount === 0) return null;
+
+      const mgrBlocks: ManagerBlockScore[] = blockOrder.map((blockName) => {
+        const be = acc.blocks.get(blockName);
+        const blockScore = be && be.count > 0 ? Math.round(be.scoreSum / be.count) : 0;
+
+        const criteriaNames = blockCriteriaOrder.get(blockName) ?? [];
+        const mgrCriteria: ManagerCriterionScore[] = criteriaNames.map((cName) => {
+          const ce = acc.criteria.get(`${blockName}::${cName}`);
+          return { name: cName, score: ce && ce.count > 0 ? Math.round(ce.scoreSum / ce.count) : 0 };
+        });
+
+        return { name: blockName, score: blockScore, criteria: mgrCriteria };
+      });
+
+      const overallScore = acc.totalScoreCount > 0 ? Math.round(acc.totalScoreSum / acc.totalScoreCount) : 0;
+      return { id: mgr.id, name: mgr.name, overallScore, callCount: acc.callCount, blocks: mgrBlocks };
+    })
+    .filter((m): m is ManagerBreakdown => m !== null)
+    .sort((a, b) => b.overallScore - a.overallScore);
+
+  return { periods, blocks, overallScores, managers, managerBreakdown, totalCalls, source, department };
+}
+
+// ─── Route handler ──────────────────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const sp = request.nextUrl.searchParams;
+    const department = (sp.get("department") === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
+    const source = sp.get("source") === "roleplay" ? "roleplay" : "okk";
+    const line = sp.get("line") ?? "1";
+    const groupBy = sp.get("groupBy") ?? "day";
+    const managerId = sp.get("managerId") || null;
 
-    const deptParam = sp.get("department") ?? "b2g";
-    const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
+    const now = new Date();
+    const defaultFrom = new Date(now);
+    defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 30);
 
-    const monthsParam = sp.get("months");
-    const rawMonths = monthsParam !== null ? Number.parseInt(monthsParam, 10) : 6;
-    const monthCount = Number.isNaN(rawMonths) || rawMonths < 1 ? 6 : Math.min(rawMonths, 24);
+    const fromStr = sp.get("from");
+    const toStr = sp.get("to");
+    const from = fromStr ? new Date(`${fromStr}T00:00:00Z`) : defaultFrom;
+    const to = toStr ? new Date(`${toStr}T23:59:59Z`) : now;
 
-    const cacheKey = `analytics:${department}:${monthCount}`;
+    if (from > to) {
+      return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
+    }
 
-    const data = await cached(cacheKey, ANALYTICS_CACHE_TTL, () =>
-      buildAnalytics(department, monthCount),
+    const effectiveLine = (department === "b2b" || source === "roleplay") ? "all" : line;
+    const cacheKey = `analytics:${department}:${source}:${effectiveLine}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
+
+    const data = await cached(cacheKey, CACHE_TTL, () =>
+      source === "roleplay"
+        ? fetchRoleplayData(department, line, from, to, groupBy, managerId)
+        : fetchOkkData(department, line, from, to, groupBy, managerId),
     );
 
     return NextResponse.json({ success: true, data });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Internal server error";
-    return NextResponse.json(
-      { success: false, error: message },
-      { status: 500 },
-    );
+    const message = error instanceof Error ? error.message : "Internal server error";
+    console.error("[Analytics API]", error);
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
