@@ -904,15 +904,15 @@ export default function Dashboard() {
                   })()}
                 </div>
 
-                {/* Manager Scores: single column with scroll */}
-                <div className="col-span-2 lg:col-span-4 glass-panel rounded-2xl p-3 border border-white/5 flex flex-col gap-2">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">Оценки менеджеров</span>
+                {/* Manager Scores: single column, fills height, scrolls if needed */}
+                <div className="col-span-2 lg:col-span-4 glass-panel rounded-2xl p-3 border border-white/5 flex flex-col gap-2 min-h-0">
+                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold shrink-0">Оценки менеджеров</span>
                   {callsDashStats.perManager.length === 0 ? (
                     <span className="text-sm text-slate-500">Нет данных за период</span>
                   ) : (
-                    <div className="flex flex-col gap-0 overflow-y-auto max-h-[200px] pr-1 custom-scrollbar">
+                    <div className="flex flex-col gap-0 overflow-y-auto flex-1 min-h-0 pr-1 custom-scrollbar">
                       {callsDashStats.perManager.map((m) => (
-                        <div key={m.name} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
+                        <div key={m.name} className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0 shrink-0">
                           <span className="text-sm text-slate-200 truncate mr-3">{m.name}</span>
                           <div className="flex items-center gap-3 shrink-0">
                             <span className="text-sm font-bold text-white">{m.count} <span className="text-[10px] font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
