@@ -7,6 +7,7 @@ import {
   A2_STATUSES,
   B1_STATUSES,
   B2_PLUS_STATUSES,
+  B2B_QUALIFIED_STATUSES,
 } from "./pipeline-config";
 
 export interface UserCallMetrics {
@@ -158,8 +159,12 @@ export function aggregateLeadFunnelMetrics(
   snapshotLeads: KommoLead[],
   flowLeads: KommoLead[],
   periodStart: number,
-  periodEnd: number
+  periodEnd: number,
+  department = "b2g",
 ): LeadFunnelCounts {
+  const isB2B = department === "b2b";
+  const qualifiedSet = isB2B ? B2B_QUALIFIED_STATUSES : QUALIFIED_STATUSES;
+
   const counts: LeadFunnelCounts = {
     activeDeals: 0,
     totalLeads: 0,
@@ -191,13 +196,14 @@ export function aggregateLeadFunnelMetrics(
     }
 
     // Qualification stages — only for active pipeline leads (exclude closed WON=142 / LOST=143).
-    // WON/LOST leads are in snapshotLeads for result metrics (gutscheins, reject)
-    // but should NOT inflate qualification counts which represent current pipeline state.
     if (lead.status_id !== 142 && lead.status_id !== 143) {
-      if (QUALIFIED_STATUSES.has(lead.status_id)) counts.qualLeads++;
-      if (A2_STATUSES.has(lead.status_id)) counts.a2++;
-      if (B1_STATUSES.has(lead.status_id)) counts.b1++;
-      if (B2_PLUS_STATUSES.has(lead.status_id)) counts.b2plus++;
+      if (qualifiedSet.has(lead.status_id)) counts.qualLeads++;
+      // A2/B1/B2+ are B2G-only concepts
+      if (!isB2B) {
+        if (A2_STATUSES.has(lead.status_id)) counts.a2++;
+        if (B1_STATUSES.has(lead.status_id)) counts.b1++;
+        if (B2_PLUS_STATUSES.has(lead.status_id)) counts.b2plus++;
+      }
     }
   }
 
@@ -207,36 +213,34 @@ export function aggregateLeadFunnelMetrics(
 
     const isNew = lead.created_at >= periodStart && lead.created_at <= periodEnd;
 
-    // New lead = created within period
     if (isNew) {
       counts.totalLeads++;
-      // New qualified lead = created in period AND currently in qualified status
-      if (QUALIFIED_STATUSES.has(lead.status_id)) {
+      if (qualifiedSet.has(lead.status_id)) {
         counts.qualLeadsNew++;
       }
     }
 
-    // All qualified leads in flow set (for conversion calculations like qual→task)
-    if (QUALIFIED_STATUSES.has(lead.status_id)) {
+    if (qualifiedSet.has(lead.status_id)) {
       counts.qualLeadsFlow++;
     }
 
-    // Count by FUNNEL_STATUS_MAP — "total" counts (leads in these statuses during period)
-    for (const [metricKey, config] of Object.entries(FUNNEL_STATUS_MAP)) {
-      if (config.pipelineIds && !config.pipelineIds.includes(lead.pipeline_id)) continue;
-      if (config.statusIds.has(lead.status_id)) {
-        counts.byMetric[metricKey] = (counts.byMetric[metricKey] ?? 0) + 1;
-      }
-    }
-
-    // Count "new" variants — same status match but only leads created in period
-    if (isNew) {
-      for (const [newKey, totalKey] of Object.entries(NEW_VARIANTS_MAP)) {
-        const config = FUNNEL_STATUS_MAP[totalKey];
-        if (!config) continue;
+    // Count by FUNNEL_STATUS_MAP — "total" counts (B2G-only pipeline mappings)
+    if (!isB2B) {
+      for (const [metricKey, config] of Object.entries(FUNNEL_STATUS_MAP)) {
         if (config.pipelineIds && !config.pipelineIds.includes(lead.pipeline_id)) continue;
         if (config.statusIds.has(lead.status_id)) {
-          counts.byMetricNew[newKey] = (counts.byMetricNew[newKey] ?? 0) + 1;
+          counts.byMetric[metricKey] = (counts.byMetric[metricKey] ?? 0) + 1;
+        }
+      }
+
+      if (isNew) {
+        for (const [newKey, totalKey] of Object.entries(NEW_VARIANTS_MAP)) {
+          const config = FUNNEL_STATUS_MAP[totalKey];
+          if (!config) continue;
+          if (config.pipelineIds && !config.pipelineIds.includes(lead.pipeline_id)) continue;
+          if (config.statusIds.has(lead.status_id)) {
+            counts.byMetricNew[newKey] = (counts.byMetricNew[newKey] ?? 0) + 1;
+          }
         }
       }
     }

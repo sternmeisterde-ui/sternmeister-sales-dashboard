@@ -12,7 +12,7 @@ import {
 } from "@/lib/kommo/metrics";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { dailySections, type SectionDef } from "@/lib/daily/metrics-config";
-import { B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
 import type { KommoLead, KommoTask, KommoCallNote } from "@/lib/kommo/types";
 
@@ -217,6 +217,12 @@ export async function buildDailyResponse(department: string, period: string, dat
   const { from, to, periodType, periodDate } = getDateRange(period, dateStr);
   const { leadsPages, closedPages, callPages } = getMaxPages(period);
 
+  // Department-aware pipeline/status IDs
+  const allPipelineIds = getPipelineIds(department);
+  const allActiveStatusIds = getActiveStatusIds(department);
+  const firstLinePipelineId = department === "b2b" ? allPipelineIds[0] : B2G_PIPELINES.FIRST_LINE;
+  const beraterPipelineId = department === "b2b" ? allPipelineIds[0] : B2G_PIPELINES.BERATER;
+
   const base = new Date(`${dateStr}T00:00:00Z`);
   const monthPeriodDate = `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, "0")}`;
   const daysInMonth = new Date(base.getUTCFullYear(), base.getUTCMonth() + 1, 0).getUTCDate();
@@ -285,17 +291,17 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod, termAACount, closedAfterDate] = await Promise.all([
     // Snapshot leads: always fetch (cached across all days in range, one Kommo call)
-    getLeads(B2G_ALL_PIPELINE_IDS, ALL_ACTIVE_STATUS_IDS, leadsPages).catch(trackError("snapshot leads")),
+    getLeads(allPipelineIds, allActiveStatusIds, leadsPages).catch(trackError("snapshot leads")),
     isHistorical ? Promise.resolve([] as KommoTask[]) : getTasks(false).catch(trackError("tasks")),
-    getLeads(B2G_ALL_PIPELINE_IDS, [142], closedPages, closedDateFilter).catch(trackError("won leads")),
-    getLeads(B2G_ALL_PIPELINE_IDS, [143], closedPages, closedDateFilter).catch(trackError("lost leads")),
+    getLeads(allPipelineIds, [142], closedPages, closedDateFilter).catch(trackError("won leads")),
+    getLeads(allPipelineIds, [143], closedPages, closedDateFilter).catch(trackError("lost leads")),
     getCallNotes(from, to, kommoUserIds, callPages).catch(trackError("call notes")),
-    getLeads([10935879], [142], closedPages, termsDateFilter).catch(trackError("terms won")),
-    getLeads([10935879], undefined, leadsPages, createdDateFilter).catch(trackError("new leads")),
-    getStatusChangeCount(from, to, 12154099, [102183943, 102183947]).catch(trackError("term AA events")),
+    getLeads([firstLinePipelineId], [142], closedPages, termsDateFilter).catch(trackError("terms won")),
+    getLeads([firstLinePipelineId], undefined, leadsPages, createdDateFilter).catch(trackError("new leads")),
+    getStatusChangeCount(from, to, beraterPipelineId, [102183943, 102183947]).catch(trackError("term AA events")),
     // Historical: fetch leads closed AFTER this date (they were active on this date)
     closedAfterDateFilter
-      ? getLeads(B2G_ALL_PIPELINE_IDS, [142, 143], 20, closedAfterDateFilter).catch(trackError("closed after date"))
+      ? getLeads(allPipelineIds, [142, 143], 20, closedAfterDateFilter).catch(trackError("closed after date"))
       : Promise.resolve([] as KommoLead[]),
   ]) as [
     KommoLead[] | undefined, KommoTask[] | undefined, KommoLead[] | undefined,
@@ -362,7 +368,7 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const callMetricsMap = aggregateCallMetrics(safeCallNotes);
   const leadMetricsMap = aggregateLeadMetrics(snapshotLeads, from, to);
-  const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to);
+  const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
   const planLookup = new Map<string, string>();
@@ -429,7 +435,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       }
 
       if (section.key === "funnel") {
-        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals);
+        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
       } else {
         // For per-manager sections: overdueTasks is snapshot-only (no date filter)
         if (metric.key === "overdueTasks" && !hasSnapshotData) {
@@ -468,11 +474,10 @@ export async function buildDailyResponse(department: string, period: string, dat
     if (section.key === "funnel") {
       const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2" || m.line === "3");
       if (funnelManagers.length > 0) {
-        const excludeQual = new Set([142, 143, 93485479, 95514987, 83873487, 83873491, 90367079, 90367083]);
         const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
         const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
-        const beraterPipeline = 12154099;
-        const firstLinePipeline = 10935879;
+        const beraterPipeline = beraterPipelineId;
+        const firstLinePipeline = firstLinePipelineId;
 
         managerData = funnelManagers.map((mgr) => {
           const uid = mgr.kommoUserId;
@@ -534,10 +539,10 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrTermsWon.length);
                   break;
                 case "termsNew": {
-                  // "New" = created in current month
-                  const baseD = new Date(from * 1000);
-                  const mStart = new Date(Date.UTC(baseD.getUTCFullYear(), baseD.getUTCMonth(), 1)).getTime() / 1000;
-                  const mEnd = new Date(Date.UTC(baseD.getUTCFullYear(), baseD.getUTCMonth() + 1, 0, 23, 59, 59)).getTime() / 1000;
+                  // "New" = created in current month (use dateStr to avoid UTC/TZ drift)
+                  const [tY, tM] = dateStr.split("-").map(Number);
+                  const mStart = new Date(Date.UTC(tY, tM - 1, 1)).getTime() / 1000;
+                  const mEnd = new Date(Date.UTC(tY, tM, 0, 23, 59, 59)).getTime() / 1000;
                   fact = String(mgrTermsWon.filter((l) => l.created_at >= mStart && l.created_at <= mEnd).length);
                   break;
                 }
@@ -545,9 +550,9 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id)).length);
                   break;
                 case "awaitTermNew": {
-                  const bD = new Date(from * 1000);
-                  const ms = new Date(Date.UTC(bD.getUTCFullYear(), bD.getUTCMonth(), 1)).getTime() / 1000;
-                  const me = new Date(Date.UTC(bD.getUTCFullYear(), bD.getUTCMonth() + 1, 0, 23, 59, 59)).getTime() / 1000;
+                  const [aY, aM] = dateStr.split("-").map(Number);
+                  const ms = new Date(Date.UTC(aY, aM - 1, 1)).getTime() / 1000;
+                  const me = new Date(Date.UTC(aY, aM, 0, 23, 59, 59)).getTime() / 1000;
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id) && l.created_at >= ms && l.created_at <= me).length);
                   break;
                 }
@@ -662,7 +667,14 @@ function getFunnelFact(
   termAATransferredCount?: number,
   hasSnapshotData = true,
   reconstructedActiveDeals?: number | null,
+  firstLinePipeline?: number,
+  beraterPipeline?: number,
+  dateStr?: string,
 ): string | null {
+  const flPipeline = firstLinePipeline ?? 10935879;
+  const brPipeline = beraterPipeline ?? 12154099;
+  // Parse month from dateStr for month-boundary calculations (avoids UTC/TZ drift)
+  const [dsYear, dsMonth] = (dateStr ?? "2026-01-01").split("-").map(Number);
   // For historical dates without stored snapshots, snapshot-only metrics are unavailable
   if (!hasSnapshotData && SNAPSHOT_ONLY_METRICS.has(key)) {
     return null;
@@ -680,10 +692,9 @@ function getFunnelFact(
     case "termsTotal":
       return String(termsWonLeads?.length ?? 0);
     case "termsNew": {
-      // "New" = leads created in current month (not recycled from old months)
-      const baseDate = new Date((from ?? 0) * 1000);
-      const monthStart = new Date(Date.UTC(baseDate.getUTCFullYear(), baseDate.getUTCMonth(), 1)).getTime() / 1000;
-      const monthEnd = new Date(Date.UTC(baseDate.getUTCFullYear(), baseDate.getUTCMonth() + 1, 0, 23, 59, 59)).getTime() / 1000;
+      // "New" = leads created in current month (use dateStr to avoid UTC/TZ drift)
+      const monthStart = new Date(Date.UTC(dsYear, dsMonth - 1, 1)).getTime() / 1000;
+      const monthEnd = new Date(Date.UTC(dsYear, dsMonth, 0, 23, 59, 59)).getTime() / 1000;
       return String((termsWonLeads || []).filter((l) => l.created_at >= monthStart && l.created_at <= monthEnd).length);
     }
     case "managersOnLine":
@@ -715,7 +726,7 @@ function getFunnelFact(
       return String(fc.b2plus);
     case "avgPortfolio": {
       const excludeStatuses = new Set([142, 143, 93485479, 95514987]);
-      const pipelineId = 10935879;
+      const pipelineId = flPipeline;
       const portfolioLeads = (snapshotLeads || []).filter(
         (l) => l.pipeline_id === pipelineId && !l.is_deleted && !excludeStatuses.has(l.status_id)
       );
@@ -724,7 +735,7 @@ function getFunnelFact(
     }
     case "awaitTermTotal": {
       const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
-      const beraterPipeline = 12154099;
+      const beraterPipeline = brPipeline;
       const awaiting = (snapshotLeads || []).filter(
         (l) => l.pipeline_id === beraterPipeline && !l.is_deleted && !l.closed_at && awaitStatuses.has(l.status_id)
       );
@@ -733,10 +744,9 @@ function getFunnelFact(
     case "awaitTermNew": {
       // Awaiting term + created in current month
       const awaitStatusesNew = new Set([93860331, 102183931, 102183935, 102183939]);
-      const beraterPipelineNew = 12154099;
-      const baseNew = new Date((from ?? 0) * 1000);
-      const mStartNew = new Date(Date.UTC(baseNew.getUTCFullYear(), baseNew.getUTCMonth(), 1)).getTime() / 1000;
-      const mEndNew = new Date(Date.UTC(baseNew.getUTCFullYear(), baseNew.getUTCMonth() + 1, 0, 23, 59, 59)).getTime() / 1000;
+      const beraterPipelineNew = brPipeline;
+      const mStartNew = new Date(Date.UTC(dsYear, dsMonth - 1, 1)).getTime() / 1000;
+      const mEndNew = new Date(Date.UTC(dsYear, dsMonth, 0, 23, 59, 59)).getTime() / 1000;
       const awaitingNew = (snapshotLeads || []).filter(
         (l) =>
           l.pipeline_id === beraterPipelineNew &&
@@ -763,13 +773,13 @@ function getFunnelFact(
     case "termDCCancelled": {
       // Термин ДЦ отменен/перенесен: status 93860875 in berater pipeline 12154099
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860875
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860875
       ).length);
     }
     case "termDCDone": {
       // Термин ДЦ состоялся: status 93886075 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93886075
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93886075
       ).length);
     }
     case "termAATransferred": {
@@ -779,32 +789,32 @@ function getFunnelFact(
     case "termAACancelled": {
       // Термин АА отменен/перенесен: status 93860883 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860883
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860883
       ).length);
     }
     case "termAACount": {
       // Термин АА (на этапе): statuses 102183943 + 102183947 in berater pipeline
       const aaStatuses = new Set([102183943, 102183947]);
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
       ).length);
     }
     case "beraterReview": {
       // На рассмотрении бератера: status 93860887
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860887
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860887
       ).length);
     }
     case "delayedStart": {
       // Отложенный старт: status 95515895 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 95515895
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 95515895
       ).length);
     }
     case "appeal": {
       // Апелляция: status 93860891
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === 12154099 && !l.is_deleted && !l.closed_at && l.status_id === 93860891
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860891
       ).length);
     }
     case "convQualTask":
