@@ -106,6 +106,7 @@ function getOkkPromptType(department: string, line: string): string | null {
   switch (line) {
     case "1": return "d2_qualifier";
     case "2": return "d2_berater";
+    case "2b": return "d2_berater2";
     case "3": return "d2_dovedenie";
     default: return null;
   }
@@ -190,13 +191,14 @@ async function fetchOkkData(
     conditions.push(eq(okkEvaluations.managerId, managerId));
   }
 
-  // Filter managers by line for B2G
+  // Filter managers by line for B2G (berater2 "2b" → same line "2")
   const managerConditions = [
     eq(okkManagers.isActive, true),
     sql`${okkManagers.role} IN ('manager', 'rop')`,
   ];
   if (department === "b2g" && line) {
-    managerConditions.push(eq(okkManagers.line, line));
+    const dbLine = line === "2b" ? "2" : line;
+    managerConditions.push(eq(okkManagers.line, dbLine));
   }
 
   const [rows, managers] = await Promise.all([
@@ -267,13 +269,14 @@ async function fetchRoleplayData(
     conditions.push(eq(callsTable.userId, managerId));
   }
 
-  // Filter managers by line for B2G
+  // Filter managers by line for B2G (berater2 "2b" → same line "2")
   const managerConditions = [
     eq(usersTable.isActive, true),
     sql`${usersTable.role} IN ('manager', 'rop')`,
   ];
   if (department === "b2g" && line) {
-    managerConditions.push(eq(usersTable.line, line));
+    const dbLine = line === "2b" ? "2" : line;
+    managerConditions.push(eq(usersTable.line, dbLine));
   }
 
   const [rows, managers] = await Promise.all([
@@ -345,10 +348,20 @@ function buildResponse(
     }
   }
 
-  // Period-based blocks (criteria × time)
+  // Trim empty periods from the start (show data from first period with calls)
+  let trimmedPeriods = periods;
+  const firstNonEmpty = periods.findIndex((p) => {
+    const acc = accMap.get(p);
+    return acc && acc.callCount > 0;
+  });
+  if (firstNonEmpty > 0) {
+    trimmedPeriods = periods.slice(firstNonEmpty);
+  }
+
+  // Period-based blocks (criteria × time) — use trimmed periods
   const blocks: BlockData[] = blockOrder.map((blockName) => {
     const scores: Record<string, number> = {};
-    for (const p of periods) {
+    for (const p of trimmedPeriods) {
       const acc = accMap.get(p);
       const be = acc?.blocks.get(blockName);
       if (be && be.count > 0) scores[p] = Math.round(be.scoreSum / be.count);
@@ -358,7 +371,7 @@ function buildResponse(
     const criteria: CriterionScore[] = criteriaNames.map((cName) => {
       const key = `${blockName}::${cName}`;
       const cScores: Record<string, number> = {};
-      for (const p of periods) {
+      for (const p of trimmedPeriods) {
         const acc = accMap.get(p);
         const ce = acc?.criteria.get(key);
         if (ce && ce.count > 0) cScores[p] = Math.round(ce.scoreSum / ce.count);
@@ -370,7 +383,7 @@ function buildResponse(
   });
 
   const overallScores: Record<string, number> = {};
-  for (const p of periods) {
+  for (const p of trimmedPeriods) {
     const acc = accMap.get(p);
     if (acc && acc.totalScoreCount > 0) {
       overallScores[p] = Math.round(acc.totalScoreSum / acc.totalScoreCount);
@@ -402,7 +415,7 @@ function buildResponse(
     .filter((m): m is ManagerBreakdown => m !== null)
     .sort((a, b) => b.overallScore - a.overallScore);
 
-  return { periods, blocks, overallScores, managers, managerBreakdown, totalCalls, source, department };
+  return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, totalCalls, source, department };
 }
 
 // ─── Route handler ──────────────────────────────────────────
