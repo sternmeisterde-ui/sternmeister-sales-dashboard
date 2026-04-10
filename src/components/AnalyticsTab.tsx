@@ -90,8 +90,15 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     set((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
   };
 
-  useEffect(() => { if (department === "b2b") setLine("1"); }, [department]);
-  useEffect(() => { if (source === "roleplay" && line === "2b") setLine("2"); }, [source]);
+  // Reset manager when context changes (different DB/line = different manager UUIDs)
+  useEffect(() => { if (department === "b2b") setLine("1"); setManagerId(""); }, [department]);
+  useEffect(() => { setManagerId(""); if (source === "roleplay" && line === "2b") setLine("2"); }, [source]);
+  // If selected manager is not in current list, clear selection
+  useEffect(() => {
+    if (managerId && data?.managers && !data.managers.some((m) => m.id === managerId)) {
+      setManagerId("");
+    }
+  }, [data?.managers, managerId]);
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     if (!data) setLoading(true);
