@@ -5,10 +5,6 @@ import {
   okkCalls,
   okkEvaluations,
   okkManagers,
-  type EvalBlock,
-  type EvalCriterion,
-  getBlockScore,
-  getBlockMaxScore,
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
 import { eq, sql, and, gte, lte, isNotNull } from "drizzle-orm";
@@ -133,36 +129,60 @@ function newAcc(): PeriodAcc {
 }
 
 function processBlocks(
-  blocks: EvalBlock[],
+  blocks: unknown[],
   acc: PeriodAcc,
   totalScore: number | null,
-) {
-  if (totalScore !== null && totalScore !== undefined) {
-    acc.totalScoreSum += totalScore;
-    acc.totalScoreCount++;
-  }
-  acc.callCount++;
+): boolean {
+  if (!blocks || blocks.length === 0) return false;
 
-  for (const block of blocks) {
-    if (!block.name || EXCLUDED_BLOCKS.has(block.name)) continue;
-    const maxBlock = getBlockMaxScore(block);
-    if (maxBlock <= 0) continue;
+  let hadData = false;
 
-    const blockPct = Math.round((getBlockScore(block) / maxBlock) * 100);
-    const be = acc.blocks.get(block.name);
+  for (const rawBlock of blocks) {
+    // Safely extract fields — handles both OKK EvalBlock and roleplay inline types
+    const block = rawBlock as Record<string, unknown>;
+    const name = typeof block.name === "string" ? block.name : "";
+    if (!name || EXCLUDED_BLOCKS.has(name)) continue;
+
+    const blockScore = typeof block.block_score === "number" ? block.block_score
+      : typeof block.score === "number" ? block.score : 0;
+    const maxBlockScore = typeof block.max_block_score === "number" ? block.max_block_score
+      : typeof block.max_score === "number" ? block.max_score : 0;
+
+    if (maxBlockScore <= 0) continue;
+
+    hadData = true;
+    const blockPct = Math.round((blockScore / maxBlockScore) * 100);
+    const be = acc.blocks.get(name);
     if (be) { be.scoreSum += blockPct; be.count++; }
-    else acc.blocks.set(block.name, { scoreSum: blockPct, count: 1 });
+    else acc.blocks.set(name, { scoreSum: blockPct, count: 1 });
 
-    const criteria: EvalCriterion[] = block.criteria ?? [];
-    for (const c of criteria) {
-      if (!c.name || c.max_score <= 0) continue;
-      const pct = Math.round((c.score / c.max_score) * 100);
-      const key = `${block.name}::${c.name}`;
+    // Criteria — safely handle any shape
+    const criteria = Array.isArray(block.criteria) ? block.criteria : [];
+    for (const rawC of criteria) {
+      const c = rawC as Record<string, unknown>;
+      const cName = typeof c.name === "string" ? c.name : "";
+      const cScore = typeof c.score === "number" ? c.score : 0;
+      const cMax = typeof c.max_score === "number" ? c.max_score : 0;
+      if (!cName || cMax <= 0) continue;
+
+      const pct = Math.round((cScore / cMax) * 100);
+      const key = `${name}::${cName}`;
       const ce = acc.criteria.get(key);
       if (ce) { ce.scoreSum += pct; ce.count++; }
       else acc.criteria.set(key, { scoreSum: pct, count: 1 });
     }
   }
+
+  // Only count call if we actually extracted block data
+  if (hadData) {
+    acc.callCount++;
+    if (totalScore !== null && totalScore !== undefined) {
+      acc.totalScoreSum += totalScore;
+      acc.totalScoreCount++;
+    }
+  }
+
+  return hadData;
 }
 
 // ─── OKK data fetcher ───────────────────────────────────────
@@ -228,17 +248,22 @@ async function fetchOkkData(
 
   let processedCount = 0;
   for (const row of rows) {
-    if (!row.callCreatedAt || !row.evaluationJson?.blocks) continue;
+    if (!row.callCreatedAt) continue;
+    const evalJson = row.evaluationJson as Record<string, unknown> | null;
+    const blocks = evalJson && Array.isArray(evalJson.blocks) ? evalJson.blocks : null;
+    if (!blocks || blocks.length === 0) continue;
+
     const p = toPeriodKey(row.callCreatedAt, groupBy);
     const acc = accMap.get(p);
     if (!acc) continue;
-    processedCount++;
-    processBlocks(row.evaluationJson.blocks, acc, row.totalScore);
+
+    const had = processBlocks(blocks, acc, row.totalScore);
+    if (had) processedCount++;
 
     // Per-manager accumulation
     if (row.managerId) {
       if (!managerAccMap.has(row.managerId)) managerAccMap.set(row.managerId, newAcc());
-      processBlocks(row.evaluationJson.blocks, managerAccMap.get(row.managerId)!, row.totalScore);
+      processBlocks(blocks, managerAccMap.get(row.managerId)!, row.totalScore);
     }
   }
 
@@ -320,16 +345,21 @@ async function fetchRoleplayData(
 
   let processedCount = 0;
   for (const row of rows) {
-    if (!row.startedAt || !row.evaluationJson?.blocks) continue;
+    if (!row.startedAt) continue;
+    const evalJson = row.evaluationJson as Record<string, unknown> | null;
+    const blocks = evalJson && Array.isArray(evalJson.blocks) ? evalJson.blocks : null;
+    if (!blocks || blocks.length === 0) continue;
+
     const p = toPeriodKey(row.startedAt, groupBy);
     const acc = accMap.get(p);
     if (!acc) continue;
-    processedCount++;
-    processBlocks(row.evaluationJson.blocks, acc, row.score ?? null);
+
+    const had = processBlocks(blocks, acc, row.score ?? null);
+    if (had) processedCount++;
 
     if (row.userId) {
       if (!managerAccMap.has(row.userId)) managerAccMap.set(row.userId, newAcc());
-      processBlocks(row.evaluationJson.blocks, managerAccMap.get(row.userId)!, row.score ?? null);
+      processBlocks(blocks, managerAccMap.get(row.userId)!, row.score ?? null);
     }
   }
 
@@ -350,8 +380,8 @@ function buildResponse(
   const blockOrder: string[] = [];
   const blockCriteriaOrder = new Map<string, string[]>();
 
-  // Collect block/criteria order from period accumulators only (consistent script)
-  for (const acc of accMap.values()) {
+  // Collect block/criteria order from all accumulators
+  for (const acc of [...accMap.values(), ...managerAccMap.values()]) {
     for (const bName of acc.blocks.keys()) {
       if (!blockOrder.includes(bName)) blockOrder.push(bName);
     }
@@ -429,6 +459,15 @@ function buildResponse(
     })
     .filter((m): m is ManagerBreakdown => m !== null)
     .sort((a, b) => b.overallScore - a.overallScore);
+
+  // Diagnostic log
+  console.log(`[Analytics] ${source}/${department}: ${totalCalls} calls, ${blockOrder.length} blocks, ${managers.length} managers in list, ${managerAccMap.size} managers with data`);
+  for (const [mgrId, mgrAcc] of managerAccMap) {
+    const inList = managers.some((m) => m.id === mgrId);
+    if (mgrAcc.callCount > 0 && mgrAcc.blocks.size === 0) {
+      console.warn(`[Analytics] Manager ${mgrId} has ${mgrAcc.callCount} calls but 0 blocks! inList=${inList}`);
+    }
+  }
 
   return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, totalCalls, source, department };
 }
