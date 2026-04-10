@@ -11,8 +11,8 @@ import {
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
-import { dailySections, type SectionDef } from "@/lib/daily/metrics-config";
-import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
+import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
 import type { KommoLead, KommoTask, KommoCallNote } from "@/lib/kommo/types";
 
@@ -398,10 +398,24 @@ export async function buildDailyResponse(department: string, period: string, dat
   const managersOnLineCount = managers.length;
   const line1ManagerCount = managers.filter((m) => m.line === "1").length;
 
-  const sections = dailySections.map((section) => {
-    const sectionManagers = managers.filter(
-      (m) => section.key === "funnel" || m.line === section.dbLine
-    );
+  const activeSections = getDailySections(department);
+
+  // B2B-specific: split leads by pipeline for Бух/Мед sections
+  const buhPipelineId = B2B_PIPELINES.COMMERCIAL;
+  const medPipelineId = B2B_PIPELINES.MEDICAL_COMM;
+  const buhWonLeads = department === "b2b" ? safeWonLeads.filter((l) => l.pipeline_id === buhPipelineId) : [];
+  const medWonLeads = department === "b2b" ? safeWonLeads.filter((l) => l.pipeline_id === medPipelineId) : [];
+  const buhNewLeads = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === buhPipelineId && !l.is_deleted) : [];
+  const medNewLeads = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === medPipelineId && !l.is_deleted) : [];
+  const buhActiveLeads = department === "b2b" ? safeSnapshotActiveLeads.filter((l) => l.pipeline_id === buhPipelineId && !l.closed_at && !l.is_deleted) : [];
+  const medActiveLeads = department === "b2b" ? safeSnapshotActiveLeads.filter((l) => l.pipeline_id === medPipelineId && !l.closed_at && !l.is_deleted) : [];
+  const buhPrepayments = department === "b2b" ? buhActiveLeads.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)) : [];
+  const medPrepayments = department === "b2b" ? medActiveLeads.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)) : [];
+
+  const sections = activeSections.map((section) => {
+    const sectionManagers = department === "b2b"
+      ? managers // B2B: all managers participate in all sections
+      : managers.filter((m) => section.key === "funnel" || m.line === section.dbLine);
 
     const sectionKommoUserIds = sectionManagers
       .map((m) => m.kommoUserId)
@@ -434,7 +448,20 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
       }
 
-      if (section.key === "funnel") {
+      if (department === "b2b") {
+        // Plan-row metrics (key ends with _p): display plan target as the fact value
+        if (metric.hasPlan && !metric.hasFact) {
+          fact = plan;
+        } else {
+          fact = getB2BFact(metric.key, section.key, {
+            summaryCallMetrics, managersOnLineCount, sectionManagers,
+            buhWonLeads, medWonLeads, buhNewLeads, medNewLeads,
+            buhActiveLeads, medActiveLeads, buhPrepayments, medPrepayments,
+            allNewLeads: safeNewLeadsInPeriod, allWonLeads: safeWonLeads,
+            getPlan, sectionDbLine: section.dbLine,
+          });
+        }
+      } else if (section.key === "funnel") {
         fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
       } else {
         // For per-manager sections: overdueTasks is snapshot-only (no date filter)
@@ -461,7 +488,7 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
       }
 
-      return { key: metric.key, label: metric.label, plan, fact, percent, isGroupHeader: false };
+      return { key: metric.key, label: metric.label, plan, fact, percent, isGroupHeader: false, isPlanRow: metric.hasPlan && !metric.hasFact };
     });
 
     let managerData: Array<{
@@ -471,7 +498,79 @@ export async function buildDailyResponse(department: string, period: string, dat
       metrics: Array<{ key: string; plan: string | null; fact: string | null; percent: number | null }>;
     }> = [];
 
-    if (section.key === "funnel") {
+    if (department === "b2b" && section.perManager) {
+      // B2B per-manager: sales (Бух/Мед) and calls
+      managerData = sectionManagers.map((mgr) => {
+        const uid = mgr.kommoUserId;
+        const mgrCallMetrics = uid ? callMetricsMap.get(uid) : undefined;
+
+        const mgrMetrics = section.metrics
+          .filter((m) => !m.isGroupHeader)
+          .map((metric) => {
+            const plan = getPlan(section.dbLine, mgr.id, metric.key);
+            let fact: string | null = null;
+
+            // Plan-row metrics: show plan value as fact
+            if (metric.hasPlan && !metric.hasFact) {
+              fact = plan;
+            } else if (section.key === "b2bCalls") {
+              // Call metrics per manager (fact rows)
+              if (metric.key === "calls_managersOnLine_f") fact = "1";
+              else if (metric.key === "calls_total_f") fact = String(mgrCallMetrics?.callsTotal ?? 0);
+              else if (metric.key === "calls_totalMinutes_f") fact = String(mgrCallMetrics?.totalMinutes ?? 0);
+              else if (metric.key === "calls_dialPercent_f") fact = String(mgrCallMetrics?.dialPercent ?? 0);
+            } else {
+              // Sales per manager (Бух or Мед) — fact rows only
+              const pipeId = section.key === "salesBuh" ? buhPipelineId : medPipelineId;
+              const mgrWon = uid ? safeWonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId) : [];
+              const mgrNew = uid ? safeNewLeadsInPeriod.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId && !l.is_deleted) : [];
+              const mgrActive = uid ? safeSnapshotActiveLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId && !l.closed_at && !l.is_deleted) : [];
+              const mgrRevenue = mgrWon.reduce((s, l) => s + (l.price || 0), 0);
+
+              const prefix = section.key === "salesBuh" ? "buh" : "med";
+              switch (metric.key) {
+                case `${prefix}_salesPlusRenewals_f`:
+                case `${prefix}_revenue_f`:
+                  fact = String(mgrRevenue);
+                  break;
+                case `${prefix}_komLeads_f`:
+                  fact = String(mgrActive.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length);
+                  break;
+                case `${prefix}_totalLeads_f`:
+                  fact = String(mgrNew.length);
+                  break;
+                case `${prefix}_sales_f`:
+                  fact = String(mgrWon.length);
+                  break;
+                case `${prefix}_prepayments`:
+                  fact = String(mgrActive.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)).length);
+                  break;
+                case `${prefix}_ql2p_f`: {
+                  const qualL = mgrActive.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
+                  fact = qualL > 0 ? String(Math.round((mgrWon.length / qualL) * 100)) : "0";
+                  break;
+                }
+                case `${prefix}_l2p_f`:
+                case "buh_l2p_f": {
+                  fact = mgrNew.length > 0 ? String(Math.round((mgrWon.length / mgrNew.length) * 100)) : "0";
+                  break;
+                }
+                case `${prefix}_avgCheck_f`:
+                  fact = mgrWon.length > 0 ? String(Math.round(mgrRevenue / mgrWon.length)) : "0";
+                  break;
+              }
+            }
+
+            let percent: number | null = null;
+            if (plan && fact && Number(plan) > 0 && metric.unit !== "%") {
+              percent = Math.round((Number(fact) / Number(plan)) * 100);
+            }
+            return { key: metric.key, plan, fact, percent };
+          });
+
+        return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
+      });
+    } else if (section.key === "funnel") {
       const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2" || m.line === "3");
       if (funnelManagers.length > 0) {
         const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
@@ -640,6 +739,158 @@ export async function buildDailyResponse(department: string, period: string, dat
     sections,
     schedule: scheduleInfo,
   };
+}
+
+// ==================== B2B FACT RESOLVER ====================
+
+interface B2BFactContext {
+  summaryCallMetrics: UserCallMetrics;
+  managersOnLineCount: number;
+  sectionManagers: Array<{ id: string; kommoUserId: number | null; line: string | null }>;
+  buhWonLeads: KommoLead[];
+  medWonLeads: KommoLead[];
+  buhNewLeads: KommoLead[];
+  medNewLeads: KommoLead[];
+  buhActiveLeads: KommoLead[];
+  medActiveLeads: KommoLead[];
+  buhPrepayments: KommoLead[];
+  medPrepayments: KommoLead[];
+  allNewLeads: KommoLead[];
+  allWonLeads: KommoLead[];
+  getPlan: (line: string, userId: string | null, metricKey: string) => string | null;
+  sectionDbLine: string;
+}
+
+function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): string | null {
+  const { summaryCallMetrics, managersOnLineCount } = ctx;
+
+  // === Продажи ТОТАЛ ===
+  if (sectionKey === "salesTotal") {
+    const totalRevenue = ctx.buhWonLeads.reduce((s, l) => s + (l.price || 0), 0) +
+      ctx.medWonLeads.reduce((s, l) => s + (l.price || 0), 0);
+    if (key === "st_salesPlusRenewals_f") return String(totalRevenue);
+  }
+
+  // === Продажи Бух ===
+  if (sectionKey === "salesBuh") {
+    const won = ctx.buhWonLeads;
+    const newLeads = ctx.buhNewLeads;
+    const active = ctx.buhActiveLeads;
+    const revenue = won.reduce((s, l) => s + (l.price || 0), 0);
+    const qualLeads = active.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
+
+    switch (key) {
+      case "buh_salesPlusRenewals_f": return String(revenue);
+      case "buh_revenue_f": return String(revenue);
+      case "buh_komLeads_f": return String(qualLeads);
+      case "buh_totalLeads_f": return String(newLeads.length);
+      case "buh_sales_f": return String(won.length);
+      case "buh_prepayments": return String(ctx.buhPrepayments.length);
+      case "buh_ql2p_f": return qualLeads > 0 ? String(Math.round((won.length / qualLeads) * 100)) : "0";
+      case "buh_l2p_f": return newLeads.length > 0 ? String(Math.round((won.length / newLeads.length) * 100)) : "0";
+      case "buh_avgCheck_f": return won.length > 0 ? String(Math.round(revenue / won.length)) : "0";
+      case "buh_planDone": {
+        const planVal = ctx.getPlan(ctx.sectionDbLine, null, "buh_revenue_p");
+        return planVal && Number(planVal) > 0 ? String(Math.round((revenue / Number(planVal)) * 100)) : "0";
+      }
+    }
+  }
+
+  // === Продажи Мед ===
+  if (sectionKey === "salesMed") {
+    const won = ctx.medWonLeads;
+    const active = ctx.medActiveLeads;
+    const revenue = won.reduce((s, l) => s + (l.price || 0), 0);
+    const qualLeads = active.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
+    const newLeads = ctx.medNewLeads;
+
+    switch (key) {
+      case "med_salesPlusRenewals_f": return String(revenue);
+      case "med_revenue_f": return String(revenue);
+      case "med_komLeads_f": return String(qualLeads);
+      case "med_sales_f": return String(won.length);
+      case "med_prepayments": return String(ctx.medPrepayments.length);
+      case "med_ql2p_f": return qualLeads > 0 ? String(Math.round((won.length / qualLeads) * 100)) : "0";
+      case "med_avgCheck_f": return won.length > 0 ? String(Math.round(revenue / won.length)) : "0";
+      case "med_planDone": {
+        const planVal = ctx.getPlan(ctx.sectionDbLine, null, "med_revenue_p");
+        return planVal && Number(planVal) > 0 ? String(Math.round((revenue / Number(planVal)) * 100)) : "0";
+      }
+    }
+  }
+
+  // === Звонки (fact rows only, _f suffix) ===
+  if (sectionKey === "b2bCalls") {
+    switch (key) {
+      case "calls_managersOnLine_f": return String(managersOnLineCount);
+      case "calls_total_f": return String(summaryCallMetrics.callsTotal);
+      case "calls_totalMinutes_f": return String(summaryCallMetrics.totalMinutes);
+      case "calls_dialPercent_f": return String(summaryCallMetrics.dialPercent);
+    }
+  }
+
+  // === Total UE (computed from Бух + Мед) ===
+  if (sectionKey === "totalUE") {
+    const totalRevenue = ctx.buhWonLeads.reduce((s, l) => s + (l.price || 0), 0) +
+      ctx.medWonLeads.reduce((s, l) => s + (l.price || 0), 0);
+    const totalSales = ctx.buhWonLeads.length + ctx.medWonLeads.length;
+    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
+    const totalQualLeads = [...ctx.buhActiveLeads, ...ctx.medActiveLeads].filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
+
+    switch (key) {
+      case "ue_ltv": return null; // Manual / formula — needs plan input
+      case "ue_cac_f": {
+        const budget = Number(ctx.getPlan("marketing", null, "mkt_budget_p") ?? 0);
+        return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
+      }
+      case "ue_leadsTotal": return String(totalNewLeads);
+      case "ue_leadsQual": return String(totalQualLeads);
+      case "ue_revenue_f": return String(totalRevenue);
+      case "ue_conversion_f": return totalNewLeads > 0 ? String(Math.round((totalSales / totalNewLeads) * 1000) / 10) : "0";
+      case "ue_ltv_cac": {
+        const cac = ctx.getPlan(ctx.sectionDbLine, null, "ue_cac_p");
+        const ltv = ctx.getPlan(ctx.sectionDbLine, null, "ue_ltv");
+        if (cac && ltv && Number(cac) > 0) return String(Math.round((Number(ltv) / Number(cac)) * 10) / 10);
+        return null;
+      }
+    }
+  }
+
+  // === Marketing (computed formulas) ===
+  if (sectionKey === "marketing") {
+    const budget = Number(ctx.getPlan(ctx.sectionDbLine, null, "mkt_budget_p") ?? 0);
+    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
+    const totalSales = ctx.allWonLeads.length;
+
+    switch (key) {
+      case "mkt_leads": return String(totalNewLeads);
+      case "mkt_cpl": return totalNewLeads > 0 ? String(Math.round(budget / totalNewLeads)) : "0";
+      case "mkt_cac": return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
+      case "mkt_budget_f": return null; // manual input
+      case "mkt_nonQualLeads_f": {
+        // Non-qualified = total - qualified
+        const qualCount = [...ctx.buhActiveLeads, ...ctx.medActiveLeads].filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
+        return String(Math.max(0, totalNewLeads - qualCount));
+      }
+    }
+  }
+
+  // === Marketing (computed formulas) ===
+  if (sectionKey === "marketing") {
+    const budget = Number(ctx.getPlan(ctx.sectionDbLine, null, "mkt_budget") ?? 0);
+    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
+    const totalSales = ctx.allWonLeads.length;
+
+    switch (key) {
+      case "mkt_leads": return String(totalNewLeads);
+      case "mkt_cpl": return totalNewLeads > 0 ? String(Math.round(budget / totalNewLeads)) : "0";
+      case "mkt_cac": return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
+    }
+  }
+
+  // === ОКК (placeholder — needs R2 DB query, will show plan only for now) ===
+
+  return null;
 }
 
 // ==================== FUNNEL FACT RESOLVER ====================

@@ -1,6 +1,8 @@
 // Metric definitions registry for the Daily tab
 // Drives both frontend rendering and backend data mapping
 
+import { b2bDailySections } from "./metrics-config-b2b";
+
 export interface MetricDef {
   key: string;
   label: string;
@@ -14,10 +16,10 @@ export interface MetricDef {
 }
 
 export interface SectionDef {
-  key: "funnel" | "qualifier" | "secondLine" | "thirdLine";
+  key: string;
   title: string;
   icon: string; // lucide icon name
-  /** DB line value: '1' for qualifier, '2' for secondLine, 'funnel' for funnel */
+  /** DB line value: '1' for qualifier, '2' for secondLine, 'funnel' for funnel, or B2B section keys */
   dbLine: string;
   /** If true, show per-manager columns */
   perManager: boolean;
@@ -159,4 +161,10 @@ export function getEditableMetricKeys(): { section: string; key: string; label: 
     }
   }
   return result;
+}
+
+/** Get sections by department — B2G uses line-based structure, B2B uses product/channel-based */
+export function getDailySections(department: string): SectionDef[] {
+  if (department === "b2b") return b2bDailySections;
+  return dailySections;
 }

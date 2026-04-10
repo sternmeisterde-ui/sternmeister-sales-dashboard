@@ -12,6 +12,13 @@ import {
   CalendarDays,
   UserCheck,
   UserX,
+  DollarSign,
+  Heart,
+  Phone,
+  ClipboardCheck,
+  Megaphone,
+  Globe,
+  Pencil,
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 
@@ -24,6 +31,7 @@ interface MetricRow {
   fact: string | null;
   percent: number | null;
   isGroupHeader: boolean;
+  isPlanRow?: boolean;
 }
 
 interface ManagerData {
@@ -88,6 +96,20 @@ function getSectionIcon(iconName: string) {
       return <Users className="w-4 h-4 text-emerald-400" />;
     case "Activity":
       return <Activity className="w-4 h-4 text-purple-400" />;
+    case "DollarSign":
+      return <DollarSign className="w-4 h-4 text-green-400" />;
+    case "Heart":
+      return <Heart className="w-4 h-4 text-red-400" />;
+    case "Phone":
+      return <Phone className="w-4 h-4 text-sky-400" />;
+    case "ClipboardCheck":
+      return <ClipboardCheck className="w-4 h-4 text-amber-400" />;
+    case "Megaphone":
+      return <Megaphone className="w-4 h-4 text-orange-400" />;
+    case "Globe":
+      return <Globe className="w-4 h-4 text-indigo-400" />;
+    case "RefreshCw":
+      return <RefreshCw className="w-4 h-4 text-teal-400" />;
     default:
       return <TrendingUp className="w-4 h-4 text-blue-400" />;
   }
@@ -164,41 +186,41 @@ function collectManagers(snapshot: DailySnapshot | undefined): ManagerData[] {
 }
 
 // Get all non-header metrics across all sections (flat list with section info)
-function getAllMetrics(snapshot: DailySnapshot | undefined): Array<{
+interface FlatMetric {
   sectionKey: string;
   sectionTitle: string;
   sectionIcon: string;
+  sectionDbLine: string;
   metricKey: string;
   metricLabel: string;
   isGroupHeader: boolean;
-}> {
+  isPlanRow: boolean;
+}
+
+function getAllMetrics(snapshot: DailySnapshot | undefined): FlatMetric[] {
   if (!snapshot) return [];
-  const result: Array<{
-    sectionKey: string;
-    sectionTitle: string;
-    sectionIcon: string;
-    metricKey: string;
-    metricLabel: string;
-    isGroupHeader: boolean;
-  }> = [];
+  const result: FlatMetric[] = [];
   for (const sec of snapshot.sections) {
-    // Add section header
     result.push({
       sectionKey: sec.key,
       sectionTitle: sec.title,
       sectionIcon: sec.icon,
+      sectionDbLine: sec.dbLine,
       metricKey: `__section_${sec.key}`,
       metricLabel: sec.title,
       isGroupHeader: false,
+      isPlanRow: false,
     });
     for (const m of sec.metrics) {
       result.push({
         sectionKey: sec.key,
         sectionTitle: sec.title,
         sectionIcon: sec.icon,
+        sectionDbLine: sec.dbLine,
         metricKey: m.key,
         metricLabel: m.label,
         isGroupHeader: m.isGroupHeader,
+        isPlanRow: m.isPlanRow ?? false,
       });
     }
   }
@@ -214,15 +236,42 @@ function SummaryTimeTable({
   columnSubLabels,
   selectedCol,
   onSelectCol,
+  department,
+  onPlanSave,
 }: {
   snapshots: DailySnapshot[];
   columnLabels: string[];
   columnSubLabels: string[];
   selectedCol: number | null;
   onSelectCol: (idx: number) => void;
+  department: string;
+  onPlanSave?: (dbLine: string, metricKey: string, value: string, periodType: string, periodDate: string) => Promise<void>;
 }) {
   const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
   const metrics = useMemo(() => getAllMetrics(referenceSnapshot), [referenceSnapshot]);
+
+  // Inline editing state: "sectionKey:metricKey" -> value
+  const [editingCell, setEditingCell] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+
+  const startEdit = (m: FlatMetric, currentVal: string | null) => {
+    setEditingCell(`${m.sectionKey}:${m.metricKey}`);
+    setEditValue(currentVal ?? "");
+  };
+
+  const cancelEdit = () => {
+    setEditingCell(null);
+    setEditValue("");
+  };
+
+  const commitEdit = async (m: FlatMetric) => {
+    if (!onPlanSave || !referenceSnapshot) return;
+    const periodType = "month";
+    const periodDate = referenceSnapshot.periodDate;
+    await onPlanSave(m.sectionDbLine, m.metricKey, editValue, periodType, periodDate);
+    setEditingCell(null);
+    setEditValue("");
+  };
 
   if (!referenceSnapshot || metrics.length === 0) {
     return (
@@ -294,29 +343,72 @@ function SummaryTimeTable({
                 );
               }
 
+              const isPlan = m.isPlanRow;
+              const cellId = `${m.sectionKey}:${m.metricKey}`;
+              const isEditing = editingCell === cellId;
+
               // Data row
               return (
                 <tr
                   key={`${m.sectionKey}-${m.metricKey}`}
-                  className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
+                  className={`hover:bg-white/[0.02] transition-colors border-b border-white/[0.03] ${
+                    isPlan ? "bg-blue-500/[0.04]" : ""
+                  }`}
                 >
-                  <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-8">
-                    {m.metricLabel}
+                  <td className={`px-4 py-2 font-medium text-[12px] sticky left-0 backdrop-blur-sm z-10 pl-8 ${
+                    isPlan ? "text-blue-300 bg-slate-900/90" : "text-slate-300 bg-slate-900/90"
+                  }`}>
+                    <div className="flex items-center gap-1.5">
+                      {isPlan && <Pencil className="w-3 h-3 text-blue-400/50 flex-shrink-0" />}
+                      {m.metricLabel}
+                    </div>
                   </td>
-                  {snapshots.map((snap, colIdx) => {
-                    const val = getMetricFact(snap, m.sectionKey, m.metricKey);
-                    return (
-                      <td
-                        key={colIdx}
-                        onClick={() => onSelectCol(colIdx)}
-                        className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
-                          selectedCol === colIdx ? "bg-blue-500/10" : ""
-                        } ${getCellColor(val)}`}
-                      >
-                        {val ?? "—"}
-                      </td>
-                    );
-                  })}
+                  {isPlan && isEditing ? (
+                    // Editing mode: single input spanning all columns
+                    <td colSpan={columnLabels.length} className="px-2 py-1">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") commitEdit(m);
+                            if (e.key === "Escape") cancelEdit();
+                          }}
+                          autoFocus
+                          className="w-32 px-2 py-1 rounded bg-slate-800 border border-blue-500/40 text-white text-[12px] font-mono focus:outline-none focus:border-blue-400"
+                        />
+                        <button
+                          onClick={() => commitEdit(m)}
+                          className="text-[10px] px-2 py-1 rounded bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
+                        >
+                          OK
+                        </button>
+                        <button
+                          onClick={cancelEdit}
+                          className="text-[10px] px-2 py-1 rounded bg-slate-700/50 text-slate-400 hover:text-white"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                    </td>
+                  ) : (
+                    // Normal display
+                    snapshots.map((snap, colIdx) => {
+                      const val = getMetricFact(snap, m.sectionKey, m.metricKey);
+                      return (
+                        <td
+                          key={colIdx}
+                          onClick={() => isPlan && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
+                          className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
+                            selectedCol === colIdx ? "bg-blue-500/10" : ""
+                          } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)}`}
+                        >
+                          {val ?? "—"}
+                        </td>
+                      );
+                    })
+                  )}
                 </tr>
               );
             })}
@@ -954,6 +1046,31 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             columnSubLabels={columnSubLabels}
             selectedCol={selectedDayIdx}
             onSelectCol={setSelectedDayIdx}
+            department={department}
+            onPlanSave={async (dbLine, metricKey, value, periodType, periodDate) => {
+              setSaving(true);
+              try {
+                const res = await fetch("/api/daily/plans", {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    department,
+                    line: dbLine,
+                    userId: null,
+                    metricKey,
+                    planValue: value,
+                    periodType,
+                    periodDate,
+                  }),
+                });
+                if (!res.ok) console.error("Plan save error:", await res.text());
+                await fetchData();
+              } catch (e) {
+                console.error("Plan save error:", e);
+              } finally {
+                setSaving(false);
+              }
+            }}
           />
         </>
       )}

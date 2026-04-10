@@ -18,6 +18,8 @@
 export const B2B_PIPELINES = {
   /** Бух Комм — commercial pipeline */
   COMMERCIAL: 10631243,
+  /** Medical Admin Commercial */
+  MEDICAL_COMM: 13209983,
 } as const;
 
 /** B2G (госники) */
@@ -286,6 +288,7 @@ export const NEW_VARIANTS_MAP: Record<string, string> = {
 
 // ==================== B2B ACTIVE STATUS IDS ====================
 
+/** Active statuses for Бух Комм pipeline (10631243) — also used as default for Medical */
 export const B2B_ALL_ACTIVE_STATUS_IDS: number[] = [
   COMMERCIAL_STATUSES.INCOMING,
   COMMERCIAL_STATUSES.TECH,
@@ -299,6 +302,12 @@ export const B2B_ALL_ACTIVE_STATUS_IDS: number[] = [
   COMMERCIAL_STATUSES.PREPAYMENT,
   COMMERCIAL_STATUSES.INSTALLMENT,
 ];
+
+/** B2B statuses considered as "предоплата получена" */
+export const B2B_PREPAYMENT_STATUSES: Set<number> = new Set([
+  COMMERCIAL_STATUSES.PREPAYMENT,
+  COMMERCIAL_STATUSES.INSTALLMENT,
+]);
 
 // ==================== B2B QUALIFICATION STAGES ====================
 // B2B qualification: "Контакт установлен" and beyond
@@ -324,6 +333,7 @@ export const B2G_ALL_PIPELINE_IDS = [
 /** All pipeline IDs for B2B */
 export const B2B_ALL_PIPELINE_IDS = [
   B2B_PIPELINES.COMMERCIAL,
+  B2B_PIPELINES.MEDICAL_COMM,
 ];
 
 /** Get pipeline IDs by department */
