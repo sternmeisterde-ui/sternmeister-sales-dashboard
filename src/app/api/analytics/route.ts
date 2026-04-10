@@ -38,12 +38,12 @@ interface BlockData {
 
 interface ManagerCriterionScore {
   name: string;
-  score: number;
+  score: number | null; // null = no data for this criterion
 }
 
 interface ManagerBlockScore {
   name: string;
-  score: number;
+  score: number | null; // null = no data
   criteria: ManagerCriterionScore[];
 }
 
@@ -247,6 +247,17 @@ async function fetchOkkData(
 
 // ─── Roleplay data fetcher ──────────────────────────────────
 
+function getRoleplayCallType(department: string, line: string): string | null {
+  if (department === "b2b") return null; // B2B has one script
+  switch (line) {
+    case "1": return "qualifier";
+    case "2":
+    case "2b": return "berater";
+    case "3": return "dovedenie";
+    default: return null;
+  }
+}
+
 async function fetchRoleplayData(
   department: "b2g" | "b2b",
   line: string,
@@ -259,12 +270,17 @@ async function fetchRoleplayData(
   const callsTable = department === "b2b" ? r1Calls : d1Calls;
   const usersTable = department === "b2b" ? r1Users : d1Users;
 
+  const callType = getRoleplayCallType(department, line);
+
   const conditions = [
     gte(callsTable.startedAt, from),
     lte(callsTable.startedAt, to),
     isNotNull(callsTable.score),
     isNotNull(callsTable.evaluationJson),
   ];
+  if (callType) {
+    conditions.push(eq(callsTable.callType, callType));
+  }
   if (managerId) {
     conditions.push(eq(callsTable.userId, managerId));
   }
@@ -334,9 +350,8 @@ function buildResponse(
   const blockOrder: string[] = [];
   const blockCriteriaOrder = new Map<string, string[]>();
 
-  // Collect block/criteria order from both period and manager accumulators
-  const allAccs = [...accMap.values(), ...managerAccMap.values()];
-  for (const acc of allAccs) {
+  // Collect block/criteria order from period accumulators only (consistent script)
+  for (const acc of accMap.values()) {
     for (const bName of acc.blocks.keys()) {
       if (!blockOrder.includes(bName)) blockOrder.push(bName);
     }
@@ -398,12 +413,12 @@ function buildResponse(
 
       const mgrBlocks: ManagerBlockScore[] = blockOrder.map((blockName) => {
         const be = acc.blocks.get(blockName);
-        const blockScore = be && be.count > 0 ? Math.round(be.scoreSum / be.count) : 0;
+        const blockScore = be && be.count > 0 ? Math.round(be.scoreSum / be.count) : null;
 
         const criteriaNames = blockCriteriaOrder.get(blockName) ?? [];
         const mgrCriteria: ManagerCriterionScore[] = criteriaNames.map((cName) => {
           const ce = acc.criteria.get(`${blockName}::${cName}`);
-          return { name: cName, score: ce && ce.count > 0 ? Math.round(ce.scoreSum / ce.count) : 0 };
+          return { name: cName, score: ce && ce.count > 0 ? Math.round(ce.scoreSum / ce.count) : null };
         });
 
         return { name: blockName, score: blockScore, criteria: mgrCriteria };

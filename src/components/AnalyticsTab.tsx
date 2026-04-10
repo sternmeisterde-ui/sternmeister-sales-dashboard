@@ -9,8 +9,8 @@ import DinoLoader from "@/components/DinoLoader";
 
 interface CriterionScore { name: string; scores: Record<string, number> }
 interface BlockData { name: string; scores: Record<string, number>; criteria: CriterionScore[] }
-interface ManagerCriterion { name: string; score: number }
-interface ManagerBlock { name: string; score: number; criteria: ManagerCriterion[] }
+interface ManagerCriterion { name: string; score: number | null }
+interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
 interface ManagerBreakdown { id: string; name: string; overallScore: number; callCount: number; blocks: ManagerBlock[] }
 interface AnalyticsData {
   periods: string[];
@@ -23,18 +23,23 @@ interface AnalyticsData {
 
 // ==================== Helpers ====================
 
-function getCriteriaColor(v: number | undefined): string {
-  if (v === undefined) return "text-slate-600";
+function getCriteriaColor(v: number | null | undefined): string {
+  if (v === undefined || v === null) return "text-slate-600";
   if (v >= 80) return "text-emerald-400";
   if (v >= 50) return "text-amber-400";
   return "text-rose-400";
 }
 
-function getCriteriaBg(v: number | undefined): string {
-  if (v === undefined) return "";
+function getCriteriaBg(v: number | null | undefined): string {
+  if (v === undefined || v === null) return "";
   if (v >= 80) return "bg-emerald-500/5";
   if (v >= 50) return "bg-amber-500/5";
   return "bg-rose-500/5";
+}
+
+function fmtScore(v: number | null | undefined): string {
+  if (v === undefined || v === null) return "—";
+  return `${v}%`;
 }
 
 function fmtPeriod(p: string, g: string): string {
@@ -85,8 +90,8 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     set((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
   };
 
-  // B2B has no lines; also when switching source to roleplay and line is "2b", keep it for OKK but use "2" for roleplay
   useEffect(() => { if (department === "b2b") setLine("1"); }, [department]);
+  useEffect(() => { if (source === "roleplay" && line === "2b") setLine("2"); }, [source]);
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     if (!data) setLoading(true);
@@ -145,10 +150,12 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           ))}
         </div>
 
-        {/* Line (B2G only) */}
+        {/* Line (B2G only) — Бератер 2 only for OKK, not roleplay */}
         {department === "b2g" && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
-            {B2G_LINES.map((l) => (
+            {B2G_LINES
+              .filter((l) => source === "okk" || l.id !== "2b")
+              .map((l) => (
               <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
                 className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
                   line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
@@ -179,13 +186,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           onClear={() => setQuickRange(30)}
         />
 
-        {/* Quick presets */}
-        {[{ d: 7, l: "7д" }, { d: 30, l: "30д" }, { d: 90, l: "3м" }].map((p) => (
-          <button key={p.d} onClick={() => setQuickRange(p.d)}
-            className="px-2 py-1.5 rounded-lg text-[10px] text-slate-400 hover:text-white bg-slate-800/30 hover:bg-slate-700/50 border border-white/5">
-            {p.l}
-          </button>
-        ))}
+        {/* No duplicate presets — groupBy + calendar is enough */}
 
         {/* Manager dropdown */}
         {data?.managers && data.managers.length > 0 && (
@@ -301,7 +302,7 @@ function CriteriaTimeTable({
               <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
               {periods.map((p) => {
                 const v = overallScores[p];
-                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)}`}>{v !== undefined ? `${v}%` : "—"}</td>;
+                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
               })}
             </tr>
           </tbody>
@@ -323,7 +324,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
         </td>
         {periods.map((p) => {
           const v = block.scores[p];
-          return <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{v !== undefined ? `${v}%` : "—"}</td>;
+          return <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
         })}
       </tr>
       {!isCollapsed && block.criteria.map((c) => (
@@ -331,7 +332,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
             const v = c.scores[p];
-            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{v !== undefined ? `${v}%` : "—"}</td>;
+            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
@@ -401,7 +402,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
         </td>
         {managers.map((m) => {
           const v = m.blocks[blockIdx]?.score;
-          return <td key={m.id} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{v !== undefined ? `${v}%` : "—"}</td>;
+          return <td key={m.id} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
         })}
       </tr>
       {!isCollapsed && criteriaNames.map((cName, ci) => (
@@ -409,7 +410,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
             const v = m.blocks[blockIdx]?.criteria[ci]?.score;
-            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{v !== undefined ? `${v}%` : "—"}</td>;
+            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
