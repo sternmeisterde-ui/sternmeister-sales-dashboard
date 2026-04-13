@@ -669,7 +669,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       }
     }
 
-    if (section.perManager) {
+    if (section.perManager && department !== "b2b") {
       managerData = sectionManagers.map((mgr) => {
         const kommoId = mgr.kommoUserId;
         const mgrCallMetrics = kommoId ? callMetricsMap.get(kommoId) : undefined;
