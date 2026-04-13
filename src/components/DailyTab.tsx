@@ -124,13 +124,13 @@ function getCellColor(value: string | null): string {
 }
 
 function formatDayLabel(dateStr: string): string {
-  const d = new Date(dateStr);
-  return `D${d.getDate()}`;
+  const [, , dd] = dateStr.split("-");
+  return `D${Number(dd)}`;
 }
 
 function formatDaySubLabel(dateStr: string): string {
-  const d = new Date(dateStr);
-  return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const [, mm, dd] = dateStr.split("-");
+  return `${dd}.${mm}`;
 }
 
 const MONTH_NAMES_SHORT = [
@@ -237,6 +237,7 @@ function SummaryTimeTable({
   selectedCol,
   onSelectCol,
   department,
+  monthPeriodDate,
   onPlanSave,
 }: {
   snapshots: DailySnapshot[];
@@ -245,6 +246,7 @@ function SummaryTimeTable({
   selectedCol: number | null;
   onSelectCol: (idx: number) => void;
   department: string;
+  monthPeriodDate?: string;
   onPlanSave?: (dbLine: string, metricKey: string, value: string, periodType: string, periodDate: string) => Promise<void>;
 }) {
   const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
@@ -267,7 +269,8 @@ function SummaryTimeTable({
   const commitEdit = async (m: FlatMetric) => {
     if (!onPlanSave || !referenceSnapshot) return;
     const periodType = "month";
-    const periodDate = referenceSnapshot.periodDate;
+    // Use stable month periodDate (e.g. "2026-04"), not individual day snapshot date
+    const periodDate = monthPeriodDate || referenceSnapshot.periodDate.slice(0, 7);
     await onPlanSave(m.sectionDbLine, m.metricKey, editValue, periodType, periodDate);
     setEditingCell(null);
     setEditValue("");
@@ -1047,6 +1050,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             selectedCol={selectedDayIdx}
             onSelectCol={setSelectedDayIdx}
             department={department}
+            monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
             onPlanSave={async (dbLine, metricKey, value, periodType, periodDate) => {
               setSaving(true);
               try {

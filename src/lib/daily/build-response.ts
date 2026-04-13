@@ -550,8 +550,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = qualL > 0 ? String(Math.round((mgrWon.length / qualL) * 100)) : "0";
                   break;
                 }
-                case `${prefix}_l2p_f`:
-                case "buh_l2p_f": {
+                case `${prefix}_l2p_f`: {
                   fact = mgrNew.length > 0 ? String(Math.round((mgrWon.length / mgrNew.length) * 100)) : "0";
                   break;
                 }
@@ -872,19 +871,6 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
         const qualCount = [...ctx.buhActiveLeads, ...ctx.medActiveLeads].filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
         return String(Math.max(0, totalNewLeads - qualCount));
       }
-    }
-  }
-
-  // === Marketing (computed formulas) ===
-  if (sectionKey === "marketing") {
-    const budget = Number(ctx.getPlan(ctx.sectionDbLine, null, "mkt_budget") ?? 0);
-    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
-    const totalSales = ctx.allWonLeads.length;
-
-    switch (key) {
-      case "mkt_leads": return String(totalNewLeads);
-      case "mkt_cpl": return totalNewLeads > 0 ? String(Math.round(budget / totalNewLeads)) : "0";
-      case "mkt_cac": return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
     }
   }
 

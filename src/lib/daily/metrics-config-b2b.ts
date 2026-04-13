@@ -11,7 +11,7 @@ import type { MetricDef, SectionDef } from "./metrics-config";
 
 // ====================== TOTAL UE (Unit Economics) ======================
 const totalUEMetrics: MetricDef[] = [
-  { key: "ue_ltv", label: "LTV", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
+  { key: "ue_ltv", label: "LTV", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "ue_cac_p", label: "CAC", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "ue_cac_f", label: "CAC факт", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
   { key: "ue_ltv_cac", label: "LTV/CAC", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
