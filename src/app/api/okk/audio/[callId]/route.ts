@@ -42,9 +42,12 @@ export async function GET(
     }
 
     // Proxy the audio from the remote URL (avoids CORS on the client)
-    const upstream = await fetch(recordingUrl, {
-      headers: { Accept: "audio/mpeg, audio/ogg, audio/webm, audio/*" },
-    });
+    // Forward Range header for seek support in <audio> elements
+    const fetchHeaders: Record<string, string> = { Accept: "audio/mpeg, audio/ogg, audio/webm, audio/*" };
+    const rangeHeader = request.headers.get("Range");
+    if (rangeHeader) fetchHeaders["Range"] = rangeHeader;
+
+    const upstream = await fetch(recordingUrl, { headers: fetchHeaders });
 
     if (!upstream.ok) {
       if (upstream.status === 404) {
@@ -73,8 +76,10 @@ export async function GET(
       if (contentLength) {
         headers["Content-Length"] = contentLength;
       }
+      const contentRange = upstream.headers.get("Content-Range");
+      if (contentRange) headers["Content-Range"] = contentRange;
 
-      return new NextResponse(upstream.body, { status: 200, headers });
+      return new NextResponse(upstream.body, { status: upstream.status, headers });
     }
 
     // Fallback: buffer the whole file (should rarely be reached)

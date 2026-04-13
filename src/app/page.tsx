@@ -1272,7 +1272,7 @@ export default function Dashboard() {
                           <td className="px-5 py-3 text-center">
                             {call.clientScoring ? (() => {
                               const cs = call.clientScoring;
-                              const maxScore = cs.solvency !== undefined ? 30 : 20;
+                              const maxScore = cs.solvency !== undefined && cs.solvency > 0 ? 30 : 20;
                               const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
                               const colorClass = pct >= 70
                                 ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
@@ -1523,7 +1523,7 @@ export default function Dashboard() {
                   {/* Mini client scoring in the same row (only for real calls) */}
                   {activeTab === "real_calls" && selectedCall.clientScoring && (() => {
                     const cs = selectedCall.clientScoring;
-                    const maxScore = cs.solvency !== undefined ? 30 : 20;
+                    const maxScore = cs.solvency !== undefined && cs.solvency > 0 ? 30 : 20;
                     const pct = maxScore > 0 ? (cs.total / maxScore) * 100 : 0;
                     const totalColor = pct >= 70 ? "text-emerald-400" : pct >= 40 ? "text-amber-400" : "text-rose-400";
                     return (

@@ -103,20 +103,18 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
 
     const fromParam = sp.get("from");
     if (fromParam) {
-      // Parse as start of day in local (Berlin) timezone
-      const parts = fromParam.split("-").map(Number);
-      const fromDate = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
-      if (!isNaN(fromDate.getTime())) {
+      // Parse as start of day in Europe/Berlin timezone (UTC+1 CET / UTC+2 CEST)
+      const fromDate = new Date(`${fromParam}T00:00:00+02:00`);
+      if (!Number.isNaN(fromDate.getTime())) {
         conditions.push(gte(okkCalls.callCreatedAt, fromDate));
       }
     }
 
     const toParam = sp.get("to");
     if (toParam) {
-      // Parse as end of day in local (Berlin) timezone
-      const parts = toParam.split("-").map(Number);
-      const toDate = new Date(parts[0], parts[1] - 1, parts[2], 23, 59, 59, 999);
-      if (!isNaN(toDate.getTime())) {
+      // Parse as end of day in Europe/Berlin timezone
+      const toDate = new Date(`${toParam}T23:59:59+02:00`);
+      if (!Number.isNaN(toDate.getTime())) {
         conditions.push(lte(okkCalls.callCreatedAt, toDate));
       }
     }

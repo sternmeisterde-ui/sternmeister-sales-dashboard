@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 
 // ─── Helper: format date ─────────────────────────────────────────────────────
 
@@ -127,6 +127,7 @@ export async function GET(
       .from(okkCalls)
       .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
       .where(eq(okkCalls.id, callId))
+      .orderBy(desc(okkEvaluations.createdAt))
       .limit(1);
 
     if (rows.length === 0) {
@@ -170,14 +171,13 @@ export async function GET(
           ? b.criteria.map((c, idx) => ({
               id: idx + 1,
               name: c.name || "",
-              score:
-                typeof c.score === "number"
-                  ? c.score
-                  : (c.score as unknown) === "1"
-                    ? 1
-                    : (c.score as unknown) === "0"
-                      ? 0
-                      : -1,
+              score: (() => {
+                if (typeof c.score === "number") return c.score;
+                if ((c.score as unknown) === "1") return 1;
+                if ((c.score as unknown) === "0") return 0;
+                console.warn(`[OKK] Unexpected criterion score: ${JSON.stringify(c.score)} for "${c.name}"`);
+                return null;
+              })(),
               maxScore:
                 typeof c.max_score === "number"
                   ? c.max_score
