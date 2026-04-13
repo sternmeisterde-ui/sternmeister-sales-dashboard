@@ -11,7 +11,7 @@ interface CriterionScore { name: string; scores: Record<string, number> }
 interface BlockData { name: string; scores: Record<string, number>; criteria: CriterionScore[] }
 interface ManagerCriterion { name: string; score: number | null }
 interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
-interface ManagerBreakdown { id: string; name: string; overallScore: number; callCount: number; blocks: ManagerBlock[] }
+interface ManagerBreakdown { id: string; name: string; overallScore: number | null; callCount: number; blocks: ManagerBlock[] }
 interface AnalyticsData {
   periods: string[];
   blocks: BlockData[];
@@ -92,7 +92,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 
   // Reset manager when context changes (different DB/line = different manager UUIDs)
   useEffect(() => { if (department === "b2b") setLine("1"); setManagerId(""); }, [department]);
-  useEffect(() => { setManagerId(""); if (source === "roleplay" && line === "2b") setLine("2"); }, [source]);
+  useEffect(() => {
+    setManagerId("");
+    if (source === "roleplay" && line === "2b") setLine("2");
+  }, [source, line]);
   // If selected manager is not in current list, clear selection
   useEffect(() => {
     if (managerId && data?.managers && !data.managers.some((m) => m.id === managerId)) {
@@ -384,7 +387,7 @@ function ManagerTable({
             <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
               <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
               {managers.map((m) => (
-                <td key={m.id} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(m.overallScore)}`}>{m.overallScore}%</td>
+                <td key={m.id} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(m.overallScore)}`}>{fmtScore(m.overallScore)}</td>
               ))}
             </tr>
           </tbody>

@@ -46,7 +46,7 @@ interface ManagerBlockScore {
 interface ManagerBreakdown {
   id: string;
   name: string;
-  overallScore: number;
+  overallScore: number | null;
   callCount: number;
   blocks: ManagerBlockScore[];
 }
@@ -454,11 +454,11 @@ function buildResponse(
         return { name: blockName, score: blockScore, criteria: mgrCriteria };
       });
 
-      const overallScore = acc.totalScoreCount > 0 ? Math.round(acc.totalScoreSum / acc.totalScoreCount) : 0;
+      const overallScore = acc.totalScoreCount > 0 ? Math.round(acc.totalScoreSum / acc.totalScoreCount) : null;
       return { id: mgr.id, name: mgr.name, overallScore, callCount: acc.callCount, blocks: mgrBlocks };
     })
     .filter((m): m is ManagerBreakdown => m !== null)
-    .sort((a, b) => b.overallScore - a.overallScore);
+    .sort((a, b) => (b.overallScore ?? 0) - (a.overallScore ?? 0));
 
   // Diagnostic log
   console.log(`[Analytics] ${source}/${department}: ${totalCalls} calls, ${blockOrder.length} blocks, ${managers.length} managers in list, ${managerAccMap.size} managers with data`);
@@ -501,8 +501,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, line, from, to, groupBy, managerId)
-        : fetchOkkData(department, line, from, to, groupBy, managerId),
+        ? fetchRoleplayData(department, effectiveLine, from, to, groupBy, managerId)
+        : fetchOkkData(department, effectiveLine, from, to, groupBy, managerId),
     );
 
     return NextResponse.json({ success: true, data });
