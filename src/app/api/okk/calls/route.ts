@@ -162,8 +162,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .from(okkCalls)
         .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
         .where(whereClause)
-        .orderBy(desc(okkCalls.callCreatedAt))
-        .limit(200),
+        // Order by eval createdAt DESC so first row per call is the latest evaluation
+        .orderBy(desc(okkCalls.callCreatedAt), desc(okkEvaluations.createdAt))
+        .limit(400),  // Over-fetch to account for duplicates from re-evaluations
 
       // Query 2: All managers (only role='manager', active)
       db
@@ -196,8 +197,16 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .groupBy(okkCalls.managerId),
     ]);
 
+    // ── Deduplicate: keep only the first (latest eval) row per call ID ──
+    const seenCallIds = new Set<string>();
+    const uniqueRows = rows.filter((row) => {
+      if (seenCallIds.has(row.id)) return false;
+      seenCallIds.add(row.id);
+      return true;
+    }).slice(0, 200);
+
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
-    const calls = rows.map((row) => {
+    const calls = uniqueRows.map((row) => {
       const dSec = row.durationSeconds || 0;
       const mins = Math.floor(dSec / 60);
       const secs = dSec % 60;
