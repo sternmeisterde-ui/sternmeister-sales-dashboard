@@ -473,6 +473,13 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "staffCount") {
           fact = String(sectionManagers.length);
         }
+        // Computed plans: staffCount × coefficient
+        if (metric.key === "callsTotal_p") {
+          fact = String(sectionManagers.length * 80);
+        }
+        if (metric.key === "totalMinutes_p") {
+          fact = String(sectionManagers.length * 180);
+        }
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
         }
