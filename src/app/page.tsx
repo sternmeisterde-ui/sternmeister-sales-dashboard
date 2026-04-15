@@ -15,6 +15,7 @@ import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
+import WorstCallsPanel from "@/components/WorstCallsPanel";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -1016,6 +1017,12 @@ export default function Dashboard() {
                 )}
               </div>
             )}
+
+            {/* WORST CALLS PANEL — D2 only */}
+            {activeTab === "real_calls" && activeDepartment === "b2g" && (() => {
+              const { from, to } = getOkkDateRange();
+              return <WorstCallsPanel department="b2g" from={from} to={to} lineFilter={lineFilter} />;
+            })()}
 
             {/* DATA TABLE */}
             <div className="glass-panel rounded-2xl flex-1 border border-white/5 overflow-hidden flex flex-col shadow-2xl">

@@ -137,6 +137,24 @@ export const okkVoiceFeedback = pgTable("voice_feedback", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// ─── worst_calls (daily feedback tracking) ────────────────
+export const okkWorstCalls = pgTable("worst_calls", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  callId: uuid("call_id").notNull().references(() => okkCalls.id),
+  managerId: uuid("manager_id").references(() => okkManagers.id),
+  evaluationId: uuid("evaluation_id").references(() => okkEvaluations.id),
+  score: integer("score").notNull(),
+  period: text("period").notNull(),            // 'morning' | 'afternoon'
+  periodDate: text("period_date").notNull(),   // YYYY-MM-DD
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  telegramMessageId: integer("telegram_message_id"),
+  voiceResponseId: uuid("voice_response_id"),
+  responded: boolean("responded").default(false),
+  respondedAt: timestamp("responded_at", { withTimezone: true }),
+  responseAdequate: boolean("response_adequate"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 // ==================== RELATIONS ====================
 
 export const okkCallsRelations = relations(okkCalls, ({ one, many }) => ({
