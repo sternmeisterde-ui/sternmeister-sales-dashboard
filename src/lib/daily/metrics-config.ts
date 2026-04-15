@@ -81,7 +81,9 @@ const qualifierMetrics: MetricDef[] = [
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "okk_p", label: "ОКК план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "okk_f", label: "ОКК факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   { key: "roleplay_p", label: "Оценка за ролевку план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "roleplay_f", label: "Оценка за ролевку факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
 ];
 
 // ====================== SECOND LINE SECTION ======================
@@ -105,7 +107,9 @@ const secondLineMetrics: MetricDef[] = [
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
   { key: "okk_p", label: "ОКК план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "okk_f", label: "ОКК факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   { key: "roleplay_p", label: "Оценка за ролевку план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "roleplay_f", label: "Оценка за ролевку факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
 ];
 
 // ====================== THIRD LINE (Доведение) SECTION ======================
@@ -130,7 +134,9 @@ const thirdLineMetrics: MetricDef[] = [
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "okk_p", label: "ОКК план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "okk_f", label: "ОКК факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   { key: "roleplay_p", label: "Оценка за ролевку план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "roleplay_f", label: "Оценка за ролевку факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
 ];
 
 // ====================== SECTIONS EXPORT ======================

@@ -15,6 +15,11 @@ import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
 import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
 import type { KommoLead, KommoTask, KommoCallNote } from "@/lib/kommo/types";
+import { getOkkDbForDepartment } from "@/lib/db/okk";
+import { okkEvaluations, okkCalls } from "@/lib/db/schema-okk";
+import { getDbForDepartment } from "@/lib/db";
+import { d1Calls, r1Calls } from "@/lib/db/schema-existing";
+import { sql as drizzleSql, and, eq, gte, lte, isNotNull } from "drizzle-orm";
 
 // ==================== Timezone helpers ====================
 
@@ -61,6 +66,66 @@ export function getBusinessToday(): string {
   const d = parts.find((p) => p.type === "day")!.value;
   return `${y}-${m}-${d}`;
 }
+
+// ==================== OKK / Roleplay avg score helpers ====================
+
+/** Get average OKK score for a line on a specific date */
+async function getOkkAvgScore(department: "b2g" | "b2b", fromTs: number, toTs: number, promptTypes: string[]): Promise<number | null> {
+  try {
+    const db = getOkkDbForDepartment(department);
+    const from = new Date(fromTs * 1000);
+    const to = new Date(toTs * 1000);
+    const rows = await db
+      .select({ avg: drizzleSql<number>`round(avg(${okkEvaluations.totalScore}))::int` })
+      .from(okkEvaluations)
+      .innerJoin(okkCalls, eq(okkEvaluations.callId, okkCalls.id))
+      .where(
+        and(
+          gte(okkCalls.callCreatedAt, from),
+          lte(okkCalls.callCreatedAt, to),
+          isNotNull(okkEvaluations.totalScore),
+          drizzleSql`${okkEvaluations.promptType} IN (${drizzleSql.join(promptTypes.map(p => drizzleSql`${p}`), drizzleSql`, `)})`,
+        )
+      );
+    return rows[0]?.avg ?? null;
+  } catch { return null; }
+}
+
+/** Get average roleplay score for a line on a specific date */
+async function getRoleplayAvgScore(department: "b2g" | "b2b", fromTs: number, toTs: number, callTypes: string[]): Promise<number | null> {
+  try {
+    const db = getDbForDepartment(department);
+    const callsTable = department === "b2b" ? r1Calls : d1Calls;
+    const from = new Date(fromTs * 1000);
+    const to = new Date(toTs * 1000);
+    const rows = await db
+      .select({ avg: drizzleSql<number>`round(avg(${callsTable.score}))::int` })
+      .from(callsTable)
+      .where(
+        and(
+          gte(callsTable.startedAt, from),
+          lte(callsTable.startedAt, to),
+          isNotNull(callsTable.score),
+          drizzleSql`${callsTable.callType} IN (${drizzleSql.join(callTypes.map(ct => drizzleSql`${ct}`), drizzleSql`, `)})`,
+        )
+      );
+    return rows[0]?.avg ?? null;
+  } catch { return null; }
+}
+
+// Line → OKK prompt types mapping
+const LINE_TO_OKK_PROMPTS: Record<string, string[]> = {
+  "1": ["d2_qualifier"],
+  "2": ["d2_berater", "d2_berater2"],
+  "3": ["d2_dovedenie"],
+};
+
+// Line → roleplay call types mapping
+const LINE_TO_ROLEPLAY_TYPES: Record<string, string[]> = {
+  "1": ["qualifier"],
+  "2": ["berater"],
+  "3": ["dovedenie"],
+};
 
 // ==================== Period helpers ====================
 
@@ -398,6 +463,21 @@ export async function buildDailyResponse(department: string, period: string, dat
   const managersOnLineCount = managers.length;
   const line1ManagerCount = managers.filter((m) => m.line === "1").length;
 
+  // Fetch OKK and Roleplay avg scores per line (B2G only, parallel)
+  const okkScores = new Map<string, number>();
+  const roleplayScores = new Map<string, number>();
+  if (department === "b2g") {
+    const okkPromises = Object.entries(LINE_TO_OKK_PROMPTS).map(async ([line, prompts]) => {
+      const avg = await getOkkAvgScore("b2g", from, to, prompts);
+      if (avg !== null) okkScores.set(line, avg);
+    });
+    const rpPromises = Object.entries(LINE_TO_ROLEPLAY_TYPES).map(async ([line, types]) => {
+      const avg = await getRoleplayAvgScore("b2g", from, to, types);
+      if (avg !== null) roleplayScores.set(line, avg);
+    });
+    await Promise.all([...okkPromises, ...rpPromises]);
+  }
+
   const activeSections = getDailySections(department);
 
   // B2B-specific: split leads by pipeline for Бух/Мед sections
@@ -488,7 +568,15 @@ export async function buildDailyResponse(department: string, period: string, dat
           fact = slaVal ? String(slaVal) : null;
         }
         if (metric.key === "okk_p") fact = "85";
+        if (metric.key === "okk_f") {
+          const v = okkScores.get(section.dbLine);
+          fact = v !== undefined ? String(v) : null;
+        }
         if (metric.key === "roleplay_p") fact = "85";
+        if (metric.key === "roleplay_f") {
+          const v = roleplayScores.get(section.dbLine);
+          fact = v !== undefined ? String(v) : null;
+        }
         if (metric.key === "avgWait_p") fact = "30";
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
