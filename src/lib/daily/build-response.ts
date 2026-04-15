@@ -480,6 +480,16 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "totalMinutes_p") {
           fact = String(sectionManagers.length * 180);
         }
+        // Fixed constants from Excel
+        if (metric.key === "sla_p") {
+          // SLA: квалификатор=25, доведение=10, бератер=нет данных
+          const slaByLine: Record<string, number> = { "1": 25, "3": 10 };
+          const slaVal = slaByLine[section.dbLine];
+          fact = slaVal ? String(slaVal) : null;
+        }
+        if (metric.key === "okk_p") fact = "85";
+        if (metric.key === "roleplay_p") fact = "85";
+        if (metric.key === "avgWait_p") fact = "30";
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
         }
