@@ -29,15 +29,18 @@ export interface SectionDef {
 // ====================== FUNNEL SECTION ======================
 // Department-wide pipeline metrics (no per-manager breakdown)
 const funnelMetrics: MetricDef[] = [
-  { key: "activeDeals", label: "Сделок на активных этапах, шт.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
-  { key: "managersOnLine", label: "Менеджеров на линии, всего", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
-  // --- Лиды ---
-  { key: "_grp_leads", label: "Лиды", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "totalLeads", label: "Всего лидов", hasPlan: true, hasFact: true, unit: "шт", factSource: "kommo_leads" },
-  { key: "qualLeads", label: "Всего квал лидов", hasPlan: true, hasFact: true, unit: "шт", factSource: "kommo_leads" },
-  { key: "qualLeadsPercent", label: "% квал. лидов", hasPlan: true, hasFact: true, unit: "%", factSource: "computed" },
+  // --- Госники header (from Excel row 82-85) ---
+  { key: "gutscheinsApproved_p", label: "Гутшайн Total план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
+  { key: "gutscheinsApproved", label: "Гутшайн Total факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "gutscheinPlanDone", label: "Выполненного плана %", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "activeDeals", label: "Всего лидов в работе", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "totalLeads_p", label: "Всего лидов план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
+  { key: "totalLeads", label: "Всего лидов факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   // --- Воронка ---
   { key: "_grp_funnel", label: "Воронка", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
+  { key: "qualLeads", label: "Всего квал лидов", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "qualLeadsPercent", label: "% квал. лидов", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "managersOnLine", label: "Менеджеров на линии", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "avgPortfolio", label: "Ср. портфель менеджера", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
   // --- Воронка Бератер ---
   { key: "_grp_terms", label: "Воронка Бератер", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
@@ -53,21 +56,24 @@ const funnelMetrics: MetricDef[] = [
   { key: "beraterReview", label: "На рассмотрении бератера", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "delayedStart", label: "Отложенный старт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "appeal", label: "Апелляция", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
-  { key: "gutscheinsApproved", label: "Одобрено гутшайнов", hasPlan: true, hasFact: true, unit: "шт", factSource: "kommo_leads" },
 ];
 
 // ====================== QUALIFIER (1st LINE) SECTION ======================
 const qualifierMetrics: MetricDef[] = [
-  { key: "staffCount", label: "Кол-во сотрудников", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
+  { key: "staffCount_p", label: "Менеджеров на линии план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
+  { key: "staffCount", label: "Менеджеров на линии факт", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   // --- Звонки ---
   { key: "_grp_calls", label: "Звонки", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "callsTotal", label: "Количество звонков", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  { key: "callsTotal_p", label: "Количество звонков план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
+  { key: "callsTotal", label: "Количество звонков факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   { key: "callsConnected", label: "Дозвон от 1 сек.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
-  { key: "dialPercent", label: "% дозвона", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
+  { key: "dialPercent_p", label: "% дозвона план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
+  { key: "dialPercent", label: "% дозвона факт", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
   { key: "missedIncoming", label: "Пропущенные входящие", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   // --- Время ---
   { key: "_grp_time", label: "Время", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "totalMinutes", label: "Всего на линии (мин)", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  { key: "totalMinutes_p", label: "Всего на линии (мин) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
+  { key: "totalMinutes", label: "Всего на линии (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   { key: "avgDialogPerEmployee", label: "Ср. время в диалоге на сотр.", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "avgDialogMinutes", label: "Ср. время диалога", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   // --- Качество ---
@@ -77,16 +83,20 @@ const qualifierMetrics: MetricDef[] = [
 
 // ====================== SECOND LINE SECTION ======================
 const secondLineMetrics: MetricDef[] = [
-  { key: "staffCount", label: "Кол-во сотрудников", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
+  { key: "staffCount_p", label: "Менеджеров на линии план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
+  { key: "staffCount", label: "Менеджеров на линии факт", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   // --- Звонки ---
   { key: "_grp_calls", label: "Звонки", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "callsTotal", label: "Количество звонков", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  { key: "callsTotal_p", label: "Количество звонков план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
+  { key: "callsTotal", label: "Количество звонков факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   { key: "callsConnected", label: "Дозвон от 1 сек.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
-  { key: "dialPercent", label: "% дозвона", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
+  { key: "dialPercent_p", label: "% дозвона план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
+  { key: "dialPercent", label: "% дозвона факт", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
   { key: "missedIncoming", label: "Пропущенные входящие", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   // --- Время ---
   { key: "_grp_time", label: "Время", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "totalMinutes", label: "Всего на линии (мин)", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  { key: "totalMinutes_p", label: "Всего на линии (мин) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
+  { key: "totalMinutes", label: "Всего на линии (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   { key: "avgDialogPerEmployee", label: "Ср. время в диалоге на сотр.", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "avgDialogMinutes", label: "Ср. время диалога", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   // --- Качество ---
@@ -96,16 +106,20 @@ const secondLineMetrics: MetricDef[] = [
 
 // ====================== THIRD LINE (Доведение) SECTION ======================
 const thirdLineMetrics: MetricDef[] = [
-  { key: "staffCount", label: "Кол-во сотрудников", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
+  { key: "staffCount_p", label: "Менеджеров на линии план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
+  { key: "staffCount", label: "Менеджеров на линии факт", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   // --- Звонки ---
   { key: "_grp_calls", label: "Звонки", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "callsTotal", label: "Количество звонков", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
+  { key: "callsTotal_p", label: "Количество звонков план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
+  { key: "callsTotal", label: "Количество звонков факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   { key: "callsConnected", label: "Дозвон от 1 сек.", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
-  { key: "dialPercent", label: "% дозвона", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
+  { key: "dialPercent_p", label: "% дозвона план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
+  { key: "dialPercent", label: "% дозвона факт", hasPlan: false, hasFact: true, unit: "%", factSource: "kommo_calls" },
   { key: "missedIncoming", label: "Пропущенные входящие", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_calls" },
   // --- Время ---
   { key: "_grp_time", label: "Время", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
-  { key: "totalMinutes", label: "Всего на линии (мин)", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  { key: "totalMinutes_p", label: "Всего на линии (мин) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
+  { key: "totalMinutes", label: "Всего на линии (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   { key: "avgDialogPerEmployee", label: "Ср. время в диалоге на сотр.", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "avgDialogMinutes", label: "Ср. время диалога", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   // --- Качество ---

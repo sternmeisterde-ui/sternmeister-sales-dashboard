@@ -448,19 +448,18 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
       }
 
-      if (department === "b2b") {
-        // Plan-row metrics (key ends with _p): display plan target as the fact value
-        if (metric.hasPlan && !metric.hasFact) {
-          fact = plan;
-        } else {
-          fact = getB2BFact(metric.key, section.key, {
-            summaryCallMetrics, managersOnLineCount, sectionManagers,
-            buhWonLeads, medWonLeads, buhNewLeads, medNewLeads,
-            buhActiveLeads, medActiveLeads, buhPrepayments, medPrepayments,
-            allNewLeads: safeNewLeadsInPeriod, allWonLeads: safeWonLeads,
-            getPlan, sectionDbLine: section.dbLine,
-          });
-        }
+      // Plan-row metrics (hasPlan && !hasFact): display plan target as the fact value
+      // Works for BOTH B2G and B2B
+      if (metric.hasPlan && !metric.hasFact) {
+        fact = plan;
+      } else if (department === "b2b") {
+        fact = getB2BFact(metric.key, section.key, {
+          summaryCallMetrics, managersOnLineCount, sectionManagers,
+          buhWonLeads, medWonLeads, buhNewLeads, medNewLeads,
+          buhActiveLeads, medActiveLeads, buhPrepayments, medPrepayments,
+          allNewLeads: safeNewLeadsInPeriod, allWonLeads: safeWonLeads,
+          getPlan, sectionDbLine: section.dbLine,
+        });
       } else if (section.key === "funnel") {
         fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
       } else {
@@ -486,6 +485,14 @@ export async function buildDailyResponse(department: string, period: string, dat
         } else {
           percent = Math.round((Number(fact) / Number(plan)) * 100);
         }
+      }
+
+      // Computed metrics that need access to other metrics in the same section
+      if (metric.key === "gutscheinPlanDone") {
+        const gutPlan = getPlan(section.dbLine, null, "gutscheinsApproved_p");
+        const gutFactStr = getFunnelFact("gutscheinsApproved", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
+        const gutFact = Number(gutFactStr ?? 0);
+        fact = gutPlan && Number(gutPlan) > 0 ? String(Math.round((gutFact / Number(gutPlan)) * 100)) : "0";
       }
 
       return { key: metric.key, label: metric.label, plan, fact, percent, isGroupHeader: false, isPlanRow: metric.hasPlan && !metric.hasFact };
@@ -1054,6 +1061,9 @@ function getFunnelFact(
         (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860891
       ).length);
     }
+    case "gutscheinPlanDone":
+      // Computed in summaryMetrics loop after plan is resolved — handled there
+      return null;
     case "convQualTask":
       return fc.qualLeadsFlow > 0
         ? String(Math.round(((fc.byMetric.tasksTotal ?? 0) / fc.qualLeadsFlow) * 100))
