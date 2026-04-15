@@ -1018,10 +1018,10 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* WORST CALLS PANEL — D2 only */}
-            {activeTab === "real_calls" && activeDepartment === "b2g" && (() => {
+            {/* WORST CALLS PANEL */}
+            {activeTab === "real_calls" && (() => {
               const { from, to } = getOkkDateRange();
-              return <WorstCallsPanel department="b2g" from={from} to={to} lineFilter={lineFilter} />;
+              return <WorstCallsPanel department={activeDepartment} from={from} to={to} lineFilter={lineFilter} />;
             })()}
 
             {/* DATA TABLE */}
