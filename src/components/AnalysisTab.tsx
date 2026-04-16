@@ -312,32 +312,32 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                         <div className="max-h-[700px] overflow-y-auto space-y-3">
                           <ReactMarkdown components={{
                             h1: ({ children }) => (
-                              <div className="p-4 bg-blue-500/10 rounded-xl border border-blue-500/20 mt-4">
-                                <h2 className="text-[15px] font-bold text-blue-300">{children}</h2>
+                              <div className="p-4 bg-blue-500/10 rounded-xl border border-blue-500/20 mt-6 mb-4">
+                                <h2 className="text-[16px] font-bold text-blue-300">{children}</h2>
                               </div>
                             ),
                             h2: ({ children }) => (
-                              <div className="p-4 bg-slate-800/50 rounded-xl border border-white/5 mt-3">
-                                <h3 className="text-[14px] font-bold text-blue-300 mb-2">{children}</h3>
+                              <div className="p-4 bg-slate-800/50 rounded-xl border border-white/5 mt-6 mb-3">
+                                <h3 className="text-[14px] font-bold text-blue-300">{children}</h3>
                               </div>
                             ),
                             h3: ({ children }) => (
-                              <div className="px-4 pt-3">
+                              <div className="px-4 pt-4 pb-1">
                                 <h4 className="text-[13px] font-bold text-white">{children}</h4>
                               </div>
                             ),
                             p: ({ children }) => (
-                              <p className="text-[12px] text-slate-300 leading-relaxed px-4">{children}</p>
+                              <p className="text-[12px] text-slate-300 leading-[1.8] px-4 mb-3">{children}</p>
                             ),
                             ul: ({ children }) => (
-                              <ul className="space-y-1.5 px-4">{children}</ul>
+                              <ul className="space-y-2.5 px-4 mb-4">{children}</ul>
                             ),
                             ol: ({ children }) => (
-                              <ol className="space-y-1.5 px-4 list-decimal list-inside">{children}</ol>
+                              <ol className="space-y-2.5 px-4 mb-4">{children}</ol>
                             ),
                             li: ({ children }) => (
-                              <li className="text-[12px] text-slate-300 leading-relaxed flex gap-2">
-                                <span className="text-blue-400 shrink-0">•</span>
+                              <li className="text-[12px] text-slate-300 leading-[1.8] flex gap-2">
+                                <span className="text-blue-400 shrink-0 mt-0.5">•</span>
                                 <span>{children}</span>
                               </li>
                             ),
@@ -348,9 +348,9 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                               <em className="text-slate-400 italic">{children}</em>
                             ),
                             blockquote: ({ children }) => (
-                              <blockquote className="border-l-2 border-blue-500/30 pl-3 mx-4 text-[11px] text-slate-400 italic">{children}</blockquote>
+                              <blockquote className="border-l-2 border-blue-500/30 pl-4 mx-4 my-3 text-[11px] text-slate-400 italic">{children}</blockquote>
                             ),
-                            hr: () => <hr className="border-white/5 my-3" />,
+                            hr: () => <hr className="border-white/10 my-5" />,
                           }}>{detail.resultSummary}</ReactMarkdown>
                         </div>
                       </div>
