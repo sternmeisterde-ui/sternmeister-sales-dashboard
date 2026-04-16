@@ -14,7 +14,8 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { department, kommoUrl, mode } = body;
+    const { department, kommoUrl, mode, minDuration } = body;
+    const minDur = Math.max(1, Math.min(60, Number(minDuration) || 5));
 
     if (!department || !kommoUrl || !mode) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
@@ -41,7 +42,7 @@ export async function POST(request: NextRequest) {
       .insert(callAnalyses)
       .values({
         department,
-        kommoUrl,
+        kommoUrl: `${kommoUrl}#minDur=${minDur}`,
         mode,
         status: "pending",
         createdBy: session.name,

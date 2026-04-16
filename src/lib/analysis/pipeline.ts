@@ -22,7 +22,7 @@ import {
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const KOMMO_TOKEN = process.env.KOMMO_ACCESS_TOKEN || "";
-const MIN_DURATION = 300; // 5 min
+const DEFAULT_MIN_DURATION = 300; // 5 min
 const MAX_CALLS = 100;
 
 // ==================== URL PARSER ====================
@@ -192,9 +192,14 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   try {
     await db.update(callAnalyses).set({ status: "processing" }).where(eq(callAnalyses.id, analysisId));
 
+    // Parse minDuration from URL hash
+    const hashMatch = analysis.kommoUrl.match(/#minDur=(\d+)/);
+    const minDuration = hashMatch ? Number(hashMatch[1]) * 60 : DEFAULT_MIN_DURATION;
+    const cleanUrl = analysis.kommoUrl.replace(/#minDur=\d+/, "");
+
     // 1. Fetch leads from Kommo
-    console.log(`[Analysis ${analysisId}] Fetching leads...`);
-    const leads = await fetchLeadsFromUrl(analysis.kommoUrl);
+    console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
+    const leads = await fetchLeadsFromUrl(cleanUrl);
     console.log(`[Analysis ${analysisId}] Found ${leads.length} leads`);
 
     // 2. Fetch call notes for each lead, dedup, filter
@@ -207,7 +212,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       for (const n of notes) {
         const dur = n.params?.duration || 0;
         const link = n.params?.link;
-        if (dur < MIN_DURATION || !link) continue;
+        if (dur < minDuration || !link) continue;
         if (link.includes("localhost")) continue; // skip CallGear internal URLs
         if (seenUrls.has(link)) continue;
         seenUrls.add(link);
