@@ -138,8 +138,8 @@ export const SUCCESS_SUMMARY_PROMPT = `Ты директор по продажа
 /** Per-call analysis — fast model, many calls */
 export const PER_CALL_MODEL = "grok-4-1-fast-reasoning";
 
-/** Summary analysis — smart model, one call with all data */
-export const SUMMARY_MODEL = "grok-4-1";
+/** Summary analysis — same model, larger context for pattern detection */
+export const SUMMARY_MODEL = "grok-4-1-fast-reasoning";
 
 export const PER_CALL_MAX_TOKENS = 4096;
 export const SUMMARY_MAX_TOKENS = 8192;
