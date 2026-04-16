@@ -19,8 +19,10 @@ import {
   Megaphone,
   Globe,
   Pencil,
+  Calendar,
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
+import SchedulePopup from "@/components/SchedulePopup";
 
 // ====================== TYPES ======================
 
@@ -783,6 +785,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
 
   const fetchData = useCallback(
@@ -984,6 +987,13 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             Сейчас
           </button>
           <button
+            onClick={() => setShowSchedule(true)}
+            className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-purple-400 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 transition-colors border border-purple-500/20"
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            Расписание
+          </button>
+          <button
             onClick={() => fetchData()}
             disabled={loading}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors disabled:opacity-30"
@@ -1102,6 +1112,16 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           title={`${MONTH_NAMES[selectedDayIdx]} ${selectedMonth.getFullYear()}`}
         />
       )}
+
+      {/* Schedule popup */}
+      <SchedulePopup
+        isOpen={showSchedule}
+        onClose={() => setShowSchedule(false)}
+        month={selectedMonth}
+        department={department}
+        managers={todaySchedule?.schedule?.allManagers ?? []}
+        onSaved={() => { setShowSchedule(false); fetchData(); }}
+      />
     </div>
   );
 }

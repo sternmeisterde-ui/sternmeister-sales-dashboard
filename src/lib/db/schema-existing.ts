@@ -163,6 +163,7 @@ export const managerSchedule = pgTable("manager_schedule", {
   userId: uuid("user_id").notNull().references(() => d1Users.id),
   scheduleDate: text("schedule_date").notNull(),     // 'YYYY-MM-DD'
   isOnLine: boolean("is_on_line").notNull().default(true),
+  scheduleValue: text("schedule_value"),              // "8", "-", "о", etc.
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

@@ -157,14 +157,34 @@ export async function getScheduleForDate(dateStr: string): Promise<Map<string, b
  */
 export async function getFullScheduleForDate(
   dateStr: string
-): Promise<Array<{ userId: string; isOnLine: boolean }>> {
+): Promise<Array<{ userId: string; isOnLine: boolean; scheduleValue: string | null }>> {
   const rows = await db
     .select({
       userId: managerSchedule.userId,
       isOnLine: managerSchedule.isOnLine,
+      scheduleValue: managerSchedule.scheduleValue,
     })
     .from(managerSchedule)
     .where(eq(managerSchedule.scheduleDate, dateStr));
+
+  return rows;
+}
+
+/**
+ * Get schedule for an entire month: date → userId → { isOnLine, scheduleValue }
+ */
+export async function getScheduleForMonth(
+  monthStr: string
+): Promise<Array<{ userId: string; scheduleDate: string; isOnLine: boolean; scheduleValue: string | null }>> {
+  const rows = await db
+    .select({
+      userId: managerSchedule.userId,
+      scheduleDate: managerSchedule.scheduleDate,
+      isOnLine: managerSchedule.isOnLine,
+      scheduleValue: managerSchedule.scheduleValue,
+    })
+    .from(managerSchedule)
+    .where(sql`${managerSchedule.scheduleDate} LIKE ${monthStr + "%"}`);
 
   return rows;
 }
@@ -175,7 +195,8 @@ export async function getFullScheduleForDate(
 export async function setSchedule(
   userId: string,
   dateStr: string,
-  isOnLine: boolean
+  isOnLine: boolean,
+  scheduleValue?: string | null,
 ): Promise<void> {
   // Check if exists
   const existing = await db
@@ -192,13 +213,14 @@ export async function setSchedule(
   if (existing.length > 0) {
     await db
       .update(managerSchedule)
-      .set({ isOnLine, updatedAt: new Date() })
+      .set({ isOnLine, scheduleValue: scheduleValue ?? null, updatedAt: new Date() })
       .where(eq(managerSchedule.id, existing[0].id));
   } else {
     await db.insert(managerSchedule).values({
       userId,
       scheduleDate: dateStr,
       isOnLine,
+      scheduleValue: scheduleValue ?? null,
     });
   }
 }
