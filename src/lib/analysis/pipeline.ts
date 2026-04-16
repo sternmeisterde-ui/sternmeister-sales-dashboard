@@ -239,14 +239,35 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     console.log(`[Analysis ${analysisId}] ${cappedCalls.length} calls to process`);
 
     // 3. Transcribe + analyze each call
+    // Resume support: check which files already exist
+    const existingFiles = await db
+      .select({ filename: callAnalysisFiles.filename, content: callAnalysisFiles.content })
+      .from(callAnalysisFiles)
+      .where(eq(callAnalysisFiles.analysisId, analysisId));
+    const existingSet = new Set(existingFiles.map(f => f.filename));
+
     const allAnalyses: string[] = [];
-    let processed = 0;
+    // Recover analyses from already-processed files
+    for (const f of existingFiles) {
+      if (f.content.includes("## Анализ")) {
+        const match = f.content.match(/## Анализ\n\n([\s\S]+)$/);
+        if (match) allAnalyses.push(match[1].trim());
+      }
+    }
+
+    let processed = analysis.processedCalls || 0;
 
     for (const call of cappedCalls) {
-      const num = String(processed + 1).padStart(2, "0");
+      const num = String(cappedCalls.indexOf(call) + 1).padStart(2, "0");
       const dateStr = call.date.toLocaleDateString("ru-RU");
       const durMin = Math.round(call.duration / 60);
       const filename = `call_${num}_lead${call.leadId}.md`;
+
+      // Skip already processed
+      if (existingSet.has(filename)) {
+        console.log(`[Analysis ${analysisId}] [${num}] Skip (already done)`);
+        continue;
+      }
 
       console.log(`[Analysis ${analysisId}] [${num}/${cappedCalls.length}] Transcribing lead ${call.leadId}...`);
 
