@@ -187,7 +187,47 @@ export const dailySnapshots = pgTable("daily_snapshots", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
+// ==================== CALL ANALYSES ====================
+
+export const callAnalyses = pgTable("call_analyses", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  department: text("department").notNull(),         // 'b2g' | 'b2b'
+  kommoUrl: text("kommo_url").notNull(),
+  mode: text("mode").notNull(),                     // 'success' | 'failure'
+  status: text("status").notNull().default("pending"), // 'pending' | 'processing' | 'done' | 'error'
+  progress: integer("progress").default(0),         // 0-100
+  totalCalls: integer("total_calls").default(0),
+  processedCalls: integer("processed_calls").default(0),
+  errorMessage: text("error_message"),
+  resultSummary: text("result_summary"),            // Grok summary markdown
+  createdBy: text("created_by"),                    // user name
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+});
+
+export const callAnalysisFiles = pgTable("call_analysis_files", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  analysisId: uuid("analysis_id").notNull().references(() => callAnalyses.id, { onDelete: "cascade" }),
+  filename: text("filename").notNull(),
+  content: text("content").notNull(),               // markdown content
+  fileType: text("file_type").notNull(),            // 'transcript' | 'summary' | 'index'
+  leadId: text("lead_id"),
+  callScore: integer("call_score"),                 // Grok-assigned relevance score
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 // ==================== RELATIONS ====================
+
+export const callAnalysesRelations = relations(callAnalyses, ({ many }) => ({
+  files: many(callAnalysisFiles),
+}));
+
+export const callAnalysisFilesRelations = relations(callAnalysisFiles, ({ one }) => ({
+  analysis: one(callAnalyses, {
+    fields: [callAnalysisFiles.analysisId],
+    references: [callAnalyses.id],
+  }),
+}));
 
 export const d1UsersRelations = relations(d1Users, ({ many }) => ({
   calls: many(d1Calls),

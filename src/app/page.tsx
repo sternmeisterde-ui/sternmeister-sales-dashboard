@@ -13,6 +13,7 @@ import AnalyticsTab from "@/components/AnalyticsTab";
 import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
+import AnalysisTab from "@/components/AnalysisTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
 import WorstCallsPanel from "@/components/WorstCallsPanel";
@@ -68,7 +69,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "call_analysis">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3">("all");
 
   // Load session on mount
@@ -673,6 +674,7 @@ export default function Dashboard() {
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
             { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
+            { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
             { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
@@ -765,6 +767,9 @@ export default function Dashboard() {
         )}
 
         {/* --------------------- CRITERIA VIEW --------------------- */}
+        {activeTab === "call_analysis" && (
+          <AnalysisTab department={activeDepartment} />
+        )}
         {activeTab === "criteria" && (
           <CriteriaTab department={activeDepartment} lineFilter={lineFilter} />
         )}
