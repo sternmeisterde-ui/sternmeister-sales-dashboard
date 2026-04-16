@@ -198,11 +198,22 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     const cleanUrl = analysis.kommoUrl.replace(/#minDur=\d+/, "");
 
     // 1. Fetch leads from Kommo
+    await db.update(callAnalyses).set({ errorMessage: "Загрузка лидов из Kommo..." }).where(eq(callAnalyses.id, analysisId));
     console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
     const leads = await fetchLeadsFromUrl(cleanUrl);
     console.log(`[Analysis ${analysisId}] Found ${leads.length} leads`);
 
+    if (leads.length === 0) {
+      await db.update(callAnalyses).set({
+        status: "error",
+        errorMessage: "Не найдено лидов по указанной ссылке. Проверьте фильтр в Kommo.",
+      }).where(eq(callAnalyses.id, analysisId));
+      return;
+    }
+
     // 2. Fetch call notes for each lead, dedup, filter
+    await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
+
     const seenUrls = new Set<string>();
     interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
     const calls: CallRecord[] = [];
@@ -213,7 +224,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         const dur = n.params?.duration || 0;
         const link = n.params?.link;
         if (dur < minDuration || !link) continue;
-        if (link.includes("localhost")) continue; // skip CallGear internal URLs
+        if (link.includes("localhost")) continue;
         if (seenUrls.has(link)) continue;
         seenUrls.add(link);
         calls.push({
@@ -235,12 +246,12 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     if (cappedCalls.length === 0) {
       await db.update(callAnalyses).set({
         status: "error",
-        errorMessage: `Не найдено звонков ≥5 мин (лидов: ${leads.length}, notes: ${calls.length})`,
+        errorMessage: `Не найдено звонков ≥${minDuration/60} мин среди ${leads.length} сделок.`,
       }).where(eq(callAnalyses.id, analysisId));
       return;
     }
 
-    await db.update(callAnalyses).set({ totalCalls: cappedCalls.length }).where(eq(callAnalyses.id, analysisId));
+    await db.update(callAnalyses).set({ totalCalls: cappedCalls.length, errorMessage: null }).where(eq(callAnalyses.id, analysisId));
     console.log(`[Analysis ${analysisId}] ${cappedCalls.length} calls to process`);
 
     // 3. Transcribe + analyze each call

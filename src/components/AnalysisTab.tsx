@@ -276,7 +276,8 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                     <div className="mt-3">
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-[13px] text-blue-400 font-bold">
-                          {a.status === "pending" ? "Загрузка лидов из Kommo..." :
+                          {a.errorMessage ? a.errorMessage :
+                           a.status === "pending" ? "Запуск..." :
                            a.progress < 10 ? "Транскрибация звонков..." :
                            a.progress < 90 ? `Анализ звонков: ${a.processedCalls}/${a.totalCalls}` :
                            "Генерация сводного отчёта..."}
