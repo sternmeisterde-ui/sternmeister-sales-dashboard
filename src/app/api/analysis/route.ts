@@ -48,11 +48,8 @@ export async function POST(request: NextRequest) {
       })
       .returning();
 
-    // Launch pipeline in background (don't await)
-    runAnalysisPipeline(analysis.id).catch((err) => {
-      console.error(`[Analysis ${analysis.id}] Pipeline failed:`, err);
-    });
-
+    // Don't run pipeline here — serverless function dies after response.
+    // Frontend will call /api/analysis/process to start the long-running job.
     return NextResponse.json({ success: true, id: analysis.id });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

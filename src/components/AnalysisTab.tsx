@@ -75,6 +75,8 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       if (json.success) {
         setKommoUrl("");
         await fetchList();
+        // Trigger background processing (long-running — fire and forget)
+        fetch("/api/analysis/process").catch(() => {});
       }
     } catch { /* ignore */ }
     finally { setSubmitting(false); }
