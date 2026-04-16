@@ -160,59 +160,77 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
               <div key={a.id}>
                 <button
                   onClick={() => a.status === "done" ? fetchDetail(a.id) : null}
-                  className={`w-full px-4 py-3 flex items-center gap-3 text-left transition-colors ${
+                  className={`w-full px-4 py-4 text-left transition-colors ${
                     isActive ? "bg-blue-500/10" : "hover:bg-white/[0.02]"
                   } ${a.status !== "done" ? "cursor-default" : "cursor-pointer"}`}
                 >
-                  {/* Status icon */}
-                  {a.status === "done" && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-                  {a.status === "error" && <XCircle className="w-4 h-4 text-rose-400 shrink-0" />}
-                  {(a.status === "pending" || a.status === "processing") && <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />}
+                  {/* Row 1: status + mode + url + calls count + actions */}
+                  <div className="flex items-center gap-3">
+                    {a.status === "done" && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+                    {a.status === "error" && <XCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                    {(a.status === "pending" || a.status === "processing") && <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />}
 
-                  {/* Mode badge */}
-                  <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                    a.mode === "success" ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"
-                  }`}>
-                    {a.mode === "success" ? "Успех" : "Потеря"}
-                  </span>
+                    <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
+                      a.mode === "success" ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"
+                    }`}>
+                      {a.mode === "success" ? "Успех" : "Потеря"}
+                    </span>
 
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[12px] text-white truncate">{a.kommoUrl.substring(0, 60)}...</div>
-                    <div className="text-[10px] text-slate-500">
-                      {new Date(a.createdAt).toLocaleDateString("ru-RU")} · {a.totalCalls || "?"} звонков
-                      {a.status === "processing" && ` · ${a.processedCalls}/${a.totalCalls} (${a.progress}%)`}
+                    <div className="flex-1 min-w-0">
+                      <span className="text-[12px] text-white truncate block">{a.kommoUrl.substring(0, 60)}...</span>
+                      <span className="text-[10px] text-slate-500">{new Date(a.createdAt).toLocaleDateString("ru-RU")}</span>
                     </div>
+
+                    {/* Calls count — large */}
+                    <span className="text-[18px] font-bold tabular-nums text-white shrink-0">
+                      {a.totalCalls || "—"}
+                      <span className="text-[10px] text-slate-500 font-normal ml-1">зв.</span>
+                    </span>
+
+                    {days !== null && days > 0 && (
+                      <span className="text-[10px] text-slate-500 flex items-center gap-1 shrink-0">
+                        <Clock className="w-3 h-3" /> {days}д
+                      </span>
+                    )}
+
+                    {a.status === "done" && (
+                      <a href={`/api/analysis/${a.id}/download`} onClick={(e) => e.stopPropagation()}
+                        className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10 shrink-0">
+                        <Download className="w-4 h-4" />
+                      </a>
+                    )}
+
+                    {a.status === "error" && (
+                      <span className="text-[10px] text-rose-400 max-w-[200px] truncate shrink-0">{a.errorMessage}</span>
+                    )}
                   </div>
 
-                  {/* Progress bar for processing */}
-                  {a.status === "processing" && (
-                    <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${a.progress}%` }} />
+                  {/* Row 2: Progress bar + time estimate (only for processing) */}
+                  {(a.status === "pending" || a.status === "processing") && (
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] text-blue-400 font-medium">
+                          {a.status === "pending" ? "Загрузка лидов из Kommo..." :
+                           a.progress < 10 ? "Транскрибация звонков..." :
+                           a.progress < 90 ? `Анализ звонков: ${a.processedCalls}/${a.totalCalls}` :
+                           "Генерация сводного отчёта..."}
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          {a.totalCalls > 0 && a.processedCalls > 0 ? (
+                            `~${Math.max(1, Math.round((a.totalCalls - a.processedCalls) * 8))} мин`
+                          ) : a.totalCalls > 0 ? (
+                            `~${Math.round(a.totalCalls * 8)} мин`
+                          ) : "определяем..."}
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full transition-all duration-500"
+                          style={{ width: `${Math.max(2, a.progress)}%` }}
+                        />
+                      </div>
+                      <div className="text-[10px] text-slate-600 mt-1 text-right">{a.progress}%</div>
                     </div>
-                  )}
-
-                  {/* Days left */}
-                  {days !== null && days > 0 && (
-                    <span className="text-[10px] text-slate-500 flex items-center gap-1">
-                      <Clock className="w-3 h-3" /> {days}д
-                    </span>
-                  )}
-
-                  {/* Download */}
-                  {a.status === "done" && (
-                    <a
-                      href={`/api/analysis/${a.id}/download`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="p-1.5 rounded-lg text-blue-400 hover:bg-blue-500/10"
-                    >
-                      <Download className="w-4 h-4" />
-                    </a>
-                  )}
-
-                  {/* Error */}
-                  {a.status === "error" && (
-                    <span className="text-[10px] text-rose-400 max-w-[150px] truncate">{a.errorMessage}</span>
                   )}
                 </button>
 
