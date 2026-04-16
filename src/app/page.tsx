@@ -666,7 +666,7 @@ export default function Dashboard() {
           </button>
         </div>
 
-        <nav className="flex flex-col gap-2 mt-4 w-full">
+        <nav className="flex flex-col gap-2 mt-4 w-full" style={{ fontFamily: 'var(--font-jetbrains), "Fira Code", monospace' }}>
           {[
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
