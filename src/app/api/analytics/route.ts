@@ -496,7 +496,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const effectiveLine = (department === "b2b" || source === "roleplay") ? "all" : line;
+    const effectiveLine = department === "b2b" ? "all" : line;
     const cacheKey = `analytics:${department}:${source}:${effectiveLine}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
