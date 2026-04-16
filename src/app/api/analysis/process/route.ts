@@ -11,9 +11,9 @@ export const maxDuration = 300;
 /**
  * GET /api/analysis/process
  *
- * Called repeatedly by frontend while analysis is pending/processing.
- * Runs the full pipeline — relies on Dokploy proxy timeout (5-10 min).
- * Progress saved incrementally so partial results survive timeout.
+ * Uses streaming response to keep the connection alive during
+ * long-running pipeline (prevents proxy timeout after 60s).
+ * Sends periodic heartbeat comments while pipeline runs.
  */
 export async function GET() {
   const session = await getSession();
@@ -33,10 +33,40 @@ export async function GET() {
     return NextResponse.json({ status: "idle" });
   }
 
-  try {
-    await runAnalysisPipeline(pending.id);
-    return NextResponse.json({ status: "done", id: pending.id });
-  } catch (err) {
-    return NextResponse.json({ status: "error", id: pending.id, error: String(err) });
-  }
+  // Use streaming to keep connection alive during long pipeline
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      // Send initial message
+      controller.enqueue(encoder.encode(`data: {"status":"started","id":"${pending.id}"}\n\n`));
+
+      // Heartbeat every 20s to prevent proxy timeout
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`data: {"heartbeat":true}\n\n`));
+        } catch {
+          clearInterval(heartbeat);
+        }
+      }, 20000);
+
+      try {
+        await runAnalysisPipeline(pending.id);
+        controller.enqueue(encoder.encode(`data: {"status":"done","id":"${pending.id}"}\n\n`));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        controller.enqueue(encoder.encode(`data: {"status":"error","error":"${msg.replace(/"/g, '\\"')}"}\n\n`));
+      } finally {
+        clearInterval(heartbeat);
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
 }

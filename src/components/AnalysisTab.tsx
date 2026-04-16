@@ -46,16 +46,23 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     finally { setLoading(false); }
   }, [department]);
 
-  // Trigger processing — calls /process which runs the pipeline
-  const triggerProcessing = useCallback(async () => {
-    try {
-      const res = await fetch("/api/analysis/process");
-      const json = await res.json();
-      await fetchList();
-      if (json.status === "error" || json.status === "done") return;
-    } catch {
-      await fetchList();
-    }
+  // Trigger processing — SSE stream keeps connection alive
+  const triggerProcessing = useCallback(() => {
+    const es = new EventSource("/api/analysis/process");
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status === "done" || data.status === "error") {
+          es.close();
+          fetchList();
+        }
+        // heartbeats are ignored (keep-alive)
+      } catch { /* ignore parse errors */ }
+    };
+    es.onerror = () => {
+      es.close();
+      fetchList();
+    };
   }, [fetchList]);
 
   useEffect(() => { setLoading(true); fetchList(); }, [fetchList]);
