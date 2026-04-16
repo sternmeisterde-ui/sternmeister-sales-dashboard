@@ -248,14 +248,14 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                   {/* Row 2: Progress bar + time estimate (only for processing) */}
                   {(a.status === "pending" || a.status === "processing") && (
                     <div className="mt-3">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-[11px] text-blue-400 font-medium">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[13px] text-blue-400 font-bold">
                           {a.status === "pending" ? "Загрузка лидов из Kommo..." :
                            a.progress < 10 ? "Транскрибация звонков..." :
                            a.progress < 90 ? `Анализ звонков: ${a.processedCalls}/${a.totalCalls}` :
                            "Генерация сводного отчёта..."}
                         </span>
-                        <span className="text-[11px] text-slate-500">
+                        <span className="text-[14px] text-blue-300 font-bold">
                           {a.totalCalls > 0 && a.processedCalls > 0 ? (
                             `~${Math.max(1, Math.round((a.totalCalls - a.processedCalls) * 8))} мин`
                           ) : a.totalCalls > 0 ? (
@@ -263,13 +263,13 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                           ) : "определяем..."}
                         </span>
                       </div>
-                      <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div className="w-full h-3 bg-slate-700 rounded-full overflow-hidden">
                         <div
                           className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full transition-all duration-500"
                           style={{ width: `${Math.max(2, a.progress)}%` }}
                         />
                       </div>
-                      <div className="text-[10px] text-slate-600 mt-1 text-right">{a.progress}%</div>
+                      <div className="text-[16px] text-blue-400 font-bold mt-2 text-right">{a.progress}%</div>
                     </div>
                   )}
                 </button>
