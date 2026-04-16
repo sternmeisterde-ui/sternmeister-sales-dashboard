@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 interface Analysis {
   id: string;
@@ -303,32 +304,36 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
 
                 {/* Detail view */}
                 {isActive && detail && (
-                  <div className="px-4 pb-4 bg-slate-900/30">
-                    {/* Summary */}
+                  <div className="px-4 pb-5 bg-slate-900/30 space-y-4">
+                    {/* Summary — rendered markdown */}
                     {detail.resultSummary && (
-                      <div className="mt-2 p-4 bg-slate-800/30 rounded-xl border border-white/5">
-                        <div className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-2">Сводный анализ</div>
-                        <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[400px] overflow-y-auto">
-                          {detail.resultSummary}
+                      <div className="mt-2 p-5 bg-slate-800/30 rounded-xl border border-white/5">
+                        <div className="text-[11px] uppercase tracking-widest text-blue-400 font-bold mb-4">Сводный анализ</div>
+                        <div className="prose prose-invert prose-sm max-w-none
+                          prose-headings:text-blue-300 prose-headings:font-bold prose-headings:border-b prose-headings:border-white/10 prose-headings:pb-2 prose-headings:mb-3
+                          prose-h2:text-[15px] prose-h2:mt-6 prose-h3:text-[13px] prose-h3:mt-4
+                          prose-p:text-slate-300 prose-p:text-[12px] prose-p:leading-relaxed
+                          prose-li:text-slate-300 prose-li:text-[12px]
+                          prose-strong:text-white
+                          prose-ul:space-y-1 prose-ol:space-y-1
+                          max-h-[600px] overflow-y-auto">
+                          <ReactMarkdown>{detail.resultSummary}</ReactMarkdown>
                         </div>
                       </div>
                     )}
 
-                    {/* Files */}
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      {detail.files.filter(f => f.fileType === "transcript").map((f) => (
-                        <span key={f.id} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-800/50 text-[10px] text-slate-400 border border-white/5">
-                          <FileText className="w-3 h-3" /> {f.filename}
-                        </span>
-                      ))}
+                    {/* Files + Download */}
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <a
+                        href={`/api/analysis/${detail.id}/download`}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-500 text-white text-xs font-bold hover:bg-blue-400 transition-colors"
+                      >
+                        <Download className="w-4 h-4" /> Скачать все файлы
+                      </a>
+                      <span className="text-[11px] text-slate-500">
+                        {detail.files.filter(f => f.fileType === "transcript").length} транскриптов + сводка
+                      </span>
                     </div>
-
-                    <a
-                      href={`/api/analysis/${detail.id}/download`}
-                      className="inline-flex items-center gap-2 mt-3 px-4 py-2 rounded-xl bg-blue-500/20 text-blue-400 text-xs font-bold hover:bg-blue-500/30 transition-colors"
-                    >
-                      <Download className="w-4 h-4" /> Скачать все файлы
-                    </a>
                   </div>
                 )}
               </div>

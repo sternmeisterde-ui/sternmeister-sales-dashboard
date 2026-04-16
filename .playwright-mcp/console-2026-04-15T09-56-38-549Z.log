@@ -1,0 +1,82 @@
+[     575ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[     651ms] [LOG] [Fast Refresh] done in 179ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[    1078ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[    1184ms] [LOG] [HMR] connected @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[    1445ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[    1482ms] [LOG] [Fast Refresh] done in 138ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   56974ms] [ERROR] In HTML, %s cannot be a descendant of <%s>.
+This will cause a hydration error.%s <button> button 
+
+  ...
+    <RedirectErrorBoundary router={{...}}>
+      <InnerLayoutRouter url="/" tree={[...]} params={{}} cacheNode={{rsc:<Fragment>, ...}} segmentPath={[...]} ...>
+        <SegmentViewNode type="page" pagePath="/Dashbord/...">
+          <SegmentTrieNode>
+          <ClientPageRoot Component={function Dashboard} serverProvidedParams={{...}}>
+            <Dashboard params={Promise} searchParams={Promise}>
+              <div className="flex sm:fl...">
+                <div>
+                <div>
+                <div>
+                <aside>
+                <main className="flex-1 fle...">
+                  <header>
+                  <DashboardTab department="b2g">
+                    <div className="flex flex-...">
+                      <div className="flex flex-...">
+                        <div className="flex items...">
+                          <div>
+                          <CalendarPicker mode="single" value={{start:Date, ...}} onChange={function onChange} ...>
+                            <div ref={{current:null}} className={"relative "}>
+>                             <button
+>                               onClick={function onClick}
+>                               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold tran..."
+>                             >
+                                <Calendar>
+                                <span>
+>                               <button
+>                                 type="button"
+>                                 onClick={function onClick}
+>                                 className="ml-0.5 p-0.5 hover:bg-white/10 rounded transition-colors"
+>                               >
+                        ...
+                      ...
+        ...
+      ...
+ @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:3127
+[   57304ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   57488ms] [LOG] [Fast Refresh] done in 286ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   59277ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   59570ms] [LOG] [Fast Refresh] done in 394ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 3682695ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 3682839ms] [LOG] [Fast Refresh] done in 253ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 4036866ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 4036923ms] [LOG] [Fast Refresh] done in 163ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 4508536ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 4508549ms] [LOG] [Fast Refresh] done in 121ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 5960484ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 5960710ms] [LOG] [Fast Refresh] done in 348ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9376817ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9377049ms] [LOG] [Fast Refresh] done in 336ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9382869ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9383273ms] [LOG] [Fast Refresh] done in 506ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9406990ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9408587ms] [LOG] [Fast Refresh] done in 1501ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9408895ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409002ms] [LOG] [Fast Refresh] done in 207ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409137ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409302ms] [LOG] [Fast Refresh] done in 267ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409540ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409562ms] [LOG] [Fast Refresh] done in 122ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409737ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409832ms] [LOG] [Fast Refresh] done in 196ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9409992ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9410383ms] [LOG] [Fast Refresh] done in 492ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9465451ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9465567ms] [LOG] [Fast Refresh] done in 189ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9492056ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9492420ms] [LOG] [Fast Refresh] done in 359ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9509938ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[ 9511257ms] [LOG] [Fast Refresh] done in 1324ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[10008704ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[10009385ms] [LOG] [Fast Refresh] done in 743ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297

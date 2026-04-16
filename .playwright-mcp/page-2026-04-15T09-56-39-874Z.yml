@@ -1,0 +1,29 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - img "Logo" [ref=e7]
+          - generic [ref=e8]:
+            - heading "Sternmeister" [level=1] [ref=e9]
+            - paragraph [ref=e10]: Dashboard
+        - button [ref=e11]:
+          - img [ref=e12]
+      - navigation [ref=e13]:
+        - button "ОКК" [ref=e14]:
+          - img [ref=e15]
+          - generic [ref=e17]: ОКК
+        - button "AI Ролевки" [ref=e18]:
+          - img [ref=e19]
+          - generic [ref=e22]: AI Ролевки
+    - main [ref=e23]:
+      - generic [ref=e25]: Коммерсы (B2B)
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - img [ref=e30]
+          - img [ref=e35]
+          - img [ref=e40]
+        - generic [ref=e56]: Загрузка данных...
+  - button "Open Next.js Dev Tools" [ref=e62] [cursor=pointer]:
+    - img [ref=e63]
+  - alert [ref=e66]

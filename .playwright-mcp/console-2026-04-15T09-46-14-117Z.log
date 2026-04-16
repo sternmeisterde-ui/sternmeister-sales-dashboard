@@ -1,0 +1,10 @@
+[    5247ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[    5458ms] [LOG] [HMR] connected @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   10722ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   10899ms] [LOG] [Fast Refresh] done in 278ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   86097ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[   86112ms] [LOG] [Fast Refresh] done in 119ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[  385245ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[  385259ms] [LOG] [Fast Refresh] done in 130ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[  434973ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
+[  435061ms] [LOG] [Fast Refresh] done in 193ms @ http://localhost:3008/_next/static/chunks/be46d_next_dist_abecaf58._.js:2297
