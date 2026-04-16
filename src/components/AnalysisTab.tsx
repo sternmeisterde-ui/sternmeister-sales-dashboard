@@ -45,15 +45,36 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     finally { setLoading(false); }
   }, [department]);
 
+  // Trigger processing — calls /process which runs the pipeline
+  const triggerProcessing = useCallback(async () => {
+    try {
+      const res = await fetch("/api/analysis/process");
+      const json = await res.json();
+      await fetchList();
+      if (json.status === "error" || json.status === "done") return;
+    } catch {
+      await fetchList();
+    }
+  }, [fetchList]);
+
   useEffect(() => { setLoading(true); fetchList(); }, [fetchList]);
 
-  // Auto-refresh for processing analyses
+  // Auto-refresh + auto-trigger processing
   useEffect(() => {
-    const hasProcessing = analyses.some(a => a.status === "pending" || a.status === "processing");
-    if (!hasProcessing) return;
-    const interval = setInterval(fetchList, 5000);
-    return () => clearInterval(interval);
-  }, [analyses, fetchList]);
+    const hasActive = analyses.some(a => a.status === "pending" || a.status === "processing");
+    if (!hasActive) return;
+
+    // Poll list every 5s for progress updates
+    const listInterval = setInterval(fetchList, 5000);
+
+    // Trigger processing if pending
+    const hasPending = analyses.some(a => a.status === "pending");
+    if (hasPending) {
+      triggerProcessing();
+    }
+
+    return () => clearInterval(listInterval);
+  }, [analyses, fetchList, triggerProcessing]);
 
   const fetchDetail = async (id: string) => {
     setSelectedId(id);
@@ -75,8 +96,8 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       if (json.success) {
         setKommoUrl("");
         await fetchList();
-        // Trigger background processing (long-running — fire and forget)
-        fetch("/api/analysis/process").catch(() => {});
+        // Start processing — long-running request, runs until done or timeout
+        triggerProcessing();
       }
     } catch { /* ignore */ }
     finally { setSubmitting(false); }

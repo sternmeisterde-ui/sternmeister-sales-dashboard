@@ -1,29 +1,32 @@
 import { NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses } from "@/lib/db/schema-existing";
-import { eq } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
+import { getSession } from "@/lib/auth";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 /**
  * GET /api/analysis/process
  *
- * Starts processing a pending analysis. The pipeline runs as a
- * long-running operation within this request. For Dokploy (Docker),
- * the timeout is controlled by the reverse proxy (default 300-600s).
- *
- * For very large analyses (100 calls), the pipeline saves progress
- * incrementally so if it times out, the partial results are preserved.
+ * Called repeatedly by frontend while analysis is pending/processing.
+ * Runs the full pipeline — relies on Dokploy proxy timeout (5-10 min).
+ * Progress saved incrementally so partial results survive timeout.
  */
-export const dynamic = "force-dynamic";
-
 export async function GET() {
+  const session = await getSession();
+  if (!session || session.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const db = getDbForDepartment("b2g");
 
-  // Find pending or stuck processing analysis
   const [pending] = await db
     .select({ id: callAnalyses.id, status: callAnalyses.status })
     .from(callAnalyses)
-    .where(eq(callAnalyses.status, "pending"))
+    .where(or(eq(callAnalyses.status, "pending"), eq(callAnalyses.status, "processing")))
     .limit(1);
 
   if (!pending) {

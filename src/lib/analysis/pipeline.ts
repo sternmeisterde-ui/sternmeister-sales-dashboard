@@ -172,9 +172,9 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
 
   if (!analysis) throw new Error("Analysis not found");
 
-  // Guard: don't re-process
-  if (analysis.status !== "pending") {
-    console.warn(`[Analysis ${analysisId}] Already ${analysis.status}, skipping`);
+  // Guard: only process pending or processing (resume after timeout)
+  if (analysis.status !== "pending" && analysis.status !== "processing") {
+    console.warn(`[Analysis ${analysisId}] Status ${analysis.status}, skipping`);
     return;
   }
 
