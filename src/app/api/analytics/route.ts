@@ -108,6 +108,21 @@ function getOkkPromptType(department: string, line: string): string | null {
   }
 }
 
+// ─── Name normalization (old evaluation versions used different names) ──
+
+const BLOCK_NAME_MAP: Record<string, string> = {
+  "Предзакрытие и FOMO": "Предзакрытие и ФОМО",
+};
+
+const CRITERIA_NAME_MAP: Record<string, string> = {
+  "Экспертный стиль установновления раппорта": "Экспертный стиль установления раппорта",
+  'Продавец корректно отработал ложные возражения ("подумаю", "посоветуюсь", "не сейчас")': "Продавец корректно отработал ложные возражения",
+};
+
+function normalizeName(name: string, map: Record<string, string>): string {
+  return map[name] ?? name;
+}
+
 // ─── Accumulator ────────────────────────────────────────────
 
 interface PeriodAcc {
@@ -140,8 +155,9 @@ function processBlocks(
   for (const rawBlock of blocks) {
     // Safely extract fields — handles both OKK EvalBlock and roleplay inline types
     const block = rawBlock as Record<string, unknown>;
-    const name = typeof block.name === "string" ? block.name : "";
-    if (!name || EXCLUDED_BLOCKS.has(name)) continue;
+    const rawName = typeof block.name === "string" ? block.name : "";
+    if (!rawName || EXCLUDED_BLOCKS.has(rawName)) continue;
+    const name = normalizeName(rawName, BLOCK_NAME_MAP);
 
     const blockScore = typeof block.block_score === "number" ? block.block_score
       : typeof block.score === "number" ? block.score : 0;
@@ -160,10 +176,11 @@ function processBlocks(
     const criteria = Array.isArray(block.criteria) ? block.criteria : [];
     for (const rawC of criteria) {
       const c = rawC as Record<string, unknown>;
-      const cName = typeof c.name === "string" ? c.name : "";
+      const rawCName = typeof c.name === "string" ? c.name : "";
       const cScore = typeof c.score === "number" ? c.score : 0;
       const cMax = typeof c.max_score === "number" ? c.max_score : 0;
-      if (!cName || cMax <= 0) continue;
+      if (!rawCName || cMax <= 0) continue;
+      const cName = normalizeName(rawCName, CRITERIA_NAME_MAP);
 
       const pct = Math.round((cScore / cMax) * 100);
       const key = `${name}::${cName}`;
