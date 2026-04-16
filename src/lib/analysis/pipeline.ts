@@ -160,11 +160,6 @@ async function callGrok(systemPrompt: string, userContent: string, model: string
 export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   const db = getMainDb("b2g"); // analyses stored in D1 (main DB)
 
-  // Validate API keys upfront
-  if (!ASSEMBLYAI_KEY) throw new Error("ASSEMBLYAI_API_KEY is not configured");
-  if (!XAI_API_KEY) throw new Error("XAI_API_KEY is not configured");
-  if (!KOMMO_TOKEN) throw new Error("KOMMO_ACCESS_TOKEN is not configured");
-
   const [analysis] = await db
     .select()
     .from(callAnalyses)
@@ -175,6 +170,18 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   // Guard: only process pending or processing (resume after timeout)
   if (analysis.status !== "pending" && analysis.status !== "processing") {
     console.warn(`[Analysis ${analysisId}] Status ${analysis.status}, skipping`);
+    return;
+  }
+
+  // Validate API keys — save error to DB if missing
+  const missingKeys = [];
+  if (!ASSEMBLYAI_KEY) missingKeys.push("ASSEMBLYAI_API_KEY");
+  if (!XAI_API_KEY) missingKeys.push("XAI_API_KEY");
+  if (!KOMMO_TOKEN) missingKeys.push("KOMMO_ACCESS_TOKEN");
+  if (missingKeys.length > 0) {
+    const msg = `Не настроены переменные окружения: ${missingKeys.join(", ")}. Добавьте в Dokploy Environment.`;
+    await db.update(callAnalyses).set({ status: "error", errorMessage: msg }).where(eq(callAnalyses.id, analysisId));
+    console.error(`[Analysis ${analysisId}] ${msg}`);
     return;
   }
 
