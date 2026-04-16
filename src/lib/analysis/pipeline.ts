@@ -299,7 +299,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         md += `## Транскрипт\n\n⚠️ Не удалось транскрибировать запись.\n`;
         await db.insert(callAnalysisFiles).values({
           analysisId, filename, content: md, fileType: "transcript", leadId: String(call.leadId),
-        });
+        }).onConflictDoUpdate({ target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename], set: { content: md } });
       } else {
         md += `## Транскрипт\n\n${transcript.speakers}\n\n`;
 
@@ -311,7 +311,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
 
         await db.insert(callAnalysisFiles).values({
           analysisId, filename, content: md, fileType: "transcript", leadId: String(call.leadId),
-        });
+        }).onConflictDoUpdate({ target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename], set: { content: md } });
       }
 
       processed++;
@@ -338,15 +338,6 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       content: `# Сводный анализ\n\n${summary}`,
       fileType: "summary",
     });
-
-    // Save index file
-    let indexMd = `# Индекс звонков\n\n`;
-    indexMd += `| # | Дата | Длительность | Lead ID |\n|---|------|-------------|--------|\n`;
-    for (let i = 0; i < cappedCalls.length; i++) {
-      const c = cappedCalls[i];
-      indexMd += `| ${i + 1} | ${c.date.toLocaleDateString("ru-RU")} | ${Math.round(c.duration / 60)} мин | ${c.leadId} |\n`;
-    }
-    await db.insert(callAnalysisFiles).values({ analysisId, filename: "INDEX.md", content: indexMd, fileType: "index" });
 
     // Done
     await db.update(callAnalyses).set({
