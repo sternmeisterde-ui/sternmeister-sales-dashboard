@@ -82,6 +82,14 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     finally { setSubmitting(false); }
   };
 
+  const handleDelete = async (id: string) => {
+    try {
+      await fetch(`/api/analysis/${id}/delete`, { method: "DELETE" });
+      setAnalyses((prev) => prev.filter((a) => a.id !== id));
+      if (selectedId === id) { setSelectedId(null); setDetail(null); }
+    } catch { /* ignore */ }
+  };
+
   const daysLeft = (expiresAt: string | null) => {
     if (!expiresAt) return null;
     const days = Math.ceil((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
@@ -205,6 +213,15 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                     {a.status === "error" && (
                       <span className="text-[10px] text-rose-400 max-w-[200px] truncate shrink-0">{a.errorMessage}</span>
                     )}
+
+                    {/* Delete / kill */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(a.id); }}
+                      className="p-1.5 rounded-lg text-slate-600 hover:text-rose-400 hover:bg-rose-500/10 shrink-0 transition-colors"
+                      title="Удалить"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
 
                   {/* Row 2: Progress bar + time estimate (only for processing) */}
