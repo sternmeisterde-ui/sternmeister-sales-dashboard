@@ -440,7 +440,7 @@ export default function Dashboard() {
     const allCalls = activeCalls;
     const managers = activeManagers
       .filter(m => !m.role || m.role === "manager")
-      .filter(m => lineFilter === "all" || m.line === lineFilter);
+      .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
     const managerNames = new Set(managers.map(m => m.name));
 
     const now = new Date();
@@ -528,7 +528,7 @@ export default function Dashboard() {
   // Filter managers by role + line — totalCalls & avgScore come directly from the API
   const filteredManagers = activeManagers
     .filter(m => !m.role || m.role === "manager")
-    .filter(m => lineFilter === "all" || m.line === lineFilter);
+    .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
 
   // Set of manager names matching current line filter (for call filtering)
   const filteredManagerNames = new Set(filteredManagers.map(m => m.name));
@@ -954,7 +954,7 @@ export default function Dashboard() {
                       const allCalls = activeTab === "real_calls" ? realCalls : aiCalls;
                       const managers = activeManagers
                         .filter(m => !m.role || m.role === "manager")
-                        .filter(m => lineFilter === "all" || m.line === lineFilter);
+                        .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
                       const managerNames = new Set(managers.map(m => m.name));
                       return allCalls.filter(c => managerNames.has(c.name));
                     })()}
