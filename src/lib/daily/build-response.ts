@@ -243,7 +243,11 @@ export function getLastKommoError() { return _lastKommoError; }
 
 export async function buildDailyResponseCached(department: string, period: string, dateStr: string) {
   const today = getBusinessToday();
-  const isPast = dateStr < today;
+  // For "month" period, the date is the 1st of the month (e.g. "2026-04-01").
+  // Current month should NOT be treated as historical — it needs live Kommo data.
+  const isPast = period === "month"
+    ? dateStr.slice(0, 7) < today.slice(0, 7)  // compare YYYY-MM only
+    : dateStr < today;
 
   // Past dates: load stored snapshot from DB (fast, no Kommo calls)
   if (isPast) {
