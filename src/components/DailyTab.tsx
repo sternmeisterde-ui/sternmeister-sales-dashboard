@@ -10,8 +10,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CalendarDays,
-  UserCheck,
-  UserX,
   DollarSign,
   Heart,
   Phone,
@@ -577,204 +575,7 @@ function ManagerMetricsTable({
   );
 }
 
-// ====================== ACTIVE MANAGERS PANEL ======================
-
-function ActiveManagersPanel({
-  schedule,
-  dateStr,
-  onSave,
-  saving,
-}: {
-  schedule: ScheduleInfo;
-  dateStr: string;
-  onSave: (selectedIds: Set<string>) => void;
-  saving: boolean;
-}) {
-  const [expanded, setExpanded] = useState(!schedule.hasSchedule);
-  const [selected, setSelected] = useState<Set<string>>(() => {
-    const s = new Set<string>();
-    for (const m of schedule.allManagers) {
-      if (m.isOnLine) s.add(m.id);
-    }
-    return s;
-  });
-  const [dirty, setDirty] = useState(false);
-
-  useEffect(() => {
-    const s = new Set<string>();
-    for (const m of schedule.allManagers) {
-      if (m.isOnLine) s.add(m.id);
-    }
-    setSelected(s);
-    setDirty(false);
-  }, [schedule]);
-
-  const toggle = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-    setDirty(true);
-  };
-
-  const selectAll = () => {
-    setSelected(new Set(schedule.allManagers.map((m) => m.id)));
-    setDirty(true);
-  };
-
-  const deselectAll = () => {
-    setSelected(new Set());
-    setDirty(true);
-  };
-
-  const line1 = schedule.allManagers.filter((m) => m.line === "1");
-  const line2 = schedule.allManagers.filter((m) => m.line === "2");
-  const line3 = schedule.allManagers.filter((m) => m.line === "3");
-  const activeCount = schedule.allManagers.filter((m) => m.isOnLine).length;
-
-  return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-lg">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full p-4 flex items-center justify-between hover:bg-white/[0.02] transition-colors"
-      >
-        <div className="flex items-center gap-3">
-          <CalendarDays className="w-4 h-4 text-amber-400" />
-          <span className="text-sm font-bold tracking-wide uppercase text-white">
-            Активные менеджеры
-          </span>
-          {schedule.hasSchedule ? (
-            <span className="text-xs text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full">
-              {activeCount} на линии
-            </span>
-          ) : (
-            <span className="text-[10px] bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full font-medium">
-              не заполнено — данные скрыты
-            </span>
-          )}
-        </div>
-        <span className="text-slate-500 text-xs">{expanded ? "▲" : "▼"}</span>
-      </button>
-
-      {expanded && (
-        <div className="px-4 pb-4 space-y-3">
-          <div className="flex gap-2">
-            <button
-              onClick={selectAll}
-              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-emerald-400 hover:bg-emerald-500/15 transition-colors border border-emerald-500/20"
-            >
-              Выбрать всех
-            </button>
-            <button
-              onClick={deselectAll}
-              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-slate-400 hover:bg-white/5 transition-colors border border-white/10"
-            >
-              Снять всех
-            </button>
-          </div>
-
-          {line1.length > 0 && (
-            <div>
-              <div className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold mb-2">
-                Первая линия (квалификаторы)
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {line1.map((mgr) => (
-                  <button
-                    key={mgr.id}
-                    onClick={() => toggle(mgr.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
-                      selected.has(mgr.id)
-                        ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25"
-                        : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
-                    }`}
-                  >
-                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
-                    {mgr.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {line2.length > 0 && (
-            <div>
-              <div className="text-[10px] uppercase tracking-widest text-purple-400 font-bold mb-2">
-                Вторая линия
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {line2.map((mgr) => (
-                  <button
-                    key={mgr.id}
-                    onClick={() => toggle(mgr.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
-                      selected.has(mgr.id)
-                        ? "bg-purple-500/15 border-purple-500/30 text-purple-300 hover:bg-purple-500/25"
-                        : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
-                    }`}
-                  >
-                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
-                    {mgr.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {line3.length > 0 && (
-            <div>
-              <div className="text-[10px] uppercase tracking-widest text-amber-400 font-bold mb-2">
-                Доведение (третья линия)
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {line3.map((mgr) => (
-                  <button
-                    key={mgr.id}
-                    onClick={() => toggle(mgr.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 border ${
-                      selected.has(mgr.id)
-                        ? "bg-amber-500/15 border-amber-500/30 text-amber-300 hover:bg-amber-500/25"
-                        : "bg-slate-800/50 border-white/5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
-                    }`}
-                  >
-                    {selected.has(mgr.id) ? <UserCheck className="w-3 h-3" /> : <UserX className="w-3 h-3" />}
-                    {mgr.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-3 pt-2">
-            <button
-              onClick={() => onSave(selected)}
-              disabled={saving}
-              className={`px-5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all duration-200 ${
-                dirty
-                  ? "bg-blue-500 text-white hover:bg-blue-400 shadow-lg shadow-blue-500/25"
-                  : "bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
-              } disabled:opacity-50`}
-            >
-              {saving ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Сохранение...
-                </span>
-              ) : (
-                "Сохранить"
-              )}
-            </button>
-            {dirty && <span className="text-[10px] text-amber-400">Есть несохранённые изменения</span>}
-            <span className="text-[10px] text-slate-500 ml-auto">
-              Выбрано: {selected.size} из {schedule.allManagers.length}
-            </span>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+// ActiveManagersPanel removed — replaced by SchedulePopup
 
 // ====================== MAIN COMPONENT ======================
 
@@ -851,45 +652,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     setSelectedDayIdx(null);
   };
 
-  // Save active managers
-  const handleSaveActiveManagers = async (selectedIds: Set<string>) => {
-    // Find the schedule from the selected day's snapshot
-    const snapshot = data?.days?.[selectedDayIdx ?? 0];
-    if (!snapshot?.schedule) return;
-    setSaving(true);
-    try {
-      const managers = snapshot.schedule.allManagers
-        .filter((m) => selectedIds.has(m.id))
-        .map((m) => ({ managerId: m.id, managerName: m.name, line: m.line }));
-
-      const res = await fetch("/api/daily/active-managers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          date: snapshot.date,
-          department,
-          managers,
-        }),
-      });
-      if (!res.ok) console.error("Active managers save error:", await res.text());
-
-      const entries = snapshot.schedule.allManagers.map((m) => ({
-        userId: m.id,
-        isOnLine: selectedIds.has(m.id),
-      }));
-      await fetch("/api/daily/schedule", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date: snapshot.date, entries }),
-      });
-
-      await fetchData();
-    } catch (e) {
-      console.error("Active managers save error:", e);
-    } finally {
-      setSaving(false);
-    }
-  };
+  // handleSaveActiveManagers removed — schedule popup handles saves directly
 
   // Build column labels and snapshots for the summary table
   const { columnLabels, columnSubLabels, snapshots } = useMemo(() => {
@@ -1032,15 +795,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </div>
       )}
 
-      {/* Active Managers Panel (show when viewing days, for today) */}
-      {todaySchedule?.schedule && (
-        <ActiveManagersPanel
-          schedule={todaySchedule.schedule}
-          dateStr={todaySchedule.date}
-          onSave={handleSaveActiveManagers}
-          saving={saving}
-        />
-      )}
+      {/* Active Managers Panel removed — replaced by SchedulePopup */}
 
       {/* Summary Time Table */}
       {data && !loading && snapshots.length > 0 && (

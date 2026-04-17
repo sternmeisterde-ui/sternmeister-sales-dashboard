@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { X, Save, Loader2 } from "lucide-react";
+import { X, Save, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Manager {
   id: string;
@@ -58,10 +58,22 @@ const MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель
 const LINE_LABELS: Record<string, string> = { "1": "Линия 1 — Квалификатор", "2": "Линия 2 — Бератер", "3": "Линия 3 — Доведение" };
 
 export default function SchedulePopup({ isOpen, onClose, month, managers, onSaved }: SchedulePopupProps) {
-  const year = month.getFullYear();
-  const mo = month.getMonth();
-  const daysCount = getDaysInMonth(month);
+  const [currentMonth, setCurrentMonth] = useState(month);
+
+  // Sync with parent when popup opens
+  useEffect(() => { if (isOpen) setCurrentMonth(month); }, [isOpen, month]);
+
+  const year = currentMonth.getFullYear();
+  const mo = currentMonth.getMonth();
+  const daysCount = getDaysInMonth(currentMonth);
   const monthStr = `${year}-${String(mo + 1).padStart(2, "0")}`;
+
+  const shiftMonth = (dir: -1 | 1) => {
+    const d = new Date(currentMonth);
+    d.setMonth(d.getMonth() + dir);
+    setCurrentMonth(d);
+    setDirty(false);
+  };
 
   // grid[managerId][day-1] = "8" | "-" | "о" | ""
   const [grid, setGrid] = useState<Record<string, ScheduleVal[]>>({});
@@ -169,14 +181,22 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-[95vw] max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-          <div>
-            <h2 className="text-lg font-bold text-white">Расписание</h2>
-            <p className="text-[11px] text-slate-400">{MONTH_NAMES[mo]} {year}</p>
+          <div className="flex items-center gap-3">
+            <button onClick={() => shiftMonth(-1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div>
+              <h2 className="text-lg font-bold text-white">Расписание</h2>
+              <p className="text-[11px] text-slate-400">{MONTH_NAMES[mo]} {year}</p>
+            </div>
+            <button onClick={() => shiftMonth(1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+              <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-3 text-[10px]">
