@@ -680,7 +680,7 @@ export default function Dashboard() {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id as any)}
-              className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 font-semibold text-[13px] uppercase tracking-widest whitespace-nowrap ${activeTab === item.id
+              className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 font-semibold text-[10px] uppercase tracking-widest whitespace-nowrap ${activeTab === item.id
                 ? "bg-blue-500/20 text-blue-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] border border-blue-500/30"
                 : "text-slate-400 hover:text-white hover:bg-white/5"
                 } ${!isSidebarOpen && "justify-center px-0"}`}
