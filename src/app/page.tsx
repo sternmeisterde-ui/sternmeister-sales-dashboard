@@ -666,7 +666,7 @@ export default function Dashboard() {
           </button>
         </div>
 
-        <nav className="flex flex-col gap-2 mt-4 w-full font-[family-name:var(--font-jetbrains)]">
+        <nav className="flex flex-col gap-2 mt-4 w-full">
           {[
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
