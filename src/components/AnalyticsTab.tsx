@@ -93,6 +93,13 @@ const B2G_LINES = [
   { id: "3", label: "Доведение" },
 ];
 
+// B2B line options — Бух 1, Бух 2, Мед 1
+const B2B_LINES = [
+  { id: "buh1", label: "Бух 1" },
+  { id: "buh2", label: "Бух 2" },
+  { id: "med1", label: "Мед 1" },
+];
+
 // ==================== Main Component ====================
 
 export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
@@ -132,7 +139,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   };
 
   // Reset manager when context changes (different DB/line = different manager UUIDs)
-  useEffect(() => { if (department === "b2b") setLine("1"); setManagerId(""); }, [department]);
+  useEffect(() => { setLine(department === "b2b" ? "buh1" : "1"); setManagerId(""); }, [department]);
   useEffect(() => {
     setManagerId("");
     if (source === "roleplay" && line === "2b") setLine("2");
@@ -230,12 +237,24 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           ))}
         </div>
 
-        {/* Line (B2G only) — Бератер 2 only for OKK, not roleplay */}
+        {/* Line filter — B2G or B2B */}
         {department === "b2g" && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
             {B2G_LINES
               .filter((l) => source === "okk" || l.id !== "2b")
               .map((l) => (
+              <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
+                className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
+                  line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
+                }`}>
+                {l.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {department === "b2b" && source === "okk" && (
+          <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
+            {B2B_LINES.map((l) => (
               <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
                 className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
                   line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"

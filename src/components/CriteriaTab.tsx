@@ -47,7 +47,9 @@ interface ConfigOption {
 function getConfigOptions(dept: "b2g" | "b2b"): ConfigOption[] {
   if (dept === "b2b") {
     return [
-      { promptType: "r2_commercial", label: "Коммерсы — OKK + Ролевки" },
+      { promptType: "r2_commercial", label: "Бух 1 — Первичное касание" },
+      { promptType: "r2_decisions", label: "Бух 2 — Вторичное касание" },
+      { promptType: "r2_med_commercial", label: "Мед 1 — Medical Admin" },
     ];
   }
   return [
@@ -59,7 +61,11 @@ function getConfigOptions(dept: "b2g" | "b2b"): ConfigOption[] {
 }
 
 function getDefaultConfig(dept: "b2g" | "b2b", line: string): string {
-  if (dept === "b2b") return "r2_commercial";
+  if (dept === "b2b") {
+    if (line === "buh2") return "r2_decisions";
+    if (line === "med1") return "r2_med_commercial";
+    return "r2_commercial";
+  }
   if (line === "1") return "d2_qualifier";
   if (line === "2") return "d2_berater";
   if (line === "3") return "d2_dovedenie";

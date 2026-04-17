@@ -98,7 +98,14 @@ function buildPeriodRange(from: Date, to: Date, groupBy: string): string[] {
 // ─── Prompt type mapping ────────────────────────────────────
 
 function getOkkPromptType(department: string, line: string): string | null {
-  if (department === "b2b") return "r2_commercial";
+  if (department === "b2b") {
+    switch (line) {
+      case "buh1": return "r2_commercial";
+      case "buh2": return "r2_decisions";
+      case "med1": return "r2_med_commercial";
+      default: return null; // "all" → no prompt_type filter
+    }
+  }
   switch (line) {
     case "1": return "d2_qualifier";
     case "2": return "d2_berater";
@@ -513,7 +520,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const effectiveLine = department === "b2b" ? "all" : line;
+    const effectiveLine = line;
     const cacheKey = `analytics:${department}:${source}:${effectiveLine}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>

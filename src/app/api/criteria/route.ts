@@ -5,6 +5,8 @@ import path from "node:path";
 
 const VALID_PROMPT_TYPES = [
   "r2_commercial",
+  "r2_decisions",
+  "r2_med_commercial",
   "d2_qualifier",
   "d2_berater",
   "d2_berater2",

@@ -70,7 +70,7 @@ export default function Dashboard() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "call_analysis">("dashboard");
-  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3">("all");
+  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3" | "buh1" | "buh2" | "med1">("all");
 
   // Load session on mount
   useEffect(() => {
@@ -329,7 +329,7 @@ export default function Dashboard() {
     );
 
     fetches.push(
-      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}`, { signal: ac.signal })
+      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}${lineFilter !== "all" ? `&line=${lineFilter}` : ""}`, { signal: ac.signal })
         .then(r => r.json())
         .then(res => {
           if (res.success) {
@@ -342,7 +342,7 @@ export default function Dashboard() {
     );
 
     return () => ac.abort();
-  }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange]);
+  }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange, lineFilter]);
 
   // Parse date from Russian format (Сегодня, Вчера, DD.MM)
   const parseCallDate = (dateStr: string): Date => {
@@ -845,6 +845,16 @@ export default function Dashboard() {
                       <button key={val} onClick={() => setLineFilter(val)}
                         className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
                         {val === "all" ? "Все" : val === "1" ? "Квалиф." : val === "2" ? "Бератер" : "Доведение"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {activeDepartment === "b2b" && (
+                  <div className="flex gap-1 ml-2">
+                    {(["all", "buh1", "buh2", "med1"] as const).map(val => (
+                      <button key={val} onClick={() => setLineFilter(val)}
+                        className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
+                        {val === "all" ? "Все" : val === "buh1" ? "Бух 1" : val === "buh2" ? "Бух 2" : "Мед 1"}
                       </button>
                     ))}
                   </div>

@@ -138,6 +138,20 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       conditions.push(eq(okkCalls.managerId, managerIdParam));
     }
 
+    // B2B line filter → filter by prompt_type in evaluations
+    const lineParam = sp.get("line");
+    if (lineParam && department === "b2b") {
+      const promptTypeMap: Record<string, string> = {
+        buh1: "r2_commercial",
+        buh2: "r2_decisions",
+        med1: "r2_med_commercial",
+      };
+      const pt = promptTypeMap[lineParam];
+      if (pt) {
+        conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE prompt_type = ${pt})`);
+      }
+    }
+
     const whereClause =
       conditions.length > 0 ? and(...conditions) : undefined;
 
