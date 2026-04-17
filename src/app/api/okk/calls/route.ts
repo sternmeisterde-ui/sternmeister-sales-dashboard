@@ -85,7 +85,7 @@ export async function GET(request: NextRequest) {
     const deptParam = sp.get("department") ?? "b2g";
     const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
 
-    const cacheKey = `okk-calls:${department}:${sp.get("from") || ""}:${sp.get("to") || ""}:${sp.get("status") || ""}:${sp.get("manager_id") || ""}`;
+    const cacheKey = `okk-calls:${department}:${sp.get("from") || ""}:${sp.get("to") || ""}:${sp.get("status") || ""}:${sp.get("manager_id") || ""}:${sp.get("line") || ""}`;
     const result = await cached(cacheKey, OKK_CACHE_TTL, () => buildOkkResponse(department, sp));
     return NextResponse.json(result);
   } catch (error) {
