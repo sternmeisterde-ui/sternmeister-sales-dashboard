@@ -18,6 +18,8 @@ import AnalysisTab from "@/components/AnalysisTab";
 import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
 import { fmtLocalDate, parseDisplayDate } from "@/lib/utils/date";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
+import { useTheme } from "@/hooks/useTheme";
+import { Sun, Moon } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
 import WorstCallsPanel from "@/components/WorstCallsPanel";
@@ -138,6 +140,9 @@ export default function Dashboard() {
     avgDuration: "00:00",
     filteredCalls: 0,
   });
+
+  // Theme switcher (light / dark). Default dark. Persists to localStorage.
+  const { theme, toggleTheme } = useTheme();
 
   // Audio player — extracted into a dedicated hook so this component doesn't
   // have to manage 7 useState + useRef + 3 useCallback for audio concerns.
@@ -587,7 +592,7 @@ export default function Dashboard() {
           ))}
         </nav>
 
-        {/* User info + logout */}
+        {/* User info + theme toggle + logout */}
         {session && (
           <div className="mt-auto pt-4 border-t border-white/5 w-full">
             {isSidebarOpen && (
@@ -639,6 +644,17 @@ export default function Dashboard() {
               {session?.department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}
             </div>
           )}
+
+          {/* Theme toggle — top-right, visible on every page. */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="ml-auto flex items-center justify-center w-9 h-9 rounded-lg border border-amber-400/30 bg-slate-800/40 text-amber-400 hover:bg-amber-500/10 transition-all"
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label={theme === "dark" ? "Переключить на светлую тему" : "Переключить на тёмную тему"}
+          >
+            {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
         </header>
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}
@@ -943,7 +959,10 @@ export default function Dashboard() {
 
             {/* DATA TABLE */}
             <div className="glass-panel rounded-2xl flex-1 border border-white/5 overflow-hidden flex flex-col shadow-2xl">
-              <div className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/20">
+              {/* `light-panel-header` is a no-op in dark mode (the
+                  dark-theme styles come from the Tailwind utilities
+                  below); globals.css repaints it blue in light mode. */}
+              <div className="light-panel-header p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/20">
                 <h2 className="text-sm font-bold tracking-wide uppercase text-slate-200">
                   {activeTab === "real_calls" ? "Таблица: ОКК" : "Таблица: AI Ролевки"}
                 </h2>
@@ -1119,7 +1138,7 @@ export default function Dashboard() {
               <div className="w-full overflow-y-auto max-h-[600px] scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
                 <table className="w-full text-left border-collapse">
                   <thead className="sticky top-0 z-10">
-                    <tr className="text-slate-400 text-[10px] uppercase tracking-widest bg-slate-800/90 backdrop-blur-sm">
+                    <tr className="light-panel-header text-slate-400 text-[10px] uppercase tracking-widest bg-slate-800/90 backdrop-blur-sm">
                       <th className="px-5 py-3 font-semibold">Сотрудник</th>
                       <th className="px-5 py-3 font-semibold">Время & Дата</th>
                       <th className="px-5 py-3 font-semibold text-center">Длительность</th>

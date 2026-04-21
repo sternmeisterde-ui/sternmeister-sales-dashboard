@@ -6,7 +6,7 @@
 }
 
 :root {
-  --background: #0f172a; /* Slate 900 */
+  --background: #0f172a; /* Slate 900 — default dark */
   --foreground: #f8fafc; /* Slate 50 */
 }
 
@@ -30,6 +30,494 @@ body {
   background: linear-gradient(to right, #38bdf8, #818cf8);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+/* =========================================================
+   LIGHT THEME — activated by `.theme-light` class on <html>.
+
+   Strategy: override the common dark classes (bg-slate-*,
+   text-white, border-white/*) with higher-specificity rules
+   when the light class is present, so existing components
+   get the new look without per-component migrations.
+
+   Semantic colours (emerald / rose / amber / blue / violet /
+   pink / cyan) are intentionally NOT overridden — score
+   colours and line accents stay identical across themes.
+   ========================================================= */
+
+/* Page background — solid light-blue canvas, no gradient.
+   The whole app now sits on #e0f2fe (sky-100). Panels layer on top
+   in slightly different blue tints so everything distinguishes from
+   the canvas without going grey. */
+.theme-light body {
+  background: #e0f2fe;
+  color: #0f172a;
+}
+
+/* Glass panels — the main "card" surface. Light blue tint so it
+   pops off the page bg, soft blue border instead of grey. */
+.theme-light .glass-panel {
+  background: #f0f9ff; /* sky-50 */
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  box-shadow: 0 2px 10px rgba(59, 130, 246, 0.08);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Text gradient — keep brand cyan/indigo but start darker for contrast */
+.theme-light .text-gradient {
+  background: linear-gradient(to right, #0284c7, #4f46e5);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Slate surface backgrounds → blue tints (not greys).
+   The original dark theme uses slate-950/900/800 for nested
+   surfaces. In light mode we mirror that depth pattern with the
+   sky/blue ramp so surfaces stay distinguishable but the whole UI
+   reads as blue-on-white instead of grey-on-white.
+   ──────────────────────────────────────────────────────────────── */
+
+/* Deepest surface (modal underlays, call-list row hover) */
+.theme-light .bg-slate-950,
+.theme-light .bg-slate-950\/95,
+.theme-light .bg-slate-950\/90,
+.theme-light .bg-slate-950\/80,
+.theme-light .bg-slate-950\/60,
+.theme-light .bg-slate-950\/50,
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-950\/30 {
+  background-color: #dbeafe; /* blue-100 */
+}
+
+/* Primary card surface (sidebar panels, headers). bg-slate-900/30 is
+   also used by the Scripts tab's section wrapper — that's where the
+   "line between cards" she flagged comes from, so give it a slightly
+   stronger blue tint to read as a clean colored separator instead of
+   white/grey. */
+.theme-light .bg-slate-900,
+.theme-light .bg-slate-900\/95,
+.theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-900\/70,
+.theme-light .bg-slate-900\/60,
+.theme-light .bg-slate-900\/50,
+.theme-light .bg-slate-900\/40 {
+  background-color: #f0f9ff; /* sky-50 */
+}
+.theme-light .bg-slate-900\/30,
+.theme-light .bg-slate-900\/20 {
+  background-color: #dbeafe; /* blue-100 — visible soft-blue separator */
+}
+
+/* Secondary surface (inputs, nested rows) */
+.theme-light .bg-slate-800,
+.theme-light .bg-slate-800\/80,
+.theme-light .bg-slate-800\/70,
+.theme-light .bg-slate-800\/60,
+.theme-light .bg-slate-800\/50,
+.theme-light .bg-slate-800\/40,
+.theme-light .bg-slate-800\/30,
+.theme-light .bg-slate-800\/20 {
+  background-color: #e0f2fe; /* sky-100 */
+}
+
+/* Accent surfaces (chips, badges, toggles) */
+.theme-light .bg-slate-700,
+.theme-light .bg-slate-700\/80,
+.theme-light .bg-slate-700\/60,
+.theme-light .bg-slate-700\/50,
+.theme-light .bg-slate-700\/40,
+.theme-light .bg-slate-700\/30,
+.theme-light .bg-slate-700\/20 {
+  background-color: #bae6fd; /* sky-200 */
+}
+
+.theme-light .bg-slate-600 {
+  background-color: #7dd3fc; /* sky-300 */
+}
+
+/* Table rows / columns where the original had dark bg-slate to
+   differentiate columns — in light mode this turns into grey noise,
+   so flatten them to the card surface. Striping should come from
+   row hover / zebra, not permanent grey columns. */
+.theme-light table,
+.theme-light thead,
+.theme-light tbody,
+.theme-light tr,
+.theme-light td,
+.theme-light th {
+  background-color: transparent !important;
+}
+.theme-light thead {
+  background-color: #dbeafe !important; /* blue-100 — header row */
+  color: #0f172a;
+}
+.theme-light tr:hover td {
+  background-color: #e0f2fe !important; /* sky-100 on hover */
+}
+
+/* Black/white overlays used as scrims */
+.theme-light .bg-black\/20,
+.theme-light .bg-black\/30,
+.theme-light .bg-black\/40 {
+  background-color: rgba(15, 23, 42, 0.04);
+}
+
+.theme-light .bg-white\/5,
+.theme-light .bg-white\/10,
+.theme-light .bg-white\/15 {
+  background-color: rgba(15, 23, 42, 0.05);
+}
+
+/* Text colours.
+   Default: flip `text-white` → dark in light mode so headings and body
+   text that used white-on-slate in the dark theme stay legible when
+   those slate panels become pale blue.
+
+   Exception: white text must be preserved when it sits on a SOLID
+   saturated background — i.e. a colored button like bg-blue-500,
+   bg-emerald-500 — otherwise the button becomes dark-on-dark.
+   Tinted variants (bg-blue-500/20 etc.) are NOT solid, so they fall
+   under the default flip. The `[class~="bg-..."]` word-boundary
+   selector excludes the slash-opacity variants cleanly. */
+/* Default in light theme: every "light on dark" text class flips to near-
+   black so the same text stays legible now that panels are pale. !important
+   guards against Tailwind utilities that happen to load later in the
+   cascade (e.g. when hover: states re-apply text-white on focus). */
+.theme-light .text-white,
+.theme-light .text-slate-50,
+.theme-light .text-slate-100 {
+  color: #0f172a !important;
+}
+
+/* Exception: white text is preserved ON and INSIDE solid saturated-color
+   buttons (bg-blue-500, bg-emerald-500, etc). `~=` matches class attribute
+   WORDS, so "bg-blue-500/20" (tinted/opacity variant) doesn't qualify. */
+.theme-light [class~="bg-blue-500"],
+.theme-light [class~="bg-blue-600"],
+.theme-light [class~="bg-blue-700"],
+.theme-light [class~="bg-indigo-500"],
+.theme-light [class~="bg-indigo-600"],
+.theme-light [class~="bg-emerald-500"],
+.theme-light [class~="bg-emerald-600"],
+.theme-light [class~="bg-rose-500"],
+.theme-light [class~="bg-rose-600"],
+.theme-light [class~="bg-red-500"],
+.theme-light [class~="bg-red-600"],
+.theme-light [class~="bg-violet-500"],
+.theme-light [class~="bg-violet-600"],
+.theme-light [class~="bg-pink-500"],
+.theme-light [class~="bg-pink-600"],
+.theme-light [class~="bg-purple-500"],
+.theme-light [class~="bg-purple-600"],
+.theme-light [class~="bg-cyan-500"],
+.theme-light [class~="bg-cyan-600"],
+.theme-light [class~="bg-sky-500"],
+.theme-light [class~="bg-sky-600"] {
+  color: #ffffff !important;
+}
+.theme-light [class~="bg-blue-500"] .text-white,
+.theme-light [class~="bg-blue-600"] .text-white,
+.theme-light [class~="bg-blue-700"] .text-white,
+.theme-light [class~="bg-indigo-500"] .text-white,
+.theme-light [class~="bg-indigo-600"] .text-white,
+.theme-light [class~="bg-emerald-500"] .text-white,
+.theme-light [class~="bg-emerald-600"] .text-white,
+.theme-light [class~="bg-rose-500"] .text-white,
+.theme-light [class~="bg-rose-600"] .text-white,
+.theme-light [class~="bg-red-500"] .text-white,
+.theme-light [class~="bg-red-600"] .text-white,
+.theme-light [class~="bg-violet-500"] .text-white,
+.theme-light [class~="bg-violet-600"] .text-white,
+.theme-light [class~="bg-pink-500"] .text-white,
+.theme-light [class~="bg-pink-600"] .text-white,
+.theme-light [class~="bg-purple-500"] .text-white,
+.theme-light [class~="bg-purple-600"] .text-white,
+.theme-light [class~="bg-cyan-500"] .text-white,
+.theme-light [class~="bg-cyan-600"] .text-white,
+.theme-light [class~="bg-sky-500"] .text-white,
+.theme-light [class~="bg-sky-600"] .text-white {
+  color: #ffffff !important;
+}
+
+.theme-light .text-slate-50,
+.theme-light .text-slate-100,
+.theme-light .text-slate-200 {
+  color: #0f172a;
+}
+
+.theme-light .text-slate-300 {
+  color: #1e293b;
+}
+
+.theme-light .text-slate-400 {
+  color: #475569; /* slate-600 */
+}
+
+.theme-light .text-slate-500 {
+  color: #64748b;
+}
+
+.theme-light .text-slate-600 {
+  color: #475569;
+}
+
+/* Borders — replace translucent whites with translucent blacks */
+.theme-light .border-white\/5,
+.theme-light .border-white\/\[0\.04\],
+.theme-light .border-white\/\[0\.05\],
+.theme-light .border-white\/\[0\.06\],
+.theme-light .border-white\/\[0\.08\] {
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+.theme-light .border-white\/10,
+.theme-light .border-white\/\[0\.10\],
+.theme-light .border-white\/\[0\.1\],
+.theme-light .border-white\/15 {
+  border-color: rgba(15, 23, 42, 0.14);
+}
+
+.theme-light .border-white\/20 {
+  border-color: rgba(15, 23, 42, 0.2);
+}
+
+.theme-light .border-slate-600,
+.theme-light .border-slate-600\/50,
+.theme-light .border-slate-700 {
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.theme-light .border-slate-800 {
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+/* Placeholder text */
+.theme-light .placeholder-slate-500::placeholder,
+.theme-light .placeholder-slate-600::placeholder {
+  color: #94a3b8; /* slate-400 */
+}
+
+/* Scrollbar thumbs */
+.theme-light .custom-scrollbar::-webkit-scrollbar-thumb,
+.theme-light .scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.2);
+}
+.theme-light .custom-scrollbar::-webkit-scrollbar-thumb:hover,
+.theme-light .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+/* Hover states — the default hover:bg-white/5 goes the wrong way in light */
+.theme-light .hover\:bg-white\/5:hover,
+.theme-light .hover\:bg-white\/10:hover {
+  background-color: rgba(15, 23, 42, 0.05);
+}
+
+/* Shadow tweaks — the heavy dark drop shadows look off on white */
+.theme-light .shadow-lg,
+.theme-light .shadow-xl,
+.theme-light .shadow-2xl {
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.08);
+}
+
+/* ────────────────────────────────────────────────────────────────
+   `.light-panel-header` — opt-in "blue banner" for panel title bars.
+   Added as a marker class to specific components (OKK/AI calls table
+   header row, the Scripts/WorstCalls section title bars).
+   No-op in dark mode; paints blue only under `.theme-light`.
+
+   Only the DIRECT heading content (h1-h4, direct <span>, <th>) is
+   force-whitened — nested filter pills / dropdowns inside the same
+   bar keep their own colour so they read clearly on their own bg.
+   ──────────────────────────────────────────────────────────────── */
+.theme-light .light-panel-header {
+  background-color: #60a5fa !important; /* blue-400 — softer than 500, still visible on sky-100 bg */
+}
+.theme-light .light-panel-header > h1,
+.theme-light .light-panel-header > h2,
+.theme-light .light-panel-header > h3,
+.theme-light .light-panel-header > h4,
+.theme-light .light-panel-header > span,
+.theme-light tr.light-panel-header > th {
+  color: #ffffff !important;
+}
+
+/* Table-row panel header (e.g. Analytics thead with period columns):
+   propagate white to EVERY descendant so the dates and any nested
+   `<div>` labels inside <th> read as white text. Non-table headers
+   keep the direct-children rule above so embedded filter pills
+   don't also get forced white. */
+.theme-light tr.light-panel-header,
+.theme-light tr.light-panel-header th,
+.theme-light tr.light-panel-header th * {
+  color: #ffffff !important;
+}
+
+/* Inputs / textareas / selects — dark text so they read on any light
+   background. We deliberately do NOT override the background here;
+   components paint their own tinted fill via Tailwind classes and we
+   remap those tints in the rules further down to keep them visible. */
+.theme-light input:not([type="range"]),
+.theme-light textarea,
+.theme-light select {
+  color: #0f172a;
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Scripts tab — row and field backgrounds.
+
+   The ScriptsTab card uses class pairs like:
+     row:   bg-emerald-500/[0.06]  (or /[0.10] for non-item kinds)
+     field: bg-emerald-500/[0.08]  (or /10 for non-item kinds)
+
+   On dark these 6–10% opacity tints are visible on the near-black
+   page bg. On light the same tints sit on sky-100 and vanish into
+   the page colour. Below we repaint each pair to a proper Tailwind
+   100/50 shade of the same hue so the card reads as a colored panel
+   with its fields as an even lighter version of the same colour.
+   ──────────────────────────────────────────────────────────────── */
+
+/* Emerald (reply / item) */
+.theme-light .bg-emerald-500\/\[0\.06\] {
+  background-color: #d1fae5 !important; /* emerald-100 — card fill */
+}
+.theme-light .bg-emerald-500\/\[0\.08\] {
+  background-color: #ecfdf5 !important; /* emerald-50  — field fill */
+}
+
+/* Blue (section) */
+.theme-light .bg-blue-500\/\[0\.10\] {
+  background-color: #dbeafe !important; /* blue-100 — card fill */
+}
+/* bg-blue-500/10 is used widely — only repaint inside Script fields
+   (it's always wrapped in a .theme-light card), but a safe global
+   repaint here is fine because 10% blue on white is barely visible
+   anyway; blue-50 at least reads. */
+.theme-light .bg-blue-500\/10 {
+  background-color: #eff6ff !important; /* blue-50 */
+}
+
+/* Rose (objection) + score-cell "bad" colouring.
+   /10 variant stays at the 100 shade (not 50) so score cells in
+   tables/KPIs read clearly as red-tinted. */
+.theme-light .bg-rose-500\/\[0\.10\] {
+  background-color: #fee2e2 !important; /* rose-100 */
+}
+.theme-light .bg-rose-500\/10 {
+  background-color: #fee2e2 !important; /* rose-100 — same, visible */
+}
+
+/* Amber (note) + score-cell "warn" colouring. */
+.theme-light .bg-amber-500\/\[0\.10\] {
+  background-color: #fef3c7 !important; /* amber-100 */
+}
+.theme-light .bg-amber-500\/10 {
+  background-color: #fef3c7 !important; /* amber-100 */
+}
+
+/* Emerald score-cell "good" colouring. */
+.theme-light .bg-emerald-500\/10 {
+  background-color: #d1fae5 !important; /* emerald-100 */
+}
+
+/* Analytics — `getCriteriaBg()` returns bg-{color}-500/5 for each
+   percentage cell in the criteria matrix. At 5% opacity those vanish
+   into the light page bg, so we repaint to 200-shade pastels —
+   brighter than 100 for clearer green/amber/red readability. Dark
+   theme keeps the original /5 tint untouched. */
+.theme-light .bg-emerald-500\/5 {
+  background-color: #a7f3d0 !important; /* emerald-200 */
+}
+.theme-light .bg-amber-500\/5 {
+  background-color: #fde68a !important; /* amber-200 */
+}
+.theme-light .bg-rose-500\/5 {
+  background-color: #fecaca !important; /* rose-200 */
+}
+
+/* Slate (subheader) */
+.theme-light .bg-slate-500\/\[0\.10\] {
+  background-color: #f1f5f9 !important; /* slate-100 */
+}
+.theme-light .bg-slate-500\/10 {
+  background-color: #f8fafc !important; /* slate-50 */
+}
+
+/* Login page — solid blue canvas, no gradient (per design direction). */
+.theme-light .animated-gradient {
+  background: #e0f2fe !important; /* sky-100, matches page bg */
+  animation: none !important;
+}
+
+/* In light theme: kill ALL `bg-gradient-to-*` utilities. Replace with a
+   flat solid blue so the UI reads as clean colour blocks rather than
+   shifting gradient washes. Dark theme still uses the gradients via
+   the same Tailwind classes — this override is scoped to `.theme-light`. */
+.theme-light [class~="bg-gradient-to-r"],
+.theme-light [class~="bg-gradient-to-br"],
+.theme-light [class~="bg-gradient-to-l"],
+.theme-light [class~="bg-gradient-to-bl"],
+.theme-light [class~="bg-gradient-to-b"],
+.theme-light [class~="bg-gradient-to-t"] {
+  background-image: none !important;
+  background-color: #60a5fa !important; /* blue-400 */
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Accent text → near-black in light theme.
+
+   In dark theme a chip like `bg-blue-500/20 text-blue-300` reads
+   fine — light-blue text on dark-blue tint. Flip to light and the
+   same chip becomes light-blue-on-light-blue-on-white. Illegible.
+
+   The blue / cyan / indigo / violet / pink / purple families all
+   flip to slate-900 (effectively black). Green text gets its own
+   darker-but-still-green treatment below, since we still want the
+   hue on score readouts.
+   ──────────────────────────────────────────────────────────────── */
+.theme-light .text-blue-200,
+.theme-light .text-blue-300,
+.theme-light .text-blue-400,
+.theme-light .text-cyan-200,
+.theme-light .text-cyan-300,
+.theme-light .text-cyan-400,
+.theme-light .text-indigo-300,
+.theme-light .text-indigo-400,
+.theme-light .text-violet-200,
+.theme-light .text-violet-300,
+.theme-light .text-violet-400,
+.theme-light .text-pink-300,
+.theme-light .text-pink-400,
+.theme-light .text-purple-300,
+.theme-light .text-purple-400 {
+  color: #0f172a; /* slate-900, effectively black */
+}
+
+/* Green text — keep the hue (it's a semantic "pass" signal on scores)
+   but shift from the washed-out 300/400 shades to deep 600/700 so it's
+   legible against the light/white background. Same treatment for rose
+   (fail) and amber (warn) — semantic colours, darker shades. */
+.theme-light .text-emerald-200,
+.theme-light .text-emerald-300,
+.theme-light .text-emerald-400 {
+  color: #047857; /* emerald-700 */
+}
+.theme-light .text-emerald-500 {
+  color: #065f46; /* emerald-800 */
+}
+.theme-light .text-rose-200,
+.theme-light .text-rose-300,
+.theme-light .text-rose-400,
+.theme-light .text-red-300,
+.theme-light .text-red-400 {
+  color: #be123c; /* rose-700 */
+}
+.theme-light .text-amber-200,
+.theme-light .text-amber-300,
+.theme-light .text-amber-400 {
+  color: #b45309; /* amber-700 */
 }
 
 /* Custom Scrollbar — compact for manager lists */

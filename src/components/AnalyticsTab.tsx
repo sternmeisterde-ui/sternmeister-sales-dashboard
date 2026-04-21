@@ -446,7 +446,7 @@ function CriteriaTimeTable({
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-white/10">
+            <tr className="light-panel-header border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
                 Критерий
               </th>
@@ -468,7 +468,7 @@ function CriteriaTimeTable({
               <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
               {periods.map((p) => {
                 const v = overallScores[p];
-                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
+                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
               })}
             </tr>
           </tbody>
@@ -498,7 +498,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
             const v = c.scores[p];
-            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
+            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
@@ -519,7 +519,7 @@ function ManagerTable({
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-white/10">
+            <tr className="light-panel-header border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
                 Критерий
               </th>
@@ -543,7 +543,7 @@ function ManagerTable({
             <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
               <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
               {managers.map((m) => (
-                <td key={m.id} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(m.overallScore)}`}>{fmtScore(m.overallScore)}</td>
+                <td key={m.id} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(m.overallScore)} ${getCriteriaBg(m.overallScore)}`}>{fmtScore(m.overallScore)}</td>
               ))}
             </tr>
           </tbody>
@@ -576,7 +576,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
             const v = m.blocks[blockIdx]?.criteria[ci]?.score;
-            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)}`}>{fmtScore(v)}</td>;
+            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
@@ -623,7 +623,7 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-white/10">
+            <tr className="light-panel-header border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
                 Критерий
               </th>
@@ -661,8 +661,8 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
             })}
             <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
               <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
-              <td className={`px-3 py-2.5 text-center font-mono text-[12px] font-bold ${getCriteriaColor(aggA.overall)}`}>{fmtScore(aggA.overall)}</td>
-              <td className={`px-3 py-2.5 text-center font-mono text-[12px] font-bold ${getCriteriaColor(aggB.overall)}`}>{fmtScore(aggB.overall)}</td>
+              <td className={`px-3 py-2.5 text-center font-mono text-[12px] font-bold ${getCriteriaColor(aggA.overall)} ${getCriteriaBg(aggA.overall)}`}>{fmtScore(aggA.overall)}</td>
+              <td className={`px-3 py-2.5 text-center font-mono text-[12px] font-bold ${getCriteriaColor(aggB.overall)} ${getCriteriaBg(aggB.overall)}`}>{fmtScore(aggB.overall)}</td>
               <td className={`px-3 py-2.5 text-center font-mono text-[12px] font-bold ${getDeltaColor(aggA.overall, aggB.overall)}`}>{fmtDelta(aggA.overall, aggB.overall)}</td>
             </tr>
           </tbody>
@@ -696,8 +696,8 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
         return (
           <tr key={`${blockName}-cmp-${cName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cA)}`}>{fmtScore(cA)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cB)}`}>{fmtScore(cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cA)} ${getCriteriaBg(cA)}`}>{fmtScore(cA)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cB)} ${getCriteriaBg(cB)}`}>{fmtScore(cB)}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getDeltaColor(cA, cB)}`}>{fmtDelta(cA, cB)}</td>
           </tr>
         );
@@ -739,7 +739,7 @@ function ComparisonManagerTable({ dataA, dataB, labelA, labelB, collapsedBlocks,
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-white/10">
+            <tr className="light-panel-header border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[180px]">
                 Менеджер
               </th>
@@ -805,9 +805,9 @@ function CompareManagerRows({ mgr, blockNames, isCollapsed, onToggle }: {
           <tr key={`${mgr.id}-${bName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[10px] text-slate-500 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{bName}</td>
             <td />
-            <td className={`px-3 py-1.5 text-center font-mono text-[10px] ${getCriteriaColor(bScoreA)}`}>{fmtScore(bScoreA)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[10px] ${getCriteriaColor(bScoreA)} ${getCriteriaBg(bScoreA)}`}>{fmtScore(bScoreA)}</td>
             <td />
-            <td className={`px-3 py-1.5 text-center font-mono text-[10px] ${getCriteriaColor(bScoreB)}`}>{fmtScore(bScoreB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[10px] ${getCriteriaColor(bScoreB)} ${getCriteriaBg(bScoreB)}`}>{fmtScore(bScoreB)}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[10px] ${getDeltaColor(bScoreA, bScoreB)}`}>{fmtDelta(bScoreA, bScoreB)}</td>
           </tr>
         );

@@ -54,7 +54,7 @@ export default function WorstCallsPanel({
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
-      <div className="px-4 py-2.5 border-b border-white/5 bg-slate-900/20">
+      <div className="light-panel-header px-4 py-2.5 border-b border-white/5 bg-slate-900/20">
         <span className="text-[11px] font-bold tracking-wide uppercase text-slate-400">
           Разбор ошибок
         </span>

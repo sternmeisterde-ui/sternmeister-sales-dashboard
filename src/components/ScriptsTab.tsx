@@ -392,7 +392,7 @@ function SectionBlock({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="w-full flex items-center justify-between px-5 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
+          className="light-panel-header w-full flex items-center justify-between px-5 py-3.5 text-left hover:bg-white/[0.02] transition-colors"
           aria-expanded={open}
         >
           <div className="flex items-center gap-3 min-w-0 flex-1">

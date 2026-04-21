@@ -33,6 +33,21 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/*
+          Inline theme bootstrap — runs before React hydrates so the first paint
+          already matches the user's saved preference. Without this, users on
+          light mode would see a flash of dark theme on every navigation. The
+          script is tiny, stringified into a single attribute, and intentionally
+          doesn't throw — localStorage can be disabled (Safari private mode).
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "(function(){try{var t=localStorage.getItem('sm_theme');if(!t){t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';}if(t==='light'){document.documentElement.classList.add('theme-light');}}catch(e){}})();",
+          }}
+        />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${jetbrainsMono.variable} antialiased`}
       >
