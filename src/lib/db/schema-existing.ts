@@ -135,6 +135,7 @@ export const masterManagers = pgTable("master_managers", {
   role: text("role").notNull().default("manager"), // 'manager' | 'rop' | 'admin'
   line: text("line"),                              // '1' | '2' | '3'
   kommoUserId: integer("kommo_user_id"),
+  callgearEmployeeId: text("callgear_employee_id"),
   cloudtalkAgentId: text("cloudtalk_agent_id"),
   inOkk: boolean("in_okk").default(false),
   inRolevki: boolean("in_rolevki").default(false),
@@ -174,6 +175,19 @@ export const kommoTokens = pgTable("kommo_tokens", {
   accessToken: text("access_token").notNull(),
   refreshToken: text("refresh_token").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+export const scripts = pgTable("scripts", {
+  id: serial("id").primaryKey(),
+  department: text("department").notNull(),            // 'b2g' | 'b2b'
+  line: text("line").notNull(),                        // '1' | '2' | '3' | 'buh1' | 'buh2' | 'med1'
+  title: text("title").notNull(),                      // e.g. 'Линия 1 — Квалификатор'
+  notionUrl: text("notion_url"),
+  content: jsonb("content").notNull(),                 // { sections: [{ id, title, items: [...] }] }
+  version: integer("version").notNull().default(1),
+  updatedBy: text("updated_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

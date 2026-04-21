@@ -5,7 +5,7 @@ import { masterManagers, d1Users, r1Users } from "@/lib/db/schema-existing";
 import { getDbForDepartment } from "@/lib/db/index";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkManagers } from "@/lib/db/schema-okk";
-import { eq, and, notInArray, sql } from "drizzle-orm";
+import { eq, and, notInArray, desc, sql } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
 import { getUsers as getKommoUsers } from "@/lib/kommo/client";
 
@@ -42,6 +42,10 @@ interface ManagerInput {
   telegramUsername: string | null;
   telegramId: string | null;
   kommoUserId: number | null;
+  // Optional — webhooks auto-fill these; UI doesn't edit them directly.
+  // If absent, we preserve the master_managers existing value.
+  callgearEmployeeId?: string | null;
+  cloudtalkAgentId?: string | null;
   role: string;
   line: string | null;
   inOkk: boolean;
@@ -90,6 +94,8 @@ export async function POST(request: NextRequest) {
       telegramId: string | null;
       telegramUsername: string | null;
       name: string;
+      callgearEmployeeId: string | null;
+      cloudtalkAgentId: string | null;
     }>();
     const existingRows = await db
       .select({
@@ -98,6 +104,8 @@ export async function POST(request: NextRequest) {
         telegramId: masterManagers.telegramId,
         telegramUsername: masterManagers.telegramUsername,
         name: masterManagers.name,
+        callgearEmployeeId: masterManagers.callgearEmployeeId,
+        cloudtalkAgentId: masterManagers.cloudtalkAgentId,
       })
       .from(masterManagers)
       .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
@@ -178,6 +186,10 @@ export async function POST(request: NextRequest) {
         role: mgr.role || "manager",
         line: mgr.line || null,
         kommoUserId,
+        // Preserve existing cg_id/ct_id — these get auto-filled by webhooks and
+        // must survive Dashboard edits that don't explicitly set them.
+        callgearEmployeeId: mgr.callgearEmployeeId ?? existing?.callgearEmployeeId ?? null,
+        cloudtalkAgentId: mgr.cloudtalkAgentId ?? existing?.cloudtalkAgentId ?? null,
         inOkk: mgr.inOkk,
         inRolevki: mgr.inRolevki,
         isActive: true,
@@ -246,49 +258,108 @@ async function syncToTargets(
     const telegramIdChanged = oldRecord && oldRecord.telegramId && oldRecord.telegramId !== row.telegramId;
 
     // ── Sync to OKK (D2/R2) ──
+    // Upsert by telegram_id (stable across renames) first, then fall back to name.
+    // Preserves callgear_employee_id and cloudtalk_agent_id from master, and pulls
+    // back webhook-assigned IDs to master so rename doesn't drop the link.
     try {
       if (row.inOkk) {
-        // If name changed, deactivate old record first
-        if (nameChanged) {
-          await okkDb
-            .update(okkManagers)
-            .set({ isActive: false })
-            .where(and(eq(okkManagers.name, oldRecord.name), eq(okkManagers.department, okkDept)));
+        // 1) Find canonical row: prefer match by telegram_id (if set), else by name+dept
+        let canonical: { id: string; isActive: boolean | null; callgearEmployeeId: string | null; cloudtalkAgentId: string | null } | null = null;
+        const allSameNameOrTg: { id: string; isActive: boolean | null; callgearEmployeeId: string | null; cloudtalkAgentId: string | null }[] = [];
+
+        if (row.telegramId) {
+          const byTg = await okkDb
+            .select({ id: okkManagers.id, isActive: okkManagers.isActive, callgearEmployeeId: okkManagers.callgearEmployeeId, cloudtalkAgentId: okkManagers.cloudtalkAgentId })
+            .from(okkManagers)
+            .where(and(eq(okkManagers.telegramId, row.telegramId), eq(okkManagers.department, okkDept)))
+            .orderBy(desc(okkManagers.isActive), desc(okkManagers.updatedAt));
+          if (byTg.length > 0) {
+            canonical = byTg[0];
+            allSameNameOrTg.push(...byTg);
+          }
         }
 
-        const [existing] = await okkDb
-          .select({ id: okkManagers.id })
+        const byName = await okkDb
+          .select({ id: okkManagers.id, isActive: okkManagers.isActive, callgearEmployeeId: okkManagers.callgearEmployeeId, cloudtalkAgentId: okkManagers.cloudtalkAgentId })
           .from(okkManagers)
-          .where(and(eq(okkManagers.name, row.name), eq(okkManagers.department, okkDept)));
+          .where(and(eq(okkManagers.name, row.name), eq(okkManagers.department, okkDept)))
+          .orderBy(desc(okkManagers.isActive), desc(okkManagers.updatedAt));
+        for (const r of byName) {
+          if (!allSameNameOrTg.find((x) => x.id === r.id)) allSameNameOrTg.push(r);
+        }
+        if (!canonical && byName.length > 0) canonical = byName[0];
 
-        if (existing) {
+        // 2) Merge IDs: master value wins; otherwise use the most-recent target-side value
+        const mergedCgId = row.callgearEmployeeId
+          || allSameNameOrTg.find((r) => r.callgearEmployeeId)?.callgearEmployeeId
+          || null;
+        const mergedCtId = row.cloudtalkAgentId
+          || allSameNameOrTg.find((r) => r.cloudtalkAgentId)?.cloudtalkAgentId
+          || null;
+
+        if (canonical) {
           await okkDb
             .update(okkManagers)
             .set({
+              name: row.name,
               role: row.role,
               line: row.line,
               telegramId: row.telegramId,
               kommoUserId: row.kommoUserId,
+              callgearEmployeeId: mergedCgId,
+              cloudtalkAgentId: mergedCtId,
               isActive: true,
             })
-            .where(eq(okkManagers.id, existing.id));
+            .where(eq(okkManagers.id, canonical.id));
+
+          // Deactivate any sibling duplicates (same name or same tg_id in same dept)
+          for (const dup of allSameNameOrTg) {
+            if (dup.id === canonical.id) continue;
+            if (dup.isActive) {
+              await okkDb
+                .update(okkManagers)
+                .set({ isActive: false })
+                .where(eq(okkManagers.id, dup.id));
+              warnings.push(`OKK: deactivated duplicate "${row.name}" (id=${dup.id})`);
+            }
+          }
         } else {
           await okkDb.insert(okkManagers).values({
             name: row.name,
             telegramId: row.telegramId,
             kommoUserId: row.kommoUserId,
+            callgearEmployeeId: mergedCgId,
+            cloudtalkAgentId: mergedCtId,
             department: okkDept,
             role: row.role,
             line: row.line,
             isActive: true,
           });
         }
+
+        // 3) Sync merged IDs back to master_managers so future renames keep them
+        if (mergedCgId !== row.callgearEmployeeId || mergedCtId !== row.cloudtalkAgentId) {
+          await db
+            .update(masterManagers)
+            .set({
+              callgearEmployeeId: mergedCgId,
+              cloudtalkAgentId: mergedCtId,
+              updatedAt: new Date(),
+            })
+            .where(eq(masterManagers.id, row.id));
+        }
       } else {
-        // Deactivate in OKK (with department filter)
+        // Deactivate all matching rows (by name or by tg_id) in this dept
         await okkDb
           .update(okkManagers)
           .set({ isActive: false })
           .where(and(eq(okkManagers.name, row.name), eq(okkManagers.department, okkDept)));
+        if (row.telegramId) {
+          await okkDb
+            .update(okkManagers)
+            .set({ isActive: false })
+            .where(and(eq(okkManagers.telegramId, row.telegramId), eq(okkManagers.department, okkDept)));
+        }
       }
     } catch (err) {
       warnings.push(`OKK sync failed for ${row.name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -387,68 +458,95 @@ async function softDeleteFromTargets(
 }
 
 /**
- * Deactivate orphan managers in target tables — managers that are active in
- * OKK/Roleplay but have no matching active record in master_managers.
- * This cleans up ghosts from failed syncs, direct DB edits, or pre-migration data.
+ * Deactivate orphan managers across ALL four target tables (R2/D2 OKK + R1/D1 Roleplay).
+ *
+ * An orphan is a row active in a target table whose name (for OKK) or telegram_id
+ * (for Roleplay) does not correspond to any active row in master_managers of the
+ * matching department. This also cleans up cross-department leakage — e.g. a manager
+ * moved B2G → B2B leaves an active ghost in D2; this function deactivates it.
+ *
+ * Runs on every save regardless of which department was edited, so a single save
+ * fully reconciles state.
  */
 async function deactivateOrphans(
-  department: "b2g" | "b2b",
-  okkDept: string,
+  _department: "b2g" | "b2b",
+  _okkDept: string,
   warnings: string[],
 ) {
-  const okkDb = getOkkDbForDepartment(department);
-  const roleplayDb = getDbForDepartment(department);
-  const usersTable = department === "b2g" ? d1Users : r1Users;
-
-  // Get all active master manager names and telegramIds for this department
-  const masterRows = await db
-    .select({ name: masterManagers.name, telegramId: masterManagers.telegramId })
+  // Load ALL active master managers grouped by department
+  const allMaster = await db
+    .select({ name: masterManagers.name, telegramId: masterManagers.telegramId, department: masterManagers.department })
     .from(masterManagers)
-    .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
+    .where(eq(masterManagers.isActive, true));
 
-  const masterNames = masterRows.map((r) => r.name);
-  const masterTelegramIds = masterRows
-    .map((r) => r.telegramId)
-    .filter((id): id is string => id !== null && id !== "");
-
-  // ── Deactivate OKK orphans ──
-  try {
-    if (masterNames.length > 0) {
-      await okkDb
-        .update(okkManagers)
-        .set({ isActive: false })
-        .where(
-          and(
-            eq(okkManagers.department, okkDept),
-            eq(okkManagers.isActive, true),
-            notInArray(okkManagers.name, masterNames),
-          )
-        );
-      console.log(`[Managers] OKK orphan cleanup for ${department}: deactivated orphans`);
-    }
-  } catch (err) {
-    warnings.push(`OKK orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+  const byDept: Record<"b2b" | "b2g", { names: string[]; telegramIds: string[] }> = {
+    b2b: { names: [], telegramIds: [] },
+    b2g: { names: [], telegramIds: [] },
+  };
+  for (const m of allMaster) {
+    const d = m.department === "b2b" ? "b2b" : "b2g";
+    byDept[d].names.push(m.name);
+    if (m.telegramId) byDept[d].telegramIds.push(m.telegramId);
   }
 
-  // ── Deactivate Roleplay orphans ──
-  try {
-    if (masterTelegramIds.length > 0) {
-      await roleplayDb
-        .update(usersTable)
-        .set({ isActive: false, updatedAt: new Date() })
-        .where(
-          and(
-            eq(usersTable.isActive, true),
-            notInArray(usersTable.telegramId, masterTelegramIds),
-          )
-        );
-      console.log(`[Managers] Roleplay orphan cleanup for ${department}: deactivated orphans`);
-    } else {
-      // No master managers with telegramIds — deactivate ALL active roleplay users for safety
-      // (unlikely scenario, but prevents data leaks)
-      warnings.push(`No master managers with telegramId for ${department} — skipping roleplay orphan cleanup`);
+  // ── OKK cleanup in BOTH departments (R2 + D2) ──
+  const okkTargets: Array<{ dept: "b2g" | "b2b"; okkDept: "d2" | "r2" }> = [
+    { dept: "b2g", okkDept: "d2" },
+    { dept: "b2b", okkDept: "r2" },
+  ];
+
+  for (const { dept, okkDept } of okkTargets) {
+    const okkDb = getOkkDbForDepartment(dept);
+    const allowedNames = byDept[dept].names;
+    try {
+      if (allowedNames.length > 0) {
+        await okkDb
+          .update(okkManagers)
+          .set({ isActive: false })
+          .where(
+            and(
+              eq(okkManagers.department, okkDept),
+              eq(okkManagers.isActive, true),
+              notInArray(okkManagers.name, allowedNames),
+            )
+          );
+      } else {
+        // No active masters for this dept — deactivate everything
+        await okkDb
+          .update(okkManagers)
+          .set({ isActive: false })
+          .where(and(eq(okkManagers.department, okkDept), eq(okkManagers.isActive, true)));
+      }
+    } catch (err) {
+      warnings.push(`OKK ${okkDept} orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  } catch (err) {
-    warnings.push(`Roleplay orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // ── Roleplay cleanup in BOTH department tables (D1 + R1) ──
+  const rpTargets: Array<{ dept: "b2g" | "b2b"; table: typeof d1Users | typeof r1Users }> = [
+    { dept: "b2g", table: d1Users },
+    { dept: "b2b", table: r1Users },
+  ];
+
+  for (const { dept, table } of rpTargets) {
+    const rpDb = getDbForDepartment(dept);
+    const allowedTelegramIds = byDept[dept].telegramIds;
+    try {
+      if (allowedTelegramIds.length > 0) {
+        await rpDb
+          .update(table)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(
+            and(
+              eq(table.isActive, true),
+              notInArray(table.telegramId, allowedTelegramIds),
+            )
+          );
+      } else {
+        warnings.push(`No active master managers with telegramId for ${dept} — skipping ${dept === "b2g" ? "D1" : "R1"} cleanup`);
+      }
+    } catch (err) {
+      warnings.push(`Roleplay ${dept} orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
