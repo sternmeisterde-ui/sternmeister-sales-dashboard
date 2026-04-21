@@ -1,17 +1,18 @@
 /**
  * Timezone & date utilities — single source of truth.
  *
- * Previously 4 different copies of formatDate were spread across API routes
- * and one used a hardcoded `+02:00` Berlin offset (which silently breaks at
- * the CET↔CEST transition) while another used `new Date(y, m-1, d)` which
- * resolves to the *server's* local TZ (= UTC on Dokploy).
+ * The business operates in Europe/Berlin, so every display, every query
+ * boundary, and every URL date string resolves against that zone. Storage is
+ * always UTC; this module converts between UTC and Berlin wall-clock.
  *
- * Now everything flows through this module. Storage is always UTC. Display
- * and "start of day" query boundaries go through APP_TZ (default
- * Europe/Moscow — no DST, safe for arithmetic).
+ * DST is handled correctly in parseDateBoundary via two-pass convergence,
+ * so the CET↔CEST transition never shifts a "start of day" boundary by ±1h.
+ *
+ * Override with env APP_TIMEZONE only if you're sure — mixing zones across
+ * the app is the original bug we fixed, not a feature.
  */
 
-export const APP_TZ = process.env.APP_TIMEZONE ?? "Europe/Moscow";
+export const APP_TZ = process.env.APP_TIMEZONE ?? "Europe/Berlin";
 
 // ─── Display formatting ────────────────────────────────────────────
 
@@ -85,16 +86,18 @@ function tzOffsetMinutes(instant: Date, tz: string): number {
 // ─── Client-side helpers ───────────────────────────────────────────
 
 /**
- * Format a Date as "YYYY-MM-DD" in the browser's local timezone.
- * Used for URL query params (e.g. ?from=2026-04-21) — do NOT use for
- * anything user-facing. The caller is responsible for choosing local vs. UTC:
- * this uses local to match whatever the browser's calendar picker showed.
+ * Format a Date as "YYYY-MM-DD" in the app's business timezone (APP_TZ =
+ * Berlin by default). Used for URL query params (e.g. ?from=2026-04-21).
+ *
+ * Deliberately NOT using the browser's local zone: a user in Moscow clicking
+ * "today" should see the same day boundary the back-end uses for Berlin-time
+ * filtering. Otherwise a 23:30 Moscow call (which is 21:30 Berlin and the
+ * same Berlin day as a 00:05 Berlin call) can land on the wrong day in the
+ * picker. Single-zone policy, no exceptions.
  */
 export function fmtLocalDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  // en-CA yields "YYYY-MM-DD" — intentional; ru-RU would give "DD.MM.YYYY".
+  return d.toLocaleDateString("en-CA", { timeZone: APP_TZ });
 }
 
 /**
@@ -127,8 +130,8 @@ export function parseDisplayDate(dateStr: string): Date {
  * Parse "YYYY-MM-DD" as a moment in APP_TZ (start or end of that local day)
  * and return the corresponding UTC Date.
  *
- * Example: parseDateBoundary("2026-04-21", "start") in Europe/Moscow
- * returns the UTC instant 2026-04-20T21:00:00Z (= 2026-04-21 00:00 MSK).
+ * Example: parseDateBoundary("2026-04-21", "start") in Europe/Berlin
+ * returns the UTC instant 2026-04-20T22:00:00Z (= 2026-04-21 00:00 CEST).
  *
  * Returns null if the input isn't a valid date string — callers should treat
  * this the same as "no filter."

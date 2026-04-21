@@ -24,15 +24,36 @@ export const SESSION_COOKIE_NAME = "sm_session";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+// Lazy-initialised per-process ephemeral secret for dev mode. Never use this
+// in production — it's a fallback so local boots don't die without .env.local.
+// Sessions signed with it invalidate on every restart.
+let ephemeralDevSecret: string | null = null;
+
 function getSecret(): string {
   const secret = process.env.SESSION_SECRET;
-  if (!secret || secret.length < 32) {
+  if (secret && secret.length >= 32) return secret;
+
+  if (process.env.NODE_ENV === "production") {
+    // Fail loudly in prod — we'd rather show a 500 on /api/auth/login than
+    // silently accept forged cookies because someone forgot to set the env
+    // var on the deploy target.
     throw new Error(
-      "SESSION_SECRET env var is missing or too short (>= 32 chars). " +
-        "Generate one with: openssl rand -base64 48",
+      "SESSION_SECRET env var is missing or too short (>= 32 chars) in production. " +
+        "Generate one with: openssl rand -base64 48 — then set it on Dokploy / your host.",
     );
   }
-  return secret;
+
+  if (!ephemeralDevSecret) {
+    // Web Crypto getRandomValues works in Node ≥18 and Edge runtimes alike.
+    const bytes = new Uint8Array(48);
+    crypto.getRandomValues(bytes);
+    ephemeralDevSecret = toBase64Url(bytes);
+    console.warn(
+      "[auth] SESSION_SECRET is unset — using an ephemeral dev-only secret. " +
+        "All sessions will invalidate on restart. Set SESSION_SECRET in .env.local to persist.",
+    );
+  }
+  return ephemeralDevSecret;
 }
 
 function toBase64Url(bytes: Uint8Array): string {
