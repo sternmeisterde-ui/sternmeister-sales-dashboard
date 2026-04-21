@@ -3,35 +3,8 @@ import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, okkManagers, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
-
-// ─── Helper: format date (same pattern as queries-existing.ts) ──────
-
-function formatDate(date: Date | null): string {
-  if (!date) return "—";
-  const tz = "Europe/Moscow";
-  const callDate = new Date(date);
-  const now = new Date();
-
-  const nowMsk = now.toLocaleDateString("en-CA", { timeZone: tz });
-  const callMsk = callDate.toLocaleDateString("en-CA", { timeZone: tz });
-
-  const hours = callDate.toLocaleString("ru-RU", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
-
-  if (callMsk === nowMsk) {
-    return `Сегодня, ${hours}`;
-  }
-
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayMsk = yesterday.toLocaleDateString("en-CA", { timeZone: tz });
-  if (callMsk === yesterdayMsk) {
-    return `Вчера, ${hours}`;
-  }
-
-  const day = callDate.toLocaleString("ru-RU", { timeZone: tz, day: "2-digit" });
-  const month = callDate.toLocaleString("ru-RU", { timeZone: tz, month: "2-digit" });
-  return `${day}.${month}, ${hours}`;
-}
+import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
+import { promptTypeForLine } from "@/lib/config/tenant";
 
 // ─── Helper: build speaker-labelled transcript ──────────────────────
 // AssemblyAI returns speakers as "A", "B", etc.
@@ -103,20 +76,14 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
 
     const fromParam = sp.get("from");
     if (fromParam) {
-      // Parse as start of day in Europe/Berlin timezone (UTC+1 CET / UTC+2 CEST)
-      const fromDate = new Date(`${fromParam}T00:00:00+02:00`);
-      if (!Number.isNaN(fromDate.getTime())) {
-        conditions.push(gte(okkCalls.callCreatedAt, fromDate));
-      }
+      const fromDate = parseDateBoundary(fromParam, "start");
+      if (fromDate) conditions.push(gte(okkCalls.callCreatedAt, fromDate));
     }
 
     const toParam = sp.get("to");
     if (toParam) {
-      // Parse as end of day in Europe/Berlin timezone
-      const toDate = new Date(`${toParam}T23:59:59+02:00`);
-      if (!Number.isNaN(toDate.getTime())) {
-        conditions.push(lte(okkCalls.callCreatedAt, toDate));
-      }
+      const toDate = parseDateBoundary(toParam, "end");
+      if (toDate) conditions.push(lte(okkCalls.callCreatedAt, toDate));
     }
 
     const statusParam = sp.get("status");
@@ -138,15 +105,11 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       conditions.push(eq(okkCalls.managerId, managerIdParam));
     }
 
-    // B2B line filter → filter by prompt_type in evaluations
+    // B2B line filter → filter by prompt_type in evaluations.
+    // B2G uses the manager.line column (not prompt_type), so skip here.
     const lineParam = sp.get("line");
     if (lineParam && department === "b2b") {
-      const promptTypeMap: Record<string, string> = {
-        buh1: "r2_commercial",
-        buh2: "r2_decisions",
-        med1: "r2_med_commercial",
-      };
-      const pt = promptTypeMap[lineParam];
+      const pt = promptTypeForLine(department, lineParam);
       if (pt) {
         conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE prompt_type = ${pt})`);
       }
@@ -249,7 +212,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         avatarUrl: "",
         callDuration: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
         callNumber: row.callNumber || "",
-        date: formatDate(row.callCreatedAt),
+        date: formatCallDate(row.callCreatedAt),
         score: row.totalScore || 0,
         totalMaxScore,
         hasRecording: !!row.recordingUrl,

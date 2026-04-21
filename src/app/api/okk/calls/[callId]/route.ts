@@ -2,40 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, desc } from "drizzle-orm";
-
-// ─── Helper: format date ─────────────────────────────────────────────────────
-
-function formatDate(date: Date | null): string {
-  if (!date) return "—";
-  const tz = "Europe/Moscow";
-  const callDate = new Date(date);
-  const now = new Date();
-
-  const nowMsk = now.toLocaleDateString("en-CA", { timeZone: tz });
-  const callMsk = callDate.toLocaleDateString("en-CA", { timeZone: tz });
-
-  const hours = callDate.toLocaleString("ru-RU", {
-    timeZone: tz,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-
-  if (callMsk === nowMsk) {
-    return `Сегодня, ${hours}`;
-  }
-
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayMsk = yesterday.toLocaleDateString("en-CA", { timeZone: tz });
-  if (callMsk === yesterdayMsk) {
-    return `Вчера, ${hours}`;
-  }
-
-  const day = callDate.toLocaleString("ru-RU", { timeZone: tz, day: "2-digit" });
-  const month = callDate.toLocaleString("ru-RU", { timeZone: tz, month: "2-digit" });
-  return `${day}.${month}, ${hours}`;
-}
+import { formatCallDate } from "@/lib/utils/date";
 
 // ─── Helper: build speaker-labelled transcript ───────────────────────────────
 // AssemblyAI returns speakers as "A", "B", etc.
@@ -203,7 +170,7 @@ export async function GET(
       name: row.managerName || "—",
       avatarUrl: "",
       callDuration: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
-      date: formatDate(row.callCreatedAt),
+      date: formatCallDate(row.callCreatedAt),
       score: row.totalScore || 0,
       hasRecording: !!row.recordingUrl,
       audioUrl: row.recordingUrl

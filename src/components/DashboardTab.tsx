@@ -71,12 +71,7 @@ interface DashboardData {
 
 // ==================== Component ====================
 
-function formatDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+import { fmtLocalDate as formatDate } from "@/lib/utils/date";
 
 export default function DashboardTab({ department }: { department: string }) {
   const [period, setPeriod] = useState<"day" | "week" | "month" | "year">("day");

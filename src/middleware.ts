@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { SESSION_COOKIE_NAME, verifySession } from "@/lib/auth";
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Always allow auth routes
@@ -22,11 +23,19 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Protect everything else: redirect to /login if no session cookie
-  const session = request.cookies.get("sm_session");
-  if (!session?.value) {
+  // Protect everything else: verify signed session cookie.
+  // A forged/unsigned cookie returns null from verifySession and is rejected
+  // here — so an attacker who sets their own sm_session value can't even load
+  // a protected page.
+  const cookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const session = cookie ? await verifySession(cookie) : null;
+
+  if (!session) {
     const loginUrl = new URL("/login", request.url);
-    return NextResponse.redirect(loginUrl);
+    // Drop the invalid cookie so the browser stops sending it.
+    const response = NextResponse.redirect(loginUrl);
+    if (cookie) response.cookies.delete(SESSION_COOKIE_NAME);
+    return response;
   }
 
   return NextResponse.next();

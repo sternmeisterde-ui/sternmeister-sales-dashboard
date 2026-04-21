@@ -15,6 +15,9 @@ import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
 import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
+import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
+import { fmtLocalDate, parseDisplayDate } from "@/lib/utils/date";
+import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
 import WorstCallsPanel from "@/components/WorstCallsPanel";
@@ -71,7 +74,9 @@ export default function Dashboard() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
   const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis">("dashboard");
-  const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3" | "buh1" | "buh2" | "med1">("all");
+  // Global line filter: "all" OR any line group id from tenant config.
+  // Stored as a plain string — tenant.ts is the source of truth for valid values.
+  const [lineFilter, setLineFilter] = useState<string>("all");
 
   // Load session on mount
   useEffect(() => {
@@ -134,14 +139,20 @@ export default function Dashboard() {
     filteredCalls: 0,
   });
 
-  // Audio player state
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playingCallId, setPlayingCallId] = useState<string | null>(null);
-  const [audioLoading, setAudioLoading] = useState<string | null>(null);
-  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
-  const [audioPlaybackRate, setAudioPlaybackRate] = useState(1);
-  const [audioPaused, setAudioPaused] = useState(false);
+  // Audio player — extracted into a dedicated hook so this component doesn't
+  // have to manage 7 useState + useRef + 3 useCallback for audio concerns.
+  const {
+    playingCallId,
+    audioLoading,
+    audioCurrentTime,
+    audioDuration,
+    audioPlaybackRate,
+    audioPaused,
+    toggleAudio,
+    stopAudio,
+    seekAudio,
+    cyclePlaybackRate,
+  } = useAudioPlayer();
 
   // Accordion state: set of open block IDs in the scoring modal
   const [openBlocks, setOpenBlocks] = useState<Set<string>>(new Set());
@@ -157,97 +168,6 @@ export default function Dashboard() {
       return next;
     });
   };
-
-  const stopAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-    }
-    setPlayingCallId(null);
-    setAudioLoading(null);
-    setAudioCurrentTime(0);
-    setAudioDuration(0);
-    setAudioPaused(false);
-  }, []);
-
-  const toggleAudio = useCallback((call: ManagerCall) => {
-    if (!call.hasRecording) return;
-
-    // If same call is playing — toggle pause/resume
-    if (playingCallId === call.id) {
-      const audio = audioRef.current;
-      if (audio) {
-        if (audio.paused) {
-          audio.play();
-          setAudioPaused(false);
-        } else {
-          audio.pause();
-          setAudioPaused(true);
-        }
-      }
-      return;
-    }
-
-    // Stop previous audio
-    stopAudio();
-
-    // Start new audio
-    setAudioLoading(call.id);
-    setAudioPlaybackRate(1);
-    const audio = new Audio();
-    audio.preload = "auto";
-    audioRef.current = audio;
-
-    audio.onloadedmetadata = () => {
-      setAudioDuration(audio.duration);
-    };
-
-    audio.ontimeupdate = () => {
-      setAudioCurrentTime(audio.currentTime);
-    };
-
-    audio.oncanplay = () => {
-      setAudioLoading(null);
-      setPlayingCallId(call.id);
-      setAudioPaused(false);
-      audio.play().catch(() => {
-        setPlayingCallId(null);
-        setAudioLoading(null);
-      });
-    };
-
-    audio.onended = () => {
-      setPlayingCallId(null);
-      setAudioCurrentTime(0);
-      setAudioPaused(false);
-    };
-
-    audio.onerror = () => {
-      console.error("Audio error:", audio.error?.message, audio.error?.code);
-      setPlayingCallId(null);
-      setAudioLoading(null);
-    };
-
-    // Set src after listeners to ensure events fire
-    audio.src = call.audioUrl;
-    audio.load();
-  }, [playingCallId, stopAudio]);
-
-  const seekAudio = useCallback((fraction: number) => {
-    if (audioRef.current && audioDuration > 0) {
-      audioRef.current.currentTime = fraction * audioDuration;
-    }
-  }, [audioDuration]);
-
-  const cyclePlaybackRate = useCallback(() => {
-    const rates = [1, 1.5, 2];
-    const nextIdx = (rates.indexOf(audioPlaybackRate) + 1) % rates.length;
-    const newRate = rates[nextIdx];
-    setAudioPlaybackRate(newRate);
-    if (audioRef.current) {
-      audioRef.current.playbackRate = newRate;
-    }
-  }, [audioPlaybackRate]);
 
   const fmtTime = (sec: number) => {
     if (!sec || !isFinite(sec)) return "0:00";
@@ -266,14 +186,6 @@ export default function Dashboard() {
   const [realManagers, setRealManagers] = useState<ManagerStat[]>([]);
   const [isLoadingReal, setIsLoadingReal] = useState(true);
   const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
-
-  // Format date as YYYY-MM-DD in local timezone (not UTC)
-  const fmtLocalDate = (d: Date): string => {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-  };
 
   // Compute OKK date range from period/custom range
   // "end" is set to tomorrow to capture calls that arrive with UTC timestamps
@@ -345,28 +257,9 @@ export default function Dashboard() {
     return () => ac.abort();
   }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange, lineFilter]);
 
-  // Parse date from Russian format (Сегодня, Вчера, DD.MM)
-  const parseCallDate = (dateStr: string): Date => {
-    const now = new Date();
-
-    if (dateStr.startsWith('Сегодня')) {
-      return now;
-    } else if (dateStr.startsWith('Вчера')) {
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      return yesterday;
-    } else {
-      // Format: "DD.MM, HH:MM"
-      const match = dateStr.match(/(\d{2})\.(\d{2})/);
-      if (match) {
-        const day = parseInt(match[1]);
-        const month = parseInt(match[2]) - 1; // месяцы с 0
-        const year = now.getFullYear();
-        return new Date(year, month, day);
-      }
-    }
-    return now;
-  };
+  // Parse display dates (Сегодня/Вчера/DD.MM) — legacy shim, delegates to
+  // the shared util so all consumers have one round-trip implementation.
+  const parseCallDate = parseDisplayDate;
 
   // Calculate manager stats with filters
   useEffect(() => {
@@ -844,26 +737,30 @@ export default function Dashboard() {
                   onChange={(range) => setAiCustomRange(range)}
                   onClear={() => setAiCustomRange({ start: null, end: null })}
                 />
-                {activeDepartment === "b2g" && (
-                  <div className="flex gap-1 ml-2">
-                    {(["all", "1", "2", "3"] as const).map(val => (
-                      <button key={val} onClick={() => setLineFilter(val)}
-                        className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
-                        {val === "all" ? "Все" : val === "1" ? "Квалиф." : val === "2" ? "Бератер" : "Доведение"}
+                {/* Line filter pills — sourced from tenant config so adding a
+                    line in src/lib/config/tenant.ts shows up here automatically. */}
+                <div className="flex gap-1 ml-2">
+                  {(() => {
+                    // Deduplicate lines by group — the global filter operates
+                    // on groups ("1"/"2"/"3") while Scripts has sub-ids like "2a"/"2b".
+                    const seen = new Set<string>();
+                    const groups = getLines(activeDepartment).filter((l) => {
+                      if (seen.has(l.group)) return false;
+                      seen.add(l.group);
+                      return true;
+                    });
+                    const options = [{ id: "all", shortLabel: "Все" } as const, ...groups.map((l) => ({ id: l.group, shortLabel: l.shortLabel ?? l.label }))];
+                    return options.map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setLineFilter(opt.id)}
+                        className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === opt.id ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}
+                      >
+                        {opt.shortLabel}
                       </button>
-                    ))}
-                  </div>
-                )}
-                {activeDepartment === "b2b" && (
-                  <div className="flex gap-1 ml-2">
-                    {(["all", "buh1", "buh2", "med1"] as const).map(val => (
-                      <button key={val} onClick={() => setLineFilter(val)}
-                        className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === val ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
-                        {val === "all" ? "Все" : val === "buh1" ? "Бух 1" : val === "buh2" ? "Бух 2" : "Мед 1"}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                    ));
+                  })()}
+                </div>
               </div>
 
               {/* Stats Row: KPIs (narrow) + Manager Scores (column) + Chart */}

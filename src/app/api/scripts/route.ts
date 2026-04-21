@@ -3,21 +3,18 @@ import { eq, and } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { scripts } from "@/lib/db/schema-existing";
+import {
+  DEPARTMENTS,
+  isValidLineId,
+  type DepartmentId,
+} from "@/lib/config/tenant";
 
-const VALID_DEPARTMENTS = ["b2g", "b2b"] as const;
-const VALID_LINES_B2G = ["1", "2a", "2b", "3"] as const;
-const VALID_LINES_B2B = ["buh1", "buh2", "med1"] as const;
-
-type Department = (typeof VALID_DEPARTMENTS)[number];
-
-function isValidDepartment(value: unknown): value is Department {
-  return typeof value === "string" && (VALID_DEPARTMENTS as readonly string[]).includes(value);
+function isValidDepartment(value: unknown): value is DepartmentId {
+  return typeof value === "string" && value in DEPARTMENTS;
 }
 
-function isValidLine(department: Department, line: unknown): line is string {
-  if (typeof line !== "string") return false;
-  const valid = department === "b2b" ? VALID_LINES_B2B : VALID_LINES_B2G;
-  return (valid as readonly string[]).includes(line);
+function isValidLine(department: DepartmentId, line: unknown): line is string {
+  return typeof line === "string" && isValidLineId(department, line);
 }
 
 // Minimal runtime validation — tolerant of missing optional fields

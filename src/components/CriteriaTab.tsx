@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Loader2, Save, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, Hash, FileText, BarChart3, Filter } from "lucide-react";
+import { getLines, isValidLineId } from "@/lib/config/tenant";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ interface CriteriaTabProps {
   lineFilter: string;
 }
 
-// ─── Config mapping by department + line ────────────────────────
+// ─── Config mapping by department + line (via tenant config) ────
 
 interface ConfigOption {
   promptType: string;
@@ -45,31 +46,18 @@ interface ConfigOption {
 }
 
 function getConfigOptions(dept: "b2g" | "b2b"): ConfigOption[] {
-  if (dept === "b2b") {
-    return [
-      { promptType: "r2_commercial", label: "Бух 1 — Первичное касание" },
-      { promptType: "r2_decisions", label: "Бух 2 — Вторичное касание" },
-      { promptType: "r2_med_commercial", label: "Мед 1 — Medical Admin" },
-    ];
-  }
-  return [
-    { promptType: "d2_qualifier", label: "Линия 1 — Квалификатор" },
-    { promptType: "d2_berater", label: "Линия 2 — Бератер 1" },
-    { promptType: "d2_berater2", label: "Линия 2 — Бератер 2" },
-    { promptType: "d2_dovedenie", label: "Линия 3 — Доведение" },
-  ];
+  return getLines(dept).map((l) => ({ promptType: l.promptType, label: l.label }));
 }
 
 function getDefaultConfig(dept: "b2g" | "b2b", line: string): string {
-  if (dept === "b2b") {
-    if (line === "buh2") return "r2_decisions";
-    if (line === "med1") return "r2_med_commercial";
-    return "r2_commercial";
+  const lines = getLines(dept);
+  // Global lineFilter uses the "group" key — Criteria has one promptType per
+  // line id, so pick the first id in the matching group (or in the line itself).
+  if (isValidLineId(dept, line)) {
+    return lines.find((l) => l.id === line)!.promptType;
   }
-  if (line === "1") return "d2_qualifier";
-  if (line === "2") return "d2_berater";
-  if (line === "3") return "d2_dovedenie";
-  return "d2_qualifier";
+  const byGroup = lines.find((l) => l.group === line);
+  return (byGroup ?? lines[0]).promptType;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

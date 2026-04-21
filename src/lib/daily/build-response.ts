@@ -173,12 +173,15 @@ async function getRoleplayPerManagerScores(department: "b2g" | "b2b", fromTs: nu
   return result;
 }
 
-// Line → OKK prompt types mapping
-const LINE_TO_OKK_PROMPTS: Record<string, string[]> = {
-  "1": ["d2_qualifier"],
-  "2": ["d2_berater", "d2_berater2"],
-  "3": ["d2_dovedenie"],
-};
+// Line → OKK prompt types mapping.
+// Derived from tenant config so new lines in src/lib/config/tenant.ts
+// automatically flow through to Daily without touching this file.
+import { groupPromptTypes } from "@/lib/config/tenant";
+
+function lineToOkkPrompts(group: string): string[] {
+  // B2G-only in the current setup; if B2B Daily rolls out, call with "b2b".
+  return groupPromptTypes("b2g", group);
+}
 
 // Line → roleplay call types mapping
 const LINE_TO_ROLEPLAY_TYPES: Record<string, string[]> = {
@@ -534,13 +537,17 @@ export async function buildDailyResponse(department: string, period: string, dat
   const okkPerManager = new Map<string, Map<string, number>>();
   const roleplayPerManager = new Map<string, Map<string, number>>();
   if (department === "b2g") {
-    const okkPromises = Object.entries(LINE_TO_OKK_PROMPTS).map(async ([line, prompts]) => {
+    // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
+    // stay index-compatible downstream.
+    const okkPromises = Object.keys(LINE_TO_ROLEPLAY_TYPES).map(async (group) => {
+      const prompts = lineToOkkPrompts(group);
+      if (prompts.length === 0) return;
       const [avg, perMgr] = await Promise.all([
         getOkkAvgScore("b2g", from, to, prompts),
         getOkkPerManagerScores("b2g", from, to, prompts),
       ]);
-      if (avg !== null) okkScores.set(line, avg);
-      okkPerManager.set(line, perMgr);
+      if (avg !== null) okkScores.set(group, avg);
+      okkPerManager.set(group, perMgr);
     });
     const rpPromises = Object.entries(LINE_TO_ROLEPLAY_TYPES).map(async ([line, types]) => {
       const [avg, perMgr] = await Promise.all([

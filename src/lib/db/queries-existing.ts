@@ -1,6 +1,7 @@
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { getDbForDepartment } from "./index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
+import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
 
 // Тип отдела
 export type DepartmentType = "b2g" | "b2b";
@@ -28,17 +29,12 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
 
   const conditions: ReturnType<typeof eq>[] = [];
   if (fromDate) {
-    // Parse as start of day in Europe/Berlin
-    // "2026-03-25" → midnight Berlin time → convert to UTC
-    const fromParts = fromDate.split("-").map(Number);
-    const fromLocal = new Date(fromParts[0], fromParts[1] - 1, fromParts[2], 0, 0, 0, 0);
-    conditions.push(gte(calls.startedAt, fromLocal));
+    const fromUtc = parseDateBoundary(fromDate, "start");
+    if (fromUtc) conditions.push(gte(calls.startedAt, fromUtc));
   }
   if (toDate) {
-    // Parse as end of day in Europe/Berlin
-    const toParts = toDate.split("-").map(Number);
-    const toLocal = new Date(toParts[0], toParts[1] - 1, toParts[2], 23, 59, 59, 999);
-    conditions.push(lte(calls.startedAt, toLocal));
+    const toUtc = parseDateBoundary(toDate, "end");
+    if (toUtc) conditions.push(lte(calls.startedAt, toUtc));
   }
 
   // Only show calls that have been evaluated (have a score)
@@ -89,7 +85,7 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
       name: call.userName || "Unknown",
       avatarUrl: `https://i.pravatar.cc/150?u=${call.userTelegramUsername || call.userId}`,
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
-      date: formatDate(call.startedAt),
+      date: formatCallDate(call.startedAt),
       score: call.score || 0,
       hasRecording: !!call.recordingPath,
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${departmentType}` : "#",
@@ -162,34 +158,5 @@ export async function getManagerStats(departmentType: DepartmentType) {
       line: user.line || null,
     };
   });
-}
-
-// Вспомогательная функция для форматирования даты (Moscow timezone)
-function formatDate(date: Date): string {
-  const tz = "Europe/Moscow";
-  const callDate = new Date(date);
-  const now = new Date();
-
-  // Получаем дату в московском часовом поясе для сравнения "сегодня/вчера"
-  const nowMsk = now.toLocaleDateString("en-CA", { timeZone: tz }); // "YYYY-MM-DD"
-  const callMsk = callDate.toLocaleDateString("en-CA", { timeZone: tz });
-
-  const hours = callDate.toLocaleString("ru-RU", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
-
-  if (callMsk === nowMsk) {
-    return `Сегодня, ${hours}`;
-  }
-
-  // Вчера
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayMsk = yesterday.toLocaleDateString("en-CA", { timeZone: tz });
-  if (callMsk === yesterdayMsk) {
-    return `Вчера, ${hours}`;
-  }
-
-  const day = callDate.toLocaleString("ru-RU", { timeZone: tz, day: "2-digit" });
-  const month = callDate.toLocaleString("ru-RU", { timeZone: tz, month: "2-digit" });
-  return `${day}.${month}, ${hours}`;
 }
 

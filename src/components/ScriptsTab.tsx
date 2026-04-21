@@ -62,36 +62,17 @@ interface ScriptsTabProps {
   isAdmin: boolean;
 }
 
-// ─── Line options per department ────────────────────────────────
+// ─── Line options (sourced from tenant config) ──────────────────
 
-interface LineOption {
-  line: string;
-  label: string;
-  accent: string; // tailwind class for border/bg accent
-}
-
-function getLineOptions(dept: "b2g" | "b2b"): LineOption[] {
-  if (dept === "b2b") {
-    return [
-      { line: "buh1", label: "Бух 1 — Первичное касание", accent: "emerald" },
-      { line: "buh2", label: "Бух 2 — Вторичное касание", accent: "violet" },
-      { line: "med1", label: "Мед 1 — Medical Admin", accent: "pink" },
-    ];
-  }
-  return [
-    { line: "1", label: "Линия 1 — Квалификатор", accent: "blue" },
-    { line: "2a", label: "Линия 2 — Бератер 1 (Верх воронки)", accent: "violet" },
-    { line: "2b", label: "Линия 2 — Бератер 2 (Низ воронки)", accent: "pink" },
-    { line: "3", label: "Линия 3 — Доведение", accent: "emerald" },
-  ];
-}
+import { getLines, isValidLineId } from "@/lib/config/tenant";
 
 function getDefaultLine(dept: "b2g" | "b2b", lineFilter: string): string {
-  const options = getLineOptions(dept);
-  // Map global lineFilter (1/2/3) to scripts default. For '2' pick '2a' by default.
-  if (lineFilter === "2" && dept === "b2g") return "2a";
-  if (options.some((o) => o.line === lineFilter)) return lineFilter;
-  return options[0].line;
+  // Global lineFilter uses the "group" key ("1"/"2"/"3" for B2G), but Scripts
+  // addresses the more granular `id` ("2a"/"2b"). Map group → first matching id.
+  if (isValidLineId(dept, lineFilter)) return lineFilter;
+  const lines = getLines(dept);
+  const byGroup = lines.find((l) => l.group === lineFilter);
+  return byGroup?.id ?? lines[0].id;
 }
 
 function accentClasses(accent: string, active: boolean) {
@@ -220,6 +201,12 @@ function ItemCard({ item, index, readOnly, onChange, onDelete }: ItemCardProps) 
   const isHeaderOnly = item.kind === "subheader";
   const isNote = item.kind === "note";
 
+  // Collapsed by default — only the script body stays always-visible.
+  // Admins editing an empty field still need to reach it, so we open when
+  // content is already there OR the admin explicitly expands.
+  const [showComment, setShowComment] = useState<boolean>(false);
+  const [showTips, setShowTips] = useState<boolean>(false);
+
   return (
     <div className={`relative ${style.rowBg} ${index > 0 ? "border-t border-white/[0.04]" : ""}`}>
       <div className="px-5 py-4 space-y-3">
@@ -302,43 +289,71 @@ function ItemCard({ item, index, readOnly, onChange, onDelete }: ItemCardProps) 
           />
         )}
 
-        {/* Comment — что нужно знать (amber always) */}
+        {/* Comment — "Что нужно знать менеджеру" — collapsible */}
         {!isNote && !isHeaderOnly && (item.comment || !readOnly) && (
           <div>
-            <div className="flex items-center gap-1.5 text-[10px] font-bold text-amber-300 uppercase tracking-wider mb-1">
+            <button
+              type="button"
+              onClick={() => setShowComment((v) => !v)}
+              className="w-full flex items-center gap-1.5 text-[10px] font-bold text-amber-300 uppercase tracking-wider mb-1 hover:text-amber-200 transition-colors group"
+            >
+              <ChevronDown
+                className={`w-3 h-3 transition-transform duration-150 ${showComment ? "" : "-rotate-90"}`}
+              />
               <MessageSquare className="w-3 h-3" />
-              Что нужно знать менеджеру
-            </div>
-            <textarea
-              value={item.comment ?? ""}
-              onChange={(e) => onChange("comment", e.target.value)}
-              readOnly={readOnly}
-              rows={Math.max(2, Math.min(10, Math.ceil((item.comment?.length ?? 0) / 90) + 1))}
-              placeholder="Пояснение, контекст, что важно учитывать..."
-              className={`w-full bg-amber-500/[0.08] border border-amber-500/20 rounded-lg px-3 py-2 text-[12px] text-amber-100 leading-relaxed focus:border-amber-400/50 focus:ring-2 focus:ring-amber-500/20 focus:outline-none resize-y placeholder-amber-300/30 transition ${
-                readOnly ? "cursor-default" : ""
-              }`}
-            />
+              <span>Что нужно знать менеджеру</span>
+              {item.comment && !showComment && (
+                <span className="normal-case tracking-normal text-[10px] text-amber-400/60 ml-1">
+                  · {item.comment.length} симв.
+                </span>
+              )}
+            </button>
+            {showComment && (
+              <textarea
+                value={item.comment ?? ""}
+                onChange={(e) => onChange("comment", e.target.value)}
+                readOnly={readOnly}
+                rows={Math.max(2, Math.min(10, Math.ceil((item.comment?.length ?? 0) / 90) + 1))}
+                placeholder="Пояснение, контекст, что важно учитывать..."
+                className={`w-full bg-amber-500/[0.08] border border-amber-500/20 rounded-lg px-3 py-2 text-[12px] text-amber-100 leading-relaxed focus:border-amber-400/50 focus:ring-2 focus:ring-amber-500/20 focus:outline-none resize-y placeholder-amber-300/30 transition ${
+                  readOnly ? "cursor-default" : ""
+                }`}
+              />
+            )}
           </div>
         )}
 
-        {/* Tips — cyan always */}
+        {/* Tips — "Подсказки" — collapsible */}
         {!isNote && (item.tips || (!readOnly && !isSection && !isHeaderOnly)) && (
           <div>
-            <div className="flex items-center gap-1.5 text-[10px] font-bold text-cyan-300 uppercase tracking-wider mb-1">
+            <button
+              type="button"
+              onClick={() => setShowTips((v) => !v)}
+              className="w-full flex items-center gap-1.5 text-[10px] font-bold text-cyan-300 uppercase tracking-wider mb-1 hover:text-cyan-200 transition-colors group"
+            >
+              <ChevronDown
+                className={`w-3 h-3 transition-transform duration-150 ${showTips ? "" : "-rotate-90"}`}
+              />
               <Sparkles className="w-3 h-3" />
-              Подсказки
-            </div>
-            <textarea
-              value={item.tips ?? ""}
-              onChange={(e) => onChange("tips", e.target.value)}
-              readOnly={readOnly}
-              rows={2}
-              placeholder="Дополнительные подсказки..."
-              className={`w-full bg-cyan-500/[0.08] border border-cyan-500/20 rounded-lg px-3 py-2 text-[12px] text-cyan-100 leading-relaxed focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-500/20 focus:outline-none resize-y placeholder-cyan-300/30 transition ${
-                readOnly ? "cursor-default" : ""
-              }`}
-            />
+              <span>Подсказки</span>
+              {item.tips && !showTips && (
+                <span className="normal-case tracking-normal text-[10px] text-cyan-400/60 ml-1">
+                  · {item.tips.length} симв.
+                </span>
+              )}
+            </button>
+            {showTips && (
+              <textarea
+                value={item.tips ?? ""}
+                onChange={(e) => onChange("tips", e.target.value)}
+                readOnly={readOnly}
+                rows={2}
+                placeholder="Дополнительные подсказки..."
+                className={`w-full bg-cyan-500/[0.08] border border-cyan-500/20 rounded-lg px-3 py-2 text-[12px] text-cyan-100 leading-relaxed focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-500/20 focus:outline-none resize-y placeholder-cyan-300/30 transition ${
+                  readOnly ? "cursor-default" : ""
+                }`}
+              />
+            )}
           </div>
         )}
       </div>
@@ -485,7 +500,7 @@ function normalizeContent(content: unknown): ScriptContent {
 }
 
 export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsTabProps) {
-  const options = useMemo(() => getLineOptions(department), [department]);
+  const options = useMemo(() => getLines(department), [department]);
   const [activeLine, setActiveLine] = useState<string>(() => getDefaultLine(department, lineFilter));
 
   const [data, setData] = useState<ScriptData | null>(null);
@@ -524,7 +539,7 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
     load(department, activeLine);
   }, [department, activeLine, load]);
 
-  const activeOption = options.find((o) => o.line === activeLine);
+  const activeOption = options.find((o) => o.id === activeLine);
   const readOnly = !isAdmin;
 
   const updateItem = useCallback(
@@ -674,11 +689,11 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
           {options.map((opt) => (
             <button
               type="button"
-              key={opt.line}
-              onClick={() => setActiveLine(opt.line)}
+              key={opt.id}
+              onClick={() => setActiveLine(opt.id)}
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-all border ${accentClasses(
                 opt.accent,
-                activeLine === opt.line,
+                activeLine === opt.id,
               )}`}
             >
               {opt.label}

@@ -12,6 +12,7 @@
 import { eq, sql } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
+import { KOMMO } from "@/lib/config/tenant";
 import {
   FAILURE_PER_CALL_PROMPT, SUCCESS_PER_CALL_PROMPT,
   FAILURE_SUMMARY_PROMPT, SUCCESS_SUMMARY_PROMPT,
@@ -50,7 +51,7 @@ export function parseKommoUrl(url: string): { pipelineId: string; filters: Recor
 // ==================== KOMMO API ====================
 
 async function kommoGet(path: string): Promise<unknown> {
-  const res = await fetch(`https://sternmeister.kommo.com/api/v4${path}`, {
+  const res = await fetch(`${KOMMO.apiBaseUrl}${path}`, {
     headers: { Authorization: `Bearer ${KOMMO_TOKEN}` },
   });
   if (res.status === 204) return null;
@@ -65,7 +66,7 @@ interface KommoNote { id: number; note_type: string; params: { duration?: number
 
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
   const parsed = new URL(kommoUrl);
-  if (parsed.hostname !== "sternmeister.kommo.com") throw new Error("Invalid Kommo URL domain");
+  if (parsed.hostname !== KOMMO.host) throw new Error("Invalid Kommo URL domain");
   const filterParams = parsed.search;
   const pipelineMatch = parsed.pathname.match(/pipeline\/(\d+)/);
 

@@ -3,15 +3,24 @@ import { cookies } from "next/headers";
 import { eq, sql, or } from "drizzle-orm";
 import { getDbForDepartment } from "@/lib/db/index";
 import { d1Users, r1Users } from "@/lib/db/schema-existing";
-import type { SessionUser } from "@/lib/auth";
+import { SESSION_COOKIE_NAME, signSession, type SessionUser } from "@/lib/auth";
 
 const THIRTY_DAYS_SECONDS = 60 * 60 * 24 * 30;
 
-// Telegram Bot tokens for resolving username → user ID
+// Telegram Bot tokens for resolving username → user ID.
+// Configure at least one of these env vars. Multiple tokens let us fall back
+// if a bot has been blocked by the user (tokens tried in order).
 const TG_BOT_TOKENS = [
   process.env.TELEGRAM_BOT_TOKEN,
-  "8250958994:AAFUQLcauiyr0avVXqr_QF0p_EpX5vZgT1Y", // OKK bot fallback
+  process.env.TELEGRAM_OKK_BOT_TOKEN,
 ].filter(Boolean) as string[];
+
+if (TG_BOT_TOKENS.length === 0) {
+  console.warn(
+    "[auth] No Telegram bot token configured — username → telegram_id resolution will be skipped. " +
+      "Set TELEGRAM_BOT_TOKEN or TELEGRAM_OKK_BOT_TOKEN.",
+  );
+}
 
 /** Resolve Telegram username to numeric user ID via Bot API getChat */
 async function resolveTelegramId(username: string): Promise<string | null> {
@@ -103,12 +112,14 @@ export async function POST(request: NextRequest) {
       };
     }
 
+    const signedSession = await signSession(session);
     const cookieStore = await cookies();
-    cookieStore.set("sm_session", JSON.stringify(session), {
+    cookieStore.set(SESSION_COOKIE_NAME, signedSession, {
       httpOnly: true,
       maxAge: THIRTY_DAYS_SECONDS,
       path: "/",
       sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
     });
 
     return NextResponse.json({ ok: true, user: session });

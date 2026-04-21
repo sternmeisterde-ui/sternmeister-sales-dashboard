@@ -2,24 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { ALL_PROMPT_TYPES, isValidPromptType as isValidPT } from "@/lib/config/tenant";
 
-const VALID_PROMPT_TYPES = [
-  "r2_commercial",
-  "r2_decisions",
-  "r2_med_commercial",
-  "d2_qualifier",
-  "d2_berater",
-  "d2_berater2",
-  "d2_dovedenie",
-] as const;
-
-type PromptType = (typeof VALID_PROMPT_TYPES)[number];
-
-function isValidPromptType(value: unknown): value is PromptType {
-  return typeof value === "string" && (VALID_PROMPT_TYPES as readonly string[]).includes(value);
+function isValidPromptType(value: unknown): value is string {
+  return typeof value === "string" && isValidPT(value);
 }
 
-function getCriteriaFilePath(promptType: PromptType): string {
+function getCriteriaFilePath(promptType: string): string {
   return path.join(process.cwd(), "src", "criteria", `${promptType}.json`);
 }
 
@@ -36,7 +25,7 @@ export async function GET(request: NextRequest) {
 
     if (!isValidPromptType(promptType)) {
       return NextResponse.json(
-        { error: `Invalid prompt_type. Must be one of: ${VALID_PROMPT_TYPES.join(", ")}` },
+        { error: `Invalid prompt_type. Must be one of: ${ALL_PROMPT_TYPES.join(", ")}` },
         { status: 400 },
       );
     }
@@ -70,7 +59,7 @@ export async function POST(request: NextRequest) {
 
     if (!isValidPromptType(promptType)) {
       return NextResponse.json(
-        { error: `Invalid prompt_type. Must be one of: ${VALID_PROMPT_TYPES.join(", ")}` },
+        { error: `Invalid prompt_type. Must be one of: ${ALL_PROMPT_TYPES.join(", ")}` },
         { status: 400 },
       );
     }

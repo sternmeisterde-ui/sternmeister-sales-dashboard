@@ -85,20 +85,13 @@ function getDeltaColor(a: number | null | undefined, b: number | null | undefine
   return "text-slate-400";
 }
 
-// B2G line options — includes Бератер 1 and Бератер 2
-const B2G_LINES = [
-  { id: "1", label: "Квалификатор" },
-  { id: "2", label: "Бератер 1" },
-  { id: "2b", label: "Бератер 2" },
-  { id: "3", label: "Доведение" },
-];
+// Line options sourced from tenant config so adding a line in one place
+// (src/lib/config/tenant.ts) flows through to Analytics automatically.
+import { getLines } from "@/lib/config/tenant";
 
-// B2B line options — Бух 1, Бух 2, Мед 1
-const B2B_LINES = [
-  { id: "buh1", label: "Бух 1" },
-  { id: "buh2", label: "Бух 2" },
-  { id: "med1", label: "Мед 1" },
-];
+function getAnalyticsLines(dept: "b2g" | "b2b"): { id: string; label: string }[] {
+  return getLines(dept).map((l) => ({ id: l.id, label: l.shortLabel ?? l.label }));
+}
 
 // ==================== Main Component ====================
 
@@ -139,11 +132,20 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   };
 
   // Reset manager when context changes (different DB/line = different manager UUIDs)
-  useEffect(() => { setLine(department === "b2b" ? "buh1" : "1"); setManagerId(""); }, [department]);
+  useEffect(() => {
+    // Reset to the first line of the new department when switching.
+    setLine(getAnalyticsLines(department)[0]?.id ?? "1");
+    setManagerId("");
+  }, [department]);
   useEffect(() => {
     setManagerId("");
-    if (source === "roleplay" && line === "2b") setLine("2");
-  }, [source, line]);
+    // When switching to roleplay, collapse sub-lines to their group id because
+    // roleplay data isn't tagged with the sub-line (e.g. "2b" → "2").
+    if (source === "roleplay") {
+      const current = getLines(department).find((l) => l.id === line);
+      if (current && current.id !== current.group) setLine(current.group);
+    }
+  }, [source, line, department]);
   // If selected manager is not in current list, clear selection
   useEffect(() => {
     if (managerId && data?.managers && !data.managers.some((m) => m.id === managerId)) {
@@ -237,24 +239,26 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           ))}
         </div>
 
-        {/* Line filter — B2G or B2B */}
-        {department === "b2g" && (
+        {/* Line filter — sourced from tenant config. For roleplay we collapse
+            sub-lines into their group (e.g. "2a"/"2b" → single "2") because
+            roleplay calls aren't tagged with the sub-line. */}
+        {(department === "b2b" ? source === "okk" : true) && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
-            {B2G_LINES
-              .filter((l) => source === "okk" || l.id !== "2b")
-              .map((l) => (
-              <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
-                className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
-                  line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
-                }`}>
-                {l.label}
-              </button>
-            ))}
-          </div>
-        )}
-        {department === "b2b" && source === "okk" && (
-          <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
-            {B2B_LINES.map((l) => (
+            {(() => {
+              const lines = getAnalyticsLines(department);
+              // For roleplay, dedupe by group so each group shows once.
+              if (source === "roleplay") {
+                const seen = new Set<string>();
+                const fullLines = getLines(department);
+                return lines.filter((l) => {
+                  const group = fullLines.find((fl) => fl.id === l.id)?.group ?? l.id;
+                  if (seen.has(group)) return false;
+                  seen.add(group);
+                  return true;
+                });
+              }
+              return lines;
+            })().map((l) => (
               <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
                 className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
                   line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"

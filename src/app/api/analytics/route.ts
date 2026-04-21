@@ -9,6 +9,7 @@ import {
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
 import { eq, sql, and, gte, lte, isNotNull } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
+import { getLines } from "@/lib/config/tenant";
 
 const CACHE_TTL = 2 * 60 * 1000;
 
@@ -95,24 +96,22 @@ function buildPeriodRange(from: Date, to: Date, groupBy: string): string[] {
   return [...periods].sort();
 }
 
-// ─── Prompt type mapping ────────────────────────────────────
+// ─── Prompt type mapping (delegates to tenant config) ──────────
+//
+// Global `line` filter uses the "group" key ("1"/"2"/"3" in B2G). For groups
+// that fan out to multiple prompt_types (e.g. line 2 = Бератер 1 AND Бератер 2),
+// return the FIRST id's prompt_type — Analytics treats a group-level filter as
+// "any of the group's prompts" downstream, but for this legacy API we pick one
+// representative.
 
 function getOkkPromptType(department: string, line: string): string | null {
-  if (department === "b2b") {
-    switch (line) {
-      case "buh1": return "r2_commercial";
-      case "buh2": return "r2_decisions";
-      case "med1": return "r2_med_commercial";
-      default: return null; // "all" → no prompt_type filter
-    }
-  }
-  switch (line) {
-    case "1": return "d2_qualifier";
-    case "2": return "d2_berater";
-    case "2b": return "d2_berater2";
-    case "3": return "d2_dovedenie";
-    default: return null;
-  }
+  if (department !== "b2g" && department !== "b2b") return null;
+  if (line === "all" || !line) return null;
+  const lines = getLines(department);
+  const exact = lines.find((l) => l.id === line);
+  if (exact) return exact.promptType;
+  const firstInGroup = lines.find((l) => l.group === line);
+  return firstInGroup?.promptType ?? null;
 }
 
 // ─── Name normalization (old evaluation versions used different names) ──

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { getDbForDepartment } from "@/lib/db/index";
 import { d1Calls, d1Users, r1Calls, r1Users } from "@/lib/db/schema-existing";
+import { formatCallDate } from "@/lib/utils/date";
 
 // Тип отдела (повторяем локально, чтобы не зависеть от queries-existing)
 type DepartmentType = "b2g" | "b2b";
@@ -11,29 +12,6 @@ function getTables(departmentType: DepartmentType) {
   return departmentType === "b2g"
     ? { calls: d1Calls, users: d1Users }
     : { calls: r1Calls, users: r1Users };
-}
-
-// Форматирование даты в московском часовом поясе
-function formatDate(date: Date): string {
-  const tz = "Europe/Moscow";
-  const callDate = new Date(date);
-  const now = new Date();
-  const nowMsk = now.toLocaleDateString("en-CA", { timeZone: tz });
-  const callMsk = callDate.toLocaleDateString("en-CA", { timeZone: tz });
-  const hours = callDate.toLocaleString("ru-RU", {
-    timeZone: tz,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  if (callMsk === nowMsk) return `Сегодня, ${hours}`;
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayMsk = yesterday.toLocaleDateString("en-CA", { timeZone: tz });
-  if (callMsk === yesterdayMsk) return `Вчера, ${hours}`;
-  const day = callDate.toLocaleString("ru-RU", { timeZone: tz, day: "2-digit" });
-  const month = callDate.toLocaleString("ru-RU", { timeZone: tz, month: "2-digit" });
-  return `${day}.${month}, ${hours}`;
 }
 
 export async function GET(
@@ -177,7 +155,7 @@ export async function GET(
       name: call.userName || "Unknown",
       avatarUrl: `https://i.pravatar.cc/150?u=${call.userTelegramUsername || call.userId}`,
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
-      date: formatDate(call.startedAt),
+      date: formatCallDate(call.startedAt),
       score: call.score || 0,
       totalMaxScore,
       hasRecording: !!call.recordingPath,

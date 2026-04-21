@@ -10,12 +10,103 @@ export interface SessionUser {
   kommoUserId: number | null;
 }
 
-export async function getSession(): Promise<SessionUser | null> {
-  const cookieStore = await cookies();
-  const raw = cookieStore.get("sm_session")?.value;
-  if (!raw) return null;
+export const SESSION_COOKIE_NAME = "sm_session";
+
+// ─── HMAC signing ───────────────────────────────────────────────
+//
+// Cookie format: `<base64url(JSON payload)>.<base64url(HMAC-SHA256 signature)>`
+// Both the server (Node) and middleware (Edge) runtimes ship Web Crypto,
+// so using it here keeps one implementation for both. A shared symmetric
+// secret in SESSION_SECRET is required; we refuse to sign or verify
+// anything if it's missing so a missing/rotated key never silently turns
+// into "anyone can forge a session."
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function getSecret(): string {
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || secret.length < 32) {
+    throw new Error(
+      "SESSION_SECRET env var is missing or too short (>= 32 chars). " +
+        "Generate one with: openssl rand -base64 48",
+    );
+  }
+  return secret;
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  // btoa works in both Node and Edge runtimes
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(input: string): Uint8Array {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = (4 - (padded.length % 4)) % 4;
+  const base64 = padded + "=".repeat(padding);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function importKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+export async function signSession(session: SessionUser): Promise<string> {
+  const key = await importKey(getSecret());
+  const payload = toBase64Url(encoder.encode(JSON.stringify(session)));
+  const signature = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, encoder.encode(payload)),
+  );
+  return `${payload}.${toBase64Url(signature)}`;
+}
+
+// Constant-time comparison to avoid timing attacks on the signature check.
+// crypto.subtle.verify already does this internally — we wrap it so callers
+// get a plain boolean and the key-import error path is handled here.
+async function verifySignature(payload: string, signatureB64: string): Promise<boolean> {
   try {
-    const parsed = JSON.parse(raw) as SessionUser;
+    const key = await importKey(getSecret());
+    const sigBytes = fromBase64Url(signatureB64);
+    // Copy into a fresh ArrayBuffer — Web Crypto's typings reject the generic
+    // Uint8Array<ArrayBufferLike> that fromBase64Url returns under strict TS.
+    const sigBuffer = sigBytes.buffer.slice(
+      sigBytes.byteOffset,
+      sigBytes.byteOffset + sigBytes.byteLength,
+    ) as ArrayBuffer;
+    return await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sigBuffer,
+      encoder.encode(payload),
+    );
+  } catch {
+    return false;
+  }
+}
+
+export async function verifySession(cookieValue: string): Promise<SessionUser | null> {
+  const dot = cookieValue.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const payload = cookieValue.slice(0, dot);
+  const signature = cookieValue.slice(dot + 1);
+
+  const valid = await verifySignature(payload, signature);
+  if (!valid) return null;
+
+  try {
+    const json = decoder.decode(fromBase64Url(payload));
+    const parsed = JSON.parse(json) as SessionUser;
     if (!parsed.userId || !parsed.name || !parsed.role || !parsed.department) {
       return null;
     }
@@ -23,4 +114,11 @@ export async function getSession(): Promise<SessionUser | null> {
   } catch {
     return null;
   }
+}
+
+export async function getSession(): Promise<SessionUser | null> {
+  const cookieStore = await cookies();
+  const raw = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+  if (!raw) return null;
+  return verifySession(raw);
 }

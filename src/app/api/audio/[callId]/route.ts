@@ -1,12 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ROLEPLAY_AUDIO_URLS, type DepartmentId } from "@/lib/config/tenant";
 
 // Маппинг отделов на API серверы
 // b2g (Госники) → D1 сервер, b2b (Коммерсы) → R1 сервер
 function getApiBaseUrl(dept: string): string {
-  if (dept === "b2g") {
-    return process.env.D1_API_URL || "https://roleplay2.sternmeister.online";
-  }
-  return process.env.R1_API_URL || "https://roleplay1.sternmeister.online";
+  return ROLEPLAY_AUDIO_URLS[dept === "b2b" ? "b2b" : "b2g" satisfies DepartmentId];
 }
 
 export async function GET(

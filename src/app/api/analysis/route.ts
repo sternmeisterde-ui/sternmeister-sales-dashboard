@@ -4,6 +4,7 @@ import { callAnalyses } from "@/lib/db/schema-existing";
 import { eq, desc } from "drizzle-orm";
 import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
 import { getSession } from "@/lib/auth";
+import { KOMMO } from "@/lib/config/tenant";
 
 // POST — create new analysis
 export async function POST(request: NextRequest) {
@@ -29,7 +30,7 @@ export async function POST(request: NextRequest) {
     // Validate Kommo URL domain
     try {
       const parsed = new URL(kommoUrl);
-      if (parsed.hostname !== "sternmeister.kommo.com") {
+      if (parsed.hostname !== KOMMO.host) {
         return NextResponse.json({ error: "Invalid Kommo URL" }, { status: 400 });
       }
     } catch {
