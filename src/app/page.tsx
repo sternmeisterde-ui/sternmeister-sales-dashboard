@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -13,6 +13,7 @@ import AnalyticsTab from "@/components/AnalyticsTab";
 import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
+import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
@@ -69,7 +70,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "call_analysis">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis">("dashboard");
   const [lineFilter, setLineFilter] = useState<"all" | "1" | "2" | "3" | "buh1" | "buh2" | "med1">("all");
 
   // Load session on mount
@@ -676,6 +677,7 @@ export default function Dashboard() {
             { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
             { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
             { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
+            { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
               key={item.id}
@@ -772,6 +774,9 @@ export default function Dashboard() {
         )}
         {activeTab === "criteria" && (
           <CriteriaTab department={activeDepartment} lineFilter={lineFilter} />
+        )}
+        {activeTab === "scripts" && (
+          <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
         )}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}

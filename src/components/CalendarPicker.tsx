@@ -141,17 +141,26 @@ export default function CalendarPicker({
           </span>
         )}
         {isActive && (
-          <button
-            type="button"
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label="Очистить фильтр дат"
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
               clear();
             }}
-            className="ml-0.5 p-0.5 hover:bg-white/10 rounded transition-colors"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                clear();
+              }
+            }}
+            className="ml-0.5 p-0.5 hover:bg-white/10 rounded transition-colors inline-flex items-center justify-center cursor-pointer"
           >
             <X className="w-3 h-3" />
-          </button>
+          </span>
         )}
       </button>
 
