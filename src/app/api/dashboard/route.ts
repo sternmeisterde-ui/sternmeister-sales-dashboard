@@ -79,7 +79,7 @@ function getTrendRange(period: string, from: number, to: number): { trendFrom: n
   return { trendFrom: from, trendTo: to, trendDays: days };
 }
 
-/** Group call notes by calendar day → per-day call counts */
+/** Group call notes by calendar day → per-day call counts (Europe/Berlin tz) */
 function groupCallsByDay(notes: KommoCallNote[], fromTs: number, days: number = 7): Array<{
   date: string;
   callsTotal: number;
@@ -91,17 +91,18 @@ function groupCallsByDay(notes: KommoCallNote[], fromTs: number, days: number = 
 }> {
   const dayMap = new Map<string, KommoCallNote[]>();
 
+  // "sv" locale produces ISO "YYYY-MM-DD"; Europe/Berlin covers our ops timezone.
+  const berlinKey = (tsSec: number) =>
+    new Date(tsSec * 1000).toLocaleDateString("sv", { timeZone: "Europe/Berlin" });
+
   // Initialize all days in range
   for (let i = 0; i < days; i++) {
-    const d = new Date(fromTs * 1000);
-    d.setDate(d.getDate() + i);
-    const key = d.toISOString().slice(0, 10);
+    const key = berlinKey(fromTs + i * 86400);
     dayMap.set(key, []);
   }
 
   for (const note of notes) {
-    const ts = note.created_at * 1000;
-    const key = new Date(ts).toISOString().slice(0, 10);
+    const key = berlinKey(note.created_at);
     if (dayMap.has(key)) {
       dayMap.get(key)!.push(note);
     }
@@ -201,45 +202,68 @@ function buildPipelineBreakdown(
     [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
     [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
     [B2B_PIPELINES.COMMERCIAL]: "Бух Комм",
+    [B2B_PIPELINES.MEDICAL_COMM]: "Medical Admin Commercial",
   };
 
-  // B2G status names
+  // Pipeline status names (synced 2026-04-22 from Kommo API)
   const statusNames: Record<number, string> = {
-    // Бух Гос
-    83873487: "Неразобранное",
+    // Бух Гос (pipeline 10935879)
+    83873487: "Incoming leads",
     93485479: "База",
     83873491: "Новый лид",
     90367079: "Взято в работу",
     90367083: "Недозвон",
     90367087: "Контакт установлен",
+    104211575: "Принимает решение",
     95514983: "Консультация проведена",
     101935919: "Док-ты отправлены в ДЦ",
     95514987: "Отложенный старт",
-    // Бух Бератер
-    93860327: "Неразобранное",
+    // Бух Бератер (pipeline 12154099)
+    93860327: "Incoming leads",
     93860331: "Принято от 1й линии",
     93860335: "Взято в работу",
     93860339: "Недозвон",
     93860863: "Контакт установлен",
+    93860879: "Термин АА",
+    102183931: "Доведение",
+    102183935: "Консультация перед термином ДЦ",
+    102183939: "Конс. перед ДЦ проведена",
     93860875: "Термин ДЦ отмен./перенес.",
     93886075: "Термин ДЦ состоялся",
-    93860879: "Термин АА",
+    102183943: "Консультация перед термином АА",
+    102183947: "Конс. перед АА проведена",
     93860883: "Термин АА отмен./перенес.",
     93860887: "На рассмотрении бератера",
     95515895: "Отложенный старт",
     93860891: "Апелляция",
-    // Бух Комм
+    // Бух Комм (pipeline 10631243)
     81523499: "Incoming leads",
     83364011: "Tech",
     81523503: "Новый лид",
+    104076579: "Новый лид 2",
+    104076583: "Новый лид 3",
     81523507: "Взят в работу",
     82883595: "Недозвон",
     81523515: "Контакт установлен",
     88519479: "Нет предв. согласия",
-    82661915: "Интерес подтвержден",
-    82661919: "Счет выставлен",
+    82661915: "Интерес подтверждён",
+    82661919: "Счёт выставлен",
     82946495: "Предоплата получена",
     82946499: "Рассрочка",
+    // Medical Admin Commercial (pipeline 13209983)
+    101858011: "Incoming leads",
+    101858015: "Tech",
+    101858019: "Новый лид",
+    104076587: "Новый лид 2",
+    104076591: "Новый лид 3",
+    101858023: "Взят в работу",
+    101858255: "Недозвон",
+    101858259: "Контакт установлен",
+    101858263: "Нет предв. согласия",
+    101858267: "Интерес подтверждён",
+    101858271: "Счёт выставлен",
+    101858275: "Предоплата получена",
+    101858279: "Рассрочка",
   };
 
   const pipelineIds = getPipelineIds(department);

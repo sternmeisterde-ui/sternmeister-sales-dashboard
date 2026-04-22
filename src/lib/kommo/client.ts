@@ -50,7 +50,8 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
     res = await fetch(url, options);
   }
 
-  // 429 Too Many Requests — wait and retry once
+  // 429 Too Many Requests — wait and retry through the mutex so the retry
+  // still respects the global rate limit (bare fetch would race the next caller).
   if (res.status === 429) {
     let retryAfterMs = 1500;
     try {
@@ -59,7 +60,7 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
     } catch { /* use default */ }
     console.warn(`[Kommo] 429 rate limited, retrying after ${retryAfterMs}ms`);
     await new Promise<void>((r) => setTimeout(r, retryAfterMs));
-    return fetch(url, options);
+    return rateLimitedFetch(url, options);
   }
 
   return res;
@@ -337,7 +338,7 @@ export async function getCallNotes(
     const baseUrl = await getBaseUrl();
     const headers = await getAuthHeaders();
 
-    // Phase 1: Events API
+    // Phase 1: Events API — capture entity_type + real timestamp
     const eventsUrl = new URL(`${baseUrl}/events`);
     eventsUrl.searchParams.append("filter[type][]", "outgoing_call");
     eventsUrl.searchParams.append("filter[type][]", "incoming_call");
@@ -345,11 +346,15 @@ export async function getCallNotes(
     eventsUrl.searchParams.set("filter[created_at][to]", String(dateTo));
     eventsUrl.searchParams.set("limit", "100");
 
-    const eventList: Array<{
+    type CallEventRecord = {
       userId: number;
       type: "call_in" | "call_out";
-      noteId: number | null;
-    }> = [];
+      noteId: number;
+      entityType: "contact" | "lead" | "company" | "customer";
+      entityId: number;
+      createdAt: number;
+    };
+    const eventList: CallEventRecord[] = [];
 
     // Kommo limits filter[created_by][] to 10 IDs
     const USER_BATCH = 10;
@@ -389,7 +394,25 @@ export async function getCallNotes(
         for (const ev of items) {
           const noteType = ev.type === "incoming_call" ? "call_in" : "call_out";
           const noteId = ev.value_after?.[0]?.note?.id ?? null;
-          eventList.push({ userId: ev.created_by, type: noteType, noteId });
+          // Skip events without a note ID — they inflate callsTotal and contribute nothing.
+          if (noteId === null) continue;
+          // Route to correct /{entity}s/notes endpoint. "unsorted" entities have notes
+          // attached as leads (they become leads once sorted), so map them to "lead".
+          const rawType = ev.entity_type;
+          const entityType: CallEventRecord["entityType"] =
+            rawType === "lead" || rawType === "company" || rawType === "customer"
+              ? rawType
+              : rawType === "unsorted"
+                ? "lead"
+                : "contact";
+          eventList.push({
+            userId: ev.created_by,
+            type: noteType,
+            noteId,
+            entityType,
+            entityId: ev.entity_id,
+            createdAt: ev.created_at,
+          });
         }
 
         if (!data._links?.next) break;
@@ -399,54 +422,75 @@ export async function getCallNotes(
 
     if (eventList.length === 0) return [];
 
-    // Phase 2: Batch-fetch notes by ID
-    const noteIds = eventList
-      .map((e) => e.noteId)
-      .filter((id): id is number => id !== null);
-
+    // Phase 2: Batch-fetch notes by ID from the correct entity endpoint.
+    // Kommo calls are attached to the entity the event fired on — usually contacts
+    // for inbound/outbound call notes. The /leads/notes endpoint returns 204 for
+    // contact-owned notes, so we must route each note id to its matching endpoint.
     const noteParamsMap = new Map<
       number,
       { duration: number; call_status: number | undefined }
     >();
 
+    const byEntity = new Map<string, number[]>();
+    for (const ev of eventList) {
+      const key = ev.entityType;
+      if (!byEntity.has(key)) byEntity.set(key, []);
+      byEntity.get(key)!.push(ev.noteId);
+    }
+
     const BATCH_SIZE = 100;
-    for (let i = 0; i < noteIds.length; i += BATCH_SIZE) {
-      const batch = noteIds.slice(i, i + BATCH_SIZE);
-      const notesUrl = new URL(`${baseUrl}/leads/notes`);
-      batch.forEach((id) =>
-        notesUrl.searchParams.append("filter[id][]", String(id))
-      );
-      notesUrl.searchParams.set("limit", "250");
+    for (const [entityType, ids] of byEntity) {
+      // Kommo endpoint path: /contacts/notes, /leads/notes, /companies/notes, /customers/notes
+      const endpointPath = `/${entityType}s/notes`;
+      const uniqIds = Array.from(new Set(ids));
 
-      const res = await rateLimitedFetch(notesUrl.toString(), {
-        headers,
-      });
-      if (res.status === 204) continue;
-      if (!res.ok) {
-        console.warn(`getCallNotes: batch notes fetch failed with ${res.status}, skipping batch`);
-        continue;
-      }
+      for (let i = 0; i < uniqIds.length; i += BATCH_SIZE) {
+        const batch = uniqIds.slice(i, i + BATCH_SIZE);
+        const notesUrl = new URL(`${baseUrl}${endpointPath}`);
+        batch.forEach((id) =>
+          notesUrl.searchParams.append("filter[id][]", String(id))
+        );
+        notesUrl.searchParams.set("limit", "250");
 
-      const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
-      const notes = data._embedded?.notes || [];
-      for (const n of notes) {
-        noteParamsMap.set(n.id, {
-          duration: n.params?.duration ?? 0,
-          call_status: n.params?.call_status,
-        });
+        // Kommo paginates even single-batch filtered responses; keep walking until no next link.
+        let notesPage = 1;
+        let batchFailed = false;
+        while (!batchFailed) {
+          const pageUrl = new URL(notesUrl.toString());
+          pageUrl.searchParams.set("page", String(notesPage));
+
+          const res = await rateLimitedFetch(pageUrl.toString(), { headers });
+          if (res.status === 204) break;
+          if (!res.ok) {
+            console.warn(`getCallNotes: ${endpointPath} batch failed with ${res.status}, skipping batch`);
+            batchFailed = true;
+            break;
+          }
+
+          const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
+          const notes = data._embedded?.notes || [];
+          for (const n of notes) {
+            noteParamsMap.set(n.id, {
+              duration: n.params?.duration ?? 0,
+              call_status: n.params?.call_status,
+            });
+          }
+          if (!data._links?.next) break;
+          notesPage++;
+        }
       }
     }
 
-    // Phase 3: Merge
+    // Phase 3: Merge — preserve real event timestamp so day-grouping works
     return eventList.map((ev) => {
-      const noteParams = ev.noteId ? noteParamsMap.get(ev.noteId) : undefined;
+      const noteParams = noteParamsMap.get(ev.noteId);
       return {
-        id: ev.noteId ?? 0,
-        entity_id: 0,
+        id: ev.noteId,
+        entity_id: ev.entityId,
         created_by: ev.userId,
         updated_by: ev.userId,
-        created_at: dateFrom,
-        updated_at: dateFrom,
+        created_at: ev.createdAt,
+        updated_at: ev.createdAt,
         responsible_user_id: ev.userId,
         group_id: 0,
         note_type: ev.type,

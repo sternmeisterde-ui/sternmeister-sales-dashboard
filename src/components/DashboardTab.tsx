@@ -4,8 +4,13 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Phone, Clock, AlertTriangle, Users,
   PhoneMissed, Target, Loader2, RefreshCw,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, TrendingUp, Trophy, XCircle, BarChart3, Filter, Wallet,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip as RTooltip,
+  ResponsiveContainer, CartesianGrid,
+} from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 
@@ -201,11 +206,11 @@ export default function DashboardTab({ department }: { department: string }) {
           />
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => shiftDate(-1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
+          <button aria-label="Предыдущий период" onClick={() => shiftDate(-1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
             <ChevronLeft className="w-4 h-4" />
           </button>
           <span className="text-sm text-slate-300 font-medium min-w-[180px] text-center">{dateDisplay}</span>
-          <button onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
+          <button aria-label="Следующий период" onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
             <ChevronRight className="w-4 h-4" />
           </button>
           {formatDate(date) !== formatDate(new Date()) && (
@@ -235,17 +240,24 @@ export default function DashboardTab({ department }: { department: string }) {
       )}
 
       {/* ============ KPI CARDS ============ */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
         <MetricCard icon={Phone} label="Звонки" value={m.callsTotal} sub={`${m.outgoingTotal} исх. / ${m.incomingTotal} вх.`} />
         <MetricCard icon={Target} label="Дозвон" value={`${m.dialPercent}%`} color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"} />
         <MetricCard icon={Clock} label="На линии" value={`${m.totalMinutes} мин`} sub={`Ср. диалог ${m.avgDialogMinutes} мин`} />
         <MetricCard icon={PhoneMissed} label="Пропущенные" value={m.missedIncoming} color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"} sub={`${missed.missedPercent}% от входящих`} />
         <MetricCard icon={AlertTriangle} label="Просрочено задач" value={m.overdueTasks} color={m.overdueTasks === 0 ? "emerald" : "rose"} />
+        <MetricCard icon={Wallet} label="Выручка" value={m.revenue > 0 ? `${Math.round(m.revenue).toLocaleString("ru-RU")} €` : "0 €"} color={m.revenue > 0 ? "emerald" : "blue"} />
         <MetricCard icon={Users} label="Менеджеров" value={m.managersCount} />
       </div>
 
+      {/* ============ FUNNEL ============ */}
+      <FunnelCards funnel={data.funnel} isB2G={isB2G} />
 
+      {/* ============ TREND CHART ============ */}
+      <TrendChart trend={data.trend} />
 
+      {/* ============ PIPELINE BREAKDOWN ============ */}
+      <PipelineBreakdown pipelines={data.pipelineBreakdown} />
 
       {/* ============ PER-MANAGER TABLES ============ */}
       {(isB2G
@@ -318,6 +330,112 @@ export default function DashboardTab({ department }: { department: string }) {
 
 // ==================== Sub-components ====================
 
+function FunnelCards({ funnel, isB2G }: { funnel: Record<string, number>; isB2G: boolean }) {
+  const n = (k: string) => Number(funnel?.[k] ?? 0);
+  const b2gItems = [
+    { label: "Активные лиды", value: n("activeDeals"), icon: Filter, color: "blue" as const },
+    { label: "Квалифицированные", value: n("qualLeads"), icon: Target, color: "emerald" as const },
+    { label: "A2", value: n("a2"), icon: BarChart3, color: "amber" as const },
+    { label: "B1", value: n("b1"), icon: BarChart3, color: "amber" as const },
+    { label: "B2+", value: n("b2plus"), icon: BarChart3, color: "amber" as const },
+    { label: "Лидов создано", value: n("totalLeads"), icon: TrendingUp, color: "blue" as const },
+    { label: "Выиграно", value: n("wonToday"), icon: Trophy, color: "emerald" as const },
+    { label: "Проиграно", value: n("lostToday"), icon: XCircle, color: "rose" as const },
+  ];
+  const b2bItems = [
+    { label: "Активные", value: n("activeDeals"), icon: Filter, color: "blue" as const },
+    { label: "Квалифицированные", value: n("qualLeads"), icon: Target, color: "emerald" as const },
+    { label: "Новые", value: n("newLead"), icon: TrendingUp, color: "blue" as const },
+    { label: "Контакт", value: n("contactMade"), icon: BarChart3, color: "amber" as const },
+    { label: "Счёт выставлен", value: n("invoiceSent"), icon: BarChart3, color: "amber" as const },
+    { label: "Предоплата", value: n("prepayment"), icon: BarChart3, color: "emerald" as const },
+    { label: "Выиграно", value: n("wonToday"), icon: Trophy, color: "emerald" as const },
+    { label: "Проиграно", value: n("lostToday"), icon: XCircle, color: "rose" as const },
+  ];
+  const items = isB2G ? b2gItems : b2bItems;
+  return (
+    <div className="glass-panel rounded-2xl p-5 border border-white/5">
+      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
+        Воронка лидов
+      </h3>
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+        {items.map(({ label, value, icon: Icon, color }) => (
+          <MetricCard key={label} icon={Icon} label={label} value={value} color={color} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TrendChart({ trend }: { trend: Array<{ date: string; callsTotal: number; callsConnected: number; totalMinutes: number; missedIncoming: number }> }) {
+  const data = (trend || []).map((d) => ({
+    date: d.date.slice(5).replace("-", "."),
+    "Звонки": d.callsTotal,
+    "Дозвон": d.callsConnected,
+    "Пропущ.": d.missedIncoming,
+  }));
+  if (data.length === 0) return null;
+  return (
+    <div className="glass-panel rounded-2xl p-5 border border-white/5">
+      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
+        Динамика звонков по дням
+      </h3>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+          <XAxis dataKey="date" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={{ stroke: "#334155" }} tickLine={false} />
+          <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+          <RTooltip
+            contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+          />
+          <Line type="monotone" dataKey="Звонки" stroke="#3b82f6" strokeWidth={2} dot={{ fill: "#3b82f6", r: 3 }} />
+          <Line type="monotone" dataKey="Дозвон" stroke="#10b981" strokeWidth={2} dot={{ fill: "#10b981", r: 3 }} />
+          <Line type="monotone" dataKey="Пропущ." stroke="#f43f5e" strokeWidth={2} dot={{ fill: "#f43f5e", r: 3 }} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function PipelineBreakdown({ pipelines }: { pipelines: PipelineStats[] }) {
+  if (!pipelines || pipelines.length === 0) return null;
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      {pipelines.map((p) => (
+        <div key={p.pipelineId} className="glass-panel rounded-2xl p-5 border border-white/5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+              {p.pipelineName}
+            </h3>
+            <span className="text-slate-500 text-xs">{p.activeDeals} активных</span>
+          </div>
+          <table className="w-full text-sm">
+            <tbody>
+              {p.statuses.map((s) => {
+                const pct = p.activeDeals > 0 ? Math.round((s.count / p.activeDeals) * 100) : 0;
+                return (
+                  <tr key={s.statusId} className="border-b border-white/[0.03]">
+                    <td className="py-2 pr-3 text-slate-300 truncate max-w-[180px]">{s.name}</td>
+                    <td className="py-2 w-full">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1.5 bg-slate-800/60 rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-500/70" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-[11px] text-slate-500 min-w-[32px] text-right">{pct}%</span>
+                      </div>
+                    </td>
+                    <td className="py-2 pl-3 text-right text-slate-300 tabular-nums min-w-[48px]">{s.count}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MetricCard({
   icon: Icon,
   label,
@@ -325,7 +443,7 @@ function MetricCard({
   sub,
   color = "blue",
 }: {
-  icon: any;
+  icon: LucideIcon;
   label: string;
   value: string | number;
   sub?: string;
