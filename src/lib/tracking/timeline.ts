@@ -48,6 +48,7 @@ export interface TimelineResult {
   totalMinutes: number;            // 0 if off
   segments: TimelineSegment[];
   pct: { call: number; crm: number; idle: number };
+  minutes: { call: number; crm: number; idle: number };
 }
 
 export interface ScheduleRow {
@@ -162,6 +163,7 @@ export function buildTimeline(params: {
       totalMinutes: 0,
       segments: [],
       pct: { call: 0, crm: 0, idle: 0 },
+      minutes: { call: 0, crm: 0, idle: 0 },
     };
   }
 
@@ -303,5 +305,6 @@ export function buildTimeline(params: {
     totalMinutes: total,
     segments,
     pct,
+    minutes: { call: callMin, crm: crmMin, idle: idleMin },
   };
 }

@@ -32,6 +32,7 @@ interface DayTimeline {
   totalMinutes: number;
   segments: Segment[];
   pct: { call: number; crm: number; idle: number };
+  minutes: { call: number; crm: number; idle: number };
 }
 
 interface ManagerTimeline {
@@ -98,8 +99,14 @@ export default function TrackingTab({ department }: TrackingTabProps) {
 
   const [data, setData] = useState<TrackingResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [revalidating, setRevalidating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+
+  // Client-side cache: keyed by department+from+to+types. Switching between
+  // departments or flipping filters shows cached data instantly while a fresh
+  // fetch runs in the background — no full-page reload / skeleton spinner.
+  const cacheRef = useRef<Map<string, TrackingResponse>>(new Map());
 
   // Build the query params
   const queryKey = useMemo(() => {
@@ -110,29 +117,49 @@ export default function TrackingTab({ department }: TrackingTabProps) {
 
   const typesParam = useMemo(() => Array.from(selectedKeys).sort().join(","), [selectedKeys]);
 
-  const fetchData = useCallback(async () => {
-    if (!queryKey.from || !queryKey.to) return;
-    setLoading(true);
-    setErr(null);
-    try {
-      const url = `/api/tracking?department=${queryKey.department}&from=${queryKey.from}&to=${queryKey.to}&types=${encodeURIComponent(typesParam)}`;
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`API ${res.status}: ${text}`);
-      }
-      const json = (await res.json()) as TrackingResponse;
-      setData(json);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [queryKey.department, queryKey.from, queryKey.to, typesParam]);
+  const cacheKey = useMemo(
+    () => `${queryKey.department}|${queryKey.from ?? ""}|${queryKey.to ?? ""}|${typesParam}`,
+    [queryKey.department, queryKey.from, queryKey.to, typesParam],
+  );
 
+  const fetchData = useCallback(
+    async (opts?: { background?: boolean }) => {
+      if (!queryKey.from || !queryKey.to) return;
+      if (opts?.background) setRevalidating(true);
+      else setLoading(true);
+      setErr(null);
+      try {
+        const url = `/api/tracking?department=${queryKey.department}&from=${queryKey.from}&to=${queryKey.to}&types=${encodeURIComponent(typesParam)}`;
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API ${res.status}: ${text}`);
+        }
+        const json = (await res.json()) as TrackingResponse;
+        cacheRef.current.set(cacheKey, json);
+        setData(json);
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+        setRevalidating(false);
+      }
+    },
+    [queryKey.department, queryKey.from, queryKey.to, typesParam, cacheKey],
+  );
+
+  // When inputs change: serve cached immediately if present (skeleton-free
+  // department switching), then quietly revalidate in background.
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    const cached = cacheRef.current.get(cacheKey);
+    if (cached) {
+      setData(cached);
+      fetchData({ background: true });
+    } else {
+      fetchData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cacheKey]);
 
   // Auto refresh every 5 min when viewing a range including today
   useEffect(() => {
@@ -144,7 +171,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
       // range fully in the past — no refresh needed
       return;
     }
-    const id = setInterval(fetchData, 5 * 60 * 1000);
+    const id = setInterval(() => fetchData({ background: true }), 5 * 60 * 1000);
     return () => clearInterval(id);
   }, [fetchData, queryKey.from, queryKey.to]);
 
@@ -205,11 +232,11 @@ export default function TrackingTab({ department }: TrackingTabProps) {
 
         <button
           type="button"
-          onClick={fetchData}
+          onClick={() => fetchData()}
           disabled={loading}
           className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 border border-white/5 hover:bg-slate-800 text-xs text-slate-300 disabled:opacity-50 transition-all"
         >
-          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          {loading || revalidating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
           Обновить
         </button>
 
@@ -282,7 +309,7 @@ function ManagerList({ managers, dates }: { managers: ManagerTimeline[]; dates: 
             {m.days.map((day) => (
               <div
                 key={day.date}
-                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_170px]" : "grid-cols-[1fr_170px]"}`}
+                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_190px]" : "grid-cols-[1fr_190px]"}`}
               >
                 {multiDay && (
                   <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
@@ -344,17 +371,35 @@ function TimelineBar({ day }: { day: DayTimeline }) {
   );
 }
 
+function fmtHm(mins: number): string {
+  if (mins <= 0) return "0м";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h === 0) return `${m}м`;
+  if (m === 0) return `${h}ч`;
+  return `${h}ч ${m}м`;
+}
+
 function PctSummary({ day }: { day: DayTimeline }) {
   if (day.mode === "off") {
     return <span className="text-[10px] text-slate-500">—</span>;
   }
   return (
-    <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums">
-      <span className="text-blue-400">{day.pct.call}%</span>
-      <span className="text-slate-600">/</span>
-      <span className="text-emerald-400">{day.pct.crm}%</span>
-      <span className="text-slate-600">/</span>
-      <span className="text-rose-400">{day.pct.idle}%</span>
+    <div className="flex flex-col items-end font-mono tabular-nums leading-tight">
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-blue-400">{day.pct.call}%</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-emerald-400">{day.pct.crm}%</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-rose-400">{day.pct.idle}%</span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[9px] text-slate-500">
+        <span className="text-blue-400/70">{fmtHm(day.minutes.call)}</span>
+        <span>/</span>
+        <span className="text-emerald-400/70">{fmtHm(day.minutes.crm)}</span>
+        <span>/</span>
+        <span className="text-rose-400/70">{fmtHm(day.minutes.idle)}</span>
+      </div>
     </div>
   );
 }
