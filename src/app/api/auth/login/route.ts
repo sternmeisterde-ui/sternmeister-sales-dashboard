@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { eq, sql, or } from "drizzle-orm";
-import { getDbForDepartment } from "@/lib/db/index";
-import { d1Users, r1Users } from "@/lib/db/schema-existing";
+import { getDbForDepartment, db as mainDb } from "@/lib/db/index";
+import { d1Users, r1Users, masterManagers } from "@/lib/db/schema-existing";
 import { SESSION_COOKIE_NAME, signSession, type SessionUser } from "@/lib/auth";
 
 const THIRTY_DAYS_SECONDS = 60 * 60 * 24 * 30;
@@ -41,8 +41,18 @@ async function resolveTelegramId(username: string): Promise<string | null> {
   return null;
 }
 
-function mapRole(dbRole: string): "admin" | "manager" {
-  return dbRole === "admin" || dbRole === "rop" ? "admin" : "manager";
+/**
+ * Aggregate roles from every table the user might exist in. If ANY source
+ * records admin or rop we hand out full access — master_managers can be
+ * authoritative while d1_users/r1_users are mid-sync, and vice versa.
+ * "Double-status" users (e.g. rop in master + manager in r1) therefore
+ * still get elevated access.
+ */
+function elevateRole(dbRoles: Array<string | null | undefined>): "admin" | "manager" {
+  for (const r of dbRoles) {
+    if (r === "admin" || r === "rop") return "admin";
+  }
+  return "manager";
 }
 
 export async function POST(request: NextRequest) {
@@ -73,42 +83,74 @@ export async function POST(request: NextRequest) {
       return or(...checks);
     };
 
-    const [d1Results, r1Results] = await Promise.all([
+    // master_managers is the source of truth for role — also match by
+    // username/telegram_id so we pick up ROPs who haven't been synced to the
+    // department-specific user tables yet.
+    const masterConditions = () => {
+      const checks = [eq(sql`lower(${masterManagers.telegramUsername})`, username)];
+      if (telegramId) checks.push(eq(masterManagers.telegramId, telegramId));
+      return or(...checks);
+    };
+
+    const [d1Results, r1Results, masterResults] = await Promise.all([
       b2gDb.select().from(d1Users).where(conditions(d1Users)).limit(1),
       b2bDb.select().from(r1Users).where(conditions(r1Users as any)).limit(1),
+      mainDb
+        .select()
+        .from(masterManagers)
+        .where(
+          sql`${masterManagers.isActive} = true AND (${masterConditions()})`,
+        )
+        .limit(1),
     ]);
 
     const d1User = d1Results[0] ?? null;
     const r1User = r1Results[0] ?? null;
+    const masterUser = masterResults[0] ?? null;
 
-    if (!d1User && !r1User) {
+    if (!d1User && !r1User && !masterUser) {
       return NextResponse.json(
         { error: "Пользователь не найден" },
         { status: 401 },
       );
     }
 
-    let session: SessionUser;
+    // Elevate role based on ALL sources — any rop/admin anywhere grants access.
+    const role = elevateRole([d1User?.role, r1User?.role, masterUser?.role]);
 
+    // Prefer d1 → r1 → master for the profile fields. Department comes from
+    // the first table that matched; master is the final fallback.
+    let session: SessionUser;
     if (d1User) {
       session = {
         userId: d1User.id,
         name: d1User.name,
-        role: mapRole(d1User.role),
+        role,
         department: "b2g",
         telegramUsername: d1User.telegramUsername ?? username,
         line: d1User.line ?? null,
         kommoUserId: d1User.kommoUserId ?? null,
       };
-    } else {
+    } else if (r1User) {
       session = {
-        userId: r1User!.id,
-        name: r1User!.name,
-        role: mapRole(r1User!.role),
+        userId: r1User.id,
+        name: r1User.name,
+        role,
         department: "b2b",
-        telegramUsername: r1User!.telegramUsername ?? username,
-        line: r1User!.line ?? null,
-        kommoUserId: r1User!.kommoUserId ?? null,
+        telegramUsername: r1User.telegramUsername ?? username,
+        line: r1User.line ?? null,
+        kommoUserId: r1User.kommoUserId ?? null,
+      };
+    } else {
+      // master-only path: ROP/admin whose department tables aren't synced.
+      session = {
+        userId: masterUser!.id,
+        name: masterUser!.name,
+        role,
+        department: (masterUser!.department === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b",
+        telegramUsername: masterUser!.telegramUsername ?? username,
+        line: masterUser!.line ?? null,
+        kommoUserId: masterUser!.kommoUserId ?? null,
       };
     }
 
