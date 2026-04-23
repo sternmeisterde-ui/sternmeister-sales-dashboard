@@ -1056,3 +1056,87 @@ export async function getCallNoteParams(
 
   return result;
 }
+
+// ==================== Generic events fetch (for Tracking tab) ====================
+
+export interface RawKommoEventRow {
+  id: number;
+  type: string;
+  createdBy: number;
+  createdAt: number;
+  entityType: string;
+  entityId: number;
+  noteId: number | null;
+  raw: Record<string, unknown>;
+}
+
+/**
+ * Fetch all events for a date range, optionally filtered by creator (manager
+ * Kommo user IDs) and/or event types. No type-specific shaping — consumers
+ * classify as needed. Kommo limits filter[created_by][] to 10 IDs per call,
+ * so we batch.
+ */
+export async function fetchRawEvents(
+  dateFrom: number,
+  dateTo: number,
+  opts?: { kommoUserIds?: number[]; types?: string[]; maxPages?: number },
+): Promise<RawKommoEventRow[]> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const maxPages = opts?.maxPages ?? 100;
+
+  const USER_BATCH = 10;
+  const idBatches: number[][] = [];
+  if (opts?.kommoUserIds && opts.kommoUserIds.length > 0) {
+    for (let i = 0; i < opts.kommoUserIds.length; i += USER_BATCH) {
+      idBatches.push(opts.kommoUserIds.slice(i, i + USER_BATCH));
+    }
+  } else {
+    idBatches.push([]);
+  }
+
+  const out: RawKommoEventRow[] = [];
+
+  for (const batch of idBatches) {
+    let page = 1;
+    while (page <= maxPages) {
+      const url = new URL(`${baseUrl}/events`);
+      url.searchParams.set("filter[created_at][from]", String(dateFrom));
+      url.searchParams.set("filter[created_at][to]", String(dateTo));
+      url.searchParams.set("limit", "100");
+      url.searchParams.set("page", String(page));
+      for (const id of batch) url.searchParams.append("filter[created_by][]", String(id));
+      for (const t of opts?.types ?? []) url.searchParams.append("filter[type][]", t);
+
+      const res = await rateLimitedFetch(url.toString(), { headers });
+      if (res.status === 204) break;
+      if (!res.ok) {
+        if (res.status === 404) break;
+        const text = await res.text();
+        throw new Error(`Kommo events API ${res.status}: ${text}`);
+      }
+
+      const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+      const items = data._embedded?.events ?? [];
+
+      for (const ev of items) {
+        const noteId = ev.value_after?.[0]?.note?.id ?? null;
+        out.push({
+          id: ev.id,
+          type: ev.type,
+          createdBy: ev.created_by,
+          createdAt: ev.created_at,
+          entityType: ev.entity_type,
+          entityId: ev.entity_id,
+          noteId,
+          raw: { value_after: ev.value_after },
+        });
+      }
+
+      if (!data._links?.next) break;
+      page++;
+    }
+  }
+
+  return out;
+}

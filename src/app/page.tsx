@@ -11,6 +11,7 @@ import Image from "next/image";
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
 import AnalyticsTab from "@/components/AnalyticsTab";
+import TrackingTab from "@/components/TrackingTab";
 import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
@@ -77,7 +78,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker">("dashboard");
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -577,6 +578,7 @@ export default function Dashboard() {
             { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
+            { id: "tracking", icon: Activity, label: "Трекинг", adminOnly: true },
             { id: "looker", icon: Database, label: "Looker", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
@@ -678,6 +680,10 @@ export default function Dashboard() {
         {/* --------------------- ANALYTICS VIEW --------------------- */}
         {activeTab === "analytics" && (
           <AnalyticsTab department={activeDepartment} />
+        )}
+
+        {activeTab === "tracking" && (
+          <TrackingTab department={activeDepartment} />
         )}
 
         {/* --------------------- MANAGERS VIEW --------------------- */}
