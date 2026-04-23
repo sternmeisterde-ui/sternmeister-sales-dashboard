@@ -349,15 +349,14 @@ body {
   color: #ffffff !important;
 }
 
-/* Table-row panel header (e.g. Analytics thead with period columns):
-   propagate white to EVERY descendant so the dates and any nested
-   `<div>` labels inside <th> read as white text. Non-table headers
-   keep the direct-children rule above so embedded filter pills
-   don't also get forced white. */
+/* Table-row panel header (OKK, AI calls, Analytics thead rows):
+   override the div-level #60a5fa to match unified #bedcff,
+   and force pure black text on every descendant. */
 .theme-light tr.light-panel-header,
 .theme-light tr.light-panel-header th,
 .theme-light tr.light-panel-header th * {
-  color: #ffffff !important;
+  background-color: #bedcff !important;
+  color: #000000 !important;
 }
 
 /* Inputs / textareas / selects — dark text so they read on any light
