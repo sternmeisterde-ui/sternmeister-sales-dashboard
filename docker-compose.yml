@@ -24,6 +24,7 @@ services:
 
       # Session signing (required in production — fail-loud if missing)
       - SESSION_SECRET=${SESSION_SECRET}
+      - COOKIE_INSECURE=${COOKIE_INSECURE}
 
       # Databases — D1/R1 = roleplay, D2/R2 = OKK, analytics = Looker mirror
       - DATABASE_URL=${DATABASE_URL}
