@@ -132,6 +132,21 @@ interface PipelineStats {
   statuses: Array<{ statusId: number; name: string; count: number }>;
 }
 
+// BERATER statuses that belong to "Линия 3 — Доведение" (follow-through stages).
+// Anything in BERATER not in this set is counted as Линия 2. Kept as an id Set
+// instead of a name match so status renames don't silently re-bucket rows.
+const BERATER_LINE_3_STATUS_IDS = new Set<number>([
+  102183931, // Доведение
+  102183935, // Консультация перед термином ДЦ
+  102183939, // Конс. перед ДЦ проведена
+  102183943, // Консультация перед термином АА
+  102183947, // Конс. перед АА проведена
+  93860875,  // Термин ДЦ отмен./перенес.
+  93886075,  // Термин ДЦ состоялся
+  93860883,  // Термин АА отмен./перенес.
+  93860891,  // Апелляция
+]);
+
 function buildPipelineBreakdown(
   leads: KommoLead[],
   department: string,
@@ -221,6 +236,42 @@ function buildPipelineBreakdown(
 
   for (const [pipelineId, pLeads] of byPipeline) {
     const active = pLeads.filter((l) => !l.closed_at);
+
+    // For B2G BERATER: split into "Линия 2" and "Линия 3 — Доведение" so the
+    // user sees the Доведение funnel as its own card (status-id split, not a
+    // separate Kommo pipeline).
+    if (department === "b2g" && pipelineId === B2G_PIPELINES.BERATER) {
+      const line2Leads: KommoLead[] = [];
+      const line3Leads: KommoLead[] = [];
+      for (const lead of active) {
+        if (BERATER_LINE_3_STATUS_IDS.has(lead.status_id)) line3Leads.push(lead);
+        else line2Leads.push(lead);
+      }
+
+      for (const [cardName, cardLeads] of [
+        ["Бух Бератер (2я линия)", line2Leads] as const,
+        ["Линия 3 — Доведение", line3Leads] as const,
+      ]) {
+        const statusCounts = new Map<number, number>();
+        for (const lead of cardLeads) {
+          statusCounts.set(lead.status_id, (statusCounts.get(lead.status_id) ?? 0) + 1);
+        }
+        const statuses = Array.from(statusCounts.entries())
+          .map(([sid, count]) => ({
+            statusId: sid,
+            name: statusNames[sid] || `Status ${sid}`,
+            count,
+          }))
+          .sort((a, b) => b.count - a.count);
+        result.push({
+          pipelineId,
+          pipelineName: cardName,
+          activeDeals: cardLeads.length,
+          statuses,
+        });
+      }
+      continue;
+    }
 
     // Count by status
     const statusCounts = new Map<number, number>();
