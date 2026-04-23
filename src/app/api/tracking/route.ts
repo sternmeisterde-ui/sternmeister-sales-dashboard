@@ -6,7 +6,7 @@ import { db as d1Db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
-import { ensureFreshSync } from "@/lib/tracking/sync";
+import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
@@ -66,10 +66,21 @@ export async function GET(req: NextRequest) {
       .toISOString()
       .slice(0, 10);
     const includesToday = todayMoscow >= fromISO && todayMoscow <= toISO;
+
+    // fromISO / toISO are Moscow-local calendar dates. Convert to UTC bounds
+    // for querying the cache AND for deciding whether a backfill is needed.
+    const rangeStart = new Date(
+      new Date(`${fromISO}T00:00:00Z`).getTime() - DASHBOARD_TZ_OFFSET_MIN * 60_000,
+    );
+
     let synced = false;
-    if (!skipSync && includesToday) {
+    if (!skipSync) {
       try {
-        synced = await ensureFreshSync(department, 300);
+        // Pull new events if user is looking at today (keeps live bar fresh)
+        if (includesToday) synced = await ensureFreshSync(department, 300);
+        // Pull older events if the user selected a date we haven't backfilled yet
+        const didBackfill = await ensureRangeCached(department, rangeStart);
+        synced = synced || didBackfill;
       } catch (err) {
         console.warn("[tracking] sync failed, serving cache:", err);
       }
@@ -126,10 +137,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Range for events (UTC-converted day bounds with generous padding)
-    const rangeStart = new Date(
-      new Date(`${fromISO}T00:00:00Z`).getTime() - DASHBOARD_TZ_OFFSET_MIN * 60_000,
-    );
+    // Upper bound for events (lower was already computed as rangeStart above).
     const rangeEnd = new Date(
       new Date(`${toISO}T00:00:00Z`).getTime() + (24 * 60 - DASHBOARD_TZ_OFFSET_MIN) * 60_000,
     );

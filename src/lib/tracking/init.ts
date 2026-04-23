@@ -48,6 +48,11 @@ export async function ensureTrackingSchema(): Promise<void> {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  // Added later — ALTER for existing deployments
+  await sql`
+    ALTER TABLE tracking_sync_state
+    ADD COLUMN IF NOT EXISTS earliest_event_ts TIMESTAMPTZ
+  `;
 
   initialized = true;
 }

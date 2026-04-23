@@ -12,6 +12,7 @@ export type Dept = DepartmentId;
 
 const SYNC_MIN_INTERVAL_MS = 60_000; // debounce concurrent triggers
 const BACKFILL_HOURS_ON_FIRST_RUN = 24; // first ever sync covers last 24h
+const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pull > 90 days of Kommo
 
 /** Load Kommo-linked managers for a department. */
 async function getManagersForDept(department: Dept) {
@@ -54,15 +55,16 @@ async function getSyncState(department: Dept) {
  */
 export async function syncDepartment(
   department: Dept,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; windowFrom?: Date; windowTo?: Date; isBackfill?: boolean },
 ): Promise<{ inserted: number; windowFrom: Date; windowTo: Date; skipped?: string }> {
   await ensureTrackingSchema();
 
   const state = await getSyncState(department);
   const now = new Date();
 
-  // Debounce: if someone else just synced, skip (unless forced).
-  if (!opts?.force && state?.lastSyncedAt) {
+  // Debounce only for default (delta) syncs — backfills target a specific past
+  // window and shouldn't be rate-limited against delta syncs.
+  if (!opts?.force && !opts?.isBackfill && !opts?.windowFrom && state?.lastSyncedAt) {
     const sinceLast = now.getTime() - new Date(state.lastSyncedAt).getTime();
     if (sinceLast < SYNC_MIN_INTERVAL_MS) {
       return {
@@ -75,12 +77,18 @@ export async function syncDepartment(
   }
 
   // Compute window
-  const windowTo = now;
+  let windowTo: Date;
   let windowFrom: Date;
-  if (state?.lastEventTs) {
-    windowFrom = new Date(new Date(state.lastEventTs).getTime() - 60 * 60_000); // 1h overlap
+  if (opts?.windowFrom && opts?.windowTo) {
+    windowFrom = opts.windowFrom;
+    windowTo = opts.windowTo;
   } else {
-    windowFrom = new Date(now.getTime() - BACKFILL_HOURS_ON_FIRST_RUN * 60 * 60_000);
+    windowTo = now;
+    if (state?.lastEventTs) {
+      windowFrom = new Date(new Date(state.lastEventTs).getTime() - 60 * 60_000); // 1h overlap
+    } else {
+      windowFrom = new Date(now.getTime() - BACKFILL_HOURS_ON_FIRST_RUN * 60 * 60_000);
+    }
   }
 
   const dateFromSec = Math.floor(windowFrom.getTime() / 1000);
@@ -89,7 +97,13 @@ export async function syncDepartment(
   // Manager list
   const managers = await getManagersForDept(department);
   if (managers.length === 0) {
-    await upsertSyncState(department, now, state?.lastEventTs ?? null, null);
+    await upsertSyncState(
+      department,
+      now,
+      state?.lastEventTs ?? null,
+      state?.earliestEventTs ? new Date(state.earliestEventTs) : null,
+      null,
+    );
     return { inserted: 0, windowFrom, windowTo, skipped: "no managers with kommo_user_id" };
   }
 
@@ -117,6 +131,7 @@ export async function syncDepartment(
     // Upsert events
     let inserted = 0;
     let maxEventTs = state?.lastEventTs ? new Date(state.lastEventTs) : new Date(0);
+    let minEventTs: Date | null = state?.earliestEventTs ? new Date(state.earliestEventTs) : null;
 
     if (events.length > 0) {
       // Batch insert with ON CONFLICT DO NOTHING
@@ -127,6 +142,7 @@ export async function syncDepartment(
 
           const evTs = new Date(ev.createdAt * 1000);
           if (evTs > maxEventTs) maxEventTs = evTs;
+          if (!minEventTs || evTs < minEventTs) minEventTs = evTs;
 
           const isCall = CALL_TYPES.has(ev.type);
           const duration = isCall && ev.noteId ? (durationByNoteId.get(ev.noteId) ?? 0) : 0;
@@ -162,12 +178,27 @@ export async function syncDepartment(
       }
     }
 
-    await upsertSyncState(department, now, maxEventTs, null);
+    // earliestEventTs watermark — extend to whichever is earlier: the sync
+    // window's floor (ensures we mark the full range as "covered" even if
+    // Kommo returned no events in the early part of it), or the oldest event
+    // we actually observed.
+    const effectiveEarliest = minEventTs && minEventTs < windowFrom ? minEventTs : windowFrom;
+    const newEarliest = state?.earliestEventTs
+      ? new Date(Math.min(new Date(state.earliestEventTs).getTime(), effectiveEarliest.getTime()))
+      : effectiveEarliest;
+
+    await upsertSyncState(department, now, maxEventTs, newEarliest, null);
     return { inserted, windowFrom, windowTo };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[tracking-sync] ${department} failed:`, msg);
-    await upsertSyncState(department, now, state?.lastEventTs ?? null, msg);
+    await upsertSyncState(
+      department,
+      now,
+      state?.lastEventTs ?? null,
+      state?.earliestEventTs ? new Date(state.earliestEventTs) : null,
+      msg,
+    );
     throw err;
   }
 }
@@ -176,6 +207,7 @@ async function upsertSyncState(
   department: Dept,
   lastSyncedAt: Date,
   lastEventTs: Date | null,
+  earliestEventTs: Date | null,
   lastError: string | null,
 ): Promise<void> {
   await trackingDb
@@ -184,6 +216,7 @@ async function upsertSyncState(
       department,
       lastSyncedAt,
       lastEventTs,
+      earliestEventTs,
       lastError,
       updatedAt: new Date(),
     })
@@ -192,6 +225,7 @@ async function upsertSyncState(
       set: {
         lastSyncedAt,
         lastEventTs,
+        earliestEventTs,
         lastError,
         updatedAt: new Date(),
       },
@@ -218,4 +252,52 @@ export async function ensureFreshSync(
     return true;
   }
   return false;
+}
+
+/**
+ * Ensure the cache covers events back to `fromDate`. If the earliest cached
+ * event is later than requested, pull the missing window from Kommo.
+ *
+ * Returns true iff a backfill was actually performed.
+ */
+export async function ensureRangeCached(
+  department: Dept,
+  fromDate: Date,
+): Promise<boolean> {
+  await ensureTrackingSchema();
+  const now = new Date();
+
+  // Hard cap — don't let a malicious / mistyped UI request pull years of data.
+  const maxFrom = new Date(now.getTime() - MAX_BACKFILL_DAYS * 24 * 60 * 60_000);
+  const effectiveFrom = fromDate < maxFrom ? maxFrom : fromDate;
+
+  const state = await getSyncState(department);
+
+  // If we have no state yet, the normal delta-sync path handles it (24h backfill).
+  // For past windows before any cache exists, we still need to pull them.
+  if (!state) {
+    await syncDepartment(department, {
+      windowFrom: effectiveFrom,
+      windowTo: now,
+      isBackfill: true,
+    });
+    return true;
+  }
+
+  // If the requested window is already covered by our earliest watermark, done.
+  if (state.earliestEventTs && new Date(state.earliestEventTs) <= effectiveFrom) {
+    return false;
+  }
+
+  // Backfill the gap: [effectiveFrom, earliestEventTs ?? now]. Upper bound is
+  // the current earliest — delta syncs handle everything above that.
+  const upper = state.earliestEventTs ? new Date(state.earliestEventTs) : now;
+  if (effectiveFrom >= upper) return false;
+
+  await syncDepartment(department, {
+    windowFrom: effectiveFrom,
+    windowTo: upper,
+    isBackfill: true,
+  });
+  return true;
 }

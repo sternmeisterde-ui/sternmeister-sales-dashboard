@@ -42,7 +42,8 @@ export const trackingEvents = pgTable(
 export const trackingSyncState = pgTable("tracking_sync_state", {
   department: text("department").primaryKey(),      // 'b2g' | 'b2b'
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
-  lastEventTs: timestamp("last_event_ts", { withTimezone: true }), // max createdAt we saw — delta cursor
+  lastEventTs: timestamp("last_event_ts", { withTimezone: true }),      // max createdAt we saw — delta cursor forward
+  earliestEventTs: timestamp("earliest_event_ts", { withTimezone: true }), // min createdAt cached — backfill watermark
   lastError: text("last_error"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

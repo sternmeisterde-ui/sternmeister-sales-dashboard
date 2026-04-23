@@ -88,6 +88,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     return t;
   }, []);
   const [range, setRange] = useState<DateRange>({ start: today, end: today });
+  const [dateMode, setDateMode] = useState<"single" | "range">("single");
 
   // Event-type filter
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
@@ -164,8 +165,32 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     <div className="flex flex-col gap-4">
       {/* ── Control bar ──────────────────────────────────────────── */}
       <div className="glass-panel rounded-2xl p-4 flex flex-wrap items-center gap-3 border border-white/5">
+        <div className="flex bg-slate-800/60 p-0.5 rounded-lg border border-white/5">
+          <button
+            type="button"
+            onClick={() => {
+              setDateMode("single");
+              setRange({ start: range.start ?? today, end: range.start ?? today });
+            }}
+            className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
+              dateMode === "single" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            День
+          </button>
+          <button
+            type="button"
+            onClick={() => setDateMode("range")}
+            className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
+              dateMode === "range" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Период
+          </button>
+        </div>
+
         <CalendarPicker
-          mode="range"
+          mode={dateMode}
           value={range}
           onChange={setRange}
           onClear={handleClearDate}
@@ -407,9 +432,9 @@ function EventTypesFilter({ open, setOpen, selected, onChange }: EventTypesFilte
     <div
       id="tracking-filter-popover"
       style={style}
-      className="glass-panel rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col"
+      className="rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col bg-slate-900"
     >
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-900/60">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-950">
         <span className="text-xs font-semibold text-white">Типы событий (зелёные)</span>
         <span className="text-[11px] text-slate-400 ml-auto">
           {selectedCrmCount}/{allCrm.length}
