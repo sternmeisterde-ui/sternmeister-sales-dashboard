@@ -234,16 +234,18 @@ export async function getLeads(
   pipelineIds?: number[],
   statusIds?: number[],
   maxPages = 10,
-  dateFilter?: { field: "created_at" | "updated_at" | "closed_at"; from: number; to: number }
+  dateFilter?: { field: "created_at" | "updated_at" | "closed_at"; from: number; to: number },
+  withContacts = false,
 ): Promise<KommoLead[]> {
   // Build cache key from params
-  const cacheKey = `leads:${JSON.stringify({ pipelineIds, statusIds, maxPages, dateFilter })}`;
+  const cacheKey = `leads:${JSON.stringify({ pipelineIds, statusIds, maxPages, dateFilter, withContacts })}`;
   const ttl = dateFilter ? CACHE_TTL.LEADS_FILTERED : CACHE_TTL.LEADS_SNAPSHOT;
 
   return cached(cacheKey, ttl, async () => {
     const baseUrl = await getBaseUrl();
     const headers = await getAuthHeaders();
     const url = new URL(`${baseUrl}/leads`);
+    if (withContacts) url.searchParams.set("with", "contacts");
     if (pipelineIds && pipelineIds.length > 0) {
       pipelineIds.forEach((id, i) => url.searchParams.append(`filter[pipeline_id][${i}]`, String(id)));
     }
@@ -561,4 +563,394 @@ export async function getStatusChangeCount(
 
     return count;
   });
+}
+
+/**
+ * Fetch tasks for specific lead IDs.
+ * Used in ETL to sync tasks for a set of leads.
+ */
+export async function getLeadTasks(
+  leadIds: number[],
+  maxPages = 50,
+): Promise<Array<{
+  id: number;
+  entityId: number;
+  entityType: string;
+  createdAt: number;
+  updatedAt: number;
+  isCompleted: boolean;
+  completeTill: number;
+  responsibleUserId: number;
+  result: { createdAt?: number } | null;
+}>> {
+  if (leadIds.length === 0) return [];
+
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result: Array<{
+    id: number;
+    entityId: number;
+    entityType: string;
+    createdAt: number;
+    updatedAt: number;
+    isCompleted: boolean;
+    completeTill: number;
+    responsibleUserId: number;
+    result: { createdAt?: number } | null;
+  }> = [];
+
+  const BATCH = 50;
+  for (let i = 0; i < leadIds.length; i += BATCH) {
+    const batch = leadIds.slice(i, i + BATCH);
+    const url = new URL(`${baseUrl}/tasks`);
+    url.searchParams.set("limit", "250");
+    url.searchParams.set("filter[entity_type]", "leads");
+    batch.forEach((id) => url.searchParams.append("filter[entity_id][]", String(id)));
+
+    let page = 1;
+    while (page <= maxPages) {
+      const pageUrl = new URL(url.toString());
+      pageUrl.searchParams.set("page", String(page));
+      const res = await rateLimitedFetch(pageUrl.toString(), { headers });
+      if (res.status === 204) break;
+      if (!res.ok) {
+        console.warn(`[ETL] tasks batch ${i} page ${page}: ${res.status}`);
+        break;
+      }
+      const data = (await res.json()) as {
+        _embedded?: { tasks?: Array<{
+          id: number; entity_id: number; entity_type: string;
+          created_at: number; updated_at: number; is_completed: boolean;
+          complete_till: number; responsible_user_id: number;
+          result?: { created_at?: number } | null;
+        }> };
+        _links?: { next?: unknown };
+      };
+      for (const t of data._embedded?.tasks ?? []) {
+        result.push({
+          id: t.id,
+          entityId: t.entity_id,
+          entityType: t.entity_type,
+          createdAt: t.created_at,
+          updatedAt: t.updated_at,
+          isCompleted: t.is_completed,
+          completeTill: t.complete_till,
+          responsibleUserId: t.responsible_user_id,
+          result: t.result ? { createdAt: t.result.created_at } : null,
+        });
+      }
+      if (!data._links?.next) break;
+      page++;
+    }
+  }
+
+  return result;
+}
+
+export async function getLossReasons(): Promise<Array<{ id: number; name: string }>> {
+  const data = await kommoGet<{ _embedded?: { loss_reasons?: Array<{ id: number; name: string }> } }>(
+    "/leads/loss_reasons",
+    { limit: "250" },
+  );
+  return data._embedded?.loss_reasons ?? [];
+}
+
+/**
+ * Batch-fetch contacts by ID with their linked leads.
+ * Used in ETL to resolve contact_id → lead_id[] for call events.
+ */
+export async function getContactsWithLeads(
+  contactIds: number[],
+): Promise<Map<number, number[]>> {
+  if (contactIds.length === 0) return new Map();
+
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result = new Map<number, number[]>();
+
+  const BATCH = 50; // Kommo allows up to 250 but filter[id][] URL gets long
+  for (let i = 0; i < contactIds.length; i += BATCH) {
+    const batch = contactIds.slice(i, i + BATCH);
+    const url = new URL(`${baseUrl}/contacts`);
+    url.searchParams.set("with", "leads");
+    url.searchParams.set("limit", "250");
+    batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+
+    const res = await rateLimitedFetch(url.toString(), { headers });
+    if (res.status === 204) continue;
+    if (!res.ok) {
+      console.warn(`[ETL] contacts batch ${i}-${i + BATCH} failed with ${res.status}`);
+      continue;
+    }
+
+    const data = (await res.json()) as {
+      _embedded?: {
+        contacts?: Array<{
+          id: number;
+          _embedded?: { leads?: Array<{ id: number }> };
+        }>;
+      };
+    };
+
+    for (const contact of data._embedded?.contacts ?? []) {
+      const leads = contact._embedded?.leads?.map((l) => l.id) ?? [];
+      result.set(contact.id, leads);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Fetch all call events (outgoing_call + incoming_call) for a date range.
+ * No user filter — returns all events for all managers.
+ * Includes note_id for Phase 2 resolution.
+ */
+export async function getCallEvents(
+  dateFrom: number,
+  dateTo: number,
+  maxPages = 200,
+): Promise<Array<{
+  type: "call_in" | "call_out";
+  noteId: number;
+  entityType: string;
+  entityId: number;
+  createdBy: number;
+  createdAt: number;
+}>> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result: Array<{
+    type: "call_in" | "call_out";
+    noteId: number;
+    entityType: string;
+    entityId: number;
+    createdBy: number;
+    createdAt: number;
+  }> = [];
+
+  let page = 1;
+  while (page <= maxPages) {
+    const url = new URL(`${baseUrl}/events`);
+    url.searchParams.append("filter[type][]", "outgoing_call");
+    url.searchParams.append("filter[type][]", "incoming_call");
+    url.searchParams.set("filter[created_at][from]", String(dateFrom));
+    url.searchParams.set("filter[created_at][to]", String(dateTo));
+    url.searchParams.set("limit", "250");
+    url.searchParams.set("page", String(page));
+
+    const res = await rateLimitedFetch(url.toString(), { headers });
+    if (res.status === 204) break;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Kommo call events ${res.status}: ${text}`);
+    }
+
+    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+    const items = data._embedded?.events ?? [];
+
+    for (const ev of items) {
+      const noteId = ev.value_after?.[0]?.note?.id ?? null;
+      if (noteId === null) continue;
+      result.push({
+        type: ev.type === "incoming_call" ? "call_in" : "call_out",
+        noteId,
+        entityType: ev.entity_type,
+        entityId: ev.entity_id,
+        createdBy: ev.created_by,
+        createdAt: ev.created_at,
+      });
+    }
+
+    if (!data._links?.next) break;
+    page++;
+  }
+
+  return result;
+}
+
+/**
+ * Fetch message events (outgoing + incoming chat messages) for a date range.
+ */
+export async function getMessageEvents(
+  dateFrom: number,
+  dateTo: number,
+  maxPages = 200,
+): Promise<Array<{
+  type: "outgoing_chat_message" | "incoming_chat_message";
+  messageId: string;
+  leadId: number;
+  createdBy: number;
+  createdAt: number;
+}>> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result: Array<{
+    type: "outgoing_chat_message" | "incoming_chat_message";
+    messageId: string;
+    leadId: number;
+    createdBy: number;
+    createdAt: number;
+  }> = [];
+
+  let page = 1;
+  while (page <= maxPages) {
+    const url = new URL(`${baseUrl}/events`);
+    url.searchParams.append("filter[type][]", "outgoing_chat_message");
+    url.searchParams.append("filter[type][]", "incoming_chat_message");
+    url.searchParams.set("filter[created_at][from]", String(dateFrom));
+    url.searchParams.set("filter[created_at][to]", String(dateTo));
+    url.searchParams.set("limit", "250");
+    url.searchParams.set("page", String(page));
+
+    const res = await rateLimitedFetch(url.toString(), { headers });
+    if (res.status === 204) break;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Kommo message events ${res.status}: ${text}`);
+    }
+
+    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+    const items = data._embedded?.events ?? [];
+
+    for (const ev of items) {
+      const msgId = (ev.value_after?.[0] as Record<string, unknown>)?.message as
+        | { id: string }
+        | undefined;
+      if (!msgId?.id || ev.entity_type !== "lead") continue;
+      result.push({
+        type: ev.type === "incoming_chat_message" ? "incoming_chat_message" : "outgoing_chat_message",
+        messageId: msgId.id,
+        leadId: ev.entity_id,
+        createdBy: ev.created_by,
+        createdAt: ev.created_at,
+      });
+    }
+
+    if (!data._links?.next) break;
+    page++;
+  }
+
+  return result;
+}
+
+/**
+ * Fetch lead_status_changed events for a date range.
+ */
+export async function getStatusChangeEvents(
+  dateFrom: number,
+  dateTo: number,
+  maxPages = 200,
+): Promise<Array<{
+  eventId: string;
+  leadId: number;
+  createdAt: number;
+  createdBy: number;
+  afterStatusId: number;
+  afterPipelineId: number;
+  beforeStatusId: number;
+  beforePipelineId: number;
+}>> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result: Array<{
+    eventId: string;
+    leadId: number;
+    createdAt: number;
+    createdBy: number;
+    afterStatusId: number;
+    afterPipelineId: number;
+    beforeStatusId: number;
+    beforePipelineId: number;
+  }> = [];
+
+  let page = 1;
+  while (page <= maxPages) {
+    const url = new URL(`${baseUrl}/events`);
+    url.searchParams.append("filter[type][]", "lead_status_changed");
+    url.searchParams.set("filter[created_at][from]", String(dateFrom));
+    url.searchParams.set("filter[created_at][to]", String(dateTo));
+    url.searchParams.set("limit", "250");
+    url.searchParams.set("page", String(page));
+
+    const res = await rateLimitedFetch(url.toString(), { headers });
+    if (res.status === 204) break;
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Kommo status events ${res.status}: ${text}`);
+    }
+
+    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+    const items = data._embedded?.events ?? [];
+
+    for (const ev of items) {
+      const after = (ev.value_after?.[0] as Record<string, unknown>)?.lead_status as
+        | { id: number; pipeline_id: number }
+        | undefined;
+      const before = (ev.value_before?.[0] as Record<string, unknown>)?.lead_status as
+        | { id: number; pipeline_id: number }
+        | undefined;
+      if (!after) continue;
+
+      result.push({
+        eventId: String(ev.id),
+        leadId: ev.entity_id,
+        createdAt: ev.created_at,
+        createdBy: ev.created_by,
+        afterStatusId: after.id,
+        afterPipelineId: after.pipeline_id,
+        beforeStatusId: before?.id ?? 0,
+        beforePipelineId: before?.pipeline_id ?? 0,
+      });
+    }
+
+    if (!data._links?.next) break;
+    page++;
+  }
+
+  return result;
+}
+
+/**
+ * Batch-fetch contact notes by note ID from the contacts endpoint.
+ */
+export async function getContactNoteParams(
+  noteIds: number[],
+): Promise<Map<number, { duration: number; callStatus: number | undefined }>> {
+  if (noteIds.length === 0) return new Map();
+
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result = new Map<number, { duration: number; callStatus: number | undefined }>();
+
+  const BATCH = 100;
+  for (let i = 0; i < noteIds.length; i += BATCH) {
+    const batch = noteIds.slice(i, i + BATCH);
+    const url = new URL(`${baseUrl}/contacts/notes`);
+    url.searchParams.set("limit", "250");
+    batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+
+    let notesPage = 1;
+    while (true) {
+      const pageUrl = new URL(url.toString());
+      pageUrl.searchParams.set("page", String(notesPage));
+      const res = await rateLimitedFetch(pageUrl.toString(), { headers });
+      if (res.status === 204) break;
+      if (!res.ok) {
+        console.warn(`[ETL] contact notes batch failed: ${res.status}`);
+        break;
+      }
+      const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
+      for (const n of data._embedded?.notes ?? []) {
+        result.set(n.id, {
+          duration: n.params?.duration ?? 0,
+          callStatus: n.params?.call_status,
+        });
+      }
+      if (!data._links?.next) break;
+      notesPage++;
+    }
+  }
+
+  return result;
 }
