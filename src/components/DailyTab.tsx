@@ -77,6 +77,12 @@ interface ScheduleInfo {
   hasSchedule: boolean;
 }
 
+interface RefusalRow {
+  reason: string;
+  count: number;
+  percent: number;
+}
+
 interface DailySnapshot {
   date: string;
   period: string;
@@ -84,6 +90,7 @@ interface DailySnapshot {
   periodDate: string;
   sections: Section[];
   schedule?: ScheduleInfo;
+  refusals?: { firstLine: RefusalRow[]; berater: RefusalRow[] } | null;
 }
 
 interface RangeResponse {
@@ -973,6 +980,17 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         />
       )}
 
+      {/* Refusal reasons (B2G only) — based on whichever snapshot is most
+          representative of the current view: monthly if available, else today */}
+      {data && !loading && department === "b2g" && (monthlySnapshot?.refusals || selectedDaySnapshot?.refusals) && (
+        <RefusalReasonsCards
+          monthly={monthlySnapshot?.refusals}
+          daily={selectedDaySnapshot?.refusals}
+          daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
+          monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
+        />
+      )}
+
       {/* Per-manager for months mode: selected month */}
       {data && !loading && mode === "months" && selectedDayIdx !== null && data.months?.[selectedDayIdx] && (
         <ManagerMetricsTable
@@ -991,6 +1009,67 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         managers={scheduleManagers}
         onSaved={() => { setShowSchedule(false); fetchData(); }}
       />
+    </div>
+  );
+}
+
+// ======================== Refusal reasons cards ==========================
+
+interface RefusalCardsProps {
+  monthly?: { firstLine: RefusalRow[]; berater: RefusalRow[] } | null;
+  daily?: { firstLine: RefusalRow[]; berater: RefusalRow[] } | null;
+  daySubLabel: string;
+  monthLabel: string;
+}
+
+function RefusalReasonsCards({ monthly, daily, daySubLabel, monthLabel }: RefusalCardsProps) {
+  // Show whichever scope we have data for — prefer monthly for the header
+  // layout since it's the broader picture the Excel spec is keyed to.
+  const data = monthly ?? daily;
+  if (!data) return null;
+
+  const label = monthly ? monthLabel : daySubLabel;
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <RefusalCard title={`Тематики отказов — Квалификатор (${label})`} rows={data.firstLine} />
+      <RefusalCard title={`Тематики отказов — Бератер (${label})`} rows={data.berater} />
+    </div>
+  );
+}
+
+function RefusalCard({ title, rows }: { title: string; rows: RefusalRow[] }) {
+  const total = rows.reduce((s, r) => s + r.count, 0);
+  return (
+    <div className="glass-panel rounded-2xl p-4 border border-white/5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-widest">{title}</h3>
+        <span className="text-[11px] text-slate-500">Итог: <span className="text-white font-bold">{total}</span></span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="text-[11px] text-slate-500 py-4 text-center">Нет отказов за период</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
+                <th className="text-left py-2 px-2 font-medium">Причина</th>
+                <th className="text-right py-2 px-2 font-medium">Кол-во</th>
+                <th className="text-right py-2 px-2 font-medium">%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.reason} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                  <td className="py-2 px-2 text-slate-200">{r.reason}</td>
+                  <td className="py-2 px-2 text-right text-white font-semibold">{r.count}</td>
+                  <td className="py-2 px-2 text-right text-slate-400 tabular-nums">{r.percent}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

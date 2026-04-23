@@ -209,6 +209,132 @@ async function getSlaFacts(
   }
 }
 
+/** Loss-reason breakdown for closed leads in a pipeline during a date range.
+ *  Returns rows sorted by count desc, with percent of the closed-total. */
+async function getRefusalReasons(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<Array<{ reason: string; count: number; percent: number }>> {
+  try {
+    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+      loss_reason: string;
+      cnt: number | string;
+    }>(
+      drizzleSql`
+        SELECT loss_reason, COUNT(*)::int AS cnt
+        FROM analytics.leads_cohort
+        WHERE pipeline_id = ${pipelineId}
+          AND created_at >= ${fromDate}
+          AND created_at <= ${toDate}
+          AND loss_reason IS NOT NULL AND loss_reason <> ''
+        GROUP BY loss_reason
+        ORDER BY cnt DESC
+      `,
+    );
+    const rows = result.rows.map((r) => ({ reason: r.loss_reason, count: Number(r.cnt) }));
+    const total = rows.reduce((s, r) => s + r.count, 0);
+    return rows.map((r) => ({
+      reason: r.reason,
+      count: r.count,
+      percent: total > 0 ? Math.round((r.count / total) * 1000) / 10 : 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Avg calls per lead for a pipeline: total calls ÷ distinct lead_ids that
+ *  received at least one call in range. Team-level. */
+async function getAvgCallsPerLead(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<number | null> {
+  try {
+    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+      total_calls: number | string;
+      unique_leads: number | string;
+    }>(
+      drizzleSql`
+        SELECT
+          COUNT(*)::int                  AS total_calls,
+          COUNT(DISTINCT lead_id)::int   AS unique_leads
+        FROM analytics.communications
+        WHERE pipeline_id = ${pipelineId}
+          AND created_at >= ${fromDate}
+          AND created_at <= ${toDate}
+          AND communication_type LIKE 'call%'
+          AND lead_id IS NOT NULL
+      `,
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const totalCalls = Number(row.total_calls);
+    const uniqueLeads = Number(row.unique_leads);
+    if (uniqueLeads <= 0) return null;
+    return Math.round((totalCalls / uniqueLeads) * 10) / 10;
+  } catch {
+    return null;
+  }
+}
+
+/** Per-manager avg calls per lead — same metric grouped by `manager`. */
+async function getAvgCallsPerLeadByManager(
+  managers: Array<{ id: string; name: string }>,
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<Map<string, number>> {
+  try {
+    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+      manager: string;
+      total_calls: number | string;
+      unique_leads: number | string;
+    }>(
+      drizzleSql`
+        SELECT
+          manager,
+          COUNT(*)::int                  AS total_calls,
+          COUNT(DISTINCT lead_id)::int   AS unique_leads
+        FROM analytics.communications
+        WHERE pipeline_id = ${pipelineId}
+          AND created_at >= ${fromDate}
+          AND created_at <= ${toDate}
+          AND communication_type LIKE 'call%'
+          AND lead_id IS NOT NULL
+          AND manager IS NOT NULL AND manager <> ''
+        GROUP BY manager
+      `,
+    );
+    const NAME_ALIASES: Record<string, string[]> = {
+      "Максим Алекперов": ["Maksim Alekperov"],
+      "Гульназ Сираждинова": ["Гульназ Cираждинова"],
+      "Елизавета Трапезникова": ["Єлизавета Трапезникова"],
+    };
+    const byName = new Map<string, number>();
+    for (const row of result.rows) {
+      const t = Number(row.total_calls);
+      const u = Number(row.unique_leads);
+      if (u > 0) byName.set(row.manager, Math.round((t / u) * 10) / 10);
+    }
+    const byMaster = new Map<string, number>();
+    for (const m of managers) {
+      let v = byName.get(m.name);
+      if (v === undefined) {
+        for (const alias of NAME_ALIASES[m.name] ?? []) {
+          const hit = byName.get(alias);
+          if (hit !== undefined) { v = hit; break; }
+        }
+      }
+      if (v !== undefined) byMaster.set(m.id, v);
+    }
+    return byMaster;
+  } catch {
+    return new Map();
+  }
+}
+
 /** Per-manager SLA/TLT for a pipeline. Keyed by master_managers.id via the
  *  same name-alias map analytics-calls uses. */
 async function getSlaFactsByManager(
@@ -645,6 +771,11 @@ export async function buildDailyResponse(department: string, period: string, dat
   const slaFacts = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
   // Per-manager SLA/TLT: line → Map<managerId, {slaMinutes, slaShiftMinutes, tltMinutes}>
   const slaPerManager = new Map<string, Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>>();
+  // Refusal reasons: pipeline key ('firstLine' | 'berater') → sorted rows
+  const refusalReasons = new Map<string, Array<{ reason: string; count: number; percent: number }>>();
+  // Avg calls per lead: line → team avg + per-manager map
+  const avgCallsPerLead = new Map<string, number | null>();
+  const avgCallsPerLeadPerManager = new Map<string, Map<string, number>>();
   if (department === "b2g") {
     // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
     // stay index-compatible downstream.
@@ -681,7 +812,34 @@ export async function buildDailyResponse(department: string, period: string, dat
       slaFacts.set(line, facts);
       slaPerManager.set(line, perMgr);
     });
-    await Promise.all([...okkPromises, ...rpPromises, ...slaPromises]);
+
+    // Refusal reasons per pipeline — aggregated, two cards in UI
+    // (FIRST_LINE = квалификатор, BERATER = бератер+доведение).
+    const refusalPromises = [
+      ["firstLine", B2G_PIPELINES.FIRST_LINE] as const,
+      ["berater", B2G_PIPELINES.BERATER] as const,
+    ].map(async ([key, pipelineId]) => {
+      const rows = await getRefusalReasons(pipelineId, fromDate, toDate);
+      refusalReasons.set(key, rows);
+    });
+
+    // Avg calls per lead — per line (uses same pipelines as SLA; line 2
+    // and 3 share BERATER so they'll report the same team number).
+    const B2G_LINE_PIPELINES_FOR_CALLS: Record<string, number> = {
+      "1": B2G_PIPELINES.FIRST_LINE,
+      "2": B2G_PIPELINES.BERATER,
+      "3": B2G_PIPELINES.BERATER,
+    };
+    const acplPromises = Object.entries(B2G_LINE_PIPELINES_FOR_CALLS).map(async ([line, pipelineId]) => {
+      const [team, perMgr] = await Promise.all([
+        getAvgCallsPerLead(pipelineId, fromDate, toDate),
+        getAvgCallsPerLeadByManager(allManagers, pipelineId, fromDate, toDate),
+      ]);
+      avgCallsPerLead.set(line, team);
+      avgCallsPerLeadPerManager.set(line, perMgr);
+    });
+
+    await Promise.all([...okkPromises, ...rpPromises, ...slaPromises, ...refusalPromises, ...acplPromises]);
   }
 
   const activeSections = getDailySections(department);
@@ -799,6 +957,10 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
+        }
+        if (metric.key === "avgCallsPerLead") {
+          const v = avgCallsPerLead.get(section.dbLine);
+          fact = v != null ? String(v) : null;
         }
       }
 
@@ -1171,6 +1333,11 @@ export async function buildDailyResponse(department: string, period: string, dat
                 else if (metric.key === "tlt_f") fact = perMgr.tltMinutes != null ? String(perMgr.tltMinutes) : null;
               }
             }
+            // Per-manager avg calls per lead
+            if (metric.key === "avgCallsPerLead") {
+              const v = avgCallsPerLeadPerManager.get(section.dbLine)?.get(mgr.id);
+              fact = v != null ? String(v) : null;
+            }
             let percent: number | null = null;
             if (plan && fact && Number(plan) > 0) {
               if (metric.unit === "%") {
@@ -1217,6 +1384,12 @@ export async function buildDailyResponse(department: string, period: string, dat
     periodDate,
     sections,
     schedule: scheduleInfo,
+    refusals: department === "b2g"
+      ? {
+          firstLine: refusalReasons.get("firstLine") ?? [],
+          berater: refusalReasons.get("berater") ?? [],
+        }
+      : null,
   };
 }
 
