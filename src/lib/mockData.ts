@@ -10,6 +10,9 @@ export interface ManagerCall {
     audioUrl: string;
     kommoUrl: string;
     date: string;
+    /** Raw ISO timestamp for reliable client-side date filtering (present
+     *  on API-sourced calls; mock data may omit it). */
+    startedAtIso?: string | null;
     transcript: string;
     aiFeedback: string;
     /** Mistakes text from the evaluations.mistakes column */

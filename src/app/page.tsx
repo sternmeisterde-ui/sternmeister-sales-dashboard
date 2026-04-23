@@ -293,7 +293,7 @@ export default function Dashboard() {
     now.setHours(23, 59, 59, 999);
 
     const filteredByPeriod = allManagerCalls.filter(call => {
-      const callDate = parseCallDate(call.date);
+      const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
 
       if (managerPeriod === "week") {
         const weekAgo = new Date(now);
@@ -381,7 +381,9 @@ export default function Dashboard() {
     // ALL calls in period (including unevaluated / score=0)
     const periodCalls = allCalls.filter(call => {
       if (!managerNames.has(call.name)) return false;
-      const callDate = parseCallDate(call.date);
+      // Prefer raw ISO timestamp when the API provides it — otherwise fall
+      // back to the fragile display-string parse for legacy paths/mocks.
+      const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
       return callDate >= periodStart && callDate <= periodEnd;
     });
 
@@ -452,7 +454,7 @@ export default function Dashboard() {
 
     // Filter by date range
     if (activeDateFilter.start && activeDateFilter.end) {
-      const callDate = parseCallDate(call.date);
+      const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
       const startOfDay = new Date(activeDateFilter.start);
       startOfDay.setHours(0, 0, 0, 0);
       const endOfDay = new Date(activeDateFilter.end);

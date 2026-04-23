@@ -86,6 +86,8 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
       avatarUrl: `https://i.pravatar.cc/150?u=${call.userTelegramUsername || call.userId}`,
       callDuration: `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
       date: formatCallDate(call.startedAt),
+      // Raw ISO so clients can filter without round-tripping the display string.
+      startedAtIso: call.startedAt ? new Date(call.startedAt).toISOString() : null,
       score: call.score || 0,
       hasRecording: !!call.recordingPath,
       audioUrl: call.recordingPath ? `/api/audio/${call.id}?dept=${departmentType}` : "#",

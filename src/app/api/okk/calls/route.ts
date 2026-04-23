@@ -213,6 +213,8 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         callDuration: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
         callNumber: row.callNumber || "",
         date: formatCallDate(row.callCreatedAt),
+        // Raw ISO so clients can filter without round-tripping the display string.
+        startedAtIso: row.callCreatedAt ? new Date(row.callCreatedAt).toISOString() : null,
         score: row.totalScore || 0,
         totalMaxScore,
         hasRecording: !!row.recordingUrl,

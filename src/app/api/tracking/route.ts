@@ -86,7 +86,9 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Load managers for this department
+    // Load managers for this department. Tracking is about individual
+    // manager performance — ROPs and admins are excluded even if they're
+    // active. A person promoted from manager→rop falls out of this view.
     const managers = await d1Db
       .select({
         id: masterManagers.id,
@@ -100,6 +102,7 @@ export async function GET(req: NextRequest) {
         and(
           eq(masterManagers.department, department),
           eq(masterManagers.isActive, true),
+          eq(masterManagers.role, "manager"),
         ),
       )
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));

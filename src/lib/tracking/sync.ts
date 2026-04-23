@@ -14,7 +14,10 @@ const SYNC_MIN_INTERVAL_MS = 60_000; // debounce concurrent triggers
 const BACKFILL_HOURS_ON_FIRST_RUN = 24; // first ever sync covers last 24h
 const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pull > 90 days of Kommo
 
-/** Load Kommo-linked managers for a department. */
+/** Load Kommo-linked managers for a department. Only role='manager' — the
+ *  Tracking tab is about individual manager performance; ROPs/admins have
+ *  different cadence and would skew timelines, so we keep them out of the
+ *  cache entirely. */
 async function getManagersForDept(department: Dept) {
   const rows = await d1Db
     .select({
@@ -26,6 +29,7 @@ async function getManagersForDept(department: Dept) {
       and(
         eq(masterManagers.department, department),
         eq(masterManagers.isActive, true),
+        eq(masterManagers.role, "manager"),
       ),
     );
   return rows.filter((r): r is { id: string; kommoUserId: number } => r.kommoUserId !== null);
