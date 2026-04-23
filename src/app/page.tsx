@@ -1115,11 +1115,17 @@ export default function Dashboard() {
                                     onClick={() => {
                                       if (!dateRange.start || (dateRange.start && dateRange.end)) {
                                         setDateRange({ start: date, end: null });
-                                      } else if (date >= dateRange.start) {
-                                        setDateRange({ ...dateRange, end: date });
-                                      } else {
-                                        setDateRange({ start: date, end: dateRange.start });
+                                        return;
                                       }
+                                      // Second click — commit the range (same-day
+                                      // click produces {X, X} so one day is a valid pick).
+                                      const next = date >= dateRange.start
+                                        ? { start: dateRange.start, end: date }
+                                        : { start: date, end: dateRange.start };
+                                      setDateRange(next);
+                                      setActiveDateFilter(next);
+                                      setAiCustomRange(next);
+                                      setIsFilterOpen(false);
                                     }}
                                     className={`aspect-square flex items-center justify-center text-[11px] rounded-lg transition-all ${
                                       isStart || isEnd ? 'bg-blue-500 text-white font-bold' :

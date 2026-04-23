@@ -309,7 +309,7 @@ function ManagerList({ managers, dates }: { managers: ManagerTimeline[]; dates: 
             {m.days.map((day) => (
               <div
                 key={day.date}
-                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_190px]" : "grid-cols-[1fr_190px]"}`}
+                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_230px]" : "grid-cols-[1fr_230px]"}`}
               >
                 {multiDay && (
                   <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
@@ -372,11 +372,9 @@ function TimelineBar({ day }: { day: DayTimeline }) {
 }
 
 function fmtHm(mins: number): string {
-  if (mins <= 0) return "0м";
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  if (h === 0) return `${m}м`;
-  if (m === 0) return `${h}ч`;
+  const safe = Math.max(0, Math.round(mins));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
   return `${h}ч ${m}м`;
 }
 
@@ -385,7 +383,7 @@ function PctSummary({ day }: { day: DayTimeline }) {
     return <span className="text-[10px] text-slate-500">—</span>;
   }
   return (
-    <div className="flex flex-col items-end font-mono tabular-nums leading-tight">
+    <div className="flex flex-col items-end font-mono tabular-nums leading-tight gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px]">
         <span className="text-blue-400">{day.pct.call}%</span>
         <span className="text-slate-600">/</span>
@@ -393,12 +391,12 @@ function PctSummary({ day }: { day: DayTimeline }) {
         <span className="text-slate-600">/</span>
         <span className="text-rose-400">{day.pct.idle}%</span>
       </div>
-      <div className="flex items-center gap-1.5 text-[9px] text-slate-500">
-        <span className="text-blue-400/70">{fmtHm(day.minutes.call)}</span>
-        <span>/</span>
-        <span className="text-emerald-400/70">{fmtHm(day.minutes.crm)}</span>
-        <span>/</span>
-        <span className="text-rose-400/70">{fmtHm(day.minutes.idle)}</span>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-blue-300/90">{fmtHm(day.minutes.call)}</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-emerald-300/90">{fmtHm(day.minutes.crm)}</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-rose-300/90">{fmtHm(day.minutes.idle)}</span>
       </div>
     </div>
   );

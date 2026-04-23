@@ -123,11 +123,16 @@ export default function CalendarPicker({
     // range mode
     if (!draft.start || (draft.start && draft.end)) {
       setDraft({ start: date, end: null });
-    } else if (date >= draft.start) {
-      setDraft({ ...draft, end: date });
-    } else {
-      setDraft({ start: date, end: draft.start });
+      return;
     }
+    // Second click — commit the range. Same-day click produces {X, X} so the
+    // user doesn't need to hit "Apply" just to pick one day inside a range picker.
+    const next: DateRange = date >= draft.start
+      ? { start: draft.start, end: date }
+      : { start: date, end: draft.start };
+    setDraft(next);
+    onChange(next);
+    setOpen(false);
   };
 
   const applyRange = () => {
