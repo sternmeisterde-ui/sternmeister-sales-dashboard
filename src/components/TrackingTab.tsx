@@ -326,6 +326,8 @@ function ManagerList({ managers, dates }: { managers: ManagerTimeline[]; dates: 
 }
 
 function TimelineBar({ day }: { day: DayTimeline }) {
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+
   if (day.mode === "off") {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
@@ -338,36 +340,58 @@ function TimelineBar({ day }: { day: DayTimeline }) {
 
   const total = day.totalMinutes || 1;
 
+  const moveTip = (e: React.MouseEvent<HTMLDivElement>, text: string) => {
+    setTip({ text, x: e.clientX, y: e.clientY });
+  };
+
   return (
-    <div className="relative h-6 rounded-md bg-slate-800/60 border border-white/5 overflow-hidden flex">
-      {day.segments.map((s, i) => {
-        const widthPct = (s.durationMin / total) * 100;
-        const bg =
-          s.type === "call"
-            ? "bg-blue-500"
-            : s.type === "crm"
-              ? "bg-emerald-500"
-              : "bg-rose-500/70";
-        return (
-          <div
-            key={`${s.type}-${s.startMin}-${i}`}
-            className={`${bg} h-full relative group transition-opacity hover:opacity-80`}
-            style={{ width: `${widthPct}%` }}
-            title={s.label ?? ""}
-          >
-            <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 rounded bg-slate-900 border border-white/10 text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity z-20 shadow-xl">
-              {s.label}
-            </div>
-          </div>
-        );
-      })}
-      <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[9px] text-white/70 font-mono pointer-events-none">
-        {day.shiftStart}
-      </span>
-      <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[9px] text-white/70 font-mono pointer-events-none">
-        {day.shiftEnd}
-      </span>
-    </div>
+    <>
+      <div className="relative h-6 rounded-md bg-slate-800/60 border border-white/5 overflow-hidden flex">
+        {day.segments.map((s, i) => {
+          const widthPct = (s.durationMin / total) * 100;
+          const bg =
+            s.type === "call"
+              ? "bg-blue-500"
+              : s.type === "crm"
+                ? "bg-emerald-500"
+                : "bg-rose-500/70";
+          const text = s.label ?? "";
+          return (
+            <div
+              key={`${s.type}-${s.startMin}-${i}`}
+              className={`${bg} h-full transition-opacity hover:opacity-80 cursor-pointer`}
+              style={{ width: `${widthPct}%` }}
+              onMouseEnter={(e) => moveTip(e, text)}
+              onMouseMove={(e) => moveTip(e, text)}
+              onMouseLeave={() => setTip(null)}
+              title={text}
+            />
+          );
+        })}
+        <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[9px] text-white/70 font-mono pointer-events-none">
+          {day.shiftStart}
+        </span>
+        <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[9px] text-white/70 font-mono pointer-events-none">
+          {day.shiftEnd}
+        </span>
+      </div>
+      {tip && typeof document !== "undefined" && createPortal(
+        <div
+          style={{
+            position: "fixed",
+            top: tip.y - 34,
+            left: tip.x,
+            transform: "translateX(-50%)",
+            pointerEvents: "none",
+            zIndex: 1000,
+          }}
+          className="px-2 py-1 rounded bg-slate-900 border border-white/10 text-[11px] text-white whitespace-nowrap shadow-xl"
+        >
+          {tip.text}
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
