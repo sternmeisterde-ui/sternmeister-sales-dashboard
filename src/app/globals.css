@@ -142,16 +142,18 @@ body {
    so flatten them to the card surface. Striping should come from
    row hover / zebra, not permanent grey columns. */
 .theme-light table,
-.theme-light thead,
 .theme-light tbody,
 .theme-light tr,
 .theme-light td,
 .theme-light th {
   background-color: transparent !important;
 }
-.theme-light thead {
-  background-color: #dbeafe !important; /* blue-100 — header row */
-  color: #0f172a;
+/* Table headers: same blue as the active nav item (bg-blue-500/20),
+   black text for legibility on the light canvas. */
+.theme-light thead tr,
+.theme-light thead th {
+  background-color: rgba(59, 130, 246, 0.2) !important;
+  color: #0f172a !important;
 }
 .theme-light tr:hover td {
   background-color: #e0f2fe !important; /* sky-100 on hover */
