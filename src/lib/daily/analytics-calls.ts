@@ -60,17 +60,23 @@ export async function getAnalyticsCallMetricsByMaster(
     sql`, `,
   );
 
+  // Call counting aligned with src/app/api/analytics/looker/data/route.ts —
+  // any communication_type starting with "call" counts (call_out, call_in,
+  // and any future call_* subtypes the ETL surfaces). "Connected" uses
+  // duration >= 10s (same threshold Looker uses for success_calls) so the
+  // two views report identical totals. Totalled duration sums across all
+  // such calls to stay consistent with Looker's total_duration_sec.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<AnalyticsRow>(sql`
     SELECT
       manager,
-      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                           AS calls_total,
-      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)       AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                        AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 10)                     AS calls_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
-      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
-      COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                           AS total_duration_s
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 10)) AS missed_incoming,
+      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
