@@ -46,9 +46,20 @@ export async function computeSla(
 
   if (leads.length === 0) return 0;
 
+  // Neon HTTP returns `timestamp` (no-tz) columns as bare strings ("2026-04-22 18:17:15").
+  // new Date() parses those as LOCAL time on the server. Force UTC by appending Z.
+  for (const lead of leads) {
+    if (lead.createdAt && typeof (lead.createdAt as unknown) === "string") {
+      lead.createdAt = new Date(`${String(lead.createdAt).replace(" ", "T")}Z`);
+    }
+  }
+
   const leadIds = leads.map((l) => l.leadId).filter((id): id is number => id !== null);
 
   // Fetch communication summaries for these leads
+  // AT TIME ZONE 'UTC' converts bare `timestamp` columns to `timestamptz` so that
+  // the Neon HTTP client returns ISO strings with Z suffix. Without this, Node.js
+  // parses the bare string in the server's local timezone (e.g. Europe/Berlin → 2h off).
   const commSummaries = await analyticsDb.execute<{
     lead_id: number;
     first_contact_at: Date | null;
@@ -58,10 +69,10 @@ export async function computeSla(
   }>(sql`
     SELECT
       lead_id,
-      MIN(created_at)                                              AS first_contact_at,
-      MIN(created_at) FILTER (WHERE communication_type = 'call_out') AS first_call_out_at,
-      MIN(created_at) FILTER (WHERE communication_type = 'outgoing_chat_message') AS first_message_at,
-      MAX(created_at)                                              AS last_contact_at
+      (MIN(created_at))                                               AT TIME ZONE 'UTC' AS first_contact_at,
+      (MIN(created_at) FILTER (WHERE communication_type = 'call_out')) AT TIME ZONE 'UTC' AS first_call_out_at,
+      (MIN(created_at) FILTER (WHERE communication_type = 'outgoing_chat_message')) AT TIME ZONE 'UTC' AS first_message_at,
+      (MAX(created_at))                                               AT TIME ZONE 'UTC' AS last_contact_at
     FROM analytics.communications
     WHERE lead_id IN (${sql.raw(leadIds.join(","))})
     GROUP BY lead_id
