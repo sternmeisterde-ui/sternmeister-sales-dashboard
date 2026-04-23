@@ -8,9 +8,8 @@
 //   - pipelineBreakdown: per-pipeline lead distribution (for B2G: Бух Гос + Бух Бератер)
 
 import { NextRequest, NextResponse } from "next/server";
-import { getCallNotes, getLeads, getTasks } from "@/lib/kommo/client";
+import { getLeads, getTasks } from "@/lib/kommo/client";
 import {
-  aggregateCallMetrics,
   aggregateLeadFunnelMetrics,
   aggregateTaskMetrics,
   sumCallMetrics,
@@ -24,7 +23,11 @@ import {
   B2B_PIPELINES,
   COMMERCIAL_STATUSES,
 } from "@/lib/kommo/pipeline-config";
-import type { KommoCallNote, KommoLead } from "@/lib/kommo/types";
+import type { KommoLead } from "@/lib/kommo/types";
+import {
+  getAnalyticsCallMetricsByMaster,
+  getAnalyticsDailyTrend,
+} from "@/lib/daily/analytics-calls";
 
 import { cached } from "@/lib/kommo/cache";
 
@@ -77,71 +80,6 @@ function getTrendRange(period: string, from: number, to: number): { trendFrom: n
   // For week/month/year — trend covers the full selected period
   const days = Math.ceil((to - from) / 86400);
   return { trendFrom: from, trendTo: to, trendDays: days };
-}
-
-/** Group call notes by calendar day → per-day call counts (Europe/Berlin tz) */
-function groupCallsByDay(notes: KommoCallNote[], fromTs: number, days: number = 7): Array<{
-  date: string;
-  callsTotal: number;
-  callsConnected: number;
-  totalMinutes: number;
-  missedIncoming: number;
-  incomingTotal: number;
-  outgoingTotal: number;
-}> {
-  const dayMap = new Map<string, KommoCallNote[]>();
-
-  // "sv" locale produces ISO "YYYY-MM-DD"; Europe/Berlin covers our ops timezone.
-  const berlinKey = (tsSec: number) =>
-    new Date(tsSec * 1000).toLocaleDateString("sv", { timeZone: "Europe/Berlin" });
-
-  // Initialize all days in range
-  for (let i = 0; i < days; i++) {
-    const key = berlinKey(fromTs + i * 86400);
-    dayMap.set(key, []);
-  }
-
-  for (const note of notes) {
-    const key = berlinKey(note.created_at);
-    if (dayMap.has(key)) {
-      dayMap.get(key)!.push(note);
-    }
-  }
-
-  const result: Array<{
-    date: string;
-    callsTotal: number;
-    callsConnected: number;
-    totalMinutes: number;
-    missedIncoming: number;
-    incomingTotal: number;
-    outgoingTotal: number;
-  }> = [];
-
-  for (const [date, dayNotes] of dayMap) {
-    const outgoing = dayNotes.filter((n) => n.note_type === "call_out");
-    const incoming = dayNotes.filter((n) => n.note_type === "call_in");
-    const connected = dayNotes.filter((n) => (n.params?.duration ?? 0) >= 1);
-    const missed = incoming.filter(
-      (n) => n.params?.call_status === 3 || (n.params?.duration ?? 0) === 0
-    );
-    const totalSeconds = connected.reduce(
-      (sum, n) => sum + (n.params?.duration ?? 0), 0
-    );
-
-    result.push({
-      date,
-      callsTotal: outgoing.length,
-      callsConnected: connected.length,
-      totalMinutes: Math.round(totalSeconds / 60),
-      missedIncoming: missed.length,
-      incomingTotal: incoming.length,
-      outgoingTotal: outgoing.length,
-    });
-  }
-
-  result.sort((a, b) => a.date.localeCompare(b.date));
-  return result;
 }
 
 /** Build B2B-specific funnel from Бух Комм pipeline */
@@ -361,36 +299,34 @@ async function buildDashboardResponse(
       from = derived.from;
       to = derived.to;
     }
-    const { trendFrom, trendTo, trendDays } = getTrendRange(effectivePeriod, from, to);
+    const { trendFrom, trendTo } = getTrendRange(effectivePeriod, from, to);
 
     const pipelineIds = getPipelineIds(department);
     const activeStatusIds = getActiveStatusIds(department);
 
     const allManagers = await getManagersWithKommo(department);
-    const kommoUserIds = allManagers
-      .map((m) => m.kommoUserId)
-      .filter((id): id is number => id !== null);
 
-    // All Kommo API calls in parallel (each individually cached)
+    // All external calls in parallel. Calls (and trend) come from the analytics
+    // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
+    // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, callNotesPeriod, callNotesTrend] = await Promise.all([
-      // Active leads from pipelines (correct status filter)
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets] = await Promise.all([
       getLeads(pipelineIds, activeStatusIds, 10).catch(() => [] as KommoLead[]),
       getTasks(false).catch(() => []),
       getLeads(pipelineIds, [142], 10, closedDateFilter).catch(() => [] as KommoLead[]),
       getLeads(pipelineIds, [143], 10, closedDateFilter).catch(() => [] as KommoLead[]),
-      getCallNotes(from, to, kommoUserIds, 20).catch(() => [] as KommoCallNote[]),
-      getCallNotes(trendFrom, trendTo, kommoUserIds, 30).catch(() => [] as KommoCallNote[]),
+      getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch((e) => {
+        console.error("[Dashboard] analytics calls failed:", e);
+        return new Map<string, UserCallMetrics>();
+      }),
+      getAnalyticsDailyTrend(department, trendFrom, trendTo).catch((e) => {
+        console.error("[Dashboard] analytics trend failed:", e);
+        return [];
+      }),
     ]);
 
-    // Step 3: Aggregate today's call metrics
-    const todayCallMap = aggregateCallMetrics(callNotesPeriod);
-    const allTodayCallMetrics: UserCallMetrics[] = [];
-    for (const uid of kommoUserIds) {
-      const m = todayCallMap.get(uid);
-      if (m) allTodayCallMetrics.push(m);
-    }
-    const todaySummary = sumCallMetrics(allTodayCallMetrics);
+    // Summary = sum of all per-manager metrics for the period
+    const todaySummary = sumCallMetrics(Array.from(todayCallMap.values()));
 
     // Step 4: Aggregate lead funnel
     let funnel: Record<string, unknown>;
@@ -417,21 +353,25 @@ async function buildDashboardResponse(
       };
     }
 
-    // Step 5: Aggregate tasks
+    // Step 5: Aggregate tasks (Kommo — keyed by kommoUserId)
     const taskMap = aggregateTaskMetrics(tasks);
     let totalOverdue = 0;
-    for (const uid of kommoUserIds) {
-      totalOverdue += taskMap.get(uid)?.overdueTasks ?? 0;
+    for (const m of allManagers) {
+      if (m.kommoUserId != null) {
+        totalOverdue += taskMap.get(m.kommoUserId)?.overdueTasks ?? 0;
+      }
     }
 
     // Step 6: WON revenue from today
     const todayRevenue = wonLeads.reduce((sum, l) => sum + (l.price || 0), 0);
 
-    // Step 7: Per-manager breakdown (today)
+    // Step 7: Per-manager breakdown. Include ALL active managers+rops from the
+    // master table; analytics matches by name so kommoUserId is no longer required.
+    // Managers without a kommoUserId get 0 overdue tasks but still show calls.
     const perManager = allManagers
-      .filter((m) => m.kommoUserId !== null && m.role === "manager")
+      .filter((m) => m.role === "manager" || m.role === "rop")
       .map((mgr) => {
-        const cm = mgr.kommoUserId ? todayCallMap.get(mgr.kommoUserId) : undefined;
+        const cm = todayCallMap.get(mgr.id);
         const tm = mgr.kommoUserId ? taskMap.get(mgr.kommoUserId) : undefined;
         return {
           id: mgr.id,
@@ -451,8 +391,8 @@ async function buildDashboardResponse(
       })
       .sort((a, b) => b.callsTotal - a.callsTotal);
 
-    // Step 8: 7-day trend
-    const trend = groupCallsByDay(callNotesTrend, trendFrom, trendDays);
+    // Step 8: Trend line (already per-day buckets from analytics)
+    const trend = trendBuckets;
 
     // Step 9: Missed calls breakdown (today)
     const missedBreakdown = {

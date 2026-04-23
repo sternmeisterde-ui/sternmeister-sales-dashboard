@@ -115,3 +115,96 @@ export async function getAnalyticsCallMetricsByMaster(
   }
   return byMaster;
 }
+
+export interface DailyCallBucket {
+  date: string;              // YYYY-MM-DD in Europe/Berlin
+  callsTotal: number;        // call_out + call_in
+  callsConnected: number;    // call_status=4
+  totalMinutes: number;      // sum of duration on connected calls, minutes
+  missedIncoming: number;    // call_in where call_status<>4
+  incomingTotal: number;     // call_in
+  outgoingTotal: number;     // call_out
+}
+
+/**
+ * Per-day call buckets for a trend line, grouped by Europe/Berlin calendar day.
+ * Pads missing days with zeros so chart x-axis is continuous.
+ */
+export async function getAnalyticsDailyTrend(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<DailyCallBucket[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return [];
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+
+  const pipelineList = sql.join(
+    pipelineIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    day: string;
+    calls_total: string | number;
+    calls_connected: string | number;
+    outgoing_total: string | number;
+    incoming_total: string | number;
+    missed_incoming: string | number;
+    total_duration_s: string | number;
+  }>(sql`
+    SELECT
+      to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                          AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
+      COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+    GROUP BY day
+    ORDER BY day
+  `);
+
+  const byDay = new Map<string, DailyCallBucket>();
+  for (const row of result.rows) {
+    const secs = Number(row.total_duration_s);
+    byDay.set(row.day, {
+      date: row.day,
+      callsTotal: Number(row.calls_total),
+      callsConnected: Number(row.calls_connected),
+      totalMinutes: Math.round(secs / 60),
+      missedIncoming: Number(row.missed_incoming),
+      incomingTotal: Number(row.incoming_total),
+      outgoingTotal: Number(row.outgoing_total),
+    });
+  }
+
+  // Pad the full range so the trend chart has continuous x-axis.
+  const berlinKey = (tsSec: number) =>
+    new Date(tsSec * 1000).toLocaleDateString("sv", { timeZone: "Europe/Berlin" });
+  const out: DailyCallBucket[] = [];
+  for (let t = fromTs; t <= toTs; t += 86400) {
+    const key = berlinKey(t);
+    out.push(
+      byDay.get(key) ?? {
+        date: key,
+        callsTotal: 0,
+        callsConnected: 0,
+        totalMinutes: 0,
+        missedIncoming: 0,
+        incomingTotal: 0,
+        outgoingTotal: 0,
+      },
+    );
+  }
+  return out;
+}

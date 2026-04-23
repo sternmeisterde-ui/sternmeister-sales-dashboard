@@ -256,19 +256,35 @@ export default function DashboardTab({ department }: { department: string }) {
         ? [
             { title: "Квалификатор (1я линия)", line: "1", color: "emerald" },
             { title: "Бератер (2я линия)", line: "2", color: "purple" },
+            { title: "Доведение (3я линия)", line: "3", color: "sky" },
+            { title: "Руководители (без линии)", line: "__none__", color: "amber" },
           ]
         : [
             { title: "Менеджеры", line: "__all__", color: "blue" },
           ]
       ).map(({ title, line, color }) => {
-        const lineManagers = line === "__all__"
-          ? data.perManager
-          : data.perManager.filter((m) => m.line === line);
+        const lineManagers =
+          line === "__all__"
+            ? data.perManager
+            : line === "__none__"
+              ? data.perManager.filter((m) => !m.line)
+              : data.perManager.filter((m) => m.line === line);
         if (lineManagers.length === 0) return null;
+        // Explicit color map so Tailwind doesn't tree-shake dynamic classes.
+        const titleColorClass =
+          color === "emerald"
+            ? "text-emerald-400"
+            : color === "purple"
+              ? "text-purple-400"
+              : color === "sky"
+                ? "text-sky-400"
+                : color === "amber"
+                  ? "text-amber-400"
+                  : "text-blue-400";
         return (
           <div key={line} className="glass-panel rounded-2xl p-5 border border-white/5">
             <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-              <span className={`text-${color}-400`}>{title}</span>
+              <span className={titleColorClass}>{title}</span>
               <span className="text-slate-500 ml-2">({lineManagers.length} чел.)</span>
             </h3>
             <div className="overflow-x-auto">
