@@ -60,6 +60,7 @@ services:
     restart: unless-stopped
     networks:
       - sternmeister-network
+      - dokploy-network
 
   # Optional: Local PostgreSQL for development
   # Uncomment if you want to use local database instead of Neon
@@ -81,6 +82,8 @@ services:
 networks:
   sternmeister-network:
     driver: bridge
+  dokploy-network:
+    external: true
 
 # volumes:
 #   postgres-data:
