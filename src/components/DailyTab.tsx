@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   CalendarDays,
   DollarSign,
   Heart,
@@ -121,6 +122,24 @@ function getCellColor(value: string | null): string {
   if (Number.isNaN(num)) return "text-white";
   if (num === 0) return "text-slate-600";
   return "text-white";
+}
+
+function getSectionAccent(dbLine: string): {
+  rowBg: string;
+  cellBg: string;
+  border: string;
+  text: string;
+} {
+  switch (dbLine) {
+    case "1":
+      return { rowBg: "bg-sky-900/30", cellBg: "bg-sky-900/30", border: "border-l-4 border-sky-500/60", text: "text-sky-200" };
+    case "2":
+      return { rowBg: "bg-violet-900/30", cellBg: "bg-violet-900/30", border: "border-l-4 border-violet-500/60", text: "text-violet-200" };
+    case "3":
+      return { rowBg: "bg-emerald-900/30", cellBg: "bg-emerald-900/30", border: "border-l-4 border-emerald-500/60", text: "text-emerald-200" };
+    default:
+      return { rowBg: "bg-blue-900/30", cellBg: "bg-blue-900/30", border: "border-l-4 border-blue-500/60", text: "text-blue-200" };
+  }
 }
 
 function formatDayLabel(dateStr: string): string {
@@ -252,6 +271,17 @@ function SummaryTimeTable({
   const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
   const metrics = useMemo(() => getAllMetrics(referenceSnapshot), [referenceSnapshot]);
 
+  // Collapsible sections
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   // Inline editing state: "sectionKey:metricKey" -> value
   const [editingCell, setEditingCell] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -313,26 +343,41 @@ function SummaryTimeTable({
           </thead>
           <tbody className="text-sm">
             {metrics.map((m) => {
-              // Section header row
+              // ── Section header row (collapsible) ────────────────────────
               if (m.metricKey.startsWith("__section_")) {
+                const isCollapsed = collapsedSections.has(m.sectionKey);
+                const accent = getSectionAccent(m.sectionDbLine);
                 return (
-                  <tr key={m.metricKey} className="bg-slate-900/40 border-t-2 border-white/10">
+                  <tr
+                    key={m.metricKey}
+                    className={`light-panel-header cursor-pointer select-none border-t-2 border-white/10 ${accent.rowBg}`}
+                    onClick={() => toggleSection(m.sectionKey)}
+                  >
                     <td
                       colSpan={columnLabels.length + 1}
-                      className="px-4 py-2 sticky left-0 bg-slate-900/40 z-10"
+                      className={`px-4 py-2.5 sticky left-0 z-10 light-panel-header ${accent.cellBg} ${accent.border}`}
                     >
-                      <div className="flex items-center gap-2">
-                        {getSectionIcon(m.sectionIcon)}
-                        <span className="text-[10px] uppercase tracking-widest font-bold text-slate-400">
-                          {m.sectionTitle}
-                        </span>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          {getSectionIcon(m.sectionIcon)}
+                          <span className={`text-[11px] uppercase tracking-widest font-bold ${accent.text}`}>
+                            {m.sectionTitle}
+                          </span>
+                        </div>
+                        {isCollapsed
+                          ? <ChevronRight className={`w-3.5 h-3.5 ${accent.text} opacity-60`} />
+                          : <ChevronDown className={`w-3.5 h-3.5 ${accent.text} opacity-60`} />
+                        }
                       </div>
                     </td>
                   </tr>
                 );
               }
 
-              // Group header
+              // ── Skip all rows for collapsed sections ──────────────────────
+              if (collapsedSections.has(m.sectionKey)) return null;
+
+              // ── Group sub-header ──────────────────────────────────────────
               if (m.isGroupHeader) {
                 return (
                   <tr key={`${m.sectionKey}-${m.metricKey}`} className="bg-slate-800/30">
@@ -428,10 +473,13 @@ function SummaryTimeTable({
 function ManagerMetricsTable({
   snapshot,
   title,
+  defaultCollapsed = false,
 }: {
   snapshot: DailySnapshot | undefined;
   title: string;
+  defaultCollapsed?: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const managers = useMemo(() => collectManagers(snapshot), [snapshot]);
 
   // Build flat metric columns from all sections (non-header only)
@@ -488,12 +536,19 @@ function ManagerMetricsTable({
 
   return (
     <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="px-4 py-3 border-b border-white/5 bg-slate-900/40">
+      <div
+        className="px-4 py-3 border-b border-white/5 bg-slate-900/40 cursor-pointer hover:bg-slate-800/50 transition-colors flex items-center justify-between"
+        onClick={() => setCollapsed((v) => !v)}
+      >
         <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">
           {title}
         </span>
+        {collapsed
+          ? <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+          : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+        }
       </div>
-      <div className="w-full overflow-x-auto">
+      {!collapsed && <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="border-b border-white/10">
@@ -570,7 +625,7 @@ function ManagerMetricsTable({
             </tr>
           </tbody>
         </table>
-      </div>
+      </div>}
     </div>
   );
 }

@@ -328,6 +328,19 @@ body {
 }
 
 /* ────────────────────────────────────────────────────────────────
+   SchedulePopup — needs a solid opaque white background in light mode.
+   The modal uses bg-slate-900 (→ #f0f9ff sky-50, nearly transparent),
+   and sticky table cells also need white so they stay opaque on scroll.
+   ──────────────────────────────────────────────────────────────── */
+.theme-light .schedule-popup-modal {
+  background-color: #ffffff !important;
+  border-color: rgba(100, 116, 139, 0.25) !important;
+}
+.theme-light .schedule-popup-modal .sticky {
+  background-color: #ffffff !important;
+}
+
+/* ────────────────────────────────────────────────────────────────
    `.light-panel-header` — opt-in "blue banner" for panel title bars.
    Added as a marker class to specific components (OKK/AI calls table
    header row, the Scripts/WorstCalls section title bars).
@@ -349,12 +362,14 @@ body {
   color: #ffffff !important;
 }
 
-/* Table-row panel header (OKK, AI calls, Analytics thead rows):
+/* Table-row panel header (OKK, AI calls, Analytics thead rows, Daily section headers):
    override the div-level #60a5fa to match unified #bedcff,
    and force pure black text on every descendant. */
 .theme-light tr.light-panel-header,
 .theme-light tr.light-panel-header th,
-.theme-light tr.light-panel-header th * {
+.theme-light tr.light-panel-header th *,
+.theme-light tr.light-panel-header td,
+.theme-light tr.light-panel-header td * {
   background-color: #bedcff !important;
   color: #000000 !important;
 }

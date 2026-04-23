@@ -1,4 +1,5 @@
 // Dedicated DB connection for the "daily" Neon project (active managers, schedules)
+import "@/lib/db/neon-setup";
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";

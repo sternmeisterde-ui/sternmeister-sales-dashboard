@@ -19,6 +19,7 @@ import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkEvaluations, okkCalls } from "@/lib/db/schema-okk";
 import { getDbForDepartment } from "@/lib/db";
 import { d1Calls, r1Calls } from "@/lib/db/schema-existing";
+import { analyticsDb } from "@/lib/db/analytics";
 import { sql as drizzleSql, and, eq, gte, lte, isNotNull } from "drizzle-orm";
 
 // ==================== Timezone helpers ====================
@@ -171,6 +172,38 @@ async function getRoleplayPerManagerScores(department: "b2g" | "b2b", fromTs: nu
     }
   } catch { /* ignore */ }
   return result;
+}
+
+/** Get average SLA and TLT (minutes) for a pipeline from analytics.sla */
+async function getSlaFacts(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<{ slaMinutes: number | null; tltMinutes: number | null }> {
+  try {
+    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+      avg_sla: number | null;
+      avg_tlt: number | null;
+    }>(
+      drizzleSql`
+        SELECT
+          round(avg(sla_first_call_seconds) / 60.0)::int    AS avg_sla,
+          round(avg(sla_first_contact_seconds) / 60.0)::int AS avg_tlt
+        FROM analytics.sla
+        WHERE pipeline_id = ${pipelineId}
+          AND lead_created_at >= ${fromDate}
+          AND lead_created_at <= ${toDate}
+          AND sla_first_call_seconds IS NOT NULL
+      `,
+    );
+    const row = result.rows[0];
+    return {
+      slaMinutes: row?.avg_sla != null ? Number(row.avg_sla) : null,
+      tltMinutes: row?.avg_tlt != null ? Number(row.avg_tlt) : null,
+    };
+  } catch {
+    return { slaMinutes: null, tltMinutes: null };
+  }
 }
 
 // Line → OKK prompt types mapping.
@@ -536,6 +569,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Per-manager OKK/roleplay scores: line → Map<managerId, score>
   const okkPerManager = new Map<string, Map<string, number>>();
   const roleplayPerManager = new Map<string, Map<string, number>>();
+  const slaFacts = new Map<string, { slaMinutes: number | null; tltMinutes: number | null }>();
   if (department === "b2g") {
     // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
     // stay index-compatible downstream.
@@ -557,7 +591,18 @@ export async function buildDailyResponse(department: string, period: string, dat
       if (avg !== null) roleplayScores.set(line, avg);
       roleplayPerManager.set(line, perMgr);
     });
-    await Promise.all([...okkPromises, ...rpPromises]);
+    // SLA / TLT facts from analytics DB (line 1 = first-line pipeline, line 3 = berater pipeline)
+    const B2G_LINE_PIPELINES: Record<string, number> = {
+      "1": B2G_PIPELINES.FIRST_LINE,
+      "3": B2G_PIPELINES.BERATER,
+    };
+    const fromDate = new Date(from * 1000);
+    const toDate = new Date(to * 1000);
+    const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineId]) => {
+      const facts = await getSlaFacts(pipelineId, fromDate, toDate);
+      slaFacts.set(line, facts);
+    });
+    await Promise.all([...okkPromises, ...rpPromises, ...slaPromises]);
   }
 
   const activeSections = getDailySections(department);
@@ -660,6 +705,14 @@ export async function buildDailyResponse(department: string, period: string, dat
           fact = v !== undefined ? String(v) : null;
         }
         if (metric.key === "avgWait_p") fact = "30";
+        if (metric.key === "sla_f") {
+          const sf = slaFacts.get(section.dbLine);
+          fact = sf?.slaMinutes != null ? String(sf.slaMinutes) : null;
+        }
+        if (metric.key === "tlt_f") {
+          const sf = slaFacts.get(section.dbLine);
+          fact = sf?.tltMinutes != null ? String(sf.tltMinutes) : null;
+        }
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
         }
