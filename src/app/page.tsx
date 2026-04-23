@@ -568,7 +568,7 @@ export default function Dashboard() {
 
         <nav className="flex flex-col gap-2 mt-4 w-full">
           {[
-            { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
+            { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
             { id: "looker", icon: Database, label: "Looker", adminOnly: true },
