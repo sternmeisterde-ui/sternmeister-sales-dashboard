@@ -24,7 +24,38 @@ const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const KOMMO_TOKEN = process.env.KOMMO_ACCESS_TOKEN || "";
 const DEFAULT_MIN_DURATION = 300; // 5 min
-const MAX_CALLS = 100;
+// Hard ceiling to avoid runaway cost — raised from 100 because filters with
+// 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
+// the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
+const MAX_CALLS = 500;
+// Concurrency limits per external service. Kommo is the strictest
+// (7 req/s per docs, we stay well under). AssemblyAI tolerates 10+ parallel.
+const KOMMO_CONCURRENCY = 5;
+const TRANSCRIBE_CONCURRENCY = 4;
+const GROK_CONCURRENCY = 3;
+
+// Minimal worker-pool helper — keeps memory flat (results array pre-sized)
+// and cancels-on-throw behaviour, unlike naive Promise.all that fans out
+// all `map` tasks immediately.
+async function mapConcurrent<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, idx: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return results;
+}
 
 // ==================== URL PARSER ====================
 
@@ -51,12 +82,25 @@ export function parseKommoUrl(url: string): { pipelineId: string; filters: Recor
 // ==================== KOMMO API ====================
 
 async function kommoGet(path: string): Promise<unknown> {
-  const res = await fetch(`${KOMMO.apiBaseUrl}${path}`, {
-    headers: { Authorization: `Bearer ${KOMMO_TOKEN}` },
-  });
-  if (res.status === 204) return null;
-  if (!res.ok) throw new Error(`Kommo API ${res.status}: ${await res.text()}`);
-  return res.json();
+  // Retry on 429 / 5xx with exponential backoff. Each attempt honours
+  // Retry-After when present; otherwise doubles the wait.
+  let waitMs = 500;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await fetch(`${KOMMO.apiBaseUrl}${path}`, {
+      headers: { Authorization: `Bearer ${KOMMO_TOKEN}` },
+    });
+    if (res.status === 204) return null;
+    if (res.ok) return res.json();
+    const retriable = res.status === 429 || res.status >= 500;
+    if (!retriable || attempt === 4) {
+      throw new Error(`Kommo API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    }
+    const retryAfter = Number(res.headers.get("retry-after") ?? "0");
+    const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
+    await sleep(backoff);
+    waitMs *= 2;
+  }
+  throw new Error("Kommo API: exhausted retries");
 }
 
 async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -212,23 +256,26 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       return;
     }
 
-    // 2. Fetch call notes for each lead, dedup, filter
+    // 2. Fetch call notes for each lead in parallel (bounded), dedup across
+    //    leads (same recording can appear on several leads in Kommo), filter
+    //    by duration. Progress is updated every 25 leads so the UI shows
+    //    movement even when the filter returns thousands of deals.
     await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
 
-    const seenUrls = new Set<string>();
     interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
-    const calls: CallRecord[] = [];
-
-    for (const lead of leads) {
-      const notes = await fetchCallNotes(lead.id);
+    let scanned = 0;
+    const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
+      const notes = await fetchCallNotes(lead.id).catch((e: unknown) => {
+        console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
+        return [] as KommoNote[];
+      });
+      const matched: CallRecord[] = [];
       for (const n of notes) {
         const dur = n.params?.duration || 0;
         const link = n.params?.link;
         if (dur < minDuration || !link) continue;
         if (link.includes("localhost")) continue;
-        if (seenUrls.has(link)) continue;
-        seenUrls.add(link);
-        calls.push({
+        matched.push({
           leadId: lead.id,
           leadName: (lead.name || "").substring(0, 60),
           duration: dur,
@@ -237,12 +284,38 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
           direction: n.note_type === "call_in" ? "входящий" : "исходящий",
         });
       }
-      await sleep(150);
+      scanned++;
+      if (scanned % 25 === 0 || scanned === leads.length) {
+        await db
+          .update(callAnalyses)
+          .set({ errorMessage: `Поиск звонков: ${scanned}/${leads.length} сделок...` })
+          .where(eq(callAnalyses.id, analysisId))
+          .catch(() => void 0);
+      }
+      return matched;
+    });
+
+    // Global dedup by URL — same recording in several leads → count once,
+    // attributed to the first lead we saw it on.
+    const seenUrls = new Set<string>();
+    const calls: CallRecord[] = [];
+    for (const bucket of perLeadResults) {
+      for (const c of bucket) {
+        if (seenUrls.has(c.url)) continue;
+        seenUrls.add(c.url);
+        calls.push(c);
+      }
     }
 
-    // Cap at MAX_CALLS
+    // Cap at MAX_CALLS (most recent first) and log how many were trimmed
+    // so the user knows the filter needs tightening if it hit the ceiling.
     calls.sort((a, b) => b.date.getTime() - a.date.getTime());
     const cappedCalls = calls.slice(0, MAX_CALLS);
+    if (calls.length > MAX_CALLS) {
+      console.warn(
+        `[Analysis ${analysisId}] filter produced ${calls.length} calls, trimmed to ${MAX_CALLS} most recent`,
+      );
+    }
 
     if (cappedCalls.length === 0) {
       await db.update(callAnalyses).set({
@@ -272,22 +345,24 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       }
     }
 
+    // Concurrency is the difference between a ~30-min run and a 3-hour run.
+    // Transcription waits on AssemblyAI polling (blocking I/O), so small N
+    // parallel = big speed-up. Use the narrower of TRANSCRIBE / GROK limits.
     let processed = analysis.processedCalls || 0;
+    const perCallLimit = Math.min(TRANSCRIBE_CONCURRENCY, GROK_CONCURRENCY);
 
-    for (const call of cappedCalls) {
-      const num = String(cappedCalls.indexOf(call) + 1).padStart(2, "0");
+    await mapConcurrent(cappedCalls, perCallLimit, async (call, idx) => {
+      const num = String(idx + 1).padStart(2, "0");
       const dateStr = call.date.toLocaleDateString("ru-RU");
       const durMin = Math.round(call.duration / 60);
       const filename = `call_${num}_lead${call.leadId}.md`;
 
-      // Skip already processed
       if (existingSet.has(filename)) {
         console.log(`[Analysis ${analysisId}] [${num}] Skip (already done)`);
-        continue;
+        return;
       }
 
       console.log(`[Analysis ${analysisId}] [${num}/${cappedCalls.length}] Transcribing lead ${call.leadId}...`);
-
       const transcript = await transcribeAudio(call.url);
 
       let md = `# Звонок ${num} — Lead ${call.leadId}\n\n`;
@@ -298,29 +373,35 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
 
       if (!transcript) {
         md += `## Транскрипт\n\n⚠️ Не удалось транскрибировать запись.\n`;
-        await db.insert(callAnalysisFiles).values({
-          analysisId, filename, content: md, fileType: "transcript", leadId: String(call.leadId),
-        }).onConflictDoUpdate({ target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename], set: { content: md } });
       } else {
         md += `## Транскрипт\n\n${transcript.speakers}\n\n`;
-
-        // Grok per-call analysis
         console.log(`[Analysis ${analysisId}] [${num}] Analyzing with Grok...`);
-        const analysis_text = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
-        md += `## Анализ\n\n${analysis_text}\n`;
-        allAnalyses.push(`### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysis_text}`);
-
-        await db.insert(callAnalysisFiles).values({
-          analysisId, filename, content: md, fileType: "transcript", leadId: String(call.leadId),
-        }).onConflictDoUpdate({ target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename], set: { content: md } });
+        const analysisText = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
+        md += `## Анализ\n\n${analysisText}\n`;
+        allAnalyses.push(`### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`);
       }
 
-      processed++;
-      const progress = Math.round((processed / cappedCalls.length) * 90); // reserve 10% for summary
-      await db.update(callAnalyses).set({ processedCalls: processed, progress }).where(eq(callAnalyses.id, analysisId));
+      await db
+        .insert(callAnalysisFiles)
+        .values({
+          analysisId,
+          filename,
+          content: md,
+          fileType: "transcript",
+          leadId: String(call.leadId),
+        })
+        .onConflictDoUpdate({
+          target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
+          set: { content: md },
+        });
 
-      await sleep(1000); // rate limit between calls
-    }
+      processed++;
+      const progress = Math.round((processed / cappedCalls.length) * 90);
+      await db
+        .update(callAnalyses)
+        .set({ processedCalls: processed, progress })
+        .where(eq(callAnalyses.id, analysisId));
+    });
 
     // 4. Generate aggregate summary
     console.log(`[Analysis ${analysisId}] Generating summary...`);
