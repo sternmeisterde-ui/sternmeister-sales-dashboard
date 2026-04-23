@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
       maxAge: THIRTY_DAYS_SECONDS,
       path: "/",
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: process.env.NODE_ENV === "production" && process.env.COOKIE_INSECURE !== "true",
     });
 
     return NextResponse.json({ ok: true, user: session });
