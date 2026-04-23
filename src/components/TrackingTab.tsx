@@ -89,7 +89,6 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     return t;
   }, []);
   const [range, setRange] = useState<DateRange>({ start: today, end: today });
-  const [dateMode, setDateMode] = useState<"single" | "range">("single");
 
   // Event-type filter
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
@@ -192,32 +191,9 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     <div className="flex flex-col gap-4">
       {/* ── Control bar ──────────────────────────────────────────── */}
       <div className="glass-panel rounded-2xl p-4 flex flex-wrap items-center gap-3 border border-white/5">
-        <div className="flex bg-slate-800/60 p-0.5 rounded-lg border border-white/5">
-          <button
-            type="button"
-            onClick={() => {
-              setDateMode("single");
-              setRange({ start: range.start ?? today, end: range.start ?? today });
-            }}
-            className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
-              dateMode === "single" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
-            }`}
-          >
-            День
-          </button>
-          <button
-            type="button"
-            onClick={() => setDateMode("range")}
-            className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
-              dateMode === "range" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
-            }`}
-          >
-            Период
-          </button>
-        </div>
-
         <CalendarPicker
-          mode={dateMode}
+          mode="range"
+          allowModeToggle
           value={range}
           onChange={setRange}
           onClear={handleClearDate}
@@ -409,18 +385,18 @@ function PctSummary({ day }: { day: DayTimeline }) {
   return (
     <div className="flex flex-col items-end font-mono tabular-nums leading-tight gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="text-blue-400">{day.pct.call}%</span>
+        <span className="tracking-call">{day.pct.call}%</span>
         <span className="text-slate-600">/</span>
-        <span className="text-emerald-400">{day.pct.crm}%</span>
+        <span className="tracking-crm">{day.pct.crm}%</span>
         <span className="text-slate-600">/</span>
-        <span className="text-rose-400">{day.pct.idle}%</span>
+        <span className="tracking-idle">{day.pct.idle}%</span>
       </div>
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="text-blue-300/90">{fmtHm(day.minutes.call)}</span>
+        <span className="tracking-call">{fmtHm(day.minutes.call)}</span>
         <span className="text-slate-600">/</span>
-        <span className="text-emerald-300/90">{fmtHm(day.minutes.crm)}</span>
+        <span className="tracking-crm">{fmtHm(day.minutes.crm)}</span>
         <span className="text-slate-600">/</span>
-        <span className="text-rose-300/90">{fmtHm(day.minutes.idle)}</span>
+        <span className="tracking-idle">{fmtHm(day.minutes.idle)}</span>
       </div>
     </div>
   );

@@ -131,6 +131,9 @@ export default function Dashboard() {
   const [dateRange, setDateRange] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [calendarMonth, setCalendarMonth] = useState(new Date());
+  // "День" — one click applies a single-day filter immediately.
+  // "Период" — two clicks pick a start/end range.
+  const [dateFilterMode, setDateFilterMode] = useState<"single" | "range">("single");
   const [searchQuery, setSearchQuery] = useState("");
   const [crmSearchUrl, setCrmSearchUrl] = useState("");
 
@@ -765,6 +768,7 @@ export default function Dashboard() {
                 </div>
                 <CalendarPicker
                   mode="range"
+                  allowModeToggle
                   value={aiCustomRange}
                   onChange={(range) => setAiCustomRange(range)}
                   onClear={() => setAiCustomRange({ start: null, end: null })}
@@ -1068,6 +1072,23 @@ export default function Dashboard() {
                             <Calendar className="w-3.5 h-3.5 text-blue-400" /> Выбрать период
                           </label>
 
+                          <div className="flex bg-slate-800/60 p-0.5 rounded-lg border border-white/5 mb-3 w-fit">
+                            <button
+                              type="button"
+                              onClick={() => setDateFilterMode("single")}
+                              className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
+                                dateFilterMode === "single" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+                              }`}
+                            >День</button>
+                            <button
+                              type="button"
+                              onClick={() => setDateFilterMode("range")}
+                              className={`px-2.5 py-1 text-[11px] rounded-md transition-all ${
+                                dateFilterMode === "range" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+                              }`}
+                            >Период</button>
+                          </div>
+
                           <div className="flex items-center justify-between mb-3">
                             <button
                               onClick={() => {
@@ -1113,12 +1134,20 @@ export default function Dashboard() {
                                   <button
                                     key={day}
                                     onClick={() => {
+                                      // "День" — one click applies a single-day filter immediately.
+                                      if (dateFilterMode === "single") {
+                                        const next = { start: date, end: date };
+                                        setDateRange(next);
+                                        setActiveDateFilter(next);
+                                        setAiCustomRange(next);
+                                        setIsFilterOpen(false);
+                                        return;
+                                      }
+                                      // "Период" — two-click range selection.
                                       if (!dateRange.start || (dateRange.start && dateRange.end)) {
                                         setDateRange({ start: date, end: null });
                                         return;
                                       }
-                                      // Second click — commit the range (same-day
-                                      // click produces {X, X} so one day is a valid pick).
                                       const next = date >= dateRange.start
                                         ? { start: dateRange.start, end: date }
                                         : { start: date, end: dateRange.start };

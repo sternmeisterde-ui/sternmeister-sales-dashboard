@@ -599,3 +599,19 @@ body {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   Tracking tab — dedicated colors for the three categories that
+   stay legible (and intentionally bolder) in both themes.
+   The global text-blue/emerald/rose light-mode overrides collapse
+   into different results (blue→black, emerald→green, rose→red),
+   which made the three values look mismatched. These classes
+   bypass that override.
+   ──────────────────────────────────────────────────────────────── */
+.tracking-call { color: rgb(96, 165, 250); font-weight: 700; }   /* blue-400 */
+.tracking-crm  { color: rgb(52, 211, 153); font-weight: 700; }   /* emerald-400 */
+.tracking-idle { color: rgb(251, 113, 133); font-weight: 700; }  /* rose-400 */
+
+.theme-light .tracking-call { color: rgb(29, 78, 216); }         /* blue-700 */
+.theme-light .tracking-crm  { color: rgb(4, 120, 87); }          /* emerald-700 */
+.theme-light .tracking-idle { color: rgb(190, 18, 60); }         /* rose-700 */

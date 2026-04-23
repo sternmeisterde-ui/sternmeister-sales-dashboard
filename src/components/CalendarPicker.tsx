@@ -49,6 +49,10 @@ interface CalendarPickerProps {
   maxDate?: Date | null;
   /** extra classes for the wrapper */
   className?: string;
+  /** When true, shows an in-popover "День / Период" toggle so the user can
+   * switch between single-click day selection and two-click range selection
+   * without the parent needing to rerender with a different mode prop. */
+  allowModeToggle?: boolean;
 }
 
 // ─── component ─────────────────────────────────────────────
@@ -60,7 +64,14 @@ export default function CalendarPicker({
   minDate,
   maxDate,
   className = "",
+  allowModeToggle = false,
 }: CalendarPickerProps) {
+  // Internal mode shadows the prop when allowModeToggle is true. Default to
+  // "single" for toggleable pickers since that's the most common intent.
+  const [internalMode, setInternalMode] = useState<"range" | "single">(
+    allowModeToggle ? "single" : mode,
+  );
+  const effectiveMode = allowModeToggle ? internalMode : mode;
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
@@ -99,7 +110,7 @@ export default function CalendarPicker({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const isActive = !!(value.start && (mode === "single" || value.end));
+  const isActive = !!(value.start && (effectiveMode === "single" || value.end));
 
   const isDayDisabled = (date: Date): boolean => {
     if (minDate) {
@@ -115,7 +126,7 @@ export default function CalendarPicker({
 
   const handleDayClick = (date: Date) => {
     if (isDayDisabled(date)) return;
-    if (mode === "single") {
+    if (effectiveMode === "single") {
       onChange({ start: date, end: date });
       setOpen(false);
       return;
@@ -151,7 +162,7 @@ export default function CalendarPicker({
 
   // label for badge
   const badgeLabel = isActive
-    ? mode === "single" && value.start
+    ? effectiveMode === "single" && value.start
       ? fmtShort(value.start)
       : value.start && value.end
       ? isSameDay(value.start, value.end)
@@ -239,6 +250,32 @@ export default function CalendarPicker({
       {/* Popup — portal to document.body to escape backdrop-filter/overflow ancestors */}
       {open && mounted && createPortal(
         <div ref={popupRef} style={dropdownStyle} className="bg-slate-900 border border-white/15 rounded-2xl p-4 shadow-2xl w-72 animate-in fade-in duration-150">
+          {/* День / Период toggle */}
+          {allowModeToggle && (
+            <div className="flex bg-slate-800/60 p-0.5 rounded-lg border border-white/5 mb-3 w-fit mx-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setInternalMode("single");
+                  setDraft({ start: null, end: null });
+                }}
+                className={`px-3 py-1 text-[11px] rounded-md transition-all ${
+                  effectiveMode === "single" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+                }`}
+              >День</button>
+              <button
+                type="button"
+                onClick={() => {
+                  setInternalMode("range");
+                  setDraft({ start: null, end: null });
+                }}
+                className={`px-3 py-1 text-[11px] rounded-md transition-all ${
+                  effectiveMode === "range" ? "bg-blue-500 text-white" : "text-slate-400 hover:text-white"
+                }`}
+              >Период</button>
+            </div>
+          )}
+
           {/* Month navigation */}
           {(() => {
             const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);
@@ -295,7 +332,7 @@ export default function CalendarPicker({
               for (let i = 0; i < offset; i++) {
                 cells.push(<div key={`e-${i}`} className="aspect-square" />);
               }
-              const sel = mode === "range" ? draft : value;
+              const sel = effectiveMode === "range" ? draft : value;
               const today = new Date();
               for (let day = 1; day <= daysInMonth; day++) {
                 const date = new Date(
@@ -306,7 +343,7 @@ export default function CalendarPicker({
                 const isStart = isSameDay(date, sel.start);
                 const isEnd = isSameDay(date, sel.end);
                 const inRange =
-                  mode === "range" &&
+                  effectiveMode === "range" &&
                   sel.start &&
                   sel.end &&
                   isInRange(date, sel.start, sel.end);
@@ -337,7 +374,7 @@ export default function CalendarPicker({
           </div>
 
           {/* Range preview */}
-          {mode === "range" && (
+          {effectiveMode === "range" && (
             <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-800/50 rounded-lg px-3 py-2 mb-3">
               <span>
                 {draft.start
@@ -357,7 +394,7 @@ export default function CalendarPicker({
 
           {/* Actions */}
           <div className="flex gap-2">
-            {mode === "range" ? (
+            {effectiveMode === "range" ? (
               <>
                 <button
                   onClick={applyRange}
