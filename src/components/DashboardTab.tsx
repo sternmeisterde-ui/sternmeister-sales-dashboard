@@ -79,8 +79,13 @@ interface DashboardData {
 import { fmtLocalDate as formatDate } from "@/lib/utils/date";
 
 export default function DashboardTab({ department }: { department: string }) {
-  const [period, setPeriod] = useState<"day" | "week" | "month" | "year">("day");
-  const [date, setDate] = useState<Date>(new Date());
+  // Single unified date range state — replaces the old period + date pair.
+  // {start: D, end: D} = single day; {start: A, end: B, A<B} = range.
+  const [range, setRange] = useState<{ start: Date; end: Date }>(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return { start: today, end: today };
+  });
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -89,8 +94,12 @@ export default function DashboardTab({ department }: { department: string }) {
     if (!data) setLoading(true);
     setError(null);
     try {
-      const dateStr = formatDate(date);
-      const res = await fetch(`/api/dashboard?department=${department}&period=${period}&date=${dateStr}`, { signal });
+      const fromStr = formatDate(range.start);
+      const toStr = formatDate(range.end);
+      const res = await fetch(
+        `/api/dashboard?department=${department}&from=${fromStr}&to=${toStr}`,
+        { signal },
+      );
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`API error ${res.status}: ${text}`);
@@ -105,7 +114,7 @@ export default function DashboardTab({ department }: { department: string }) {
     } finally {
       setLoading(false);
     }
-  }, [department, period, date]);
+  }, [department, range.start, range.end]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -141,68 +150,44 @@ export default function DashboardTab({ department }: { department: string }) {
 
   const isB2G = department === "b2g";
 
+  const isSingleDay =
+    range.start.getTime() === range.end.getTime() ||
+    formatDate(range.start) === formatDate(range.end);
+
   const shiftDate = (dir: -1 | 1) => {
-    const d = new Date(date);
-    switch (period) {
-      case "day": d.setDate(d.getDate() + dir); break;
-      case "week": d.setDate(d.getDate() + 7 * dir); break;
-      case "month": d.setMonth(d.getMonth() + dir); break;
-      case "year": d.setFullYear(d.getFullYear() + dir); break;
-    }
-    setDate(d);
+    // Shift by the length of the current selection (inclusive).
+    const spanDays =
+      Math.round((range.end.getTime() - range.start.getTime()) / 86_400_000) + 1;
+    const nextStart = new Date(range.start);
+    nextStart.setDate(nextStart.getDate() + dir * spanDays);
+    const nextEnd = new Date(range.end);
+    nextEnd.setDate(nextEnd.getDate() + dir * spanDays);
+    setRange({ start: nextStart, end: nextEnd });
   };
 
-  const dateDisplay = (() => {
-    switch (period) {
-      case "day":
-        return date.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
-      case "week": {
-        const d = new Date(date);
-        const day = d.getDay();
-        const diff = day === 0 ? -6 : 1 - day;
-        const monday = new Date(d);
-        monday.setDate(d.getDate() + diff);
-        const sunday = new Date(monday);
-        sunday.setDate(monday.getDate() + 6);
-        return `${monday.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })} — ${sunday.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" })}`;
-      }
-      case "month":
-        return date.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
-      case "year":
-        return `${date.getFullYear()} год`;
-    }
-  })();
+  const dateDisplay = isSingleDay
+    ? range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })
+    : `${range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })} — ${range.end.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" })}`;
 
   return (
     <div className="flex flex-col gap-4 fade-in">
-      {/* Filters */}
+      {/* Filters — single calendar with День/Период toggle drives the whole view. */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
-            {([
-              { id: "day", label: "День" },
-              { id: "week", label: "Неделя" },
-              { id: "month", label: "Месяц" },
-              { id: "year", label: "Год" },
-            ] as const).map((f) => (
-              <button
-                key={f.id}
-                onClick={() => setPeriod(f.id)}
-                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 ${
-                  period === f.id
-                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
           <CalendarPicker
-            mode="single"
-            value={{ start: date, end: date }}
-            onChange={(range) => { if (range.start) setDate(range.start); }}
-            onClear={() => setDate(new Date())}
+            mode="range"
+            allowModeToggle
+            value={{ start: range.start, end: range.end }}
+            onChange={(r) => {
+              if (!r.start) return;
+              const end = r.end ?? r.start;
+              setRange({ start: r.start, end });
+            }}
+            onClear={() => {
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              setRange({ start: today, end: today });
+            }}
           />
         </div>
         <div className="flex items-center gap-2">
@@ -213,8 +198,15 @@ export default function DashboardTab({ department }: { department: string }) {
           <button aria-label="Следующий период" onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
             <ChevronRight className="w-4 h-4" />
           </button>
-          {formatDate(date) !== formatDate(new Date()) && (
-            <button onClick={() => setDate(new Date())} className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20">
+          {(!isSingleDay || formatDate(range.start) !== formatDate(new Date())) && (
+            <button
+              onClick={() => {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                setRange({ start: today, end: today });
+              }}
+              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
+            >
               Сегодня
             </button>
           )}

@@ -319,10 +319,15 @@ export async function GET(req: NextRequest) {
     const department = url.searchParams.get("department") || "b2g";
     const period = url.searchParams.get("period") || "day";
     const dateStr = url.searchParams.get("date") || new Date().toISOString().slice(0, 10);
+    // Optional explicit range — when provided, overrides period-based boundaries.
+    // Lets the UI collapse day/week/month/year buttons into one calendar with
+    // День/Период toggle.
+    const fromStr = url.searchParams.get("from");
+    const toStr = url.searchParams.get("to");
 
-    const cacheKey = `dashboard-response:${department}:${period}:${dateStr}`;
+    const cacheKey = `dashboard-response:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
-      buildDashboardResponse(department, period, dateStr)
+      buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
 
     return NextResponse.json(responseData);
@@ -332,9 +337,31 @@ export async function GET(req: NextRequest) {
   }
 }
 
-async function buildDashboardResponse(department: string, period: string, dateStr: string) {
-    const { from, to } = getDateRange(period, dateStr);
-    const { trendFrom, trendTo, trendDays } = getTrendRange(period, from, to);
+async function buildDashboardResponse(
+  department: string,
+  period: string,
+  dateStr: string,
+  fromStr: string | null,
+  toStr: string | null,
+) {
+    // Explicit from/to (inclusive, "YYYY-MM-DD") take priority over period/date.
+    let from: number;
+    let to: number;
+    let effectivePeriod = period;
+    if (fromStr && toStr) {
+      const fromDate = new Date(`${fromStr}T00:00:00Z`);
+      const toDate = new Date(`${toStr}T00:00:00Z`);
+      toDate.setUTCHours(23, 59, 59, 999);
+      from = Math.floor(fromDate.getTime() / 1000);
+      to = Math.floor(toDate.getTime() / 1000);
+      // Mark as custom so getTrendRange uses the full range (not 7-day default).
+      effectivePeriod = fromStr === toStr ? "day" : "custom";
+    } else {
+      const derived = getDateRange(period, dateStr);
+      from = derived.from;
+      to = derived.to;
+    }
+    const { trendFrom, trendTo, trendDays } = getTrendRange(effectivePeriod, from, to);
 
     const pipelineIds = getPipelineIds(department);
     const activeStatusIds = getActiveStatusIds(department);
