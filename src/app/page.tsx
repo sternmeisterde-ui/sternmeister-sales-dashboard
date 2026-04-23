@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -15,6 +15,7 @@ import ManagersTab from "@/components/ManagersTab";
 import CriteriaTab from "@/components/CriteriaTab";
 import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
+import LookerTab from "@/components/LookerTab";
 import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
 import { fmtLocalDate, parseDisplayDate } from "@/lib/utils/date";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
@@ -75,7 +76,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker">("dashboard");
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -570,6 +571,7 @@ export default function Dashboard() {
             { id: "dashboard", icon: LayoutDashboard, label: "Дашборд", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
+            { id: "looker", icon: Database, label: "Looker", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
             { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
@@ -687,6 +689,8 @@ export default function Dashboard() {
         {activeTab === "scripts" && (
           <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
         )}
+
+        {activeTab === "looker" && <LookerTab />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
         {(activeTab === "real_calls" || activeTab === "ai_calls") && (
