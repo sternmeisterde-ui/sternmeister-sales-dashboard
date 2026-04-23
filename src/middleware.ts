@@ -26,6 +26,11 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Cron endpoints authenticate via CRON_SECRET header/query param — no session.
+  if (pathname === "/api/analytics/sync/cron") {
+    return NextResponse.next();
+  }
+
   // Always allow the login page
   if (pathname === "/login") {
     return NextResponse.next();
