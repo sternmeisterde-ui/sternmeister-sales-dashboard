@@ -328,21 +328,23 @@ async function buildDashboardResponse(
     // Summary = sum of all per-manager metrics for the period
     const todaySummary = sumCallMetrics(Array.from(todayCallMap.values()));
 
-    // Step 4: Aggregate lead funnel — BOTH departments now respect the date
-    // range (was previously only B2G). For past ranges this is approximate
-    // since Kommo doesn't store historical snapshots, but it at least makes
-    // the values visibly change when the user picks a different date.
-    const leadsInRange = snapshotLeads.filter(
-      (l) => l.updated_at >= from && l.updated_at <= to,
-    );
+    // Step 4: Aggregate lead funnel.
+    // Kommo doesn't store historical pipeline snapshots, so the funnel and
+    // pipeline breakdown always reflect the CURRENT active state (regardless
+    // of the selected date range). Calls/revenue/won-lost DO respect the
+    // range — they're derived from timestamped events, not live state.
     let funnel: Record<string, unknown>;
 
     if (department === "b2b") {
-      funnel = buildB2BFunnel(leadsInRange, wonLeads, lostLeads);
+      funnel = buildB2BFunnel(snapshotLeads, wonLeads, lostLeads);
     } else {
-      // B2G funnel with qualification stages
+      // B2G funnel with qualification stages. "Flow" metrics (a2/b1/b2+) still
+      // use the from/to range since they track movement, not snapshot state.
       const snapshotLeadsAll = [...snapshotLeads, ...wonLeads, ...lostLeads];
-      const flowLeads = [...leadsInRange, ...wonLeads, ...lostLeads];
+      const flowActive = snapshotLeads.filter(
+        (l) => l.updated_at >= from && l.updated_at <= to,
+      );
+      const flowLeads = [...flowActive, ...wonLeads, ...lostLeads];
       const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to);
       funnel = {
         activeDeals: fc.activeDeals,
@@ -371,8 +373,10 @@ async function buildDashboardResponse(
     // Step 7: Per-manager breakdown. Include ALL active managers+rops from the
     // master table; analytics matches by name so kommoUserId is no longer required.
     // Managers without a kommoUserId get 0 overdue tasks but still show calls.
+    // Only role='manager' per user policy — ROPs/admins don't appear in the
+    // per-manager tables even if they were carrying calls.
     const perManager = allManagers
-      .filter((m) => m.role === "manager" || m.role === "rop")
+      .filter((m) => m.role === "manager")
       .map((mgr) => {
         const cm = todayCallMap.get(mgr.id);
         const tm = mgr.kommoUserId ? taskMap.get(mgr.kommoUserId) : undefined;
@@ -407,9 +411,10 @@ async function buildDashboardResponse(
     };
 
     // Step 10: Per-pipeline breakdown
-    // Pipeline breakdown respects the date range too — leads updated outside
-    // the range drop out so the table reacts to the same filter as the cards.
-    const pipelineBreakdown = buildPipelineBreakdown(leadsInRange, department);
+    // Pipeline breakdown reflects current active pipeline state. Kommo has no
+    // historical snapshots to reconstruct what the pipeline looked like on a
+    // past date, so tying this to from/to would make past-date views empty.
+    const pipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
 
     return {
       date: dateStr,
