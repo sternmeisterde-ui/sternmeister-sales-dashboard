@@ -148,11 +148,10 @@ body {
 .theme-light th {
   background-color: transparent !important;
 }
-/* Table headers: same blue as the active nav item (bg-blue-500/20),
-   black text for legibility on the light canvas. */
+/* Table headers: unified #bedcff across all tabs in light mode. */
 .theme-light thead tr,
 .theme-light thead th {
-  background-color: rgba(59, 130, 246, 0.2) !important;
+  background-color: #bedcff !important;
   color: #0f172a !important;
 }
 .theme-light tr:hover td {
