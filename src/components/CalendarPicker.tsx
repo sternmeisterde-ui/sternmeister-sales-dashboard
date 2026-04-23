@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
 
 // ─── helpers ───────────────────────────────────────────────
@@ -61,6 +62,8 @@ export default function CalendarPicker({
   className = "",
 }: CalendarPickerProps) {
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
   // Start the calendar on maxDate's month if data hasn't reached today
   const [month, setMonth] = useState(() => {
     const today = new Date();
@@ -70,18 +73,27 @@ export default function CalendarPicker({
     return new Date(today.getFullYear(), today.getMonth(), 1);
   });
   const [draft, setDraft] = useState<DateRange>({ start: null, end: null });
-  const ref = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => { setMounted(true); }, []);
 
   // Sync draft with external value when popup opens
   useEffect(() => {
     if (open) setDraft({ start: value.start, end: value.end });
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Close on outside click
+  // Close on outside click (check both wrapper and portal popup)
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (
+        wrapperRef.current?.contains(target) ||
+        popupRef.current?.contains(target)
+      ) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -146,10 +158,39 @@ export default function CalendarPicker({
   const { daysInMonth, firstDayOfMonth } = getDaysInMonth(month);
 
   return (
-    <div ref={ref} className={`relative ${className}`}>
+    <div ref={wrapperRef} className={`relative ${className}`}>
       {/* Trigger button */}
       <button
-        onClick={() => setOpen((v) => !v)}
+        ref={triggerRef}
+        onClick={() => {
+          if (!open && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            const POPUP_W = 288;
+            const POPUP_H = 360; // approximate popup height
+            const GAP = 8;
+            // Horizontal: keep inside viewport
+            let left = rect.left;
+            if (left + POPUP_W > window.innerWidth - GAP) {
+              left = Math.max(GAP, window.innerWidth - POPUP_W - GAP);
+            }
+            // Vertical: open above if enough space, else below
+            const spaceAbove = rect.top - GAP;
+            const bottom = spaceAbove >= POPUP_H
+              ? window.innerHeight - rect.top + GAP
+              : undefined;
+            const top = spaceAbove < POPUP_H
+              ? rect.bottom + GAP
+              : undefined;
+            setDropdownStyle({
+              position: "fixed",
+              bottom,
+              top,
+              left,
+              zIndex: 9999,
+            });
+          }
+          setOpen((v) => !v);
+        }}
         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all border ${
           isActive
             ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
@@ -190,9 +231,9 @@ export default function CalendarPicker({
         )}
       </button>
 
-      {/* Popup */}
-      {open && (
-        <div className="absolute bottom-full mb-2 right-0 sm:right-auto sm:left-0 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-72 animate-in fade-in slide-in-from-bottom-2">
+      {/* Popup — portal to document.body to escape backdrop-filter/overflow ancestors */}
+      {open && mounted && createPortal(
+        <div ref={popupRef} style={dropdownStyle} className="bg-slate-900 border border-white/15 rounded-2xl p-4 shadow-2xl w-72 animate-in fade-in duration-150">
           {/* Month navigation */}
           {(() => {
             const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);
@@ -336,7 +377,8 @@ export default function CalendarPicker({
               </button>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -14,6 +14,8 @@
 //   sla_status = 'contacted'|'frozen'|'waiting'
 
 import { analyticsDb } from "@/lib/db/analytics";
+import { db } from "@/lib/db";
+import { masterManagers } from "@/lib/db/schema-existing";
 import { leadsCohort, sla, communications } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql, eq, inArray } from "drizzle-orm";
 import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
@@ -49,6 +51,20 @@ export async function computeSla(
     );
 
   if (leads.length === 0) return 0;
+
+  // Load per-manager shift start hours from master_managers.shift_start_time ("09:00", "11:00", …)
+  const managerRows = await db.select({
+    name: masterManagers.name,
+    shiftStartTime: masterManagers.shiftStartTime,
+  }).from(masterManagers);
+
+  const shiftHourByManager = new Map<string, number>();
+  for (const m of managerRows) {
+    if (m.shiftStartTime) {
+      const h = Number(m.shiftStartTime.split(":")[0]);
+      if (!Number.isNaN(h)) shiftHourByManager.set(m.name, h);
+    }
+  }
 
   // Neon HTTP returns `timestamp` (no-tz) columns as bare strings ("2026-04-22 18:17:15").
   // new Date() parses those as LOCAL time on the server. Force UTC by appending Z.
@@ -127,10 +143,11 @@ export async function computeSla(
     const slaFirstCallCalSec = comms.firstCallOutAt
       ? calendarSeconds(slaStart, comms.firstCallOutAt)
       : null;
-    // SLA from shift start: calendar seconds from 09:00 Berlin on the DAY OF THE FIRST CALL.
-    // Resets to 09:00 each workday — shows how early/late in the shift the call was made.
+    // SLA from shift start: seconds from the manager's personal shift start to first call.
+    // Uses shift_start_time from master_managers (default 09:00 if not set).
+    const managerShiftHour = lead.manager ? (shiftHourByManager.get(lead.manager) ?? 9) : 9;
     const slaFirstCallFromShiftSec = comms.firstCallOutAt
-      ? secondsFromShiftStart(comms.firstCallOutAt)
+      ? secondsFromShiftStart(comms.firstCallOutAt, managerShiftHour)
       : null;
     const bhSinceLastContact = comms.lastContactAt
       ? businessHoursSeconds(slaStart, comms.lastContactAt)

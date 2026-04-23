@@ -997,7 +997,6 @@ export async function buildDailyResponse(department: string, period: string, dat
   const scheduleInfo = period === "day"
     ? {
         allManagers: allManagers
-          .filter((m) => m.line !== null)
           .map((m) => ({
             id: m.id,
             name: m.name,

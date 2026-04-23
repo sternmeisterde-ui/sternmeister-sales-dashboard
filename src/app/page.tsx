@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database
@@ -120,6 +121,11 @@ export default function Dashboard() {
   const [reportSent, setReportSent] = useState(false);
   const [selectedManager, setSelectedManager] = useState<ManagerStat | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [filterDropdownStyle, setFilterDropdownStyle] = useState<React.CSSProperties>({});
+  const filterBtnRef = useRef<HTMLButtonElement>(null);
+  const filterPopupRef = useRef<HTMLDivElement>(null);
+  const [pageMounted, setPageMounted] = useState(false);
+  useEffect(() => { setPageMounted(true); }, []);
   const [scoreFilter, setScoreFilter] = useState(0);
   const [dateRange, setDateRange] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
@@ -1007,7 +1013,19 @@ export default function Dashboard() {
                   {/* Filter & Date button */}
                   <div className="relative">
                     <button
-                      onClick={() => setIsFilterOpen(!isFilterOpen)}
+                      ref={filterBtnRef}
+                      onClick={() => {
+                        if (!isFilterOpen && filterBtnRef.current) {
+                          const rect = filterBtnRef.current.getBoundingClientRect();
+                          setFilterDropdownStyle({
+                            position: "fixed",
+                            bottom: window.innerHeight - rect.top + 8,
+                            right: window.innerWidth - rect.right,
+                            zIndex: 9999,
+                          });
+                        }
+                        setIsFilterOpen(!isFilterOpen);
+                      }}
                       className={`border hover:bg-white/10 rounded-lg px-3 py-1.5 text-slate-300 flex items-center gap-2 transition-colors relative ${isFilterOpen ? "bg-white/10 border-blue-500/50" : "bg-slate-800/40 border-white/5"}`}
                     >
                       <Filter className="w-3.5 h-3.5 text-blue-400" />
@@ -1017,8 +1035,8 @@ export default function Dashboard() {
                       )}
                     </button>
 
-                    {isFilterOpen && (
-                      <div className="absolute bottom-full mb-2 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-2">
+                    {isFilterOpen && pageMounted && createPortal(
+                      <div ref={filterPopupRef} style={filterDropdownStyle} className="bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-2">
                         {/* Manager filter inside widget */}
                         <div>
                           <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">
@@ -1133,7 +1151,8 @@ export default function Dashboard() {
                             >Сбросить</button>
                           </div>
                         </div>
-                      </div>
+                      </div>,
+                      document.body,
                     )}
                   </div>
                 </div>

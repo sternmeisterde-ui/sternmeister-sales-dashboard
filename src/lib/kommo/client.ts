@@ -442,8 +442,10 @@ export async function getCallNotes(
 
     const BATCH_SIZE = 100;
     for (const [entityType, ids] of byEntity) {
-      // Kommo endpoint path: /contacts/notes, /leads/notes, /companies/notes, /customers/notes
-      const endpointPath = `/${entityType}s/notes`;
+      // Kommo endpoint path: /contacts/notes, /leads/notes, /companies/notes
+      // Note: "company" + "s" would produce "companys" — use explicit mapping instead.
+      const entityPlural: Record<string, string> = { contact: "contacts", lead: "leads", company: "companies", customer: "customers" };
+      const endpointPath = `/${entityPlural[entityType] ?? `${entityType}s`}/notes`;
       const uniqIds = Array.from(new Set(ids));
 
       for (let i = 0; i < uniqIds.length; i += BATCH_SIZE) {
@@ -1014,7 +1016,8 @@ export async function getCallNoteParams(
   // Group note IDs by entity endpoint
   const byEndpoint = new Map<string, number[]>();
   for (const n of notes) {
-    const endpoint = n.entityType === "lead" ? "leads" : "contacts";
+    const entityPlurals: Record<string, string> = { lead: "leads", contact: "contacts", company: "companies", customer: "customers" };
+    const endpoint = entityPlurals[n.entityType] ?? "contacts";
     if (!byEndpoint.has(endpoint)) byEndpoint.set(endpoint, []);
     byEndpoint.get(endpoint)!.push(n.noteId);
   }

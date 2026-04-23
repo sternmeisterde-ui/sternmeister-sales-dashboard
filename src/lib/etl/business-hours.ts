@@ -84,26 +84,26 @@ export function calendarSeconds(startUtc: Date, endUtc: Date): number {
 }
 
 /**
- * Returns the UTC timestamp of 09:00 Berlin time on the Berlin calendar date of `d`.
- * Handles DST automatically (CEST=UTC+2 in summer, CET=UTC+1 in winter).
- * Used as the "shift start" reference point for SLA-from-shift calculation.
+ * Returns the UTC timestamp of `startHour`:00 Berlin on the Berlin calendar date of `d`.
+ * Handles DST automatically (CEST=UTC+2, CET=UTC+1).
+ * Default startHour=9 → 09:00 Berlin.
  */
-export function shiftStartUtc(d: Date): Date {
-  const ymd = berlinYMD(d); // "YYYY-MM-DD" in Berlin time
-  // Probe UTC hours 6..9 — one of these will be 09:00 Berlin regardless of DST
-  for (const utcH of [6, 7, 8, 9]) {
+export function shiftStartUtc(d: Date, startHour = 9): Date {
+  const ymd = berlinYMD(d);
+  const target = startHour * 3600;
+  for (let utcH = Math.max(0, startHour - 3); utcH <= startHour + 1; utcH++) {
     const candidate = new Date(`${ymd}T${String(utcH).padStart(2, "0")}:00:00Z`);
-    if (berlinSecondOfDay(candidate) === 9 * 3600) return candidate;
+    if (berlinSecondOfDay(candidate) === target) return candidate;
   }
-  return new Date(`${ymd}T07:00:00Z`); // fallback (CEST)
+  return new Date(`${ymd}T${String(Math.max(0, startHour - 2)).padStart(2, "0")}:00:00Z`);
 }
 
 /**
- * Seconds from 09:00 Berlin on the day of firstCallAt to firstCallAt.
- * Shows how deep into the workday the first call happened — resets to 09:00 each day.
- * Returns 0 if the call was made before 09:00 Berlin (e.g., from a previous shift).
+ * Calendar seconds from the manager's shift start to firstCallAt.
+ * startHour is the manager's shift start in Berlin time (default 9 = 09:00).
+ * Returns 0 if the call was made before the shift started.
  */
-export function secondsFromShiftStart(firstCallAt: Date): number {
-  const shift = shiftStartUtc(firstCallAt);
+export function secondsFromShiftStart(firstCallAt: Date, startHour = 9): number {
+  const shift = shiftStartUtc(firstCallAt, startHour);
   return Math.max(0, Math.floor((firstCallAt.getTime() - shift.getTime()) / 1000));
 }

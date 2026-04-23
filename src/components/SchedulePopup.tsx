@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { X, Save, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Manager {
@@ -21,18 +22,6 @@ interface SchedulePopupProps {
 const SCHEDULE_VALUES = ["8", "4", "-", "о"] as const;
 type ScheduleVal = (typeof SCHEDULE_VALUES)[number] | "";
 
-// Kept for backward compat — no longer used for cell clicks
-function nextValue(current: ScheduleVal): ScheduleVal {
-  switch (current) {
-    case "": return "8";
-    case "8": return "-";
-    case "-": return "о";
-    case "о": return "8";
-    default: return "8";
-  }
-}
-
-/** All 4 picker options with display metadata */
 const PICKER_OPTIONS: Array<{
   value: Exclude<ScheduleVal, "">;
   label: string;
@@ -50,15 +39,19 @@ function cellStyle(val: ScheduleVal): string {
     case "8": return "bg-emerald-500/20 text-emerald-400 font-bold";
     case "4": return "bg-amber-500/20 text-amber-400 font-bold";
     case "-": return "bg-slate-700/50 text-slate-500";
-    case "о": return "bg-blue-500/20 text-blue-400 font-bold";
-    default: return "text-slate-700";
+    case "о": return "bg-blue-500/20 text-blue-400 font-bold !text-[8px]";
+    default:  return "text-slate-700";
   }
 }
 
-/** Cell display text — "4" shows "4", "о" shows "О", etc. */
 function cellLabel(val: ScheduleVal): string {
-  if (val === "о") return "О";
-  return val;
+  switch (val) {
+    case "8": return "☀";
+    case "4": return "◑";
+    case "-": return "—";
+    case "о": return "ОТП";
+    default:  return "";
+  }
 }
 
 function getDaysInMonth(date: Date): number {
@@ -66,8 +59,7 @@ function getDaysInMonth(date: Date): number {
 }
 
 function isWeekend(year: number, month: number, day: number): boolean {
-  const d = new Date(year, month, day);
-  const dow = d.getDay();
+  const dow = new Date(year, month, day).getDay();
   return dow === 0 || dow === 6;
 }
 
@@ -75,26 +67,30 @@ function fmtDate(year: number, month: number, day: number): string {
   return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-const MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-const LINE_LABELS: Record<string, string> = { "1": "Линия 1 — Квалификатор", "2": "Линия 2 — Бератер", "3": "Линия 3 — Доведение" };
+const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+const LINE_LABELS: Record<string, string> = {
+  "1": "Линия 1 — Квалификатор",
+  "2": "Линия 2 — Бератер",
+  "3": "Линия 3 — Доведение",
+};
 
-interface ActivePicker {
+interface PickerState {
   managerId: string;
   dayIdx: number;
-  /** true → picker opens below the cell; false → above */
-  openBelow: boolean;
+  style: React.CSSProperties;
 }
 
 export default function SchedulePopup({ isOpen, onClose, month, managers, onSaved }: SchedulePopupProps) {
-  const [currentMonth, setCurrentMonth] = useState(month);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
 
-  // Sync with parent when popup opens
+  const [currentMonth, setCurrentMonth] = useState(month);
   useEffect(() => { if (isOpen) setCurrentMonth(month); }, [isOpen, month]);
 
   const year = currentMonth.getFullYear();
-  const mo = currentMonth.getMonth();
+  const mo   = currentMonth.getMonth();
   const daysCount = getDaysInMonth(currentMonth);
-  const monthStr = `${year}-${String(mo + 1).padStart(2, "0")}`;
+  const monthStr  = `${year}-${String(mo + 1).padStart(2, "0")}`;
 
   const shiftMonth = (dir: -1 | 1) => {
     const d = new Date(currentMonth);
@@ -103,29 +99,81 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
     setDirty(false);
   };
 
-  // grid[managerId][day-1] = "8" | "4" | "-" | "о" | ""
-  const [grid, setGrid] = useState<Record<string, ScheduleVal[]>>({});
+  const [grid,   setGrid]   = useState<Record<string, ScheduleVal[]>>({});
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const [dirty,   setDirty]   = useState(false);
 
-  // Which cell currently has its picker open
-  const [activePicker, setActivePicker] = useState<ActivePicker | null>(null);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
+  // Picker rendered via fixed portal to escape overflow clipping
+  const [picker, setPicker] = useState<PickerState | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
-  // Load schedule for month
+  // Close picker on outside click
+  useEffect(() => {
+    if (!picker) return;
+    const h = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPicker(null);
+      }
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [picker]);
+
+  const openPicker = (managerId: string, dayIdx: number, cellEl: HTMLButtonElement) => {
+    if (picker?.managerId === managerId && picker?.dayIdx === dayIdx) {
+      setPicker(null);
+      return;
+    }
+    const rect = cellEl.getBoundingClientRect();
+    const PICKER_W = 152;
+    const PICKER_H = 176;
+    const GAP = 4;
+
+    // Horizontal: centre on cell, clamp inside viewport
+    let left = rect.left + rect.width / 2 - PICKER_W / 2;
+    left = Math.max(GAP, Math.min(left, window.innerWidth - PICKER_W - GAP));
+
+    // Vertical: prefer above, fall back to below
+    let top: number;
+    if (rect.top - GAP >= PICKER_H) {
+      top = rect.top - PICKER_H - GAP;
+    } else {
+      top = rect.bottom + GAP;
+    }
+
+    setPicker({
+      managerId,
+      dayIdx,
+      style: { position: "fixed", top, left, zIndex: 9999, width: PICKER_W },
+    });
+  };
+
+  const selectValue = (managerId: string, dayIdx: number, val: Exclude<ScheduleVal, "">) => {
+    setGrid((prev) => {
+      const row = [...(prev[managerId] || Array(daysCount).fill(""))];
+      row[dayIdx] = val;
+      return { ...prev, [managerId]: row };
+    });
+    setDirty(true);
+    setPicker(null);
+  };
+
+  const fillRow = (managerId: string, val: ScheduleVal) => {
+    setGrid((prev) => ({ ...prev, [managerId]: Array(daysCount).fill(val) }));
+    setDirty(true);
+  };
+
   const loadSchedule = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`/api/daily/schedule?month=${monthStr}`);
       const json = await res.json();
-      const entries: Array<{ userId: string; scheduleDate: string; scheduleValue: string | null; isOnLine: boolean }> = json.schedule || [];
+      const entries: Array<{ userId: string; scheduleDate: string; scheduleValue: string | null; isOnLine: boolean }> =
+        json.schedule || [];
 
       const newGrid: Record<string, ScheduleVal[]> = {};
-      for (const m of managers) {
-        newGrid[m.id] = Array(daysCount).fill("");
-      }
-
+      for (const m of managers) newGrid[m.id] = Array(daysCount).fill("");
       for (const entry of entries) {
         if (!newGrid[entry.userId]) continue;
         const day = Number.parseInt(entry.scheduleDate.split("-")[2], 10);
@@ -133,7 +181,6 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
           newGrid[entry.userId][day - 1] = (entry.scheduleValue || (entry.isOnLine ? "8" : "-")) as ScheduleVal;
         }
       }
-
       setGrid(newGrid);
       setDirty(false);
     } catch (e) {
@@ -143,55 +190,7 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
     }
   }, [monthStr, managers, daysCount]);
 
-  useEffect(() => {
-    if (isOpen) loadSchedule();
-  }, [isOpen, loadSchedule]);
-
-  // Close picker when clicking outside
-  useEffect(() => {
-    if (!activePicker) return;
-    const handler = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setActivePicker(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [activePicker]);
-
-  // Open picker instead of cycling directly
-  const toggleCell = (managerId: string, dayIdx: number, cellEl: HTMLButtonElement) => {
-    if (
-      activePicker?.managerId === managerId &&
-      activePicker?.dayIdx === dayIdx
-    ) {
-      setActivePicker(null);
-      return;
-    }
-    const rect = cellEl.getBoundingClientRect();
-    const openBelow = rect.top < window.innerHeight / 2;
-    setActivePicker({ managerId, dayIdx, openBelow });
-  };
-
-  // Set value and close picker
-  const selectValue = (managerId: string, dayIdx: number, val: Exclude<ScheduleVal, "">) => {
-    setGrid((prev) => {
-      const row = [...(prev[managerId] || Array(daysCount).fill(""))];
-      row[dayIdx] = val;
-      return { ...prev, [managerId]: row };
-    });
-    setDirty(true);
-    setActivePicker(null);
-  };
-
-  // Fill entire row with a value
-  const fillRow = (managerId: string, val: ScheduleVal) => {
-    setGrid((prev) => {
-      const row = Array(daysCount).fill(val);
-      return { ...prev, [managerId]: row };
-    });
-    setDirty(true);
-  };
+  useEffect(() => { if (isOpen) loadSchedule(); }, [isOpen, loadSchedule]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -199,22 +198,14 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
       const entries: Array<{ userId: string; date: string; scheduleValue: string }> = [];
       for (const [managerId, row] of Object.entries(grid)) {
         for (let d = 0; d < row.length; d++) {
-          if (row[d]) {
-            entries.push({
-              userId: managerId,
-              date: fmtDate(year, mo, d + 1),
-              scheduleValue: row[d],
-            });
-          }
+          if (row[d]) entries.push({ userId: managerId, date: fmtDate(year, mo, d + 1), scheduleValue: row[d] });
         }
       }
-
       await fetch("/api/daily/schedule", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ entries }),
       });
-
       setDirty(false);
       onSaved();
     } catch (e) {
@@ -225,216 +216,172 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   };
 
   // Group managers by line
-  const lines = ["1", "2", "3"];
-  const grouped = lines.map((l) => ({
-    line: l,
-    label: LINE_LABELS[l] || `Линия ${l}`,
-    managers: managers.filter((m) => m.line === l),
-  })).filter((g) => g.managers.length > 0);
-
-  // Also add managers without a line
+  const lines   = ["1", "2", "3"];
+  const grouped = lines
+    .map((l) => ({ line: l, label: LINE_LABELS[l] || `Линия ${l}`, managers: managers.filter((m) => m.line === l) }))
+    .filter((g) => g.managers.length > 0);
   const noLine = managers.filter((m) => !m.line || !lines.includes(m.line));
-  if (noLine.length > 0) {
-    grouped.push({ line: "other", label: "Без линии", managers: noLine });
-  }
+  if (noLine.length > 0) grouped.push({ line: "other", label: "Без линии", managers: noLine });
 
-  if (!isOpen) return null;
+  if (!isOpen || !mounted) return null;
 
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="schedule-popup-modal bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-[95vw] max-h-[90vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-          <div className="flex items-center gap-3">
-            <button onClick={() => shiftMonth(-1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <div>
-              <h2 className="text-lg font-bold text-white">Расписание</h2>
-              <p className="text-[11px] text-slate-400">{MONTH_NAMES[mo]} {year}</p>
-            </div>
-            <button onClick={() => shiftMonth(1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-3 text-[10px]">
-              <span className="flex items-center gap-1">
-                <span className="w-4 h-4 rounded bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[9px] font-bold">☀</span>
-                Полный день
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-4 h-4 rounded bg-amber-500/20 text-amber-400 flex items-center justify-center text-[9px] font-bold">◑</span>
-                Половина дня
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-4 h-4 rounded bg-slate-700/50 text-slate-400 flex items-center justify-center text-[9px]">—</span>
-                Выходной
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="w-4 h-4 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center text-[8px] font-bold">ОТП</span>
-                Отпуск
-              </span>
-            </div>
-            {dirty && (
-              <button onClick={handleSave} disabled={saving}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors disabled:opacity-50">
-                {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                Сохранить
+  return createPortal(
+    <>
+      {/* Backdrop + modal */}
+      <div
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+      >
+        <div
+          className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-[95vw] max-h-[90vh] flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 shrink-0">
+            <div className="flex items-center gap-3">
+              <button onClick={() => shiftMonth(-1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+                <ChevronLeft className="w-4 h-4" />
               </button>
-            )}
-            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Table */}
-        <div className="overflow-auto flex-1 p-4">
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+              <div>
+                <h2 className="text-lg font-bold text-white">Расписание</h2>
+                <p className="text-[11px] text-slate-400">{MONTH_NAMES[mo]} {year}</p>
+              </div>
+              <button onClick={() => shiftMonth(1)} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+                <ChevronRight className="w-4 h-4" />
+              </button>
             </div>
-          ) : (
-            <table className="border-collapse text-[11px]">
-              <thead>
-                <tr>
-                  <th className="sticky left-0 z-10 bg-slate-900 px-3 py-2 text-left text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[160px]">
-                    Менеджер
-                  </th>
-                  <th className="sticky left-[160px] z-10 bg-slate-900 px-1 py-2 text-center text-[9px] text-slate-600 min-w-[28px]">
-                    ⚡
-                  </th>
-                  {Array.from({ length: daysCount }, (_, i) => {
-                    const weekend = isWeekend(year, mo, i + 1);
+            <div className="flex items-center gap-3">
+              {/* Legend */}
+              <div className="hidden sm:flex items-center gap-3 text-[10px]">
+                {PICKER_OPTIONS.map((o) => (
+                  <span key={o.value} className="flex items-center gap-1">
+                    <span className={`w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold ${o.colorClass}`}>{o.symbol}</span>
+                    {o.label}
+                  </span>
+                ))}
+              </div>
+              {dirty && (
+                <button onClick={handleSave} disabled={saving}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-[11px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors disabled:opacity-50">
+                  {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  Сохранить
+                </button>
+              )}
+              <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Table */}
+          <div className="overflow-auto flex-1 p-4">
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+              </div>
+            ) : managers.length === 0 ? (
+              <div className="flex items-center justify-center py-12 text-slate-500 text-sm">
+                Нет менеджеров для отображения
+              </div>
+            ) : (
+              <table className="border-collapse text-[11px]">
+                <thead>
+                  <tr>
+                    <th className="sticky left-0 z-10 bg-slate-900 px-3 py-2 text-left text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[160px]">
+                      Менеджер
+                    </th>
+                    <th className="sticky left-[160px] z-10 bg-slate-900 px-1 py-2 text-center text-[9px] text-slate-600 min-w-[28px]">⚡</th>
+                    {Array.from({ length: daysCount }, (_, i) => {
+                      const weekend = isWeekend(year, mo, i + 1);
+                      return (
+                        <th key={i} className={`px-0 py-2 text-center min-w-[28px] text-[10px] font-bold ${weekend ? "text-rose-400/60" : "text-slate-400"}`}>
+                          {i + 1}
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {grouped.map((group) => {
+                    const dayCounts = Array.from({ length: daysCount }, (_, d) =>
+                      group.managers.reduce((n, m) => n + (grid[m.id]?.[d] === "8" ? 1 : 0), 0),
+                    );
                     return (
-                      <th key={i} className={`px-0 py-2 text-center min-w-[28px] text-[10px] font-bold ${weekend ? "text-rose-400/60" : "text-slate-400"}`}>
-                        {i + 1}
-                      </th>
+                      <>
+                        <tr key={`hdr-${group.line}`} className="border-t border-white/10">
+                          <td colSpan={daysCount + 2} className="sticky left-0 z-10 bg-slate-800/60 px-3 py-1.5">
+                            <span className="text-[10px] uppercase tracking-widest font-bold text-slate-300">{group.label}</span>
+                          </td>
+                        </tr>
+                        {/* Day count row */}
+                        <tr key={`cnt-${group.line}`}>
+                          <td className="sticky left-0 z-10 bg-slate-900/95 px-3 py-0.5 text-[9px] text-slate-600 italic">онлайн</td>
+                          <td className="sticky left-[160px] z-10 bg-slate-900/95" />
+                          {dayCounts.map((cnt, i) => (
+                            <td key={i} className="px-0 py-0.5 text-center text-[9px] text-slate-600">{cnt > 0 ? cnt : ""}</td>
+                          ))}
+                        </tr>
+                        {group.managers.map((m) => {
+                          const row = grid[m.id] || Array(daysCount).fill("");
+                          return (
+                            <tr key={m.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                              <td className="sticky left-0 z-10 bg-slate-900 px-3 py-1 text-[11px] text-slate-300 font-medium whitespace-nowrap">
+                                {m.name}
+                              </td>
+                              <td className="sticky left-[160px] z-10 bg-slate-900 px-1 py-1">
+                                <button onClick={() => fillRow(m.id, "8")} title="Заполнить все рабочими"
+                                  className="w-5 h-5 rounded text-[8px] bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors flex items-center justify-center">
+                                  ☀
+                                </button>
+                              </td>
+                              {row.map((val, d) => {
+                                const weekend = isWeekend(year, mo, d + 1);
+                                return (
+                                  <td key={d} className={`px-0 py-1 text-center ${weekend ? "bg-white/[0.02]" : ""}`}>
+                                    <button
+                                      onClick={(e) => openPicker(m.id, d, e.currentTarget)}
+                                      className={`w-6 h-6 rounded text-[10px] transition-all hover:ring-1 hover:ring-white/20 ${cellStyle(val)} ${!val ? "border border-white/5" : ""}`}
+                                    >
+                                      {cellLabel(val)}
+                                    </button>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </>
                     );
                   })}
-                </tr>
-              </thead>
-              <tbody>
-                {grouped.map((group) => (
-                  <LineGroup key={group.line} group={group} grid={grid} daysCount={daysCount}
-                    year={year} mo={mo} onToggle={toggleCell} onFillRow={fillRow}
-                    activePicker={activePicker} onSelect={selectValue} pickerRef={pickerRef} />
-                ))}
-              </tbody>
-            </table>
-          )}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       </div>
-    </div>
-  );
-}
 
-function LineGroup({ group, grid, daysCount, year, mo, onToggle, onFillRow, activePicker, onSelect, pickerRef }: {
-  group: { line: string; label: string; managers: Manager[] };
-  grid: Record<string, ScheduleVal[]>;
-  daysCount: number; year: number; mo: number;
-  onToggle: (id: string, day: number, el: HTMLButtonElement) => void;
-  onFillRow: (id: string, val: ScheduleVal) => void;
-  activePicker: ActivePicker | null;
-  onSelect: (managerId: string, dayIdx: number, val: Exclude<ScheduleVal, "">) => void;
-  pickerRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  // Count working managers per day
-  const dayCounts = Array.from({ length: daysCount }, (_, d) => {
-    let count = 0;
-    for (const m of group.managers) {
-      const val = grid[m.id]?.[d] || "";
-      if (val === "8") count++;
-    }
-    return count;
-  });
-
-  return (
-    <>
-      {/* Group header */}
-      <tr className="border-t border-white/10">
-        <td colSpan={daysCount + 2} className="sticky left-0 z-10 bg-slate-800/60 px-3 py-1.5">
-          <span className="text-[10px] uppercase tracking-widest font-bold text-slate-300">{group.label}</span>
-        </td>
-      </tr>
-
-      {/* Manager rows */}
-      {group.managers.map((m) => {
-        const row = grid[m.id] || Array(daysCount).fill("");
-        return (
-          <tr key={m.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-            <td className="sticky left-0 z-10 bg-slate-900/95 px-3 py-1 text-[11px] text-slate-300 font-medium whitespace-nowrap">
-              {m.name}
-            </td>
-            <td className="sticky left-[160px] z-10 bg-slate-900/95 px-1 py-1">
-              <button onClick={() => onFillRow(m.id, "8")} title="Заполнить все 8"
-                className="w-5 h-5 rounded text-[8px] bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors flex items-center justify-center">
-                8
+      {/* Picker portal — rendered outside modal to avoid overflow clipping */}
+      {picker && (
+        <div ref={pickerRef} style={picker.style}
+          className="bg-slate-800 border border-white/15 rounded-xl shadow-2xl overflow-hidden">
+          {PICKER_OPTIONS.map((opt) => {
+            const currentVal = grid[picker.managerId]?.[picker.dayIdx] ?? "";
+            return (
+              <button
+                key={opt.value}
+                onClick={(e) => { e.stopPropagation(); selectValue(picker.managerId, picker.dayIdx, opt.value); }}
+                className={`w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-white/10 transition-colors text-left ${currentVal === opt.value ? "bg-white/5" : ""}`}
+              >
+                <span className={`w-5 h-5 rounded flex items-center justify-center text-[9px] font-bold shrink-0 ${opt.colorClass}`}>
+                  {opt.symbol}
+                </span>
+                <span className="text-slate-200 leading-tight">{opt.label}</span>
               </button>
-            </td>
-            {row.map((val, d) => {
-              const weekend = isWeekend(year, mo, d + 1);
-              const isPickerOpen =
-                activePicker?.managerId === m.id && activePicker?.dayIdx === d;
-              return (
-                <td key={d} className={`px-0 py-1 text-center relative ${weekend ? "bg-white/[0.02]" : ""}`}>
-                  <button
-                    onClick={(e) => onToggle(m.id, d, e.currentTarget)}
-                    className={`w-6 h-6 rounded text-[10px] transition-all hover:ring-1 hover:ring-white/20 ${cellStyle(val)} ${!val ? "border border-white/5" : ""}`}
-                  >
-                    {cellLabel(val)}
-                  </button>
-
-                  {/* Mini picker popup */}
-                  {isPickerOpen && (
-                    <div
-                      ref={pickerRef}
-                      className={`absolute left-1/2 -translate-x-1/2 z-[200] w-36 bg-slate-800 border border-white/10 rounded-xl shadow-2xl overflow-hidden ${
-                        activePicker?.openBelow ? "top-full mt-1" : "bottom-full mb-1"
-                      }`}
-                    >
-                      {PICKER_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.value}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSelect(m.id, d, opt.value);
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-white/10 transition-colors text-left ${
-                            val === opt.value ? "bg-white/5" : ""
-                          }`}
-                        >
-                          <span
-                            className={`w-5 h-5 rounded flex items-center justify-center text-[9px] font-bold shrink-0 ${opt.colorClass}`}
-                          >
-                            {opt.symbol}
-                          </span>
-                          <span className="text-slate-200 leading-tight">{opt.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </td>
-              );
-            })}
-          </tr>
-        );
-      })}
-
-      {/* Summary row: count per day */}
-      <tr className="border-b border-white/10">
-        <td className="sticky left-0 z-10 bg-slate-900/95 px-3 py-1 text-[10px] text-slate-500 font-bold">
-          На линии
-        </td>
-        <td className="sticky left-[160px] z-10 bg-slate-900/95" />
-        {dayCounts.map((count, d) => (
-          <td key={d} className="px-0 py-1 text-center text-[10px] font-bold text-slate-400">
-            {count > 0 ? count : ""}
-          </td>
-        ))}
-      </tr>
-    </>
+            );
+          })}
+        </div>
+      )}
+    </>,
+    document.body,
   );
 }

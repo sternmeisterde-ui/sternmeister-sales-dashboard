@@ -643,6 +643,21 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [saving, setSaving] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
+  const [scheduleManagers, setScheduleManagers] = useState<Array<{ id: string; name: string; line: string | null }>>([]);
+
+  useEffect(() => {
+    let abort = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/daily/managers?department=${department}`);
+        const json = await res.json();
+        if (!abort && Array.isArray(json.managers)) setScheduleManagers(json.managers);
+      } catch (e) {
+        console.error("Failed to load schedule managers:", e);
+      }
+    })();
+    return () => { abort = true; };
+  }, [department]);
 
   const fetchData = useCallback(
     async (signal?: AbortSignal) => {
@@ -929,7 +944,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         onClose={() => setShowSchedule(false)}
         month={selectedMonth}
         department={department}
-        managers={todaySchedule?.schedule?.allManagers ?? []}
+        managers={scheduleManagers}
         onSaved={() => { setShowSchedule(false); fetchData(); }}
       />
     </div>
