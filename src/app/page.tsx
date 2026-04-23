@@ -690,7 +690,7 @@ export default function Dashboard() {
           <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
         )}
 
-        {activeTab === "looker" && <LookerTab />}
+        {activeTab === "looker" && <LookerTab department={activeDepartment} />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
         {(activeTab === "real_calls" || activeTab === "ai_calls") && (

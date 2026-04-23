@@ -1,92 +1,139 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Loader2, ExternalLink } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
-const TABLE_CONFIG = {
-  leads_cohort: { filterCols: ["manager", "pipeline", "status", "category", "utm_source"] },
-  communications: { filterCols: ["manager", "communication_type", "pipeline_name"] },
-  lead_status_changes: { filterCols: ["manager", "pipeline"] },
-  tasks: { filterCols: ["lead_manager", "task_manager"] },
-  sla: { filterCols: ["manager", "pipeline_name", "sla_status"] },
-  sales_report: { filterCols: ["manager"] },
-  ads_report: { filterCols: ["utm_source", "utm_medium"] },
-  custom_report: { filterCols: ["manager", "metric_name", "pipeline_name"] },
-  funnel: { filterCols: ["manager", "pipeline_name"] },
+// ─── Department config ──────────────────────────────────────────────────────
+
+const DEPT_CONFIG = {
+  b2g: {
+    label: "Госники",
+    pipelines: ["Бух Гос", "Бух Бератер"] as const,
+    statuses: [
+      "Термин ДЦ состоялся",
+      "Термин ДЦ отменен/перенесен",
+      "Термин ДЦ",
+      "Термин АА отменен/перенесен",
+      "Принято от первой линии",
+      "Принимает решение",
+      "Новый лид",
+      "Недозвон",
+      "На рассмотрении бератера",
+      "Контакт установлен",
+      "Консультация проведена",
+      "Консультация перед термином ДЦ проведена",
+      "Консультация перед термином ДЦ",
+      "Консультация перед термином АА проведена",
+      "Консультация перед термином АА",
+    ] as const,
+    slaRanges: [
+      { label: "0–9 мин", value: "0-9" },
+      { label: "10–29 мин", value: "10-29" },
+      { label: "30+ мин", value: "30+" },
+    ],
+    hasPipeline: true,
+  },
+  b2b: {
+    label: "Коммерсы",
+    pipelines: ["Бух Комм", "Мед Комм"] as const,
+    statuses: [
+      "Успешно реализовано",
+      "Рассрочка",
+      "Новый лид 3",
+      "Новый лид 2",
+      "Новый лид",
+      "Нет предварительного согласия",
+      "Недозвон",
+      "Контакт установлен",
+      "Консультация проведена",
+      "ИНТЕРЕС ПОДТВЕРЖДЕН",
+      "Закрыто и не реализовано",
+      "Взят в работу",
+      "База",
+      "Счет выставлен",
+    ] as const,
+    slaRanges: [{ label: "10–29 мин", value: "10-29" }],
+    hasPipeline: false,
+  },
 } as const;
 
-type TableKey = keyof typeof TABLE_CONFIG;
+// ─── Types ──────────────────────────────────────────────────────────────────
 
-const TABLE_LABELS: { key: TableKey; label: string }[] = [
-  { key: "leads_cohort", label: "Лиды" },
-  { key: "communications", label: "Коммуникации" },
-  { key: "lead_status_changes", label: "Статусы" },
-  { key: "tasks", label: "Задачи" },
-  { key: "sla", label: "SLA" },
-  { key: "sales_report", label: "Продажи" },
-  { key: "ads_report", label: "Реклама" },
-  { key: "custom_report", label: "Custom" },
-  { key: "funnel", label: "Воронка" },
-];
+type View = "all_calls" | "cohorts" | "detail";
 
-const PAGE_SIZE = 100;
-
-interface ApiResponse {
-  table: string;
-  total: number;
-  rows: Record<string, unknown>[];
-  filterOptions: Record<string, string[]>;
+interface AllCallsRow {
+  manager: string;
+  total_calls: number;
+  outgoing_calls: number;
+  incoming_calls: number;
+  messages_sent: number;
+  success_pct: number | null;
+  success_calls: number;
+  total_duration_sec: number;
 }
 
-interface SyncResult {
-  success: boolean;
-  result?: Record<string, unknown>;
-  error?: string;
+interface CohortsRow {
+  manager: string;
+  lead_count: number;
+  outgoing_calls: number;
+  messages_sent: number;
+  success_pct: number | null;
+  total_duration_sec: number;
+  avg_calls_per_lead: number | null;
+  avg_sla_first_call_sec: number | null;
+  total_sla_first_call_sec: number;
+}
+
+interface DetailRow {
+  manager: string;
+  lead_id: number;
+  lead_created_at: string;
+  sla_start: string | null;
+  first_call_out_at: string | null;
+  success_calls: number;
+  total_calls: number;
+  avg_duration_sec: number | null;
+  sla_first_call_seconds: number | null;
+  sla_first_call_calendar_seconds: number | null;
+}
+
+interface ApiResponse {
+  view: View;
+  rows: AllCallsRow[] | CohortsRow[] | DetailRow[];
+  total: number;
+  filterOptions: { managers: string[] };
+}
+
+// ─── Formatters ─────────────────────────────────────────────────────────────
+
+function fmtHMS(sec: number | null | undefined): string {
+  if (sec == null) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function fmtPct(val: number | null | undefined): string {
+  if (val == null) return "—";
+  return `${val}%`;
+}
+
+function fmtNum(val: number | null | undefined): string {
+  if (val == null) return "—";
+  return Number(val).toLocaleString("ru");
+}
+
+function fmtDate(val: unknown): string {
+  if (!val) return "—";
+  const d = new Date(val as string);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
 function toISODate(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function colLabel(col: string): string {
-  return col
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-function formatCell(col: string, value: unknown): string {
-  if (value === null || value === undefined) return "—";
-
-  const colLower = col.toLowerCase();
-  const isDate = colLower.includes("_at") || colLower.includes("date") || colLower.startsWith("dt");
-
-  if (isDate && (typeof value === "string" || value instanceof Date)) {
-    const d = new Date(value as string);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toLocaleString("ru-RU", {
-        timeZone: "Europe/Berlin",
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    }
-  }
-
-  if (colLower.endsWith("_seconds") && typeof value === "number") {
-    const h = Math.floor(value / 3600);
-    const m = Math.round((value % 3600) / 60);
-    return `${h}ч ${m}м`;
-  }
-
-  if (typeof value === "number") {
-    return value.toLocaleString("ru");
-  }
-
-  return String(value);
 }
 
 function makeDefaultRange(): DateRange {
@@ -96,76 +143,400 @@ function makeDefaultRange(): DateRange {
   return { start, end };
 }
 
-export default function LookerTab() {
-  const [table, setTable] = useState<TableKey>("leads_cohort");
+// ─── Pill button helper ──────────────────────────────────────────────────────
+
+function PillBtn({
+  active,
+  onClick,
+  children,
+  accent = "blue",
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  accent?: "blue" | "purple";
+}) {
+  const activeClass =
+    accent === "purple"
+      ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+      : "bg-blue-500/20 text-blue-400 border border-blue-500/30";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
+        active ? activeClass : "text-slate-400 hover:text-white border-transparent hover:border-white/5"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ─── Totals helpers ──────────────────────────────────────────────────────────
+
+function sumNum(rows: AllCallsRow[], key: keyof AllCallsRow): number {
+  let total = 0;
+  for (const r of rows) {
+    const v = r[key];
+    if (typeof v === "number") total += v;
+  }
+  return total;
+}
+
+function sumNumC(rows: CohortsRow[], key: keyof CohortsRow): number {
+  let total = 0;
+  for (const r of rows) {
+    const v = r[key];
+    if (typeof v === "number") total += v;
+  }
+  return total;
+}
+
+// ─── Tables ──────────────────────────────────────────────────────────────────
+
+function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolean }) {
+  const colCount = 8;
+
+  const totalCalls = sumNum(rows, "total_calls");
+  const totalOut = sumNum(rows, "outgoing_calls");
+  const totalIn = sumNum(rows, "incoming_calls");
+  const totalMsg = sumNum(rows, "messages_sent");
+  const totalSuccess = sumNum(rows, "success_calls");
+  const totalDur = sumNum(rows, "total_duration_sec");
+  const totalPct = totalCalls > 0 ? Math.round((totalSuccess / totalCalls) * 100) : null;
+
+  return (
+    <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse text-xs">
+          <thead>
+            <tr className="border-b border-white/10">
+              {["Менеджер", "Всего звонков", "Исходящие", "Входящие", "Сообщений", "% успеха", "Успешных (10+с)", "Время на линии"].map((h) => (
+                <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={colCount} className="text-center py-16 text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto" />
+                </td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
+                  Нет данных за выбранный период
+                </td>
+              </tr>
+            ) : (
+              <>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.incoming_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.success_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
+                  <td className="px-4 py-2.5 text-slate-200">Итого</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalCalls)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalOut)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalIn)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalMsg)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtPct(totalPct)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalSuccess)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalDur)}</td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean }) {
+  const colCount = 9;
+
+  const totalLeads = sumNumC(rows, "lead_count");
+  const totalOut = sumNumC(rows, "outgoing_calls");
+  const totalMsg = sumNumC(rows, "messages_sent");
+  const totalDur = sumNumC(rows, "total_duration_sec");
+  const totalSlaSum = sumNumC(rows, "total_sla_first_call_sec");
+  const totalCalls = rows.reduce((acc, r) => {
+    const calls = r.avg_calls_per_lead != null ? r.avg_calls_per_lead * r.lead_count : 0;
+    return acc + calls;
+  }, 0);
+  const totalSucc = rows.reduce((acc, r) => {
+    const pct = r.success_pct != null ? r.success_pct / 100 : 0;
+    return acc + pct * (r.avg_calls_per_lead != null ? r.avg_calls_per_lead * r.lead_count : 0);
+  }, 0);
+  const totalPct = totalCalls > 0 ? Math.round((totalSucc / totalCalls) * 100) : null;
+  const avgCallsPerLead = totalLeads > 0 ? Math.round((totalCalls / totalLeads) * 100) / 100 : null;
+  const avgSla = rows.length > 0 ? Math.round(rows.reduce((a, r) => a + (r.avg_sla_first_call_sec ?? 0), 0) / rows.length) : null;
+
+  return (
+    <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse text-xs">
+          <thead>
+            <tr className="border-b border-white/10">
+              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA первый (ср)", "SLA первый (итого)"].map((h) => (
+                <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={colCount} className="text-center py-16 text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto" />
+                </td>
+              </tr>
+            ) : rows.length === 0 ? (
+              <tr>
+                <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
+                  Нет данных за выбранный период
+                </td>
+              </tr>
+            ) : (
+              <>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? r.avg_calls_per_lead : "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_first_call_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_sla_first_call_sec)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
+                  <td className="px-4 py-2.5 text-slate-200">Итого</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalLeads)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalOut)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalMsg)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{fmtPct(totalPct)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalDur)}</td>
+                  <td className="px-4 py-2.5 text-slate-200">{avgCallsPerLead != null ? avgCallsPerLead : "—"}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgSla)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalSlaSum)}</td>
+                </tr>
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function DetailTable({
+  rows,
+  loading,
+  total,
+  page,
+  onPageChange,
+}: {
+  rows: DetailRow[];
+  loading: boolean;
+  total: number;
+  page: number;
+  onPageChange: (p: number) => void;
+}) {
+  const colCount = 9;
+  const PAGE_SIZE = 100;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="border-b border-white/10">
+                {["Менеджер", "Лид", "Успешных", "Всего", "TLT (ср)", "SLA звонок", "SLA тотал", "Дата лида", "Первый исх."].map((h) => (
+                  <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={colCount} className="text-center py-16 text-slate-400">
+                    <Loader2 className="w-5 h-5 animate-spin mx-auto" />
+                  </td>
+                </tr>
+              ) : rows.length === 0 ? (
+                <tr>
+                  <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
+                    Нет данных за выбранный период
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r, i) => (
+                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
+                    <td className="px-4 py-2.5 text-slate-200">
+                      <a
+                        href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
+                      >
+                        {r.lead_id}
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.success_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_duration_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.sla_first_call_seconds)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.sla_first_call_calendar_seconds)}</td>
+                    <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">{fmtDate(r.lead_created_at)}</td>
+                    <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">{fmtDate(r.first_call_out_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between px-1">
+        <span className="text-xs text-slate-400">
+          {loading ? "Загрузка..." : `${fmtNum(total)} строк`}
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onPageChange(Math.max(0, page - 1))}
+            disabled={page === 0 || loading}
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
+          >
+            ‹
+          </button>
+          <span className="text-xs text-slate-400">
+            Стр {page + 1} / {totalPages}
+          </span>
+          <button
+            type="button"
+            onClick={() => onPageChange(page + 1)}
+            disabled={(page + 1) * PAGE_SIZE >= total || loading}
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
+          >
+            ›
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main component ──────────────────────────────────────────────────────────
+
+interface LookerTabProps {
+  department: "b2g" | "b2b";
+}
+
+export default function LookerTab({ department }: LookerTabProps) {
+  const config = DEPT_CONFIG[department];
+
+  const [view, setView] = useState<View>("all_calls");
   const [dateRange, setDateRange] = useState<DateRange>(makeDefaultRange);
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const [manager, setManager] = useState("");
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const [category, setCategory] = useState("");
+  const [slaRange, setSlaRange] = useState("");
+  const [pipeline, setPipeline] = useState("");
   const [page, setPage] = useState(0);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState<string>("");
+  const [statusOpen, setStatusOpen] = useState(false);
 
-  const filterDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingFiltersRef = useRef<Record<string, string>>(filters);
+  const statusDropdownRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const fetchData = useCallback(
-    async (
-      currentTable: TableKey,
-      currentRange: DateRange,
-      currentFilters: Record<string, string>,
-      currentPage: number,
-    ) => {
+  // Reset all filters when department changes
+  useEffect(() => {
+    setManager("");
+    setSelectedStatuses([]);
+    setCategory("");
+    setSlaRange("");
+    setPipeline("");
+    setPage(0);
+    setData(null);
+  }, [department]);
+
+  // Close status dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target as Node)) {
+        setStatusOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  // Fetch data on any filter/view/page/department change
+  useEffect(() => {
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const fetchData = async () => {
       setLoading(true);
       try {
-        const params = new URLSearchParams({ table: currentTable });
+        const params = new URLSearchParams({ dept: department, view });
 
-        if (currentRange.start) params.set("from", toISODate(currentRange.start));
-        if (currentRange.end) params.set("to", toISODate(currentRange.end));
-
-        params.set("limit", String(PAGE_SIZE));
-        params.set("offset", String(currentPage * PAGE_SIZE));
-
-        for (const [col, val] of Object.entries(currentFilters)) {
-          if (val) params.set(col, val);
+        if (dateRange.start) params.set("from", toISODate(dateRange.start));
+        if (dateRange.end) params.set("to", toISODate(dateRange.end));
+        if (manager) params.set("manager", manager);
+        if (selectedStatuses.length > 0) params.set("statuses", selectedStatuses.join(","));
+        if (category) params.set("category", category);
+        if (slaRange) params.set("sla", slaRange);
+        if (pipeline && config.hasPipeline) params.set("pipeline", pipeline);
+        if (view === "detail") {
+          params.set("limit", "100");
+          params.set("offset", String(page * 100));
         }
 
-        const res = await fetch(`/api/analytics/data?${params.toString()}`);
+        const res = await fetch(`/api/analytics/looker/data?${params.toString()}`, {
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as ApiResponse;
         setData(json);
       } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
         console.error("[LookerTab] fetch error", err);
       } finally {
         setLoading(false);
       }
-    },
-    [],
-  );
+    };
 
-  useEffect(() => {
-    fetchData(table, dateRange, filters, page);
-  }, [table, dateRange, page, filters, fetchData]);
+    fetchData();
 
-  const applyDebouncedFilters = useCallback(
-    (newFilters: Record<string, string>) => {
-      pendingFiltersRef.current = newFilters;
-      if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
-      filterDebounceRef.current = setTimeout(() => {
-        setPage(0);
-        setFilters(pendingFiltersRef.current);
-      }, 300);
-    },
-    [],
-  );
-
-  const handleFilterChange = useCallback(
-    (col: string, value: string) => {
-      const next = { ...pendingFiltersRef.current, [col]: value };
-      applyDebouncedFilters(next);
-    },
-    [applyDebouncedFilters],
-  );
+    return () => controller.abort();
+  }, [department, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, page, config.hasPipeline]);
 
   const setQuickRange = useCallback((days: number) => {
     const end = new Date();
@@ -175,239 +546,203 @@ export default function LookerTab() {
     setPage(0);
   }, []);
 
-  const handleSync = useCallback(async () => {
-    setSyncing(true);
-    setSyncResult("");
-    try {
-      const from = dateRange.start ? toISODate(dateRange.start) : toISODate(new Date(Date.now() - 30 * 86400 * 1000));
-      const to = dateRange.end ? toISODate(dateRange.end) : toISODate(new Date());
+  const toggleStatus = useCallback((status: string) => {
+    setSelectedStatuses((prev) =>
+      prev.includes(status) ? prev.filter((s) => s !== status) : [...prev, status],
+    );
+    setPage(0);
+  }, []);
 
-      const res = await fetch("/api/analytics/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from, to }),
-      });
+  const managers = data?.filterOptions.managers ?? [];
 
-      const json = (await res.json()) as SyncResult;
+  const allCallsRows = (view === "all_calls" ? data?.rows : []) as AllCallsRow[];
+  const cohortsRows = (view === "cohorts" ? data?.rows : []) as CohortsRow[];
+  const detailRows = (view === "detail" ? data?.rows : []) as DetailRow[];
 
-      if (json.success && json.result) {
-        const r = json.result as Record<string, unknown>;
-        const parts: string[] = [];
-        if (typeof r.leads === "number") parts.push(`лидов: ${r.leads}`);
-        if (typeof r.communications === "number") parts.push(`комм: ${r.communications}`);
-        if (typeof r.sla === "number") parts.push(`SLA: ${r.sla}`);
-        if (typeof r.durationMs === "number") parts.push(`${(r.durationMs / 1000).toFixed(1)}с`);
-        setSyncResult(parts.length > 0 ? `✓ ${parts.join(", ")}` : "✓ Синхронизировано");
-        await fetchData(table, dateRange, filters, page);
-      } else {
-        setSyncResult(`✗ ${json.error ?? "Ошибка синхронизации"}`);
-      }
-    } catch (err) {
-      setSyncResult(`✗ ${err instanceof Error ? err.message : "Ошибка"}`);
-    } finally {
-      setSyncing(false);
-    }
-  }, [dateRange, table, filters, page, fetchData]);
-
-  const columns = data?.rows[0] ? Object.keys(data.rows[0]) : [];
-  const rows = data?.rows ?? [];
-  const total = data?.total ?? 0;
-  const hasFilters = Object.values(filters).some(Boolean);
-  const totalPages = Math.ceil(total / PAGE_SIZE) || 1;
-  const rowStart = page * PAGE_SIZE + 1;
-  const rowEnd = Math.min((page + 1) * PAGE_SIZE, total);
+  const views: { key: View; label: string }[] = [
+    { key: "all_calls", label: "Все звонки" },
+    { key: "cohorts", label: "Когорты" },
+    { key: "detail", label: "Детализация" },
+  ];
 
   return (
     <div className="flex flex-col gap-4 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
-      <div className="glass-panel rounded-2xl px-5 py-3 flex flex-wrap gap-2 items-center border border-white/5">
-        <span className="text-[10px] uppercase tracking-widest text-slate-400 mr-2">Таблица</span>
-        {TABLE_LABELS.map(({ key, label }) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
-              setTable(key);
+      {/* Filter bar */}
+      <div className="glass-panel rounded-2xl px-5 py-4 flex flex-col gap-3 border border-white/5">
+        {/* Row 1 */}
+        <div className="flex flex-wrap gap-2 items-center">
+          <CalendarPicker
+            mode="range"
+            value={dateRange}
+            onChange={(r) => {
+              setDateRange(r);
               setPage(0);
-              setFilters({});
-              pendingFiltersRef.current = {};
             }}
-            className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
-              table === key
-                ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
-                : "text-slate-400 hover:text-white border-transparent hover:border-white/5"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+            onClear={() => {
+              setDateRange(makeDefaultRange());
+              setPage(0);
+            }}
+          />
 
-        <div className="ml-auto flex items-center gap-3">
-          {syncResult && (
-            <span
-              className={`text-[10px] ${syncResult.startsWith("✓") ? "text-emerald-400" : "text-red-400"}`}
+          {([7, 14, 30, 90] as const).map((days) => (
+            <button
+              key={days}
+              type="button"
+              onClick={() => setQuickRange(days)}
+              className="text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white hover:bg-slate-700/60 transition-all"
             >
-              {syncResult}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={handleSync}
-            disabled={syncing}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-semibold hover:bg-blue-500/30 disabled:opacity-50 transition-all"
-          >
-            {syncing ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="w-3.5 h-3.5" />
-            )}
-            Синхронизировать
-          </button>
-        </div>
-      </div>
+              {days}д
+            </button>
+          ))}
 
-      <div className="glass-panel rounded-2xl px-5 py-3 flex flex-wrap gap-3 items-center border border-white/5">
-        <CalendarPicker
-          mode="range"
-          value={dateRange}
-          onChange={(r) => {
-            setDateRange(r);
-            setPage(0);
-          }}
-          onClear={() => {
-            setDateRange(makeDefaultRange());
-            setPage(0);
-          }}
-        />
-
-        {([7, 14, 30, 90] as const).map((days) => (
-          <button
-            key={days}
-            type="button"
-            onClick={() => setQuickRange(days)}
-            className="text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white hover:bg-slate-700/60 transition-all"
-          >
-            {days}д
-          </button>
-        ))}
-
-        {TABLE_CONFIG[table].filterCols.map((col) => (
+          {/* Manager select */}
           <select
-            key={col}
-            value={pendingFiltersRef.current[col] ?? ""}
-            onChange={(e) => handleFilterChange(col, e.target.value)}
+            value={manager}
+            onChange={(e) => {
+              setManager(e.target.value);
+              setPage(0);
+            }}
             className="bg-slate-800/60 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
           >
-            <option value="">Все ({colLabel(col)})</option>
-            {data?.filterOptions[col]?.map((v) => (
-              <option key={v} value={v}>
-                {v}
+            <option value="">Все менеджеры</option>
+            {managers.map((m) => (
+              <option key={m} value={m}>
+                {m}
               </option>
             ))}
           </select>
-        ))}
 
-        {hasFilters && (
-          <button
-            type="button"
-            onClick={() => {
-              if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
-              setFilters({});
-              pendingFiltersRef.current = {};
+          {/* Category select */}
+          <select
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value);
               setPage(0);
             }}
-            className="text-[10px] text-slate-400 hover:text-red-400 transition-colors"
+            className="bg-slate-800/60 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
           >
-            ✕ сбросить
-          </button>
-        )}
-      </div>
+            <option value="">Все категории</option>
+            {["A", "B", "C", "D", "E"].map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
 
-      <div className="flex items-center gap-4 px-1">
-        <span className="text-xs text-slate-400">
-          {loading
-            ? "Загрузка..."
-            : `${total.toLocaleString("ru")} строк · показано ${rowStart}–${rowEnd}`}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            disabled={page === 0 || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ‹
-          </button>
-          <span className="text-xs text-slate-400">
-            Стр. {page + 1} / {totalPages}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPage((p) => p + 1)}
-            disabled={(page + 1) * PAGE_SIZE >= total || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ›
-          </button>
+          {/* SLA range pills */}
+          {config.slaRanges.length > 0 && (
+            <div className="flex items-center gap-1">
+              <PillBtn active={slaRange === ""} onClick={() => { setSlaRange(""); setPage(0); }} accent="purple">
+                Все SLA
+              </PillBtn>
+              {config.slaRanges.map((r) => (
+                <PillBtn
+                  key={r.value}
+                  active={slaRange === r.value}
+                  onClick={() => { setSlaRange(r.value); setPage(0); }}
+                  accent="purple"
+                >
+                  {r.label}
+                </PillBtn>
+              ))}
+            </div>
+          )}
+
+          {/* Pipeline pills (b2g only) */}
+          {config.hasPipeline && (
+            <div className="flex items-center gap-1">
+              <PillBtn active={pipeline === ""} onClick={() => { setPipeline(""); setPage(0); }}>
+                Все воронки
+              </PillBtn>
+              {config.pipelines.map((p) => (
+                <PillBtn
+                  key={p}
+                  active={pipeline === p}
+                  onClick={() => { setPipeline(p); setPage(0); }}
+                >
+                  {p}
+                </PillBtn>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Row 2: Statuses multi-select */}
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="relative" ref={statusDropdownRef}>
+            <button
+              type="button"
+              onClick={() => setStatusOpen((v) => !v)}
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
+                selectedStatuses.length > 0
+                  ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                  : "text-slate-400 hover:text-white border-white/10 bg-slate-800/60"
+              }`}
+            >
+              {selectedStatuses.length > 0 ? `Статусы (${selectedStatuses.length})` : "Статусы"}
+            </button>
+
+            {statusOpen && (
+              <div className="absolute top-full mt-2 left-0 bg-slate-900 border border-white/10 rounded-xl shadow-xl z-50 w-72 max-h-72 overflow-y-auto">
+                <div className="p-2 border-b border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedStatuses([]); setPage(0); }}
+                    className="text-[10px] text-slate-400 hover:text-white transition-colors px-2"
+                  >
+                    Снять все
+                  </button>
+                </div>
+                <div className="p-1">
+                  {config.statuses.map((s) => (
+                    <label key={s} className="flex items-center gap-2 px-3 py-2 hover:bg-white/[0.04] rounded-lg cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedStatuses.includes(s)}
+                        onChange={() => toggleStatus(s)}
+                        className="w-3.5 h-3.5 accent-blue-500"
+                      />
+                      <span className="text-xs text-slate-300">{s}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {selectedStatuses.length > 0 && (
+            <button
+              type="button"
+              onClick={() => { setSelectedStatuses([]); setPage(0); }}
+              className="text-[10px] text-slate-400 hover:text-red-400 transition-colors"
+            >
+              ✕ сбросить статусы
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-white/10">
-                {columns.map((col) => (
-                  <th
-                    key={col}
-                    className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap"
-                  >
-                    {colLabel(col)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td
-                    colSpan={Math.max(columns.length, 1)}
-                    className="text-center py-16 text-slate-400"
-                  >
-                    <Loader2 className="w-5 h-5 animate-spin mx-auto" />
-                  </td>
-                </tr>
-              ) : rows.length === 0 ? (
-                <tr>
-                  <td
-                    colSpan={Math.max(columns.length, 1)}
-                    className="text-center py-16 text-slate-500 text-xs"
-                  >
-                    Нет данных за выбранный период
-                  </td>
-                </tr>
-              ) : (
-                rows.map((row, i) => (
-                  <tr
-                    key={i}
-                    className="border-t border-white/5 hover:bg-white/[0.03] transition-colors"
-                  >
-                    {columns.map((col) => (
-                      <td
-                        key={col}
-                        className="px-4 py-2.5 text-slate-200 whitespace-nowrap max-w-[200px] truncate"
-                        title={String(row[col] ?? "")}
-                      >
-                        {formatCell(col, row[col])}
-                      </td>
-                    ))}
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+      {/* View toggle */}
+      <div className="flex items-center gap-1 px-1">
+        {views.map(({ key, label }) => (
+          <PillBtn key={key} active={view === key} onClick={() => { setView(key); setPage(0); }}>
+            {label}
+          </PillBtn>
+        ))}
       </div>
+
+      {/* Tables */}
+      {view === "all_calls" && <AllCallsTable rows={allCallsRows} loading={loading} />}
+      {view === "cohorts" && <CohortsTable rows={cohortsRows} loading={loading} />}
+      {view === "detail" && (
+        <DetailTable
+          rows={detailRows}
+          loading={loading}
+          total={data?.total ?? 0}
+          page={page}
+          onPageChange={setPage}
+        />
+      )}
     </div>
   );
 }
