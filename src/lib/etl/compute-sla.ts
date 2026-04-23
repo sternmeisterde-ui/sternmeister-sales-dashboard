@@ -15,10 +15,17 @@
 
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db";
-import { masterManagers } from "@/lib/db/schema-existing";
+import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { leadsCohort, sla, communications } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql, eq, inArray } from "drizzle-orm";
 import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
+
+// Parse "HH:MM" → hour as number (0–23). Returns null on unparsable.
+function parseHour(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const h = Number(s.split(":")[0]);
+  return Number.isFinite(h) ? h : null;
+}
 
 export async function computeSla(
   fromDate: Date,
@@ -52,18 +59,35 @@ export async function computeSla(
 
   if (leads.length === 0) return 0;
 
-  // Load per-manager shift start hours from master_managers.shift_start_time ("09:00", "11:00", …)
+  // Load shift-start hours with two layers of precedence:
+  //   1. manager_schedule.shift_start_time for the exact call date (historical snapshot)
+  //   2. master_managers.shift_start_time (current default)
+  //   3. fallback → 09:00
   const managerRows = await db.select({
+    id: masterManagers.id,
     name: masterManagers.name,
     shiftStartTime: masterManagers.shiftStartTime,
   }).from(masterManagers);
 
-  const shiftHourByManager = new Map<string, number>();
+  const defaultShiftHourByManager = new Map<string, number>();
+  const managerIdByName = new Map<string, string>();
   for (const m of managerRows) {
-    if (m.shiftStartTime) {
-      const h = Number(m.shiftStartTime.split(":")[0]);
-      if (!Number.isNaN(h)) shiftHourByManager.set(m.name, h);
-    }
+    managerIdByName.set(m.name, m.id);
+    const h = parseHour(m.shiftStartTime);
+    if (h !== null) defaultShiftHourByManager.set(m.name, h);
+  }
+
+  const scheduleRows = await db.select({
+    userId: managerSchedule.userId,
+    scheduleDate: managerSchedule.scheduleDate,
+    shiftStartTime: managerSchedule.shiftStartTime,
+  }).from(managerSchedule);
+
+  // Key: `${managerId}|${YYYY-MM-DD}` → hour
+  const scheduleShiftHour = new Map<string, number>();
+  for (const r of scheduleRows) {
+    const h = parseHour(r.shiftStartTime);
+    if (h !== null) scheduleShiftHour.set(`${r.userId}|${r.scheduleDate}`, h);
   }
 
   // Neon HTTP returns `timestamp` (no-tz) columns as bare strings ("2026-04-22 18:17:15").
@@ -143,9 +167,19 @@ export async function computeSla(
     const slaFirstCallCalSec = comms.firstCallOutAt
       ? calendarSeconds(slaStart, comms.firstCallOutAt)
       : null;
-    // SLA from shift start: seconds from the manager's personal shift start to first call.
-    // Uses shift_start_time from master_managers (default 09:00 if not set).
-    const managerShiftHour = lead.manager ? (shiftHourByManager.get(lead.manager) ?? 9) : 9;
+    // SLA from shift start: per-day shift from manager_schedule if present, else master_managers default, else 09:00.
+    let managerShiftHour = 9;
+    if (lead.manager) {
+      const managerId = managerIdByName.get(lead.manager);
+      if (comms.firstCallOutAt && managerId) {
+        const callDate = comms.firstCallOutAt.toISOString().slice(0, 10); // UTC date; business-hours in Berlin may shift <= 1h but acceptable
+        const perDay = scheduleShiftHour.get(`${managerId}|${callDate}`);
+        if (perDay !== undefined) managerShiftHour = perDay;
+        else managerShiftHour = defaultShiftHourByManager.get(lead.manager) ?? 9;
+      } else {
+        managerShiftHour = defaultShiftHourByManager.get(lead.manager) ?? 9;
+      }
+    }
     const slaFirstCallFromShiftSec = comms.firstCallOutAt
       ? secondsFromShiftStart(comms.firstCallOutAt, managerShiftHour)
       : null;

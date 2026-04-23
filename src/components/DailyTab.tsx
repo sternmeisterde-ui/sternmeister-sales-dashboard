@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
 import {
   TrendingUp,
   Users,
@@ -38,6 +38,8 @@ interface MetricRow {
 interface ManagerData {
   id: string;
   name: string;
+  /** line may be absent on old snapshots loaded from daily_snapshots. */
+  line?: string | null;
   kommoUserId: number | null;
   metrics: Array<{
     key: string;
@@ -46,6 +48,12 @@ interface ManagerData {
     percent: number | null;
   }>;
 }
+
+const LINE_TITLES: Record<string, string> = {
+  "1": "Первая линия — Квалификатор",
+  "2": "Вторая линия — Бератер",
+  "3": "Третья линия — Доведение",
+};
 
 interface Section {
   key: string;
@@ -473,14 +481,30 @@ function SummaryTimeTable({
 function ManagerMetricsTable({
   snapshot,
   title,
+  department,
   defaultCollapsed = false,
 }: {
   snapshot: DailySnapshot | undefined;
   title: string;
+  department: "b2g" | "b2b";
   defaultCollapsed?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const managers = useMemo(() => collectManagers(snapshot), [snapshot]);
+
+  // Group by line for B2G; B2B stays flat (no line concept)
+  const groupedManagers = useMemo(() => {
+    if (department !== "b2g") return [{ line: null as string | null, managers }];
+    const order = ["1", "2", "3"];
+    const groups: Array<{ line: string | null; managers: ManagerData[] }> = [];
+    for (const line of order) {
+      const bucket = managers.filter((m) => m.line === line);
+      if (bucket.length > 0) groups.push({ line, managers: bucket });
+    }
+    const orphans = managers.filter((m) => !m.line || !order.includes(m.line));
+    if (orphans.length > 0) groups.push({ line: null, managers: orphans });
+    return groups;
+  }, [managers, department]);
 
   // Build flat metric columns from all sections (non-header only)
   const metricColumns = useMemo(() => {
@@ -568,30 +592,47 @@ function ManagerMetricsTable({
             </tr>
           </thead>
           <tbody className="text-sm">
-            {/* Manager rows */}
-            {managers.map((mgr) => (
-              <tr
-                key={mgr.id}
-                className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
-              >
-                <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
-                  {mgr.name}
-                  {!mgr.kommoUserId && (
-                    <span className="ml-1 text-[9px] text-amber-500">! Kommo</span>
-                  )}
-                </td>
-                {metricColumns.map((col, i) => {
-                  const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
-                  return (
+            {/* Manager rows grouped by line (B2G) or flat (B2B) */}
+            {groupedManagers.map((group) => (
+              <Fragment key={group.line ?? "_flat"}>
+                {group.line !== null && (
+                  <tr className="light-panel-header border-t-2 border-white/10">
                     <td
-                      key={`${col.sectionKey}-${col.metricKey}-${i}`}
-                      className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
+                      colSpan={metricColumns.length + 1}
+                      className={`px-4 py-2 sticky left-0 z-10 text-[11px] uppercase tracking-widest font-bold ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} ${getSectionAccent(group.line).text}`}
                     >
-                      {val ?? "—"}
+                      {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
+                      <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
+                        · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
+                      </span>
                     </td>
-                  );
-                })}
-              </tr>
+                  </tr>
+                )}
+                {group.managers.map((mgr) => (
+                  <tr
+                    key={mgr.id}
+                    className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
+                  >
+                    <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                      {mgr.name}
+                      {!mgr.kommoUserId && (
+                        <span className="ml-1 text-[9px] text-amber-500">! Kommo</span>
+                      )}
+                    </td>
+                    {metricColumns.map((col, i) => {
+                      const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
+                      return (
+                        <td
+                          key={`${col.sectionKey}-${col.metricKey}-${i}`}
+                          className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
+                        >
+                          {val ?? "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </Fragment>
             ))}
 
             {/* Итого row */}
@@ -643,7 +684,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [saving, setSaving] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
-  const [scheduleManagers, setScheduleManagers] = useState<Array<{ id: string; name: string; line: string | null }>>([]);
+  const [scheduleManagers, setScheduleManagers] = useState<Array<{ id: string; name: string; line: string | null; shiftStartTime: string | null; shiftEndTime: string | null }>>([]);
 
   useEffect(() => {
     let abort = false;
@@ -919,6 +960,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         <ManagerMetricsTable
           snapshot={monthlySnapshot}
           title={`Месячный показатель — ${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
+          department={department}
         />
       )}
 
@@ -927,6 +969,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         <ManagerMetricsTable
           snapshot={selectedDaySnapshot}
           title={`Дневной показатель — ${formatDaySubLabel(selectedDaySnapshot.date)}`}
+          department={department}
         />
       )}
 
@@ -935,6 +978,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         <ManagerMetricsTable
           snapshot={data.months[selectedDayIdx]}
           title={`${MONTH_NAMES[selectedDayIdx]} ${selectedMonth.getFullYear()}`}
+          department={department}
         />
       )}
 

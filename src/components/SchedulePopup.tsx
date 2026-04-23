@@ -8,6 +8,8 @@ interface Manager {
   id: string;
   name: string;
   line: string | null;
+  shiftStartTime?: string | null;
+  shiftEndTime?: string | null;
 }
 
 interface SchedulePopupProps {
@@ -103,6 +105,33 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   const [loading, setLoading] = useState(false);
   const [saving,  setSaving]  = useState(false);
   const [dirty,   setDirty]   = useState(false);
+  const [shiftStart, setShiftStart] = useState<Record<string, string>>({});
+  const [shiftEnd,   setShiftEnd]   = useState<Record<string, string>>({});
+
+  // Initialize shift maps from managers prop when popup opens
+  useEffect(() => {
+    if (!isOpen) return;
+    const s: Record<string, string> = {};
+    const e: Record<string, string> = {};
+    for (const m of managers) {
+      s[m.id] = m.shiftStartTime ?? "";
+      e[m.id] = m.shiftEndTime ?? "";
+    }
+    setShiftStart(s);
+    setShiftEnd(e);
+  }, [isOpen, managers]);
+
+  const saveShift = async (managerId: string, field: "shiftStartTime" | "shiftEndTime", value: string) => {
+    try {
+      await fetch("/api/daily/managers", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: managerId, [field]: value || null }),
+      });
+    } catch (e) {
+      console.error("Failed to save shift:", e);
+    }
+  };
 
   // Picker rendered via fixed portal to escape overflow clipping
   const [picker, setPicker] = useState<PickerState | null>(null);
@@ -195,10 +224,26 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   const handleSave = async () => {
     setSaving(true);
     try {
-      const entries: Array<{ userId: string; date: string; scheduleValue: string }> = [];
+      const entries: Array<{
+        userId: string;
+        date: string;
+        scheduleValue: string;
+        shiftStartTime: string | null;
+        shiftEndTime: string | null;
+      }> = [];
       for (const [managerId, row] of Object.entries(grid)) {
+        const s = shiftStart[managerId]?.trim() || null;
+        const e = shiftEnd[managerId]?.trim() || null;
         for (let d = 0; d < row.length; d++) {
-          if (row[d]) entries.push({ userId: managerId, date: fmtDate(year, mo, d + 1), scheduleValue: row[d] });
+          if (row[d]) {
+            entries.push({
+              userId: managerId,
+              date: fmtDate(year, mo, d + 1),
+              scheduleValue: row[d],
+              shiftStartTime: s,
+              shiftEndTime: e,
+            });
+          }
         }
       }
       await fetch("/api/daily/schedule", {
@@ -325,8 +370,30 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
                           const row = grid[m.id] || Array(daysCount).fill("");
                           return (
                             <tr key={m.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                              <td className="sticky left-0 z-10 bg-slate-900 px-3 py-1 text-[11px] text-slate-300 font-medium whitespace-nowrap">
-                                {m.name}
+                              <td className="sticky left-0 z-10 bg-slate-900 px-3 py-1.5 text-[11px] text-slate-200 font-medium whitespace-nowrap">
+                                <div className="flex flex-col gap-1">
+                                  <span>{m.name}</span>
+                                  <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                                    <span>с</span>
+                                    <input
+                                      type="text"
+                                      value={shiftStart[m.id] ?? ""}
+                                      onChange={(e) => setShiftStart((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                                      onBlur={(e) => saveShift(m.id, "shiftStartTime", e.target.value)}
+                                      placeholder="09:00"
+                                      className="w-12 bg-transparent border border-white/15 rounded px-1 py-0.5 text-[10px] font-mono text-white focus:border-blue-500/60 focus:outline-none text-center placeholder-slate-600"
+                                    />
+                                    <span>до</span>
+                                    <input
+                                      type="text"
+                                      value={shiftEnd[m.id] ?? ""}
+                                      onChange={(e) => setShiftEnd((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                                      onBlur={(e) => saveShift(m.id, "shiftEndTime", e.target.value)}
+                                      placeholder="18:00"
+                                      className="w-12 bg-transparent border border-white/15 rounded px-1 py-0.5 text-[10px] font-mono text-white focus:border-blue-500/60 focus:outline-none text-center placeholder-slate-600"
+                                    />
+                                  </div>
+                                </div>
                               </td>
                               <td className="sticky left-[160px] z-10 bg-slate-900 px-1 py-1">
                                 <button onClick={() => fillRow(m.id, "8")} title="Заполнить все рабочими"

@@ -141,6 +141,7 @@ export const masterManagers = pgTable("master_managers", {
   inRolevki: boolean("in_rolevki").default(false),
   isActive: boolean("is_active").default(true),
   shiftStartTime: text("shift_start_time"),           // "09:00", "10:00", etc. (null = default 09:00)
+  shiftEndTime: text("shift_end_time"),               // "18:00", "17:00", etc. (null = default 18:00)
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
@@ -162,10 +163,12 @@ export const dailyPlans = pgTable("daily_plans", {
 
 export const managerSchedule = pgTable("manager_schedule", {
   id: serial("id").primaryKey(),
-  userId: uuid("user_id").notNull().references(() => d1Users.id),
+  userId: uuid("user_id").notNull().references(() => masterManagers.id),
   scheduleDate: text("schedule_date").notNull(),     // 'YYYY-MM-DD'
   isOnLine: boolean("is_on_line").notNull().default(true),
   scheduleValue: text("schedule_value"),              // "8", "-", "о", etc.
+  shiftStartTime: text("shift_start_time"),           // snapshot of shift start on this date, "HH:MM"
+  shiftEndTime: text("shift_end_time"),               // snapshot of shift end on this date, "HH:MM"
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

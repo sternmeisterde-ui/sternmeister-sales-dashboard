@@ -1,7 +1,7 @@
 // DB queries for the Daily tab — plans CRUD + manager-kommo mapping
-import { eq, and, sql } from "drizzle-orm";
-import { db, getDbForDepartment } from "./index";
-import { d1Users, r1Users, dailyPlans, managerSchedule, dailySnapshots } from "./schema-existing";
+import { eq, and, sql, inArray } from "drizzle-orm";
+import { db } from "./index";
+import { dailyPlans, managerSchedule, dailySnapshots, masterManagers } from "./schema-existing";
 
 export interface ManagerRow {
   id: string;
@@ -12,23 +12,26 @@ export interface ManagerRow {
 }
 
 /**
- * Get all active managers with their Kommo user IDs for a given department
- * B2G → d1_users (D1 branch), B2B → r1_users (R1 branch)
+ * Get active managers for a department from the `master_managers` single source of truth.
+ * Includes both `manager` and `rop` roles (ROPs also make calls and count toward line metrics).
  */
 export async function getManagersWithKommo(department: string = "b2g"): Promise<ManagerRow[]> {
-  const usersTable = department === "b2b" ? r1Users : d1Users;
-  const deptDb = getDbForDepartment(department);
-
-  const rows = await deptDb
+  const rows = await db
     .select({
-      id: usersTable.id,
-      name: usersTable.name,
-      line: usersTable.line,
-      kommoUserId: usersTable.kommoUserId,
-      role: usersTable.role,
+      id: masterManagers.id,
+      name: masterManagers.name,
+      line: masterManagers.line,
+      kommoUserId: masterManagers.kommoUserId,
+      role: masterManagers.role,
     })
-    .from(usersTable)
-    .where(eq(usersTable.isActive, true));
+    .from(masterManagers)
+    .where(
+      and(
+        eq(masterManagers.department, department),
+        eq(masterManagers.isActive, true),
+        inArray(masterManagers.role, ["manager", "rop"]),
+      ),
+    );
 
   return rows;
 }
@@ -157,12 +160,14 @@ export async function getScheduleForDate(dateStr: string): Promise<Map<string, b
  */
 export async function getFullScheduleForDate(
   dateStr: string
-): Promise<Array<{ userId: string; isOnLine: boolean; scheduleValue: string | null }>> {
+): Promise<Array<{ userId: string; isOnLine: boolean; scheduleValue: string | null; shiftStartTime: string | null; shiftEndTime: string | null }>> {
   const rows = await db
     .select({
       userId: managerSchedule.userId,
       isOnLine: managerSchedule.isOnLine,
       scheduleValue: managerSchedule.scheduleValue,
+      shiftStartTime: managerSchedule.shiftStartTime,
+      shiftEndTime: managerSchedule.shiftEndTime,
     })
     .from(managerSchedule)
     .where(eq(managerSchedule.scheduleDate, dateStr));
@@ -175,13 +180,15 @@ export async function getFullScheduleForDate(
  */
 export async function getScheduleForMonth(
   monthStr: string
-): Promise<Array<{ userId: string; scheduleDate: string; isOnLine: boolean; scheduleValue: string | null }>> {
+): Promise<Array<{ userId: string; scheduleDate: string; isOnLine: boolean; scheduleValue: string | null; shiftStartTime: string | null; shiftEndTime: string | null }>> {
   const rows = await db
     .select({
       userId: managerSchedule.userId,
       scheduleDate: managerSchedule.scheduleDate,
       isOnLine: managerSchedule.isOnLine,
       scheduleValue: managerSchedule.scheduleValue,
+      shiftStartTime: managerSchedule.shiftStartTime,
+      shiftEndTime: managerSchedule.shiftEndTime,
     })
     .from(managerSchedule)
     .where(sql`${managerSchedule.scheduleDate} LIKE ${monthStr + "%"}`);
@@ -197,6 +204,8 @@ export async function setSchedule(
   dateStr: string,
   isOnLine: boolean,
   scheduleValue?: string | null,
+  shiftStartTime?: string | null,
+  shiftEndTime?: string | null,
 ): Promise<void> {
   // Check if exists
   const existing = await db
@@ -213,7 +222,13 @@ export async function setSchedule(
   if (existing.length > 0) {
     await db
       .update(managerSchedule)
-      .set({ isOnLine, scheduleValue: scheduleValue ?? null, updatedAt: new Date() })
+      .set({
+        isOnLine,
+        scheduleValue: scheduleValue ?? null,
+        shiftStartTime: shiftStartTime ?? null,
+        shiftEndTime: shiftEndTime ?? null,
+        updatedAt: new Date(),
+      })
       .where(eq(managerSchedule.id, existing[0].id));
   } else {
     await db.insert(managerSchedule).values({
@@ -221,6 +236,8 @@ export async function setSchedule(
       scheduleDate: dateStr,
       isOnLine,
       scheduleValue: scheduleValue ?? null,
+      shiftStartTime: shiftStartTime ?? null,
+      shiftEndTime: shiftEndTime ?? null,
     });
   }
 }

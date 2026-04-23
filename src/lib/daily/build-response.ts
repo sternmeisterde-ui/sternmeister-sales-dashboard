@@ -1,20 +1,20 @@
 // Shared logic for building Daily API responses
 // Used by both /api/daily and /api/daily/range routes
 import { cached } from "@/lib/kommo/cache";
-import { getCallNotes, getLeads, getTasks, getStatusChangeCount } from "@/lib/kommo/client";
+import { getLeads, getTasks, getStatusChangeCount } from "@/lib/kommo/client";
 import {
-  aggregateCallMetrics,
   aggregateLeadMetrics,
   aggregateLeadFunnelMetrics,
   aggregateTaskMetrics,
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
+import { getAnalyticsCallMetricsByMaster } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
 import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
-import type { KommoLead, KommoTask, KommoCallNote } from "@/lib/kommo/types";
+import type { KommoLead, KommoTask } from "@/lib/kommo/types";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkEvaluations, okkCalls } from "@/lib/db/schema-okk";
 import { getDbForDepartment } from "@/lib/db";
@@ -300,18 +300,18 @@ function getISOWeek(date: Date): number {
   return Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
 }
 
-function getMaxPages(period: string): { leadsPages: number; closedPages: number; callPages: number } {
+function getMaxPages(period: string): { leadsPages: number; closedPages: number } {
   switch (period) {
     case "day":
-      return { leadsPages: 10, closedPages: 3, callPages: 10 };
+      return { leadsPages: 10, closedPages: 3 };
     case "week":
-      return { leadsPages: 10, closedPages: 5, callPages: 15 };
+      return { leadsPages: 10, closedPages: 5 };
     case "month":
-      return { leadsPages: 10, closedPages: 10, callPages: 20 };
+      return { leadsPages: 10, closedPages: 10 };
     case "year":
-      return { leadsPages: 10, closedPages: 20, callPages: 30 };
+      return { leadsPages: 10, closedPages: 20 };
     default:
-      return { leadsPages: 10, closedPages: 5, callPages: 10 };
+      return { leadsPages: 10, closedPages: 5 };
   }
 }
 
@@ -383,7 +383,7 @@ export async function buildDailyResponseCached(department: string, period: strin
  */
 export async function buildDailyResponse(department: string, period: string, dateStr: string, isHistorical = false) {
   const { from, to, periodType, periodDate } = getDateRange(period, dateStr);
-  const { leadsPages, closedPages, callPages } = getMaxPages(period);
+  const { leadsPages, closedPages } = getMaxPages(period);
 
   // Department-aware pipeline/status IDs
   const allPipelineIds = getPipelineIds(department);
@@ -412,10 +412,14 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const plans = monthlyPlans;
 
+  // Schedule-driven: when any schedule rows exist for the date, managers WITHOUT
+  // a row are treated as off (not on shift). Only when the day is entirely
+  // unscheduled (scheduleMap === null) do we fall back to counting everyone.
+  // Schedule values "8" (полный) and "4" (неполный) → isOnLine = true; "-" / "о" → false.
   const isManagerOnLine = (managerId: string): boolean => {
     if (scheduleMap === null) return true;
     const entry = scheduleMap.get(managerId);
-    if (entry === undefined) return true;
+    if (entry === undefined) return false;
     return entry;
   };
 
@@ -426,10 +430,6 @@ export async function buildDailyResponse(department: string, period: string, dat
   const onLineManagerIds = allManagers
     .filter((m) => isManagerOnLine(m.id))
     .map((m) => m.id);
-
-  const kommoUserIds = managers
-    .map((m) => m.kommoUserId)
-    .filter((id): id is number => id !== null);
 
   const closedDateFilter = { field: "closed_at" as const, from, to };
 
@@ -457,13 +457,20 @@ export async function buildDailyResponse(department: string, period: string, dat
     ? { field: "closed_at" as const, from: to + 1, to: todayRange!.to }
     : null;
 
-  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, callNotes, termsWonLeads, newLeadsInPeriod, termAACount, closedAfterDate] = await Promise.all([
+  const trackAnalyticsError = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[Analytics] call metrics: ${msg}`);
+    return new Map<string, UserCallMetrics>();
+  };
+
+  const [snapshotActiveLeads, tasks, wonLeads, lostLeads, analyticsCallMap, termsWonLeads, newLeadsInPeriod, termAACount, closedAfterDate] = await Promise.all([
     // Snapshot leads: always fetch (cached across all days in range, one Kommo call)
     getLeads(allPipelineIds, allActiveStatusIds, leadsPages).catch(trackError("snapshot leads")),
     isHistorical ? Promise.resolve([] as KommoTask[]) : getTasks(false).catch(trackError("tasks")),
     getLeads(allPipelineIds, [142], closedPages, closedDateFilter).catch(trackError("won leads")),
     getLeads(allPipelineIds, [143], closedPages, closedDateFilter).catch(trackError("lost leads")),
-    getCallNotes(from, to, kommoUserIds, callPages).catch(trackError("call notes")),
+    // Call metrics come from the analytics DB (integrator mirror). Keyed by master_managers.id.
+    getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch(trackAnalyticsError),
     getLeads([firstLinePipelineId], [142], closedPages, termsDateFilter).catch(trackError("terms won")),
     getLeads([firstLinePipelineId], undefined, leadsPages, createdDateFilter).catch(trackError("new leads")),
     getStatusChangeCount(from, to, beraterPipelineId, [102183943, 102183947]).catch(trackError("term AA events")),
@@ -473,7 +480,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       : Promise.resolve([] as KommoLead[]),
   ]) as [
     KommoLead[] | undefined, KommoTask[] | undefined, KommoLead[] | undefined,
-    KommoLead[] | undefined, KommoCallNote[] | undefined, KommoLead[] | undefined,
+    KommoLead[] | undefined, Map<string, UserCallMetrics>, KommoLead[] | undefined,
     KommoLead[] | undefined, number | undefined, KommoLead[] | undefined
   ];
 
@@ -482,7 +489,6 @@ export async function buildDailyResponse(department: string, period: string, dat
   const safeTasks = tasks ?? [];
   const safeWonLeads = wonLeads ?? [];
   const safeLostLeads = lostLeads ?? [];
-  const safeCallNotes = callNotes ?? [];
   const safeTermsWonLeads = termsWonLeads ?? [];
   const safeNewLeadsInPeriod = newLeadsInPeriod ?? [];
   const safeTermAACount = termAACount ?? 0;
@@ -524,7 +530,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     byPipeline[l.pipeline_id] = (byPipeline[l.pipeline_id] || 0) + 1;
   }
   console.log(
-    `[Daily API] ${department}/${period}/${dateStr}: allLeads=${safeSnapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${safeWonLeads.length} lost=${safeLostLeads.length} calls=${safeCallNotes.length} terms=${safeTermsWonLeads.length} managers=${managers.length} line1=${managers.filter((m) => m.line === "1").length}`
+    `[Daily API] ${department}/${period}/${dateStr}: allLeads=${safeSnapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${safeWonLeads.length} lost=${safeLostLeads.length} callMetrics=${analyticsCallMap.size} terms=${safeTermsWonLeads.length} managers=${managers.length} line1=${managers.filter((m) => m.line === "1").length}`
   );
 
   const flowActiveLeads = safeSnapshotActiveLeads.filter(
@@ -534,7 +540,9 @@ export async function buildDailyResponse(department: string, period: string, dat
   const snapshotLeads = [...safeSnapshotActiveLeads, ...safeWonLeads, ...safeLostLeads];
   const flowLeads = [...flowActiveLeads, ...safeWonLeads, ...safeLostLeads];
 
-  const callMetricsMap = aggregateCallMetrics(safeCallNotes);
+  // Analytics-backed per-master-id call map. Falls back to empty map on failure
+  // (already handled upstream in trackAnalyticsError → new Map()).
+  const callMetricsMap = analyticsCallMap;
   const leadMetricsMap = aggregateLeadMetrics(snapshotLeads, from, to);
   const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
@@ -627,16 +635,17 @@ export async function buildDailyResponse(department: string, period: string, dat
       ? managers // B2B: all managers participate in all sections
       : managers.filter((m) => section.key === "funnel" || m.line === section.dbLine);
 
-    const sectionKommoUserIds = sectionManagers
-      .map((m) => m.kommoUserId)
-      .filter((id): id is number => id !== null);
-
-    const sectionCallMetrics = sectionKommoUserIds
-      .map((id) => callMetricsMap.get(id))
+    // Calls: keyed by master_managers.id (from analytics DB).
+    const sectionCallMetrics = sectionManagers
+      .map((m) => callMetricsMap.get(m.id))
       .filter((m): m is UserCallMetrics => m !== undefined);
 
     const summaryCallMetrics = sumCallMetrics(sectionCallMetrics);
 
+    // Tasks still come from Kommo and are keyed by kommo user id.
+    const sectionKommoUserIds = sectionManagers
+      .map((m) => m.kommoUserId)
+      .filter((id): id is number => id !== null);
     let totalOverdue = 0;
     for (const uid of sectionKommoUserIds) {
       totalOverdue += taskMetricsMap.get(uid)?.overdueTasks ?? 0;
@@ -748,6 +757,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     let managerData: Array<{
       id: string;
       name: string;
+      line: string | null;
       kommoUserId: number | null;
       metrics: Array<{ key: string; plan: string | null; fact: string | null; percent: number | null }>;
     }> = [];
@@ -756,7 +766,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       // B2B per-manager: sales (Бух/Мед) and calls
       managerData = sectionManagers.map((mgr) => {
         const uid = mgr.kommoUserId;
-        const mgrCallMetrics = uid ? callMetricsMap.get(uid) : undefined;
+        const mgrCallMetrics = callMetricsMap.get(mgr.id);
 
         const mgrMetrics = section.metrics
           .filter((m) => !m.isGroupHeader)
@@ -821,7 +831,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             return { key: metric.key, plan, fact, percent };
           });
 
-        return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
+        return { id: mgr.id, name: mgr.name, line: mgr.line, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
       });
     } else if (section.key === "funnel") {
       const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2" || m.line === "3");
@@ -917,7 +927,7 @@ export async function buildDailyResponse(department: string, period: string, dat
               return { key: metric.key, plan: null as string | null, fact, percent: null as number | null };
             });
 
-          return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
+          return { id: mgr.id, name: mgr.name, line: mgr.line, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
         });
       }
     }
@@ -925,7 +935,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     if (section.perManager && department !== "b2b") {
       managerData = sectionManagers.map((mgr) => {
         const kommoId = mgr.kommoUserId;
-        const mgrCallMetrics = kommoId ? callMetricsMap.get(kommoId) : undefined;
+        const mgrCallMetrics = callMetricsMap.get(mgr.id);
         const mgrOverdue = kommoId ? (taskMetricsMap.get(kommoId)?.overdueTasks ?? 0) : 0;
         const mgrFacts = buildUserFacts(mgrCallMetrics, mgrOverdue, section);
 
@@ -979,7 +989,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             return { key: metric.key, plan, fact, percent };
           });
 
-        return { id: mgr.id, name: mgr.name, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
+        return { id: mgr.id, name: mgr.name, line: mgr.line, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
       });
     }
 

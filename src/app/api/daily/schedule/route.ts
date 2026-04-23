@@ -37,18 +37,25 @@ export async function PUT(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Bulk update with scheduleValue: { entries: [{ userId, date, scheduleValue }] }
+    // Bulk update: { entries: [{ userId, date, scheduleValue, shiftStartTime?, shiftEndTime? }] }
     if (body.entries && Array.isArray(body.entries)) {
       for (const entry of body.entries) {
         const isOnLine = scheduleValueToIsOnLine(entry.scheduleValue);
-        await setSchedule(entry.userId, entry.date, isOnLine, entry.scheduleValue ?? null);
+        await setSchedule(
+          entry.userId,
+          entry.date,
+          isOnLine,
+          entry.scheduleValue ?? null,
+          entry.shiftStartTime ?? null,
+          entry.shiftEndTime ?? null,
+        );
       }
       clearCache();
       return NextResponse.json({ ok: true, count: body.entries.length });
     }
 
-    // Single update: { userId, date, isOnLine, scheduleValue? }
-    const { userId, date, isOnLine, scheduleValue } = body;
+    // Single update: { userId, date, isOnLine, scheduleValue?, shiftStartTime?, shiftEndTime? }
+    const { userId, date, isOnLine, scheduleValue, shiftStartTime, shiftEndTime } = body;
     if (!userId || !date) {
       return NextResponse.json(
         { error: "Missing required fields: userId, date" },
@@ -60,7 +67,14 @@ export async function PUT(req: NextRequest) {
       ? scheduleValueToIsOnLine(scheduleValue)
       : (isOnLine ?? true);
 
-    await setSchedule(userId, date, effectiveIsOnLine, scheduleValue ?? null);
+    await setSchedule(
+      userId,
+      date,
+      effectiveIsOnLine,
+      scheduleValue ?? null,
+      shiftStartTime ?? null,
+      shiftEndTime ?? null,
+    );
     clearCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
