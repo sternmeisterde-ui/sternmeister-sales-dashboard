@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3008:3008"
+      - "${HOST_PORT:-3008}:3008"
     # ───────────────────────────────────────────────────────────────
     # Env-variable whitelist. Only vars listed here reach the container.
     # Anything added to Dokploy's UI but NOT listed here is invisible to
@@ -35,6 +35,9 @@ services:
       # Roleplay audio servers
       - D1_API_URL=${D1_API_URL}
       - R1_API_URL=${R1_API_URL}
+
+      # ETL cron secret — protects /api/analytics/sync/cron from unauthorized calls
+      - CRON_SECRET=${CRON_SECRET}
 
       # Kommo CRM
       - KOMMO_ACCESS_TOKEN=${KOMMO_ACCESS_TOKEN}
