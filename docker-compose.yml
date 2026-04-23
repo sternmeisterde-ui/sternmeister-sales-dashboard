@@ -63,6 +63,34 @@ services:
       - sternmeister-network
       - dokploy-network
 
+  # ETL cron — calls /api/analytics/sync/cron every SYNC_INTERVAL_SECONDS
+  # (default 600s = 10 min). Pulls Kommo → Neon analytics incrementally.
+  # Talks to `app` over the internal docker network, not the public host.
+  etl-cron:
+    image: curlimages/curl:8.7.1
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      - CRON_SECRET=${CRON_SECRET}
+      - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS:-600}
+      - SYNC_START_DELAY_SECONDS=${SYNC_START_DELAY_SECONDS:-30}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[etl-cron] starting, interval=$${SYNC_INTERVAL_SECONDS}s";
+        sleep "$${SYNC_START_DELAY_SECONDS}";
+        while true; do
+          ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)";
+          http_status="$$(curl -sS -o /tmp/sync.out -w '%{http_code}' --max-time 290 \
+            -H "x-cron-secret: $${CRON_SECRET}" \
+            http://app:3008/api/analytics/sync/cron || echo '000')";
+          echo "[etl-cron] $${ts} http=$${http_status} body=$$(head -c 200 /tmp/sync.out)";
+          sleep "$${SYNC_INTERVAL_SECONDS}";
+        done
+    networks:
+      - sternmeister-network
+
   # Optional: Local PostgreSQL for development
   # Uncomment if you want to use local database instead of Neon
   # postgres:
