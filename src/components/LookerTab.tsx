@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Loader2, ExternalLink } from "lucide-react";
+import { Loader2, ExternalLink, ChevronDown } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // ─── Department config ──────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ type SliceCol = (typeof SLICE_OPTIONS)[number]["col"];
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type View = "all_calls" | "cohorts" | "detail" | "tlt";
+type View = "all_calls" | "cohorts" | "tlt";
 
 interface AllCallsRow {
   manager: string;
@@ -91,23 +91,13 @@ interface CohortsRow {
   outgoing_calls: number;
   messages_sent: number;
   success_pct: number | null;
+  success_calls: number;
+  total_all_calls: number;
   total_duration_sec: number;
   avg_calls_per_lead: number | null;
   avg_sla_first_call_sec: number | null;
   total_sla_first_call_sec: number;
-}
-
-interface DetailRow {
-  manager: string;
-  lead_id: number;
-  lead_created_at: string;
-  sla_start: string | null;
-  first_call_out_at: string | null;
-  success_calls: number;
-  total_calls: number;
-  avg_duration_sec: number | null;
-  sla_first_call_seconds: number | null;
-  sla_first_call_calendar_seconds: number | null;
+  sla_lead_count: number;
 }
 
 interface TltSummaryRow {
@@ -135,7 +125,7 @@ interface TltDetailRow {
 
 interface ApiResponse {
   view: string;
-  rows: AllCallsRow[] | CohortsRow[] | DetailRow[] | TltSummaryRow[] | TltDetailRow[];
+  rows: AllCallsRow[] | CohortsRow[] | TltSummaryRow[] | TltDetailRow[];
   total: number;
   filterOptions: { managers: string[] };
 }
@@ -144,9 +134,10 @@ interface ApiResponse {
 
 function fmtHMS(sec: number | null | undefined): string {
   if (sec == null) return "—";
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
+  const abs = Math.abs(Number(sec));
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = Math.floor(abs % 60);
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
@@ -208,37 +199,95 @@ function PillBtn({
   );
 }
 
-// ─── Totals helpers ──────────────────────────────────────────────────────────
+// ─── Compact dropdown filter ─────────────────────────────────────────────────
 
-function sumNum(rows: AllCallsRow[], key: keyof AllCallsRow): number {
-  let total = 0;
-  for (const r of rows) {
-    const v = r[key];
-    if (typeof v === "number") total += v;
-  }
-  return total;
+function FilterDropdown({
+  label,
+  activeLabel,
+  isActive,
+  open,
+  onToggle,
+  dropdownRef,
+  accent = "blue",
+  children,
+}: {
+  label: string;
+  activeLabel?: string;
+  isActive: boolean;
+  open: boolean;
+  onToggle: () => void;
+  dropdownRef: React.RefObject<HTMLDivElement | null>;
+  accent?: "blue" | "purple";
+  children: React.ReactNode;
+}) {
+  const activeClass =
+    accent === "purple"
+      ? "bg-purple-500/20 text-purple-400 border-purple-500/30"
+      : "bg-blue-500/20 text-blue-400 border-blue-500/30";
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
+          isActive
+            ? `${activeClass} border`
+            : "text-slate-400 hover:text-white border-white/10 bg-slate-800/60"
+        }`}
+      >
+        {isActive && activeLabel ? activeLabel : label}
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute top-full mt-2 left-0 bg-slate-900 border border-white/10 rounded-xl shadow-xl z-50 min-w-[130px]">
+          <div className="p-1">
+            {children}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-function sumNumC(rows: CohortsRow[], key: keyof CohortsRow): number {
-  let total = 0;
-  for (const r of rows) {
-    const v = r[key];
-    if (typeof v === "number") total += v;
-  }
-  return total;
+function DropdownItem({
+  active,
+  onClick,
+  children,
+  accent = "blue",
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  accent?: "blue" | "purple";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full text-left px-3 py-2 rounded-lg text-xs hover:bg-white/[0.06] transition-colors whitespace-nowrap ${
+        active
+          ? accent === "purple" ? "text-purple-400 font-semibold" : "text-blue-400 font-semibold"
+          : "text-slate-300"
+      }`}
+    >
+      {children}
+    </button>
+  );
 }
 
 // ─── Tables ──────────────────────────────────────────────────────────────────
 
 function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolean }) {
   const colCount = 8;
+  const safeRows = rows ?? [];
 
-  const totalCalls = sumNum(rows, "total_calls");
-  const totalOut = sumNum(rows, "outgoing_calls");
-  const totalIn = sumNum(rows, "incoming_calls");
-  const totalMsg = sumNum(rows, "messages_sent");
-  const totalSuccess = sumNum(rows, "success_calls");
-  const totalDur = sumNum(rows, "total_duration_sec");
+  const totalCalls = safeRows.reduce((s, r) => s + Number(r.total_calls), 0);
+  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const totalIn = safeRows.reduce((s, r) => s + Number(r.incoming_calls), 0);
+  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const totalSuccess = safeRows.reduce((s, r) => s + Number(r.success_calls), 0);
+  const totalDur = safeRows.reduce((s, r) => s + Number(r.total_duration_sec), 0);
   const totalPct = totalCalls > 0 ? Math.round((totalSuccess / totalCalls) * 100) : null;
 
   return (
@@ -261,7 +310,7 @@ function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolea
                   <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                 </td>
               </tr>
-            ) : rows.length === 0 ? (
+            ) : safeRows.length === 0 ? (
               <tr>
                 <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
                   Нет данных за выбранный период
@@ -269,7 +318,7 @@ function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolea
               </tr>
             ) : (
               <>
-                {rows.map((r, i) => (
+                {safeRows.map((r, i) => (
                   <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_calls)}</td>
@@ -302,23 +351,20 @@ function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolea
 
 function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean }) {
   const colCount = 9;
+  const safeRows = rows ?? [];
 
-  const totalLeads = sumNumC(rows, "lead_count");
-  const totalOut = sumNumC(rows, "outgoing_calls");
-  const totalMsg = sumNumC(rows, "messages_sent");
-  const totalDur = sumNumC(rows, "total_duration_sec");
-  const totalSlaSum = sumNumC(rows, "total_sla_first_call_sec");
-  const totalCalls = rows.reduce((acc, r) => {
-    const calls = r.avg_calls_per_lead != null ? r.avg_calls_per_lead * r.lead_count : 0;
-    return acc + calls;
-  }, 0);
-  const totalSucc = rows.reduce((acc, r) => {
-    const pct = r.success_pct != null ? r.success_pct / 100 : 0;
-    return acc + pct * (r.avg_calls_per_lead != null ? r.avg_calls_per_lead * r.lead_count : 0);
-  }, 0);
-  const totalPct = totalCalls > 0 ? Math.round((totalSucc / totalCalls) * 100) : null;
-  const avgCallsPerLead = totalLeads > 0 ? Math.round((totalCalls / totalLeads) * 100) / 100 : null;
-  const avgSla = rows.length > 0 ? Math.round(rows.reduce((a, r) => a + (r.avg_sla_first_call_sec ?? 0), 0) / rows.length) : null;
+  const totalLeads = safeRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const totalDur = safeRows.reduce((s, r) => s + Number(r.total_duration_sec), 0);
+  const totalSlaSum = safeRows.reduce((s, r) => s + Number(r.total_sla_first_call_sec), 0);
+  const totalAllCalls = safeRows.reduce((s, r) => s + Number(r.total_all_calls), 0);
+  const totalSuccessCalls = safeRows.reduce((s, r) => s + Number(r.success_calls), 0);
+  const totalSlaLeads = safeRows.reduce((s, r) => s + Number(r.sla_lead_count ?? 0), 0);
+
+  const totalPct = totalAllCalls > 0 ? Math.round((totalSuccessCalls / totalAllCalls) * 100) : null;
+  const avgCallsPerLead = totalLeads > 0 ? Math.round((totalAllCalls / totalLeads) * 100) / 100 : null;
+  const avgSla = totalSlaLeads > 0 ? Math.round(totalSlaSum / totalSlaLeads) : null;
 
   return (
     <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
@@ -326,7 +372,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="border-b border-white/10">
-              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA первый (ср)", "SLA первый (итого)"].map((h) => (
+              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA первый (ср)", "SLA первый (сумма)"].map((h) => (
                 <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
                   {h}
                 </th>
@@ -340,7 +386,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                   <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                 </td>
               </tr>
-            ) : rows.length === 0 ? (
+            ) : safeRows.length === 0 ? (
               <tr>
                 <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
                   Нет данных за выбранный период
@@ -348,7 +394,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
               </tr>
             ) : (
               <>
-                {rows.map((r, i) => (
+                {safeRows.map((r, i) => (
                   <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
@@ -356,7 +402,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? r.avg_calls_per_lead : "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? Number(r.avg_calls_per_lead) : "—"}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_first_call_sec)}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_sla_first_call_sec)}</td>
                   </tr>
@@ -381,110 +427,6 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
   );
 }
 
-function DetailTable({
-  rows,
-  loading,
-  total,
-  page,
-  onPageChange,
-}: {
-  rows: DetailRow[];
-  loading: boolean;
-  total: number;
-  page: number;
-  onPageChange: (p: number) => void;
-}) {
-  const colCount = 9;
-  const PAGE_SIZE = 100;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-white/10">
-                {["Менеджер", "Лид", "Успешных", "Всего", "TLT (ср)", "SLA звонок", "SLA тотал", "Дата лида", "Первый исх."].map((h) => (
-                  <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={colCount} className="text-center py-16 text-slate-400">
-                    <Loader2 className="w-5 h-5 animate-spin mx-auto" />
-                  </td>
-                </tr>
-              ) : rows.length === 0 ? (
-                <tr>
-                  <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
-                    Нет данных за выбранный период
-                  </td>
-                </tr>
-              ) : (
-                rows.map((r, i) => (
-                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
-                    <td className="px-4 py-2.5 text-slate-200">
-                      <a
-                        href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
-                      >
-                        {r.lead_id}
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    </td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.success_calls)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_calls)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_duration_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.sla_first_call_seconds)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.sla_first_call_calendar_seconds)}</td>
-                    <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">{fmtDate(r.lead_created_at)}</td>
-                    <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">{fmtDate(r.first_call_out_at)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between px-1">
-        <span className="text-xs text-slate-400">
-          {loading ? "Загрузка..." : `${fmtNum(total)} строк`}
-        </span>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onPageChange(Math.max(0, page - 1))}
-            disabled={page === 0 || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ‹
-          </button>
-          <span className="text-xs text-slate-400">
-            Стр {page + 1} / {totalPages}
-          </span>
-          <button
-            type="button"
-            onClick={() => onPageChange(page + 1)}
-            disabled={(page + 1) * PAGE_SIZE >= total || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ›
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── TLT Tables ──────────────────────────────────────────────────────────────
 
 function TltSummaryTable({
@@ -501,15 +443,20 @@ function TltSummaryTable({
   slice3Label: string;
 }) {
   const colCount = 9;
+  const safeRows = rows ?? [];
 
-  const totalLeads = rows.reduce((s, r) => s + Number(r.lead_count), 0);
-  const totalOut = rows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
-  const totalMsg = rows.reduce((s, r) => s + Number(r.messages_sent), 0);
-  const totalComms = rows.reduce((s, r) => s + Number(r.total_comms), 0);
-  const tltRows = rows.filter((r) => r.avg_tlt != null);
-  const totalAvgTlt = tltRows.length > 0 ? Math.round(tltRows.reduce((s, r) => s + Number(r.avg_tlt), 0) / tltRows.length) : null;
-  const gapRows = rows.filter((r) => r.avg_gap_sec != null);
-  const totalAvgGap = gapRows.length > 0 ? Math.round(gapRows.reduce((s, r) => s + Number(r.avg_gap_sec), 0) / gapRows.length) : null;
+  const totalLeads = safeRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const totalComms = safeRows.reduce((s, r) => s + Number(r.total_comms), 0);
+  const tltRows = safeRows.filter((r) => r.avg_tlt != null);
+  const totalSumTlt = tltRows.reduce((s, r) => s + Number(r.avg_tlt) * Number(r.lead_count), 0);
+  const totalLeadsWithTlt = tltRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const totalAvgTlt = totalLeadsWithTlt > 0 ? Math.round(totalSumTlt / totalLeadsWithTlt) : null;
+  const gapRows = safeRows.filter((r) => r.avg_gap_sec != null);
+  const totalSumGap = gapRows.reduce((s, r) => s + Number(r.avg_gap_sec) * Number(r.lead_count), 0);
+  const totalLeadsWithGap = gapRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const totalAvgGap = totalLeadsWithGap > 0 ? Math.round(totalSumGap / totalLeadsWithGap) : null;
 
   return (
     <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
@@ -517,16 +464,10 @@ function TltSummaryTable({
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="border-b border-white/10">
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                {slice1Label}
-              </th>
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                {slice2Label}
-              </th>
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                {slice3Label}
-              </th>
-              {["Кол-во лидов", "TLT средний", "Ср. время между звонками", "Исходящие", "Сообщений", "Всего коммуникаций"].map((h) => (
+              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice1Label}</th>
+              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice2Label}</th>
+              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice3Label}</th>
+              {["Кол-во лидов", "TLT средний", "Ср. между звонками", "Исходящие", "Сообщений", "Всего коммуникаций"].map((h) => (
                 <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
                   {h}
                 </th>
@@ -540,7 +481,7 @@ function TltSummaryTable({
                   <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                 </td>
               </tr>
-            ) : rows.length === 0 ? (
+            ) : safeRows.length === 0 ? (
               <tr>
                 <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
                   Нет данных за выбранный период
@@ -548,7 +489,7 @@ function TltSummaryTable({
               </tr>
             ) : (
               <>
-                {rows.map((r, i) => (
+                {safeRows.map((r, i) => (
                   <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param1 ?? "—"}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param2 ?? "—"}</td>
@@ -595,13 +536,14 @@ function TltDetailTable({
   const colCount = 8;
   const PAGE_SIZE = 100;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const safeRows = rows ?? [];
 
-  const totalOut = rows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
-  const totalMsg = rows.reduce((s, r) => s + Number(r.messages_sent), 0);
-  const totalComms = rows.reduce((s, r) => s + Number(r.total_comms), 0);
-  const tltRows = rows.filter((r) => r.tlt != null);
+  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const totalComms = safeRows.reduce((s, r) => s + Number(r.total_comms), 0);
+  const tltRows = safeRows.filter((r) => r.tlt != null);
   const totalAvgTlt = tltRows.length > 0 ? Math.round(tltRows.reduce((s, r) => s + Number(r.tlt), 0) / tltRows.length) : null;
-  const gapRows = rows.filter((r) => r.avg_gap_sec != null);
+  const gapRows = safeRows.filter((r) => r.avg_gap_sec != null);
   const totalAvgGap = gapRows.length > 0 ? Math.round(gapRows.reduce((s, r) => s + Number(r.avg_gap_sec), 0) / gapRows.length) : null;
 
   return (
@@ -625,7 +567,7 @@ function TltDetailTable({
                     <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                   </td>
                 </tr>
-              ) : rows.length === 0 ? (
+              ) : safeRows.length === 0 ? (
                 <tr>
                   <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
                     Нет данных за выбранный период
@@ -633,10 +575,10 @@ function TltDetailTable({
                 </tr>
               ) : (
                 <>
-                  {rows.map((r, i) => (
+                  {safeRows.map((r, i) => (
                     <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
                       <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager ?? "—"}</td>
-                      <td className="px-4 py-2.5 text-slate-300 whitespace-nowrap max-w-[180px] truncate">{r.current_status ?? "—"}</td>
+                      <td className="px-4 py-2.5 text-slate-300 max-w-[180px] truncate whitespace-nowrap">{r.current_status ?? "—"}</td>
                       <td className="px-4 py-2.5">
                         <a
                           href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
@@ -683,9 +625,7 @@ function TltDetailTable({
           >
             ‹
           </button>
-          <span className="text-xs text-slate-400">
-            Стр {page + 1} / {totalPages}
-          </span>
+          <span className="text-xs text-slate-400">Стр {page + 1} / {totalPages}</span>
           <button
             type="button"
             onClick={() => onPageChange(page + 1)}
@@ -716,7 +656,6 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [category, setCategory] = useState("");
   const [slaRange, setSlaRange] = useState("");
   const [pipeline, setPipeline] = useState("");
-  const [page, setPage] = useState(0);
   const [tltPage, setTltPage] = useState(0);
   const [slice1, setSlice1] = useState<SliceCol>("manager");
   const [slice2, setSlice2] = useState<SliceCol>("utm_source");
@@ -728,37 +667,47 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [tltDetailTotal, setTltDetailTotal] = useState(0);
   const [managers, setManagers] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [statusOpen, setStatusOpen] = useState(false);
+  const [slaOpen, setSlaOpen] = useState(false);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
 
   const statusDropdownRef = useRef<HTMLDivElement>(null);
+  const slaDropdownRef = useRef<HTMLDivElement>(null);
+  const pipelineDropdownRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Reset all filters when department changes
+  // Reset filters when department changes
   useEffect(() => {
     setManager("");
     setSelectedStatuses([]);
     setCategory("");
     setSlaRange("");
     setPipeline("");
-    setPage(0);
     setTltPage(0);
     setData(null);
     setTltSummaryRows([]);
     setTltDetailRows([]);
   }, [department]);
 
-  // Close status dropdown on outside click
+  // Close dropdowns on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target as Node)) {
         setStatusOpen(false);
+      }
+      if (slaDropdownRef.current && !slaDropdownRef.current.contains(e.target as Node)) {
+        setSlaOpen(false);
+      }
+      if (pipelineDropdownRef.current && !pipelineDropdownRef.current.contains(e.target as Node)) {
+        setPipelineOpen(false);
       }
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  // Fetch data on any filter/view/page/department change
+  // Fetch data
   useEffect(() => {
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
@@ -808,10 +757,6 @@ export default function LookerTab({ department }: LookerTabProps) {
         } else {
           const params = buildBaseParams();
           params.set("view", view);
-          if (view === "detail") {
-            params.set("limit", "100");
-            params.set("offset", String(page * 100));
-          }
           const res = await fetch(`/api/analytics/looker/data?${params}`, {
             signal: controller.signal,
           });
@@ -831,16 +776,14 @@ export default function LookerTab({ department }: LookerTabProps) {
     };
 
     fetchData();
-
     return () => controller.abort();
-  }, [department, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, page, tltPage, slice1, slice2, slice3, config.hasPipeline]);
+  }, [department, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, tltPage, slice1, slice2, slice3, config.hasPipeline]);
 
   const setQuickRange = useCallback((days: number) => {
     const end = new Date();
     const start = new Date();
     start.setDate(start.getDate() - (days - 1));
     setDateRange({ start, end });
-    setPage(0);
     setTltPage(0);
   }, []);
 
@@ -848,13 +791,14 @@ export default function LookerTab({ department }: LookerTabProps) {
     setSelectedStatuses((prev) =>
       prev.includes(status) ? prev.filter((s) => s !== status) : [...prev, status],
     );
-    setPage(0);
     setTltPage(0);
   }, []);
 
   const allCallsRows = (view === "all_calls" ? (data?.rows ?? []) : []) as AllCallsRow[];
   const cohortsRows = (view === "cohorts" ? (data?.rows ?? []) : []) as CohortsRow[];
-  const detailRows = (view === "detail" ? (data?.rows ?? []) : []) as DetailRow[];
+
+  const activeSlaLabel = config.slaRanges.find((r) => r.value === slaRange)?.label;
+  const activePipelineLabel = pipeline || undefined;
 
   const slice1Label = SLICE_OPTIONS.find((o) => o.col === slice1)?.label ?? slice1;
   const slice2Label = SLICE_OPTIONS.find((o) => o.col === slice2)?.label ?? slice2;
@@ -863,7 +807,6 @@ export default function LookerTab({ department }: LookerTabProps) {
   const views: { key: View; label: string }[] = [
     { key: "all_calls", label: "Все звонки" },
     { key: "cohorts", label: "Когорты" },
-    { key: "detail", label: "Детализация" },
     { key: "tlt", label: "TLT" },
   ];
 
@@ -876,16 +819,8 @@ export default function LookerTab({ department }: LookerTabProps) {
           <CalendarPicker
             mode="range"
             value={dateRange}
-            onChange={(r) => {
-              setDateRange(r);
-              setPage(0);
-              setTltPage(0);
-            }}
-            onClear={() => {
-              setDateRange(makeDefaultRange());
-              setPage(0);
-              setTltPage(0);
-            }}
+            onChange={(r) => { setDateRange(r); setTltPage(0); }}
+            onClear={() => { setDateRange(makeDefaultRange()); setTltPage(0); }}
           />
 
           {([7, 14, 30, 90] as const).map((days) => (
@@ -902,74 +837,68 @@ export default function LookerTab({ department }: LookerTabProps) {
           {/* Manager select */}
           <select
             value={manager}
-            onChange={(e) => {
-              setManager(e.target.value);
-              setPage(0);
-              setTltPage(0);
-            }}
+            onChange={(e) => { setManager(e.target.value); setTltPage(0); }}
             className="bg-slate-800/60 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
           >
             <option value="">Все менеджеры</option>
             {managers.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
+              <option key={m} value={m}>{m}</option>
             ))}
           </select>
 
           {/* Category select */}
           <select
             value={category}
-            onChange={(e) => {
-              setCategory(e.target.value);
-              setPage(0);
-              setTltPage(0);
-            }}
+            onChange={(e) => { setCategory(e.target.value); setTltPage(0); }}
             className="bg-slate-800/60 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 transition-colors"
           >
             <option value="">Все категории</option>
             {["A", "B", "C", "D", "E"].map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
+              <option key={c} value={c}>{c}</option>
             ))}
           </select>
 
-          {/* SLA range pills */}
+          {/* SLA dropdown */}
           {config.slaRanges.length > 0 && (
-            <div className="flex items-center gap-1">
-              <PillBtn active={slaRange === ""} onClick={() => { setSlaRange(""); setPage(0); setTltPage(0); }} accent="purple">
+            <FilterDropdown
+              label="SLA"
+              activeLabel={activeSlaLabel}
+              isActive={slaRange !== ""}
+              open={slaOpen}
+              onToggle={() => setSlaOpen((v) => !v)}
+              dropdownRef={slaDropdownRef}
+              accent="purple"
+            >
+              <DropdownItem active={slaRange === ""} onClick={() => { setSlaRange(""); setTltPage(0); setSlaOpen(false); }} accent="purple">
                 Все SLA
-              </PillBtn>
+              </DropdownItem>
               {config.slaRanges.map((r) => (
-                <PillBtn
-                  key={r.value}
-                  active={slaRange === r.value}
-                  onClick={() => { setSlaRange(r.value); setPage(0); setTltPage(0); }}
-                  accent="purple"
-                >
+                <DropdownItem key={r.value} active={slaRange === r.value} onClick={() => { setSlaRange(r.value); setTltPage(0); setSlaOpen(false); }} accent="purple">
                   {r.label}
-                </PillBtn>
+                </DropdownItem>
               ))}
-            </div>
+            </FilterDropdown>
           )}
 
-          {/* Pipeline pills (b2g only) */}
+          {/* Pipeline dropdown (b2g only) */}
           {config.hasPipeline && (
-            <div className="flex items-center gap-1">
-              <PillBtn active={pipeline === ""} onClick={() => { setPipeline(""); setPage(0); setTltPage(0); }}>
+            <FilterDropdown
+              label="Воронка"
+              activeLabel={activePipelineLabel}
+              isActive={pipeline !== ""}
+              open={pipelineOpen}
+              onToggle={() => setPipelineOpen((v) => !v)}
+              dropdownRef={pipelineDropdownRef}
+            >
+              <DropdownItem active={pipeline === ""} onClick={() => { setPipeline(""); setTltPage(0); setPipelineOpen(false); }}>
                 Все воронки
-              </PillBtn>
+              </DropdownItem>
               {config.pipelines.map((p) => (
-                <PillBtn
-                  key={p}
-                  active={pipeline === p}
-                  onClick={() => { setPipeline(p); setPage(0); setTltPage(0); }}
-                >
+                <DropdownItem key={p} active={pipeline === p} onClick={() => { setPipeline(p); setTltPage(0); setPipelineOpen(false); }}>
                   {p}
-                </PillBtn>
+                </DropdownItem>
               ))}
-            </div>
+            </FilterDropdown>
           )}
         </div>
 
@@ -979,13 +908,14 @@ export default function LookerTab({ department }: LookerTabProps) {
             <button
               type="button"
               onClick={() => setStatusOpen((v) => !v)}
-              className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold tracking-wide transition-all border ${
                 selectedStatuses.length > 0
                   ? "bg-blue-500/20 text-blue-400 border-blue-500/30"
                   : "text-slate-400 hover:text-white border-white/10 bg-slate-800/60"
               }`}
             >
               {selectedStatuses.length > 0 ? `Статусы (${selectedStatuses.length})` : "Статусы"}
+              <ChevronDown className={`w-3 h-3 transition-transform ${statusOpen ? "rotate-180" : ""}`} />
             </button>
 
             {statusOpen && (
@@ -993,7 +923,7 @@ export default function LookerTab({ department }: LookerTabProps) {
                 <div className="p-2 border-b border-white/10">
                   <button
                     type="button"
-                    onClick={() => { setSelectedStatuses([]); setPage(0); setTltPage(0); }}
+                    onClick={() => { setSelectedStatuses([]); setTltPage(0); }}
                     className="text-[10px] text-slate-400 hover:text-white transition-colors px-2"
                   >
                     Снять все
@@ -1019,7 +949,7 @@ export default function LookerTab({ department }: LookerTabProps) {
           {selectedStatuses.length > 0 && (
             <button
               type="button"
-              onClick={() => { setSelectedStatuses([]); setPage(0); setTltPage(0); }}
+              onClick={() => { setSelectedStatuses([]); setTltPage(0); }}
               className="text-[10px] text-slate-400 hover:text-red-400 transition-colors"
             >
               ✕ сбросить статусы
@@ -1027,7 +957,7 @@ export default function LookerTab({ department }: LookerTabProps) {
           )}
         </div>
 
-        {/* Row 3: TLT срез selectors (visible only in TLT view) */}
+        {/* Row 3: TLT срез selectors */}
         {view === "tlt" && (
           <div className="flex flex-wrap gap-3 items-center pt-1 border-t border-white/5">
             <span className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">Срезы</span>
@@ -1056,7 +986,7 @@ export default function LookerTab({ department }: LookerTabProps) {
       {/* View toggle */}
       <div className="flex items-center gap-1 px-1">
         {views.map(({ key, label }) => (
-          <PillBtn key={key} active={view === key} onClick={() => { setView(key); setPage(0); setTltPage(0); }}>
+          <PillBtn key={key} active={view === key} onClick={() => { setView(key); setTltPage(0); }}>
             {label}
           </PillBtn>
         ))}
@@ -1065,15 +995,6 @@ export default function LookerTab({ department }: LookerTabProps) {
       {/* Tables */}
       {view === "all_calls" && <AllCallsTable rows={allCallsRows} loading={loading} />}
       {view === "cohorts" && <CohortsTable rows={cohortsRows} loading={loading} />}
-      {view === "detail" && (
-        <DetailTable
-          rows={detailRows}
-          loading={loading}
-          total={data?.total ?? 0}
-          page={page}
-          onPageChange={setPage}
-        />
-      )}
       {view === "tlt" && (
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-2">
