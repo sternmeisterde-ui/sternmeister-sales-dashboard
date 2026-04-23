@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { X, Save, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface Manager {
@@ -18,9 +18,10 @@ interface SchedulePopupProps {
   onSaved: () => void;
 }
 
-const SCHEDULE_VALUES = ["8", "-", "о"] as const;
-type ScheduleVal = typeof SCHEDULE_VALUES[number] | "";
+const SCHEDULE_VALUES = ["8", "4", "-", "о"] as const;
+type ScheduleVal = (typeof SCHEDULE_VALUES)[number] | "";
 
+// Kept for backward compat — no longer used for cell clicks
 function nextValue(current: ScheduleVal): ScheduleVal {
   switch (current) {
     case "": return "8";
@@ -31,13 +32,33 @@ function nextValue(current: ScheduleVal): ScheduleVal {
   }
 }
 
+/** All 4 picker options with display metadata */
+const PICKER_OPTIONS: Array<{
+  value: Exclude<ScheduleVal, "">;
+  label: string;
+  symbol: string;
+  colorClass: string;
+}> = [
+  { value: "8", label: "Полный день",  symbol: "☀",   colorClass: "bg-emerald-500/20 text-emerald-400" },
+  { value: "4", label: "Половина дня", symbol: "◑",   colorClass: "bg-amber-500/20 text-amber-400" },
+  { value: "-", label: "Выходной",     symbol: "—",   colorClass: "bg-slate-700/50 text-slate-400" },
+  { value: "о", label: "Отпуск",       symbol: "ОТП", colorClass: "bg-blue-500/20 text-blue-400" },
+];
+
 function cellStyle(val: ScheduleVal): string {
   switch (val) {
     case "8": return "bg-emerald-500/20 text-emerald-400 font-bold";
+    case "4": return "bg-amber-500/20 text-amber-400 font-bold";
     case "-": return "bg-slate-700/50 text-slate-500";
     case "о": return "bg-blue-500/20 text-blue-400 font-bold";
     default: return "text-slate-700";
   }
+}
+
+/** Cell display text — "4" shows "4", "о" shows "О", etc. */
+function cellLabel(val: ScheduleVal): string {
+  if (val === "о") return "О";
+  return val;
 }
 
 function getDaysInMonth(date: Date): number {
@@ -57,6 +78,13 @@ function fmtDate(year: number, month: number, day: number): string {
 const MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
 const LINE_LABELS: Record<string, string> = { "1": "Линия 1 — Квалификатор", "2": "Линия 2 — Бератер", "3": "Линия 3 — Доведение" };
 
+interface ActivePicker {
+  managerId: string;
+  dayIdx: number;
+  /** true → picker opens below the cell; false → above */
+  openBelow: boolean;
+}
+
 export default function SchedulePopup({ isOpen, onClose, month, managers, onSaved }: SchedulePopupProps) {
   const [currentMonth, setCurrentMonth] = useState(month);
 
@@ -75,11 +103,15 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
     setDirty(false);
   };
 
-  // grid[managerId][day-1] = "8" | "-" | "о" | ""
+  // grid[managerId][day-1] = "8" | "4" | "-" | "о" | ""
   const [grid, setGrid] = useState<Record<string, ScheduleVal[]>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+
+  // Which cell currently has its picker open
+  const [activePicker, setActivePicker] = useState<ActivePicker | null>(null);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
 
   // Load schedule for month
   const loadSchedule = useCallback(async () => {
@@ -115,13 +147,41 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
     if (isOpen) loadSchedule();
   }, [isOpen, loadSchedule]);
 
-  const toggleCell = (managerId: string, dayIdx: number) => {
+  // Close picker when clicking outside
+  useEffect(() => {
+    if (!activePicker) return;
+    const handler = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setActivePicker(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [activePicker]);
+
+  // Open picker instead of cycling directly
+  const toggleCell = (managerId: string, dayIdx: number, cellEl: HTMLButtonElement) => {
+    if (
+      activePicker?.managerId === managerId &&
+      activePicker?.dayIdx === dayIdx
+    ) {
+      setActivePicker(null);
+      return;
+    }
+    const rect = cellEl.getBoundingClientRect();
+    const openBelow = rect.top < window.innerHeight / 2;
+    setActivePicker({ managerId, dayIdx, openBelow });
+  };
+
+  // Set value and close picker
+  const selectValue = (managerId: string, dayIdx: number, val: Exclude<ScheduleVal, "">) => {
     setGrid((prev) => {
       const row = [...(prev[managerId] || Array(daysCount).fill(""))];
-      row[dayIdx] = nextValue(row[dayIdx]);
+      row[dayIdx] = val;
       return { ...prev, [managerId]: row };
     });
     setDirty(true);
+    setActivePicker(null);
   };
 
   // Fill entire row with a value
@@ -200,9 +260,22 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-3 text-[10px]">
-              <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[9px] font-bold">8</span> работает</span>
-              <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-slate-700/50 text-slate-500 flex items-center justify-center text-[9px]">-</span> не работает</span>
-              <span className="flex items-center gap-1"><span className="w-4 h-4 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center text-[9px] font-bold">о</span> отпуск</span>
+              <span className="flex items-center gap-1">
+                <span className="w-4 h-4 rounded bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[9px] font-bold">☀</span>
+                Полный день
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-4 h-4 rounded bg-amber-500/20 text-amber-400 flex items-center justify-center text-[9px] font-bold">◑</span>
+                Половина дня
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-4 h-4 rounded bg-slate-700/50 text-slate-400 flex items-center justify-center text-[9px]">—</span>
+                Выходной
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-4 h-4 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center text-[8px] font-bold">ОТП</span>
+                Отпуск
+              </span>
             </div>
             {dirty && (
               <button onClick={handleSave} disabled={saving}
@@ -246,7 +319,8 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
               <tbody>
                 {grouped.map((group) => (
                   <LineGroup key={group.line} group={group} grid={grid} daysCount={daysCount}
-                    year={year} mo={mo} onToggle={toggleCell} onFillRow={fillRow} />
+                    year={year} mo={mo} onToggle={toggleCell} onFillRow={fillRow}
+                    activePicker={activePicker} onSelect={selectValue} pickerRef={pickerRef} />
                 ))}
               </tbody>
             </table>
@@ -257,12 +331,15 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   );
 }
 
-function LineGroup({ group, grid, daysCount, year, mo, onToggle, onFillRow }: {
+function LineGroup({ group, grid, daysCount, year, mo, onToggle, onFillRow, activePicker, onSelect, pickerRef }: {
   group: { line: string; label: string; managers: Manager[] };
   grid: Record<string, ScheduleVal[]>;
   daysCount: number; year: number; mo: number;
-  onToggle: (id: string, day: number) => void;
+  onToggle: (id: string, day: number, el: HTMLButtonElement) => void;
   onFillRow: (id: string, val: ScheduleVal) => void;
+  activePicker: ActivePicker | null;
+  onSelect: (managerId: string, dayIdx: number, val: Exclude<ScheduleVal, "">) => void;
+  pickerRef: React.RefObject<HTMLDivElement | null>;
 }) {
   // Count working managers per day
   const dayCounts = Array.from({ length: daysCount }, (_, d) => {
@@ -299,14 +376,46 @@ function LineGroup({ group, grid, daysCount, year, mo, onToggle, onFillRow }: {
             </td>
             {row.map((val, d) => {
               const weekend = isWeekend(year, mo, d + 1);
+              const isPickerOpen =
+                activePicker?.managerId === m.id && activePicker?.dayIdx === d;
               return (
-                <td key={d} className={`px-0 py-1 text-center ${weekend ? "bg-white/[0.02]" : ""}`}>
+                <td key={d} className={`px-0 py-1 text-center relative ${weekend ? "bg-white/[0.02]" : ""}`}>
                   <button
-                    onClick={() => onToggle(m.id, d)}
+                    onClick={(e) => onToggle(m.id, d, e.currentTarget)}
                     className={`w-6 h-6 rounded text-[10px] transition-all hover:ring-1 hover:ring-white/20 ${cellStyle(val)} ${!val ? "border border-white/5" : ""}`}
                   >
-                    {val || ""}
+                    {cellLabel(val)}
                   </button>
+
+                  {/* Mini picker popup */}
+                  {isPickerOpen && (
+                    <div
+                      ref={pickerRef}
+                      className={`absolute left-1/2 -translate-x-1/2 z-[200] w-36 bg-slate-800 border border-white/10 rounded-xl shadow-2xl overflow-hidden ${
+                        activePicker?.openBelow ? "top-full mt-1" : "bottom-full mb-1"
+                      }`}
+                    >
+                      {PICKER_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelect(m.id, d, opt.value);
+                          }}
+                          className={`w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-white/10 transition-colors text-left ${
+                            val === opt.value ? "bg-white/5" : ""
+                          }`}
+                        >
+                          <span
+                            className={`w-5 h-5 rounded flex items-center justify-center text-[9px] font-bold shrink-0 ${opt.colorClass}`}
+                          >
+                            {opt.symbol}
+                          </span>
+                          <span className="text-slate-200 leading-tight">{opt.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </td>
               );
             })}
