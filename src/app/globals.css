@@ -148,11 +148,15 @@ body {
 .theme-light th {
   background-color: transparent !important;
 }
-/* Table headers: unified #bedcff across all tabs in light mode. */
+/* Table headers: unified #bedcff background, pure black text, all tabs, light mode. */
 .theme-light thead tr,
 .theme-light thead th {
   background-color: #bedcff !important;
-  color: #0f172a !important;
+  color: #000000 !important;
+}
+.theme-light thead th span,
+.theme-light thead th p {
+  color: #000000 !important;
 }
 .theme-light tr:hover td {
   background-color: #e0f2fe !important; /* sky-100 on hover */
