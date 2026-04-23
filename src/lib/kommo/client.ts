@@ -473,7 +473,7 @@ export async function getCallNotes(
           const notes = data._embedded?.notes || [];
           for (const n of notes) {
             noteParamsMap.set(n.id, {
-              duration: n.params?.duration ?? 0,
+              duration: Number(n.params?.duration) || 0,
               call_status: n.params?.call_status,
             });
           }
@@ -706,6 +706,87 @@ export async function getContactsWithLeads(
  * No user filter — returns all events for all managers.
  * Includes note_id for Phase 2 resolution.
  */
+/**
+ * Fetch ALL call notes directly from /contacts/notes and /leads/notes by date range.
+ * More complete than getCallEvents (Events API misses ~18% of calls that lack event entries).
+ * Returns unified shape identical to what getCallEvents used to return.
+ */
+export async function getAllCallNotesByDate(
+  dateFrom: number,
+  dateTo: number,
+  maxPages = 500,
+): Promise<Array<{
+  type: "call_in" | "call_out";
+  noteId: number;
+  entityType: string;
+  entityId: number;
+  createdBy: number;
+  createdAt: number;
+  duration: number;
+  callStatus: number | undefined;
+}>> {
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+
+  const result: Array<{
+    type: "call_in" | "call_out";
+    noteId: number;
+    entityType: string;
+    entityId: number;
+    createdBy: number;
+    createdAt: number;
+    duration: number;
+    callStatus: number | undefined;
+  }> = [];
+
+  // Track seen note IDs to deduplicate across entity endpoints
+  const seen = new Set<number>();
+
+  for (const entityType of ["contacts", "leads"] as const) {
+    let page = 1;
+    while (page <= maxPages) {
+      const url = new URL(`${baseUrl}/${entityType}/notes`);
+      url.searchParams.append("filter[note_type][]", "call_in");
+      url.searchParams.append("filter[note_type][]", "call_out");
+      url.searchParams.set("filter[created_at][from]", String(dateFrom));
+      url.searchParams.set("filter[created_at][to]", String(dateTo));
+      url.searchParams.set("limit", "250");
+      url.searchParams.set("page", String(page));
+
+      const res = await rateLimitedFetch(url.toString(), { headers });
+      if (res.status === 204) break;
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Kommo ${entityType}/notes ${res.status}: ${text}`);
+      }
+
+      const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
+      const notes = data._embedded?.notes ?? [];
+
+      for (const n of notes) {
+        if (seen.has(n.id)) continue;
+        seen.add(n.id);
+        result.push({
+          type: n.note_type,
+          noteId: n.id,
+          entityType: entityType === "contacts" ? "contact" : "lead",
+          entityId: n.entity_id,
+          createdBy: n.created_by,
+          createdAt: n.created_at,
+          duration: Number(n.params?.duration) || 0,
+          callStatus: n.params?.call_status,
+        });
+      }
+
+      if (!data._links?.next) break;
+      page++;
+    }
+  }
+
+  return result;
+}
+
+/** @deprecated Use getAllCallNotesByDate instead — Events API misses ~18% of calls */
 export async function getCallEvents(
   dateFrom: number,
   dateTo: number,
@@ -914,41 +995,59 @@ export async function getStatusChangeEvents(
 /**
  * Batch-fetch contact notes by note ID from the contacts endpoint.
  */
-export async function getContactNoteParams(
-  noteIds: number[],
+/**
+ * Fetch call note params (duration, call_status) for a list of note IDs.
+ * Splits by entity type so each batch hits the correct endpoint
+ * (contact notes → /contacts/notes, lead notes → /leads/notes).
+ * This avoids wasted 204 responses that caused the old single-endpoint approach
+ * to take 20+ minutes on large datasets.
+ */
+export async function getCallNoteParams(
+  notes: ReadonlyArray<{ noteId: number; entityType: string }>,
 ): Promise<Map<number, { duration: number; callStatus: number | undefined }>> {
-  if (noteIds.length === 0) return new Map();
+  if (notes.length === 0) return new Map();
 
   const baseUrl = await getBaseUrl();
   const headers = await getAuthHeaders();
   const result = new Map<number, { duration: number; callStatus: number | undefined }>();
 
-  const BATCH = 100;
-  for (let i = 0; i < noteIds.length; i += BATCH) {
-    const batch = noteIds.slice(i, i + BATCH);
-    const url = new URL(`${baseUrl}/contacts/notes`);
-    url.searchParams.set("limit", "250");
-    batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+  // Group note IDs by entity endpoint
+  const byEndpoint = new Map<string, number[]>();
+  for (const n of notes) {
+    const endpoint = n.entityType === "lead" ? "leads" : "contacts";
+    if (!byEndpoint.has(endpoint)) byEndpoint.set(endpoint, []);
+    byEndpoint.get(endpoint)!.push(n.noteId);
+  }
 
-    let notesPage = 1;
-    while (true) {
-      const pageUrl = new URL(url.toString());
-      pageUrl.searchParams.set("page", String(notesPage));
-      const res = await rateLimitedFetch(pageUrl.toString(), { headers });
-      if (res.status === 204) break;
-      if (!res.ok) {
-        console.warn(`[ETL] contact notes batch failed: ${res.status}`);
-        break;
+  const BATCH = 100;
+  for (const [endpoint, ids] of byEndpoint) {
+    const uniqIds = [...new Set(ids)];
+    for (let i = 0; i < uniqIds.length; i += BATCH) {
+      const batch = uniqIds.slice(i, i + BATCH);
+      const url = new URL(`${baseUrl}/${endpoint}/notes`);
+      url.searchParams.set("limit", "250");
+      batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+
+      let page = 1;
+      while (true) {
+        const pageUrl = new URL(url.toString());
+        pageUrl.searchParams.set("page", String(page));
+        const res = await rateLimitedFetch(pageUrl.toString(), { headers });
+        if (res.status === 204) break;
+        if (!res.ok) {
+          console.warn(`[ETL] ${endpoint}/notes batch failed: ${res.status}`);
+          break;
+        }
+        const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
+        for (const n of data._embedded?.notes ?? []) {
+          result.set(n.id, {
+            duration: Number(n.params?.duration) || 0,
+            callStatus: n.params?.call_status,
+          });
+        }
+        if (!data._links?.next) break;
+        page++;
       }
-      const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
-      for (const n of data._embedded?.notes ?? []) {
-        result.set(n.id, {
-          duration: n.params?.duration ?? 0,
-          callStatus: n.params?.call_status,
-        });
-      }
-      if (!data._links?.next) break;
-      notesPage++;
     }
   }
 

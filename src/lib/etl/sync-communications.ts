@@ -9,7 +9,7 @@
 
 import {
   getCallEvents,
-  getContactNoteParams,
+  getCallNoteParams,
   getContactsWithLeads,
   getMessageEvents,
 } from "@/lib/kommo/client";
@@ -72,9 +72,11 @@ export async function syncCommunications(
     console.log(`[ETL] comm: resolved ${unknownContactIds.length} unknown contacts`);
   }
 
-  // Fetch note params (duration, call_status) for all note IDs
-  const noteIds = callEvents.map((e) => e.noteId);
-  const noteParams = await getContactNoteParams(noteIds);
+  // Fetch note params split by entity type — contact notes from /contacts/notes,
+  // lead notes from /leads/notes — eliminates wasted 204 responses from old approach.
+  const noteParams = await getCallNoteParams(
+    callEvents.map((e) => ({ noteId: e.noteId, entityType: e.entityType })),
+  );
 
   // ── Phase 2: fetch message events ────────────────────────────────────────
   const msgEvents = await getMessageEvents(fromTs, toTs);
@@ -112,17 +114,15 @@ export async function syncCommunications(
         category: lead?.category ?? null,
         leadCreatedAt: lead?.createdAt ?? null,
         leadDayStart: lead
-          ? new Date(
-              new Date(lead.createdAt).setUTCHours(0, 0, 0, 0),
-            )
+          ? new Date(new Date(lead.createdAt).setUTCHours(0, 0, 0, 0))
           : null,
         callStatus: note?.callStatus ?? null,
         duration: note?.duration ?? 0,
         manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",
         statusId: lead?.statusId ?? null,
         statusName: lead?.statusName ?? null,
-        utmSource: null, // populated from leads_cohort if needed
-        firstContactFlg: null, // computed below
+        utmSource: null,
+        firstContactFlg: null,
         lastContactFlg: null,
         firstCallAt: null,
         businessHoursSla: null,
