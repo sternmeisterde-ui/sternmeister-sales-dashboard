@@ -727,7 +727,7 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [tltDetailRows, setTltDetailRows] = useState<TltDetailRow[]>([]);
   const [tltDetailTotal, setTltDetailTotal] = useState(0);
   const [managers, setManagers] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [statusOpen, setStatusOpen] = useState(false);
 
   const statusDropdownRef = useRef<HTMLDivElement>(null);
@@ -852,9 +852,9 @@ export default function LookerTab({ department }: LookerTabProps) {
     setTltPage(0);
   }, []);
 
-  const allCallsRows = (view === "all_calls" ? data?.rows : []) as AllCallsRow[];
-  const cohortsRows = (view === "cohorts" ? data?.rows : []) as CohortsRow[];
-  const detailRows = (view === "detail" ? data?.rows : []) as DetailRow[];
+  const allCallsRows = (view === "all_calls" ? (data?.rows ?? []) : []) as AllCallsRow[];
+  const cohortsRows = (view === "cohorts" ? (data?.rows ?? []) : []) as CohortsRow[];
+  const detailRows = (view === "detail" ? (data?.rows ?? []) : []) as DetailRow[];
 
   const slice1Label = SLICE_OPTIONS.find((o) => o.col === slice1)?.label ?? slice1;
   const slice2Label = SLICE_OPTIONS.find((o) => o.col === slice2)?.label ?? slice2;
