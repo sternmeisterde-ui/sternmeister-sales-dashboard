@@ -145,7 +145,7 @@ export default function LookerTab() {
 
   useEffect(() => {
     fetchData(table, dateRange, filters, page);
-  }, [table, dateRange, page, fetchData]);
+  }, [table, dateRange, page, filters, fetchData]);
 
   const applyDebouncedFilters = useCallback(
     (newFilters: Record<string, string>) => {
@@ -154,10 +154,9 @@ export default function LookerTab() {
       filterDebounceRef.current = setTimeout(() => {
         setPage(0);
         setFilters(pendingFiltersRef.current);
-        fetchData(table, dateRange, pendingFiltersRef.current, 0);
       }, 300);
     },
-    [table, dateRange, fetchData],
+    [],
   );
 
   const handleFilterChange = useCallback(
@@ -227,6 +226,7 @@ export default function LookerTab() {
             key={key}
             type="button"
             onClick={() => {
+              if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
               setTable(key);
               setPage(0);
               setFilters({});
@@ -311,6 +311,7 @@ export default function LookerTab() {
           <button
             type="button"
             onClick={() => {
+              if (filterDebounceRef.current) clearTimeout(filterDebounceRef.current);
               setFilters({});
               pendingFiltersRef.current = {};
               setPage(0);

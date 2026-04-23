@@ -113,7 +113,7 @@ export async function syncLeads(
   const leadIds = rows.map((r) => r.leadId).filter(Boolean) as number[];
 
   await analyticsDb.execute(
-    sql`DELETE FROM analytics.leads_cohort WHERE lead_id = ANY(${leadIds}::bigint[])`,
+    sql.raw(`DELETE FROM analytics.leads_cohort WHERE lead_id IN (${leadIds.join(",")})`),
   );
 
   const CHUNK = 500;
@@ -134,7 +134,7 @@ export async function updateContactDates(leadIds: number[]): Promise<void> {
     FROM (
       SELECT lead_id, MIN(created_at) AS first_contact
       FROM analytics.communications
-      WHERE lead_id = ANY(${leadIds}::bigint[])
+      WHERE lead_id IN (${sql.raw(leadIds.join(","))})
       GROUP BY lead_id
     ) sub
     WHERE lc.lead_id = sub.lead_id

@@ -63,7 +63,7 @@ export async function computeSla(
       MIN(created_at) FILTER (WHERE communication_type = 'outgoing_chat_message') AS first_message_at,
       MAX(created_at)                                              AS last_contact_at
     FROM analytics.communications
-    WHERE lead_id = ANY(${leadIds}::bigint[])
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
     GROUP BY lead_id
   `);
 
@@ -78,10 +78,10 @@ export async function computeSla(
   >();
   for (const row of commSummaries.rows) {
     commMap.set(Number(row.lead_id), {
-      firstContactAt: row.first_contact_at,
-      firstCallOutAt: row.first_call_out_at,
-      firstMessageAt: row.first_message_at,
-      lastContactAt: row.last_contact_at,
+      firstContactAt: row.first_contact_at ? new Date(row.first_contact_at) : null,
+      firstCallOutAt: row.first_call_out_at ? new Date(row.first_call_out_at) : null,
+      firstMessageAt: row.first_message_at ? new Date(row.first_message_at) : null,
+      lastContactAt: row.last_contact_at ? new Date(row.last_contact_at) : null,
     });
   }
 
@@ -153,7 +153,7 @@ export async function computeSla(
 
   // Delete existing SLA rows for these leads, then insert
   await analyticsDb.execute(
-    sql`DELETE FROM analytics.sla WHERE lead_id = ANY(${leadIds}::bigint[])`,
+    sql.raw(`DELETE FROM analytics.sla WHERE lead_id IN (${leadIds.join(",")})`),
   );
 
   const CHUNK = 500;

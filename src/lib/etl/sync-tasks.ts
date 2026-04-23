@@ -45,7 +45,7 @@ export async function syncTasks(
   }
 
   await analyticsDb.execute(
-    sql`DELETE FROM analytics.tasks WHERE lead_id = ANY(${leadIds}::bigint[])`,
+    sql.raw(`DELETE FROM analytics.tasks WHERE lead_id IN (${leadIds.join(",")})`),
   );
 
   const CHUNK = 500;

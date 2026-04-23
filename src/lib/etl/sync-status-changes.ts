@@ -77,7 +77,7 @@ export async function syncStatusChanges(
         LEAD(status_id) OVER (PARTITION BY lead_id ORDER BY event_at) AS next_sid,
         LEAD(event_at)  OVER (PARTITION BY lead_id ORDER BY event_at) AS next_eat
       FROM analytics.lead_status_changes
-      WHERE lead_id = ANY(${leadIds}::bigint[])
+      WHERE lead_id IN (${sql.raw(leadIds.join(","))})
     )
     UPDATE analytics.lead_status_changes lsc
     SET
