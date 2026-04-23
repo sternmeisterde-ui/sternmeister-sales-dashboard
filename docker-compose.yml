@@ -25,11 +25,12 @@ services:
       # Session signing (required in production — fail-loud if missing)
       - SESSION_SECRET=${SESSION_SECRET}
 
-      # Databases — D1/R1 = roleplay, D2/R2 = OKK
+      # Databases — D1/R1 = roleplay, D2/R2 = OKK, analytics = Looker mirror
       - DATABASE_URL=${DATABASE_URL}
       - R1_DATABASE_URL=${R1_DATABASE_URL}
       - D2_OKK_DATABASE_URL=${D2_OKK_DATABASE_URL}
       - R2_OKK_DATABASE_URL=${R2_OKK_DATABASE_URL}
+      - ANALYTICS_DATABASE_URL=${ANALYTICS_DATABASE_URL}
 
       # Roleplay audio servers
       - D1_API_URL=${D1_API_URL}
