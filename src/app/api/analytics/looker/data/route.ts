@@ -276,6 +276,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COALESCE(SUM(ca.total_duration_sec), 0) AS total_duration_sec,
           ROUND(COALESCE(SUM(ca.total_calls), 0)::numeric / NULLIF(COUNT(fl.lead_id), 0), 2) AS avg_calls_per_lead,
           ROUND(AVG(s.sla_first_call_seconds)) AS avg_sla_first_call_sec,
+          ROUND(AVG(s.sla_first_call_from_shift_seconds)) AS avg_sla_from_shift_sec,
           COALESCE(SUM(s.sla_first_call_seconds), 0) AS total_sla_first_call_sec,
           COUNT(s.sla_first_call_seconds) AS sla_lead_count
         FROM filtered_leads fl
@@ -300,6 +301,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COALESCE(ca.total_calls, 0) AS total_calls,
           ca.avg_duration_sec,
           s.sla_first_call_seconds,
+          s.sla_first_call_from_shift_seconds,
           s.sla_first_call_calendar_seconds
         FROM filtered_leads fl
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
