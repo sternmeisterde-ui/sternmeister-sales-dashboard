@@ -12,7 +12,7 @@ import {
 import { getAnalyticsCallMetricsByMaster } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
-import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES, A2_STATUSES, B1_STATUSES, B2_PLUS_STATUSES, FUNNEL_STATUS_MAP } from "@/lib/kommo/pipeline-config";
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
 import type { KommoLead, KommoTask } from "@/lib/kommo/types";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
@@ -206,6 +206,68 @@ async function getSlaFacts(
     };
   } catch {
     return { slaMinutes: null, slaShiftMinutes: null, tltMinutes: null };
+  }
+}
+
+/** Per-manager SLA/TLT for a pipeline. Keyed by master_managers.id via the
+ *  same name-alias map analytics-calls uses. */
+async function getSlaFactsByManager(
+  managers: Array<{ id: string; name: string }>,
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>> {
+  try {
+    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+      manager: string;
+      avg_sla: number | null;
+      avg_sla_shift: number | null;
+      avg_tlt: number | null;
+    }>(
+      drizzleSql`
+        SELECT
+          manager,
+          round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
+          round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
+          round(avg(sla_first_contact_seconds) / 60.0)::int         AS avg_tlt
+        FROM analytics.sla
+        WHERE pipeline_id = ${pipelineId}
+          AND lead_created_at >= ${fromDate}
+          AND lead_created_at <= ${toDate}
+          AND sla_first_call_seconds IS NOT NULL
+          AND manager IS NOT NULL AND manager <> ''
+        GROUP BY manager
+      `,
+    );
+    // Inline alias table — kept here to avoid a circular import from
+    // analytics-calls. Keep in sync with NAME_ALIASES there.
+    const NAME_ALIASES: Record<string, string[]> = {
+      "Максим Алекперов": ["Maksim Alekperov"],
+      "Гульназ Сираждинова": ["Гульназ Cираждинова"],
+      "Елизавета Трапезникова": ["Єлизавета Трапезникова"],
+    };
+    const byName = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
+    for (const row of result.rows) {
+      byName.set(row.manager, {
+        slaMinutes: row.avg_sla != null ? Number(row.avg_sla) : null,
+        slaShiftMinutes: row.avg_sla_shift != null ? Number(row.avg_sla_shift) : null,
+        tltMinutes: row.avg_tlt != null ? Number(row.avg_tlt) : null,
+      });
+    }
+    const byMaster = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
+    for (const m of managers) {
+      let metrics = byName.get(m.name);
+      if (!metrics) {
+        for (const alias of NAME_ALIASES[m.name] ?? []) {
+          const hit = byName.get(alias);
+          if (hit) { metrics = hit; break; }
+        }
+      }
+      if (metrics) byMaster.set(m.id, metrics);
+    }
+    return byMaster;
+  } catch {
+    return new Map();
   }
 }
 
@@ -581,6 +643,8 @@ export async function buildDailyResponse(department: string, period: string, dat
   const okkPerManager = new Map<string, Map<string, number>>();
   const roleplayPerManager = new Map<string, Map<string, number>>();
   const slaFacts = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
+  // Per-manager SLA/TLT: line → Map<managerId, {slaMinutes, slaShiftMinutes, tltMinutes}>
+  const slaPerManager = new Map<string, Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>>();
   if (department === "b2g") {
     // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
     // stay index-compatible downstream.
@@ -610,8 +674,12 @@ export async function buildDailyResponse(department: string, period: string, dat
     const fromDate = new Date(from * 1000);
     const toDate = new Date(to * 1000);
     const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineId]) => {
-      const facts = await getSlaFacts(pipelineId, fromDate, toDate);
+      const [facts, perMgr] = await Promise.all([
+        getSlaFacts(pipelineId, fromDate, toDate),
+        getSlaFactsByManager(allManagers, pipelineId, fromDate, toDate),
+      ]);
       slaFacts.set(line, facts);
+      slaPerManager.set(line, perMgr);
     });
     await Promise.all([...okkPromises, ...rpPromises, ...slaPromises]);
   }
@@ -923,6 +991,120 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrGut);
                   break;
                 }
+                case "a2": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && A2_STATUSES.has(l.status_id)).length);
+                  break;
+                }
+                case "b1": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && B1_STATUSES.has(l.status_id)).length);
+                  break;
+                }
+                case "b2plus": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && B2_PLUS_STATUSES.has(l.status_id)).length);
+                  break;
+                }
+                case "tasksTotal": {
+                  const map = FUNNEL_STATUS_MAP.tasksTotal;
+                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)).length);
+                  break;
+                }
+                case "tasksNew": {
+                  const map = FUNNEL_STATUS_MAP.tasksTotal;
+                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  const [tnY, tnM] = dateStr.split("-").map(Number);
+                  const ms = new Date(Date.UTC(tnY, tnM - 1, 1)).getTime() / 1000;
+                  const me = new Date(Date.UTC(tnY, tnM, 0, 23, 59, 59)).getTime() / 1000;
+                  fact = String(mgrActiveLeads.filter((l) =>
+                    l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
+                      && l.created_at >= ms && l.created_at <= me,
+                  ).length);
+                  break;
+                }
+                case "consultTotal": {
+                  const map = FUNNEL_STATUS_MAP.consultTotal;
+                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)).length);
+                  break;
+                }
+                case "consultNew": {
+                  const map = FUNNEL_STATUS_MAP.consultTotal;
+                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  const [cnY, cnM] = dateStr.split("-").map(Number);
+                  const ms = new Date(Date.UTC(cnY, cnM - 1, 1)).getTime() / 1000;
+                  const me = new Date(Date.UTC(cnY, cnM, 0, 23, 59, 59)).getTime() / 1000;
+                  fact = String(mgrActiveLeads.filter((l) =>
+                    l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
+                      && l.created_at >= ms && l.created_at <= me,
+                  ).length);
+                  break;
+                }
+                case "convQualTask": {
+                  // tasksTotal / qualLeads × 100 — recompute qual inline to avoid
+                  // depending on another row in the same map().
+                  const nqE = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+                  const mgrQual = mgrNewLeads.filter((l) => {
+                    if (l.status_id === 83873487 || l.status_id === 93485479) return false;
+                    const cf = (l.custom_fields_values || []).find((f: { field_id: number }) => f.field_id === 879824);
+                    if (!cf) return true;
+                    return !nqE.has(cf.values?.[0]?.enum_id ?? -1);
+                  }).length;
+                  const mgrTasks = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.tasksTotal?.statusIds.has(l.status_id)).length;
+                  fact = mgrQual > 0 ? String(Math.round((mgrTasks / mgrQual) * 100)) : "0";
+                  break;
+                }
+                case "convTaskConsult": {
+                  const mgrTasks = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.tasksTotal?.statusIds.has(l.status_id)).length;
+                  const mgrConsult = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.consultTotal?.statusIds.has(l.status_id)).length;
+                  fact = mgrTasks > 0 ? String(Math.round((mgrConsult / mgrTasks) * 100)) : "0";
+                  break;
+                }
+                case "convConsultTerm": {
+                  const mgrConsult = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.consultTotal?.statusIds.has(l.status_id)).length;
+                  fact = mgrConsult > 0 ? String(Math.round((mgrTermsWon.length / mgrConsult) * 100)) : "0";
+                  break;
+                }
+                case "beraterReject": {
+                  const mgrRej = uid ? safeLostLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
+                  fact = String(mgrRej);
+                  break;
+                }
+                case "appealsSubmitted": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860891).length);
+                  break;
+                }
+                case "termDCCancelled": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860875).length);
+                  break;
+                }
+                case "termDCDone": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93886075).length);
+                  break;
+                }
+                case "termAATransferred": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 102183943).length);
+                  break;
+                }
+                case "termAACancelled": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860883).length);
+                  break;
+                }
+                case "termAACount": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860879).length);
+                  break;
+                }
+                case "beraterReview": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860887).length);
+                  break;
+                }
+                case "delayedStart": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 95515895).length);
+                  break;
+                }
+                case "appeal": {
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860891).length);
+                  break;
+                }
               }
               return { key: metric.key, plan: null as string | null, fact, percent: null as number | null };
             });
@@ -975,9 +1157,20 @@ export async function buildDailyResponse(department: string, period: string, dat
               fact = slaVal ? String(slaVal) : null;
             }
             if (metric.key === "avgWait_p") fact = "30";
-            // Per-manager plan overrides (computed plans)
-            if (metric.key === "callsTotal_p") fact = "80";
-            if (metric.key === "totalMinutes_p") fact = "180";
+            // Per-manager plan overrides — match Excel reference values
+            // (Госники Daily Weekly Monthly): qualifier/Доведение/2я линия
+            // expect 160 calls and 240 min per-manager per day.
+            if (metric.key === "callsTotal_p") fact = "160";
+            if (metric.key === "totalMinutes_p") fact = "240";
+            // Per-manager SLA / SLA-from-shift / TLT from analytics.sla
+            if (metric.key === "sla_f" || metric.key === "sla_shift_f" || metric.key === "tlt_f") {
+              const perMgr = slaPerManager.get(section.dbLine)?.get(mgr.id);
+              if (perMgr) {
+                if (metric.key === "sla_f") fact = perMgr.slaMinutes != null ? String(perMgr.slaMinutes) : null;
+                else if (metric.key === "sla_shift_f") fact = perMgr.slaShiftMinutes != null ? String(perMgr.slaShiftMinutes) : null;
+                else if (metric.key === "tlt_f") fact = perMgr.tltMinutes != null ? String(perMgr.tltMinutes) : null;
+              }
+            }
             let percent: number | null = null;
             if (plan && fact && Number(plan) > 0) {
               if (metric.unit === "%") {
