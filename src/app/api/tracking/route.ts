@@ -7,6 +7,7 @@ import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { ensureFreshSync } from "@/lib/tracking/sync";
+import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
 
@@ -53,9 +54,18 @@ export async function GET(req: NextRequest) {
       typesParam ? typesParam.split(",").filter(Boolean) : DEFAULT_SELECTED_KEYS,
     );
 
-    // If range includes today OR cache older than 5 min → sync.
-    const today = new Date().toISOString().slice(0, 10);
-    const includesToday = today >= fromISO && today <= toISO;
+    // Tables must exist before ANY query, not just before sync — users can
+    // open past dates (which skips sync) and we still SELECT from the cache.
+    await ensureTrackingSchema();
+
+    // "today" in the dashboard TZ (not UTC) — dashboard operates in Moscow
+    // time and client sends local ISO dates, so UTC-today would be off by
+    // up to 3 hours and miss the "includes today" branch near midnight UTC.
+    const nowMs = Date.now();
+    const todayMoscow = new Date(nowMs + DASHBOARD_TZ_OFFSET_MIN * 60_000)
+      .toISOString()
+      .slice(0, 10);
+    const includesToday = todayMoscow >= fromISO && todayMoscow <= toISO;
     let synced = false;
     if (!skipSync && includesToday) {
       try {
