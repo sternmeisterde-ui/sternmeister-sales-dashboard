@@ -328,18 +328,21 @@ async function buildDashboardResponse(
     // Summary = sum of all per-manager metrics for the period
     const todaySummary = sumCallMetrics(Array.from(todayCallMap.values()));
 
-    // Step 4: Aggregate lead funnel
+    // Step 4: Aggregate lead funnel — BOTH departments now respect the date
+    // range (was previously only B2G). For past ranges this is approximate
+    // since Kommo doesn't store historical snapshots, but it at least makes
+    // the values visibly change when the user picks a different date.
+    const leadsInRange = snapshotLeads.filter(
+      (l) => l.updated_at >= from && l.updated_at <= to,
+    );
     let funnel: Record<string, unknown>;
 
     if (department === "b2b") {
-      funnel = buildB2BFunnel(snapshotLeads, wonLeads, lostLeads);
+      funnel = buildB2BFunnel(leadsInRange, wonLeads, lostLeads);
     } else {
       // B2G funnel with qualification stages
       const snapshotLeadsAll = [...snapshotLeads, ...wonLeads, ...lostLeads];
-      const flowActive = snapshotLeads.filter(
-        (l) => l.updated_at >= from && l.updated_at <= to
-      );
-      const flowLeads = [...flowActive, ...wonLeads, ...lostLeads];
+      const flowLeads = [...leadsInRange, ...wonLeads, ...lostLeads];
       const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to);
       funnel = {
         activeDeals: fc.activeDeals,
@@ -404,7 +407,9 @@ async function buildDashboardResponse(
     };
 
     // Step 10: Per-pipeline breakdown
-    const pipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
+    // Pipeline breakdown respects the date range too — leads updated outside
+    // the range drop out so the table reacts to the same filter as the cards.
+    const pipelineBreakdown = buildPipelineBreakdown(leadsInRange, department);
 
     return {
       date: dateStr,
