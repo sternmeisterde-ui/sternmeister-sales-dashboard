@@ -42,6 +42,10 @@ interface CalendarPickerProps {
   value: DateRange;
   onChange: (range: DateRange) => void;
   onClear: () => void;
+  /** Earliest selectable date (days before are greyed out) */
+  minDate?: Date | null;
+  /** Latest selectable date (days after are greyed out) */
+  maxDate?: Date | null;
   /** extra classes for the wrapper */
   className?: string;
 }
@@ -52,10 +56,19 @@ export default function CalendarPicker({
   value,
   onChange,
   onClear,
+  minDate,
+  maxDate,
   className = "",
 }: CalendarPickerProps) {
   const [open, setOpen] = useState(false);
-  const [month, setMonth] = useState(new Date());
+  // Start the calendar on maxDate's month if data hasn't reached today
+  const [month, setMonth] = useState(() => {
+    const today = new Date();
+    if (maxDate && maxDate < today) {
+      return new Date(maxDate.getFullYear(), maxDate.getMonth(), 1);
+    }
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  });
   const [draft, setDraft] = useState<DateRange>({ start: null, end: null });
   const ref = useRef<HTMLDivElement>(null);
 
@@ -76,7 +89,20 @@ export default function CalendarPicker({
 
   const isActive = !!(value.start && (mode === "single" || value.end));
 
+  const isDayDisabled = (date: Date): boolean => {
+    if (minDate) {
+      const min = new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate());
+      if (date < min) return true;
+    }
+    if (maxDate) {
+      const max = new Date(maxDate.getFullYear(), maxDate.getMonth(), maxDate.getDate());
+      if (date > max) return true;
+    }
+    return false;
+  };
+
   const handleDayClick = (date: Date) => {
+    if (isDayDisabled(date)) return;
     if (mode === "single") {
       onChange({ start: date, end: date });
       setOpen(false);
@@ -168,34 +194,39 @@ export default function CalendarPicker({
       {open && (
         <div className="absolute top-10 right-0 sm:right-auto sm:left-0 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-72 animate-in fade-in slide-in-from-top-2">
           {/* Month navigation */}
-          <div className="flex items-center justify-between mb-3">
-            <button
-              onClick={() => {
-                const m = new Date(month);
-                m.setMonth(m.getMonth() - 1);
-                setMonth(m);
-              }}
-              className="p-1.5 hover:bg-white/5 rounded-lg transition-colors"
-            >
-              <ChevronLeft className="w-4 h-4 text-slate-400" />
-            </button>
-            <span className="text-xs font-bold text-white capitalize">
-              {month.toLocaleDateString("ru-RU", {
-                month: "long",
-                year: "numeric",
-              })}
-            </span>
-            <button
-              onClick={() => {
-                const m = new Date(month);
-                m.setMonth(m.getMonth() + 1);
-                setMonth(m);
-              }}
-              className="p-1.5 hover:bg-white/5 rounded-lg transition-colors"
-            >
-              <ChevronRight className="w-4 h-4 text-slate-400" />
-            </button>
-          </div>
+          {(() => {
+            const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);
+            const nextMonth = new Date(month.getFullYear(), month.getMonth() + 1, 1);
+            const minMonth = minDate
+              ? new Date(minDate.getFullYear(), minDate.getMonth(), 1)
+              : null;
+            const maxMonth = maxDate
+              ? new Date(maxDate.getFullYear(), maxDate.getMonth(), 1)
+              : null;
+            const prevDisabled = minMonth !== null && prevMonth < minMonth;
+            const nextDisabled = maxMonth !== null && nextMonth > maxMonth;
+            return (
+              <div className="flex items-center justify-between mb-3">
+                <button
+                  onClick={() => { if (!prevDisabled) setMonth(prevMonth); }}
+                  disabled={prevDisabled}
+                  className="p-1.5 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft className="w-4 h-4 text-slate-400" />
+                </button>
+                <span className="text-xs font-bold text-white capitalize">
+                  {month.toLocaleDateString("ru-RU", { month: "long", year: "numeric" })}
+                </span>
+                <button
+                  onClick={() => { if (!nextDisabled) setMonth(nextMonth); }}
+                  disabled={nextDisabled}
+                  className="p-1.5 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Day-of-week labels */}
           <div className="grid grid-cols-7 gap-1 mb-1">
@@ -234,18 +265,22 @@ export default function CalendarPicker({
                   sel.end &&
                   isInRange(date, sel.start, sel.end);
                 const isToday = isSameDay(date, today);
+                const disabled = isDayDisabled(date);
 
                 cells.push(
                   <button
                     key={day}
                     onClick={() => handleDayClick(date)}
+                    disabled={disabled}
                     className={`aspect-square flex items-center justify-center text-[11px] rounded-lg transition-all relative ${
-                      isStart || isEnd
+                      disabled
+                        ? "text-slate-600 cursor-not-allowed"
+                        : isStart || isEnd
                         ? "bg-blue-500 text-white font-bold"
                         : inRange
                         ? "bg-blue-500/20 text-blue-300"
                         : "text-slate-300 hover:bg-white/5"
-                    } ${isToday && !isStart && !isEnd ? "ring-1 ring-blue-500/40" : ""}`}
+                    } ${isToday && !isStart && !isEnd && !disabled ? "ring-1 ring-blue-500/40" : ""}`}
                   >
                     {day}
                   </button>

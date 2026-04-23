@@ -37,7 +37,7 @@ const VALID_STATUSES = new Set([
 ]);
 
 const VALID_CATEGORIES = new Set(["A", "B", "C", "D", "E"]);
-const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail", "conversions"]);
+const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail", "conversions", "meta"]);
 const VALID_SLA = new Set(["0-9", "10-29", "30+"]);
 const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category"]);
 
@@ -109,6 +109,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     const pipelineList = activePipelines.map((p) => `'${esc(p)}'`).join(", ");
+
+    // meta view — return data date bounds for calendar restriction
+    if (view === "meta") {
+      const metaQuery = `
+        SELECT
+          (MIN(created_at) AT TIME ZONE 'Europe/Berlin')::date AS min_date,
+          (MAX(created_at) AT TIME ZONE 'Europe/Berlin')::date AS max_date
+        FROM analytics.leads_cohort
+        WHERE pipeline IN (${pipelineList})
+      `;
+      const metaRes = await analyticsDb.execute<{ min_date: string; max_date: string }>(
+        sql.raw(metaQuery),
+      );
+      const row = metaRes.rows[0];
+      return NextResponse.json({
+        minDate: row?.min_date ?? null,
+        maxDate: row?.max_date ?? null,
+      });
+    }
 
     // Build base WHERE conditions
     const conditions: string[] = [
@@ -330,26 +349,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         SELECT COUNT(*) AS count FROM filtered_leads
       `;
     } else {
-      // conversions — status distribution per pipeline
+      // conversions — true funnel: how many cohort leads ever reached each status
+      // Uses lead_status_changes (history) not leads_cohort (snapshot of current status).
       mainQuery = `
-        WITH ${filteredLeadsCte},
+        WITH ${tltFilteredLeadsCte},
         pipeline_totals AS (
           SELECT pipeline, COUNT(*) AS total
-          FROM analytics.leads_cohort lc
-          WHERE ${baseWhere}
+          FROM filtered_leads
           GROUP BY pipeline
         )
         SELECT
-          lc.pipeline,
-          lc.status,
-          MAX(lc.status_order) AS status_order,
-          COUNT(*) AS lead_count,
-          ROUND(100.0 * COUNT(*) / pt.total, 1) AS pct
-        FROM analytics.leads_cohort lc
-        JOIN pipeline_totals pt ON pt.pipeline = lc.pipeline
-        WHERE ${baseWhere}
-        GROUP BY lc.pipeline, lc.status, pt.total
-        ORDER BY lc.pipeline, MAX(lc.status_order) ASC NULLS LAST, COUNT(*) DESC
+          fl.pipeline,
+          sc.status,
+          sc.sort AS status_order,
+          COUNT(DISTINCT sc.lead_id) AS lead_count,
+          pt.total AS pipeline_total,
+          ROUND(100.0 * COUNT(DISTINCT sc.lead_id) / pt.total, 1) AS pct
+        FROM filtered_leads fl
+        JOIN analytics.lead_status_changes sc
+          ON sc.lead_id = fl.lead_id AND sc.pipeline = fl.pipeline
+        JOIN pipeline_totals pt ON pt.pipeline = fl.pipeline
+        GROUP BY fl.pipeline, sc.status, sc.sort, pt.total
+        ORDER BY fl.pipeline, sc.sort ASC NULLS LAST, COUNT(DISTINCT sc.lead_id) DESC
       `;
       countQuery = mainQuery;
     }

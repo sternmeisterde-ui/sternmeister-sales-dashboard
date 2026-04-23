@@ -117,6 +117,7 @@ interface ConvRow {
   status: string;
   status_order: number | null;
   lead_count: number;
+  pipeline_total: number;
   pct: number;
 }
 
@@ -684,7 +685,9 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
     <div className="flex flex-col gap-5">
       {pipelines.map((pipeline) => {
         const pipeRows = byPipeline.get(pipeline)!;
-        const total = pipeRows.reduce((s, r) => s + Number(r.lead_count), 0);
+        // pipeline_total = cohort size (leads created in period); lead_count can exceed
+        // it because one lead may pass through multiple statuses (true funnel).
+        const total = Number(pipeRows[0]?.pipeline_total ?? 0);
         const maxLeads = Math.max(...pipeRows.map((r) => Number(r.lead_count)));
 
         return (
@@ -692,9 +695,10 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
             {/* Pipeline header */}
             <div className="px-5 py-3 border-b border-white/10 flex items-center gap-3">
               <span className="text-xs font-semibold text-slate-200">{pipeline}</span>
-              <span className="text-[10px] text-slate-500 bg-white/5 px-2 py-0.5 rounded-full">
-                {fmtNum(total)} лидов
+              <span className="text-[10px] text-slate-500 bg-white/5 px-2 py.0.5 rounded-full">
+                {fmtNum(total)} лидов в когорте
               </span>
+              <span className="text-[9px] text-slate-600 ml-auto">% от когорты</span>
             </div>
 
             <div className="overflow-x-auto">
@@ -716,7 +720,8 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
                   {pipeRows.map((r) => {
                     const leadCount = Number(r.lead_count);
                     const pct = Number(r.pct);
-                    const leadsBarW = maxLeads > 0 ? Math.round((leadCount / maxLeads) * 100) : 0;
+                    // Bar width relative to pipeline_total so all bars express the same scale
+                    const leadsBarW = total > 0 ? Math.min(Math.round((leadCount / total) * 100), 100) : 0;
 
                     return (
                       <tr
@@ -793,6 +798,8 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [convRows, setConvRows] = useState<ConvRow[]>([]);
   const [managers, setManagers] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [minDate, setMinDate] = useState<Date | null>(null);
+  const [maxDate, setMaxDate] = useState<Date | null>(null);
 
   const [statusOpen, setStatusOpen] = useState(false);
   const [slaOpen, setSlaOpen] = useState(false);
@@ -815,6 +822,18 @@ export default function LookerTab({ department }: LookerTabProps) {
     setTltSummaryRows([]);
     setTltDetailRows([]);
     setConvRows([]);
+  }, [department]);
+
+  // Fetch available date bounds for the calendar
+  useEffect(() => {
+    const params = new URLSearchParams({ dept: department, view: "meta" });
+    fetch(`/api/analytics/looker/data?${params}`)
+      .then((r) => r.json())
+      .then((json: { minDate?: string | null; maxDate?: string | null }) => {
+        setMinDate(json.minDate ? new Date(`${json.minDate}T00:00:00`) : null);
+        setMaxDate(json.maxDate ? new Date(`${json.maxDate}T23:59:59`) : null);
+      })
+      .catch(() => {/* non-critical */});
   }, [department]);
 
   // Close dropdowns on outside click
@@ -961,6 +980,8 @@ export default function LookerTab({ department }: LookerTabProps) {
             value={dateRange}
             onChange={(r) => { setDateRange(r); setTltPage(0); }}
             onClear={() => { setDateRange(makeDefaultRange()); setTltPage(0); }}
+            minDate={minDate}
+            maxDate={maxDate}
           />
 
           {([7, 14, 30, 90] as const).map((days) => (
