@@ -73,6 +73,7 @@ const funnelMetrics: MetricDef[] = [
   { key: "gutscheinsApproved", label: "Одобрено гутшайнов", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "beraterReject", label: "Отказ бератера", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "appealsSubmitted", label: "Подано апелляций", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "revenue", label: "Выручка факт, €", hasPlan: false, hasFact: true, unit: "", factSource: "kommo_leads" },
 ];
 
 // ====================== QUALIFIER (1st LINE) SECTION ======================
@@ -96,7 +97,7 @@ const qualifierMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
-  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "kommo_calls" },
+  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "sla_f", label: "SLA от лида (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
   { key: "sla_shift_f", label: "SLA от смены (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
@@ -127,7 +128,7 @@ const secondLineMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
-  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "kommo_calls" },
+  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "okk_p", label: "ОКК план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   { key: "okk_f", label: "ОКК факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   { key: "roleplay_p", label: "Оценка за ролевку план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
@@ -147,14 +148,14 @@ const thirdLineMetrics: MetricDef[] = [
   // --- Время ---
   { key: "_grp_time", label: "Время", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "totalMinutes_p", label: "Всего на линии (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
-  { key: "totalMinutes", label: "Всего на линии (мін) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
+  { key: "totalMinutes", label: "Всего на линии (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   { key: "avgDialogPerEmployee", label: "Ср. время в диалоге на сотр.", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "avgDialogMinutes", label: "Ср. время диалога", hasPlan: false, hasFact: true, unit: "мин", factSource: "kommo_calls" },
   { key: "avgWait_p", label: "Ср. время ожидания ответа (сек) план", hasPlan: false, hasFact: true, unit: "сек", factSource: "computed" },
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
-  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "kommo_calls" },
+  { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "sla_f", label: "SLA от лида (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
   { key: "sla_shift_f", label: "SLA от смены (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },

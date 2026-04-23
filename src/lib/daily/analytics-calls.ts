@@ -19,11 +19,7 @@ import type { UserCallMetrics } from "@/lib/kommo/metrics";
 // `analytics.communications.manager` (from integrator). Add entries here when
 // a new manager shows up with a transliteration mismatch — verified from prod
 // on 2026-04-24.
-const NAME_ALIASES: Record<string, string[]> = {
-  "Максим Алекперов": ["Maksim Alekperov"],
-  "Гульназ Сираждинова": ["Гульназ Cираждинова"], // Latin C in integrator feed
-  "Елизавета Трапезникова": ["Єлизавета Трапезникова"], // Ukrainian Є vs Russian Е
-};
+import { NAME_ALIASES } from "./name-aliases";
 
 interface AnalyticsRow {
   manager: string;

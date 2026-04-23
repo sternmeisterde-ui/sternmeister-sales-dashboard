@@ -13,6 +13,24 @@ import { getAnalyticsCallMetricsByMaster } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
 import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES, A2_STATUSES, B1_STATUSES, B2_PLUS_STATUSES, FUNNEL_STATUS_MAP } from "@/lib/kommo/pipeline-config";
+import { resolveByAlias } from "@/lib/daily/name-aliases";
+import { parseDateBoundary } from "@/lib/utils/date";
+
+/** APP_TZ-aware month bounds in epoch seconds. Replaces the hand-rolled
+ *  Date.UTC(y, m, 0, 23, 59, 59) pattern that leaked 1–2 Berlin hours into
+ *  the next month depending on DST. */
+function monthBoundsSec(dateStr: string): { start: number; end: number } {
+  const [y, m] = dateStr.split("-").map(Number);
+  const firstDay = `${y}-${String(m).padStart(2, "0")}-01`;
+  const lastDayNum = new Date(y, m, 0).getDate();
+  const lastDay = `${y}-${String(m).padStart(2, "0")}-${String(lastDayNum).padStart(2, "0")}`;
+  const startD = parseDateBoundary(firstDay, "start");
+  const endD = parseDateBoundary(lastDay, "end");
+  return {
+    start: startD ? Math.floor(startD.getTime() / 1000) : 0,
+    end: endD ? Math.floor(endD.getTime() / 1000) : 0,
+  };
+}
 import type { LeadFunnelCounts } from "@/lib/kommo/metrics";
 import type { KommoLead, KommoTask } from "@/lib/kommo/types";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
@@ -307,29 +325,13 @@ async function getAvgCallsPerLeadByManager(
         GROUP BY manager
       `,
     );
-    const NAME_ALIASES: Record<string, string[]> = {
-      "Максим Алекперов": ["Maksim Alekperov"],
-      "Гульназ Сираждинова": ["Гульназ Cираждинова"],
-      "Елизавета Трапезникова": ["Єлизавета Трапезникова"],
-    };
     const byName = new Map<string, number>();
     for (const row of result.rows) {
       const t = Number(row.total_calls);
       const u = Number(row.unique_leads);
       if (u > 0) byName.set(row.manager, Math.round((t / u) * 10) / 10);
     }
-    const byMaster = new Map<string, number>();
-    for (const m of managers) {
-      let v = byName.get(m.name);
-      if (v === undefined) {
-        for (const alias of NAME_ALIASES[m.name] ?? []) {
-          const hit = byName.get(alias);
-          if (hit !== undefined) { v = hit; break; }
-        }
-      }
-      if (v !== undefined) byMaster.set(m.id, v);
-    }
-    return byMaster;
+    return resolveByAlias(managers, byName);
   } catch {
     return new Map();
   }
@@ -365,13 +367,6 @@ async function getSlaFactsByManager(
         GROUP BY manager
       `,
     );
-    // Inline alias table — kept here to avoid a circular import from
-    // analytics-calls. Keep in sync with NAME_ALIASES there.
-    const NAME_ALIASES: Record<string, string[]> = {
-      "Максим Алекперов": ["Maksim Alekperov"],
-      "Гульназ Сираждинова": ["Гульназ Cираждинова"],
-      "Елизавета Трапезникова": ["Єлизавета Трапезникова"],
-    };
     const byName = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
     for (const row of result.rows) {
       byName.set(row.manager, {
@@ -380,18 +375,7 @@ async function getSlaFactsByManager(
         tltMinutes: row.avg_tlt != null ? Number(row.avg_tlt) : null,
       });
     }
-    const byMaster = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
-    for (const m of managers) {
-      let metrics = byName.get(m.name);
-      if (!metrics) {
-        for (const alias of NAME_ALIASES[m.name] ?? []) {
-          const hit = byName.get(alias);
-          if (hit) { metrics = hit; break; }
-        }
-      }
-      if (metrics) byMaster.set(m.id, metrics);
-    }
-    return byMaster;
+    return resolveByAlias(managers, byName);
   } catch {
     return new Map();
   }
@@ -918,12 +902,13 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "staffCount") {
           fact = String(sectionManagers.length);
         }
-        // Computed plans: staffCount × coefficient
+        // Computed plans: staffCount × per-manager coefficient (Excel reference:
+        // 160 calls/day, 240 min/day per employee, same per-manager block below).
         if (metric.key === "callsTotal_p") {
-          fact = String(sectionManagers.length * 80);
+          fact = String(sectionManagers.length * 160);
         }
         if (metric.key === "totalMinutes_p") {
-          fact = String(sectionManagers.length * 180);
+          fact = String(sectionManagers.length * 240);
         }
         // Fixed constants from Excel
         if (metric.key === "sla_p") {
@@ -1131,10 +1116,8 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrTermsWon.length);
                   break;
                 case "termsNew": {
-                  // "New" = created in current month (use dateStr to avoid UTC/TZ drift)
-                  const [tY, tM] = dateStr.split("-").map(Number);
-                  const mStart = new Date(Date.UTC(tY, tM - 1, 1)).getTime() / 1000;
-                  const mEnd = new Date(Date.UTC(tY, tM, 0, 23, 59, 59)).getTime() / 1000;
+                  // "New" = created in current month, APP_TZ-aware bounds.
+                  const { start: mStart, end: mEnd } = monthBoundsSec(dateStr);
                   fact = String(mgrTermsWon.filter((l) => l.created_at >= mStart && l.created_at <= mEnd).length);
                   break;
                 }
@@ -1142,9 +1125,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id)).length);
                   break;
                 case "awaitTermNew": {
-                  const [aY, aM] = dateStr.split("-").map(Number);
-                  const ms = new Date(Date.UTC(aY, aM - 1, 1)).getTime() / 1000;
-                  const me = new Date(Date.UTC(aY, aM, 0, 23, 59, 59)).getTime() / 1000;
+                  const { start: ms, end: me } = monthBoundsSec(dateStr);
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id) && l.created_at >= ms && l.created_at <= me).length);
                   break;
                 }
@@ -1174,9 +1155,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                 case "tasksNew": {
                   const map = FUNNEL_STATUS_MAP.tasksTotal;
                   const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
-                  const [tnY, tnM] = dateStr.split("-").map(Number);
-                  const ms = new Date(Date.UTC(tnY, tnM - 1, 1)).getTime() / 1000;
-                  const me = new Date(Date.UTC(tnY, tnM, 0, 23, 59, 59)).getTime() / 1000;
+                  const { start: ms, end: me } = monthBoundsSec(dateStr);
                   fact = String(mgrActiveLeads.filter((l) =>
                     l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
                       && l.created_at >= ms && l.created_at <= me,
@@ -1192,9 +1171,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                 case "consultNew": {
                   const map = FUNNEL_STATUS_MAP.consultTotal;
                   const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
-                  const [cnY, cnM] = dateStr.split("-").map(Number);
-                  const ms = new Date(Date.UTC(cnY, cnM - 1, 1)).getTime() / 1000;
-                  const me = new Date(Date.UTC(cnY, cnM, 0, 23, 59, 59)).getTime() / 1000;
+                  const { start: ms, end: me } = monthBoundsSec(dateStr);
                   fact = String(mgrActiveLeads.filter((l) =>
                     l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
                       && l.created_at >= ms && l.created_at <= me,
@@ -1235,6 +1212,11 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860891).length);
                   break;
                 }
+                case "revenue": {
+                  const mgrRev = mgrTermsWon.reduce((s, l) => s + (l.price || 0), 0);
+                  fact = String(mgrRev);
+                  break;
+                }
                 case "termDCCancelled": {
                   fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860875).length);
                   break;
@@ -1244,7 +1226,12 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "termAATransferred": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 102183943).length);
+                  // Team-level uses getStatusChangeCount (events API, period-
+                  // bound). There's no per-manager variant of that call yet,
+                  // and counting current snapshot status would report a
+                  // different number with the same label. Return null rather
+                  // than mislead; team total still shows in the summary row.
+                  fact = null;
                   break;
                 }
                 case "termAACancelled": {
@@ -1260,7 +1247,12 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "delayedStart": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 95515895).length);
+                  // Matches team-level FUNNEL_STATUS_MAP.delayedStart which
+                  // covers BOTH pipelines' "Отложенный старт" statuses.
+                  fact = String(mgrActiveLeads.filter((l) =>
+                    (l.pipeline_id === beraterPipeline && l.status_id === 95515895)
+                    || (l.pipeline_id === firstLinePipeline && l.status_id === 95514987),
+                  ).length);
                   break;
                 }
                 case "appeal": {
@@ -1542,6 +1534,12 @@ const SNAPSHOT_ONLY_METRICS = new Set([
   "termDCCancelled", "termDCDone", "termAACount",
   "beraterReview", "delayedStart", "appeal",
   "a2", "b1", "b2plus",
+  // tasks/consult per-manager filter mgrActiveLeads (live snapshot) — for
+  // historical dates without a stored snapshot the numbers would leak today's
+  // state. Gate them the same way as the other snapshot-derived metrics.
+  "tasksTotal", "tasksNew",
+  "consultTotal", "consultNew",
+  "appealsSubmitted",
 ]);
 
 function getFunnelFact(
@@ -1582,9 +1580,8 @@ function getFunnelFact(
     case "termsTotal":
       return String(termsWonLeads?.length ?? 0);
     case "termsNew": {
-      // "New" = leads created in current month (use dateStr to avoid UTC/TZ drift)
-      const monthStart = new Date(Date.UTC(dsYear, dsMonth - 1, 1)).getTime() / 1000;
-      const monthEnd = new Date(Date.UTC(dsYear, dsMonth, 0, 23, 59, 59)).getTime() / 1000;
+      // "New" = leads created in current month, APP_TZ-aware bounds.
+      const { start: monthStart, end: monthEnd } = monthBoundsSec(dateStr ?? "2026-01-01");
       return String((termsWonLeads || []).filter((l) => l.created_at >= monthStart && l.created_at <= monthEnd).length);
     }
     case "managersOnLine":
@@ -1635,8 +1632,7 @@ function getFunnelFact(
       // Awaiting term + created in current month
       const awaitStatusesNew = new Set([93860331, 102183931, 102183935, 102183939]);
       const beraterPipelineNew = brPipeline;
-      const mStartNew = new Date(Date.UTC(dsYear, dsMonth - 1, 1)).getTime() / 1000;
-      const mEndNew = new Date(Date.UTC(dsYear, dsMonth, 0, 23, 59, 59)).getTime() / 1000;
+      const { start: mStartNew, end: mEndNew } = monthBoundsSec(dateStr ?? "2026-01-01");
       const awaitingNew = (snapshotLeads || []).filter(
         (l) =>
           l.pipeline_id === beraterPipelineNew &&
@@ -1710,6 +1706,12 @@ function getFunnelFact(
     case "gutscheinPlanDone":
       // Computed in summaryMetrics loop after plan is resolved — handled there
       return null;
+    case "revenue": {
+      // Sum of prices on WON leads in the berater pipeline for this period.
+      // (termsWonLeads is already scoped to the berater won-in-range dataset.)
+      const rev = (termsWonLeads || []).reduce((s, l) => s + (l.price || 0), 0);
+      return String(rev);
+    }
     case "convQualTask":
       return fc.qualLeadsFlow > 0
         ? String(Math.round(((fc.byMetric.tasksTotal ?? 0) / fc.qualLeadsFlow) * 100))
