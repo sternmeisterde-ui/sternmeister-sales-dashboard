@@ -72,7 +72,7 @@ type SliceCol = (typeof SLICE_OPTIONS)[number]["col"];
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type View = "all_calls" | "cohorts" | "tlt";
+type View = "all_calls" | "cohorts" | "tlt" | "conversions";
 
 interface AllCallsRow {
   manager: string;
@@ -112,6 +112,14 @@ interface TltSummaryRow {
   total_comms: number;
 }
 
+interface ConvRow {
+  pipeline: string;
+  status: string;
+  status_order: number | null;
+  lead_count: number;
+  pct: number;
+}
+
 interface TltDetailRow {
   manager: string;
   current_status: string | null;
@@ -125,7 +133,7 @@ interface TltDetailRow {
 
 interface ApiResponse {
   view: string;
-  rows: AllCallsRow[] | CohortsRow[] | TltSummaryRow[] | TltDetailRow[];
+  rows: AllCallsRow[] | CohortsRow[] | TltSummaryRow[] | TltDetailRow[] | ConvRow[];
   total: number;
   filterOptions: { managers: string[] };
 }
@@ -640,6 +648,123 @@ function TltDetailTable({
   );
 }
 
+// ─── Conversions table ───────────────────────────────────────────────────────
+
+function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boolean }) {
+  const safeRows = rows ?? [];
+
+  if (loading) {
+    return (
+      <div className="glass-panel rounded-2xl border border-white/5 flex items-center justify-center py-20">
+        <Loader2 className="w-5 h-5 animate-spin text-slate-400" />
+      </div>
+    );
+  }
+
+  if (safeRows.length === 0) {
+    return (
+      <div className="glass-panel rounded-2xl border border-white/5 flex items-center justify-center py-20">
+        <span className="text-xs text-slate-500">Нет данных за выбранный период</span>
+      </div>
+    );
+  }
+
+  // Group by pipeline preserving SQL order
+  const pipelines: string[] = [];
+  const byPipeline = new Map<string, ConvRow[]>();
+  for (const r of safeRows) {
+    if (!byPipeline.has(r.pipeline)) {
+      pipelines.push(r.pipeline);
+      byPipeline.set(r.pipeline, []);
+    }
+    byPipeline.get(r.pipeline)!.push(r);
+  }
+
+  return (
+    <div className="flex flex-col gap-5">
+      {pipelines.map((pipeline) => {
+        const pipeRows = byPipeline.get(pipeline)!;
+        const total = pipeRows.reduce((s, r) => s + Number(r.lead_count), 0);
+        const maxLeads = Math.max(...pipeRows.map((r) => Number(r.lead_count)));
+
+        return (
+          <div key={pipeline} className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+            {/* Pipeline header */}
+            <div className="px-5 py-3 border-b border-white/10 flex items-center gap-3">
+              <span className="text-xs font-semibold text-slate-200">{pipeline}</span>
+              <span className="text-[10px] text-slate-500 bg-white/5 px-2 py-0.5 rounded-full">
+                {fmtNum(total)} лидов
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="px-5 py-2.5 text-[10px] uppercase tracking-widest text-slate-400 font-semibold w-1/2">
+                      Статус
+                    </th>
+                    <th className="px-5 py-2.5 text-[10px] uppercase tracking-widest text-slate-400 font-semibold w-1/4">
+                      Лиды
+                    </th>
+                    <th className="px-5 py-2.5 text-[10px] uppercase tracking-widest text-slate-400 font-semibold w-1/4">
+                      %
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pipeRows.map((r) => {
+                    const leadCount = Number(r.lead_count);
+                    const pct = Number(r.pct);
+                    const leadsBarW = maxLeads > 0 ? Math.round((leadCount / maxLeads) * 100) : 0;
+
+                    return (
+                      <tr
+                        key={r.status}
+                        className="border-t border-white/5 hover:bg-white/[0.02] transition-colors"
+                      >
+                        <td className="px-5 py-2.5 text-slate-300 max-w-[280px]">
+                          {r.status ?? "—"}
+                        </td>
+                        <td className="px-5 py-2.5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="flex-1 max-w-[80px] h-1.5 bg-white/5 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-blue-500/60 rounded-full"
+                                style={{ width: `${leadsBarW}%` }}
+                              />
+                            </div>
+                            <span className="text-slate-200 tabular-nums w-8 text-right">
+                              {fmtNum(leadCount)}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-5 py-2.5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="flex-1 max-w-[80px] h-1.5 bg-white/5 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-emerald-500/60 rounded-full"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-slate-200 tabular-nums w-12 text-right">
+                              {pct.toFixed(1)}%
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Main component ──────────────────────────────────────────────────────────
 
 interface LookerTabProps {
@@ -665,6 +790,7 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [tltSummaryRows, setTltSummaryRows] = useState<TltSummaryRow[]>([]);
   const [tltDetailRows, setTltDetailRows] = useState<TltDetailRow[]>([]);
   const [tltDetailTotal, setTltDetailTotal] = useState(0);
+  const [convRows, setConvRows] = useState<ConvRow[]>([]);
   const [managers, setManagers] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -688,6 +814,7 @@ export default function LookerTab({ department }: LookerTabProps) {
     setData(null);
     setTltSummaryRows([]);
     setTltDetailRows([]);
+    setConvRows([]);
   }, [department]);
 
   // Close dropdowns on outside click
@@ -728,7 +855,18 @@ export default function LookerTab({ department }: LookerTabProps) {
     const fetchData = async () => {
       setLoading(true);
       try {
-        if (view === "tlt") {
+        if (view === "conversions") {
+          const params = buildBaseParams();
+          params.set("view", "conversions");
+          const res = await fetch(`/api/analytics/looker/data?${params}`, { signal: controller.signal });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = (await res.json()) as ApiResponse;
+          setConvRows(json.rows as ConvRow[]);
+          setManagers(json.filterOptions.managers);
+          setData(null);
+          setTltSummaryRows([]);
+          setTltDetailRows([]);
+        } else if (view === "tlt") {
           const sumParams = buildBaseParams();
           sumParams.set("view", "tlt_summary");
           sumParams.set("slice1", slice1);
@@ -766,6 +904,7 @@ export default function LookerTab({ department }: LookerTabProps) {
           setManagers(json.filterOptions.managers);
           setTltSummaryRows([]);
           setTltDetailRows([]);
+          setConvRows([]);
         }
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
@@ -808,6 +947,7 @@ export default function LookerTab({ department }: LookerTabProps) {
     { key: "all_calls", label: "Все звонки" },
     { key: "cohorts", label: "Когорты" },
     { key: "tlt", label: "TLT" },
+    { key: "conversions", label: "Конверсии" },
   ];
 
   return (
@@ -995,6 +1135,7 @@ export default function LookerTab({ department }: LookerTabProps) {
       {/* Tables */}
       {view === "all_calls" && <AllCallsTable rows={allCallsRows} loading={loading} />}
       {view === "cohorts" && <CohortsTable rows={cohortsRows} loading={loading} />}
+      {view === "conversions" && <ConversionsSection rows={convRows} loading={loading} />}
       {view === "tlt" && (
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-2">

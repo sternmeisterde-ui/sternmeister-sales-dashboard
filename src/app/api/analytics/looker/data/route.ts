@@ -37,7 +37,7 @@ const VALID_STATUSES = new Set([
 ]);
 
 const VALID_CATEGORIES = new Set(["A", "B", "C", "D", "E"]);
-const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail"]);
+const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail", "conversions"]);
 const VALID_SLA = new Set(["0-9", "10-29", "30+"]);
 const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category"]);
 
@@ -112,8 +112,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     // Build base WHERE conditions
     const conditions: string[] = [
-      `lc.created_at >= '${esc(fromStr)}T00:00:00Z'::timestamptz`,
-      `lc.created_at <= '${esc(toStr)}T23:59:59Z'::timestamptz`,
+      `lc.created_at >= ('${esc(fromStr)} 00:00:00'::timestamp AT TIME ZONE 'Europe/Berlin')`,
+      `lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')`,
       `lc.pipeline IN (${pipelineList})`,
     ];
 
@@ -144,8 +144,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const managerOptionsQuery = `
       SELECT DISTINCT lc.manager
       FROM analytics.leads_cohort lc
-      WHERE lc.created_at >= '${esc(fromStr)}T00:00:00Z'::timestamptz
-        AND lc.created_at <= '${esc(toStr)}T23:59:59Z'::timestamptz
+      WHERE lc.created_at >= ('${esc(fromStr)} 00:00:00'::timestamp AT TIME ZONE 'Europe/Berlin')
+        AND lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')
         AND lc.pipeline IN (${pipelineList})
         AND lc.manager IS NOT NULL
       ORDER BY lc.manager
@@ -303,7 +303,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ORDER BY lead_count DESC
       `;
       countQuery = mainQuery;
-    } else {
+    } else if (view === "tlt_detail") {
       // tlt_detail — per-lead, paginated
       mainQuery = `
         WITH ${tltFilteredLeadsCte},
@@ -329,6 +329,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         WITH ${tltFilteredLeadsCte}
         SELECT COUNT(*) AS count FROM filtered_leads
       `;
+    } else {
+      // conversions — status distribution per pipeline
+      mainQuery = `
+        WITH ${filteredLeadsCte},
+        pipeline_totals AS (
+          SELECT pipeline, COUNT(*) AS total
+          FROM analytics.leads_cohort lc
+          WHERE ${baseWhere}
+          GROUP BY pipeline
+        )
+        SELECT
+          lc.pipeline,
+          lc.status,
+          MAX(lc.status_order) AS status_order,
+          COUNT(*) AS lead_count,
+          ROUND(100.0 * COUNT(*) / pt.total, 1) AS pct
+        FROM analytics.leads_cohort lc
+        JOIN pipeline_totals pt ON pt.pipeline = lc.pipeline
+        WHERE ${baseWhere}
+        GROUP BY lc.pipeline, lc.status, pt.total
+        ORDER BY lc.pipeline, MAX(lc.status_order) ASC NULLS LAST, COUNT(*) DESC
+      `;
+      countQuery = mainQuery;
     }
 
     const [rowsResult, managerOptsResult] = await Promise.all([
