@@ -37,8 +37,9 @@ const VALID_STATUSES = new Set([
 ]);
 
 const VALID_CATEGORIES = new Set(["A", "B", "C", "D", "E"]);
-const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail"]);
+const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail"]);
 const VALID_SLA = new Set(["0-9", "10-29", "30+"]);
+const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category"]);
 
 function esc(s: string): string {
   return s.replace(/'/g, "''");
@@ -91,6 +92,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const statusesParam = sp.get("statuses") ?? "";
     const categoryParam = sp.get("category") ?? "";
     const slaParam = sp.get("sla") ?? "";
+
+    const slice1Raw = sp.get("slice1") ?? "manager";
+    const slice2Raw = sp.get("slice2") ?? "utm_source";
+    const slice3Raw = sp.get("slice3") ?? "status";
+    const slice1 = VALID_SLICES.has(slice1Raw) ? slice1Raw : "manager";
+    const slice2 = VALID_SLICES.has(slice2Raw) ? slice2Raw : "utm_source";
+    const slice3 = VALID_SLICES.has(slice3Raw) ? slice3Raw : "status";
 
     // Build pipeline list (server-side whitelist only)
     let activePipelines: readonly string[];
@@ -157,6 +165,32 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
+    // TLT variant — includes extra columns for pivot slice grouping
+    const tltFilteredLeadsCte = `
+      filtered_leads AS (
+        SELECT lc.lead_id, lc.manager, lc.created_at, lc.utm_source, lc.status, lc.pipeline, lc.category
+        FROM analytics.leads_cohort lc
+        ${needSlaJoinInFiltered ? "LEFT JOIN analytics.sla s ON s.lead_id = lc.lead_id" : ""}
+        WHERE ${baseWhere}
+        ${slaCondition}
+      )
+    `;
+
+    const callGapsCte = `
+      call_gaps AS (
+        SELECT lead_id, AVG(gap_seconds) AS avg_gap_sec
+        FROM (
+          SELECT lead_id,
+            EXTRACT(EPOCH FROM (created_at - LAG(created_at) OVER (PARTITION BY lead_id ORDER BY created_at))) AS gap_seconds
+          FROM analytics.communications
+          WHERE lead_id IN (SELECT lead_id FROM filtered_leads)
+            AND communication_type LIKE 'call%'
+        ) g
+        WHERE gap_seconds IS NOT NULL
+        GROUP BY lead_id
+      )
+    `;
+
     const commAggCte = `
       comm_agg AS (
         SELECT
@@ -214,7 +248,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ORDER BY lead_count DESC
       `;
       countQuery = mainQuery;
-    } else {
+    } else if (view === "detail") {
       // detail view — paginated
       const detailBase = `
         WITH ${filteredLeadsCte},
@@ -243,6 +277,55 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         WITH ${filteredLeadsCte}
         SELECT COUNT(*) AS count FROM filtered_leads
       `;
+    } else if (view === "tlt_summary") {
+      mainQuery = `
+        WITH ${tltFilteredLeadsCte},
+        ${commAggCte},
+        ${callGapsCte}
+        SELECT
+          COALESCE(fl.${slice1}::text, '—') AS param1,
+          COALESCE(fl.${slice2}::text, '—') AS param2,
+          COALESCE(fl.${slice3}::text, '—') AS param3,
+          COUNT(fl.lead_id) AS lead_count,
+          ROUND(AVG(s.sla_first_contact_seconds)) AS avg_tlt,
+          ROUND(AVG(cg.avg_gap_sec)) AS avg_gap_sec,
+          COALESCE(SUM(ca.outgoing_calls), 0) AS outgoing_calls,
+          COALESCE(SUM(ca.messages_sent), 0) AS messages_sent,
+          COALESCE(SUM(ca.outgoing_calls), 0) + COALESCE(SUM(ca.messages_sent), 0) AS total_comms
+        FROM filtered_leads fl
+        LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
+        LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
+        GROUP BY fl.${slice1}, fl.${slice2}, fl.${slice3}
+        ORDER BY lead_count DESC
+      `;
+      countQuery = mainQuery;
+    } else {
+      // tlt_detail — per-lead, paginated
+      mainQuery = `
+        WITH ${tltFilteredLeadsCte},
+        ${commAggCte},
+        ${callGapsCte}
+        SELECT
+          fl.manager,
+          fl.status AS current_status,
+          fl.lead_id,
+          s.sla_first_contact_seconds AS tlt,
+          COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
+          COALESCE(ca.messages_sent, 0) AS messages_sent,
+          COALESCE(ca.outgoing_calls, 0) + COALESCE(ca.messages_sent, 0) AS total_comms,
+          ROUND(cg.avg_gap_sec) AS avg_gap_sec
+        FROM filtered_leads fl
+        LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
+        LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
+        ORDER BY tlt ASC NULLS LAST
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      countQuery = `
+        WITH ${tltFilteredLeadsCte}
+        SELECT COUNT(*) AS count FROM filtered_leads
+      `;
     }
 
     const [rowsResult, managerOptsResult] = await Promise.all([
@@ -251,7 +334,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     ]);
 
     let total = 0;
-    if (view === "detail") {
+    if (view === "detail" || view === "tlt_detail") {
       const countResult = await analyticsDb.execute<{ count: string }>(sql.raw(countQuery));
       total = Number(countResult.rows[0]?.count ?? 0);
     } else {
