@@ -151,7 +151,16 @@ export async function POST(request: NextRequest) {
     const resolvedIds = await Promise.all(resolvePromises);
 
     // ── Step 3.5: Auto-resolve Kommo User IDs by name ──
-    let kommoUserMap = new Map<string, number>(); // lowercase name → kommo user id
+    // Load Kommo users once for the whole batch so we can auto-fill the id on
+    // freshly-added or previously-blank managers. Match is case-insensitive by
+    // display name with a small alias table for the three transliteration
+    // drifts the integrator / Kommo feeds have exhibited.
+    const KOMMO_NAME_ALIASES: Record<string, string[]> = {
+      "Максим Алекперов": ["Maksim Alekperov"],
+      "Гульназ Сираждинова": ["Гульназ Cираждинова"],
+      "Елизавета Трапезникова": ["Єлизавета Трапезникова"],
+    };
+    const kommoUserMap = new Map<string, number>(); // lowercase name → kommo user id
     try {
       const kommoUsers = await getKommoUsers();
       for (const ku of kommoUsers) {
@@ -166,6 +175,22 @@ export async function POST(request: NextRequest) {
       warnings.push(`Не удалось загрузить пользователей из Kommo: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // Look up a Kommo id by master manager name, trying aliases if the direct
+    // match misses (Cyrillic ↔ Latin, Ukrainian Є ↔ Russian Е).
+    const lookupKommoId = (name: string): number | null => {
+      const key = name.trim().toLowerCase();
+      const direct = kommoUserMap.get(key);
+      if (direct !== undefined) return direct;
+      const aliases = KOMMO_NAME_ALIASES[name.trim()];
+      if (aliases) {
+        for (const alias of aliases) {
+          const hit = kommoUserMap.get(alias.toLowerCase().trim());
+          if (hit !== undefined) return hit;
+        }
+      }
+      return null;
+    };
+
     // ── Step 4: Upsert each manager ──
     const results: (typeof masterManagers.$inferSelect)[] = [];
 
@@ -174,11 +199,18 @@ export async function POST(request: NextRequest) {
       const existing = mgr.id ? existingMap.get(mgr.id) : null;
       const telegramId = resolvedIds[idx] || existing?.telegramId || null;
 
-      // kommoUserId: auto-resolve from Kommo API only for OKK managers
-      const autoMatchedKommoId = mgr.inOkk
-        ? (kommoUserMap.get(mgr.name.trim().toLowerCase()) ?? null)
-        : null;
-      const kommoUserId = existing?.kommoUserId ?? autoMatchedKommoId ?? mgr.kommoUserId ?? null;
+      // kommoUserId precedence: explicit form input → existing saved value →
+      // auto-match by name (via Kommo API). We always attempt auto-match now
+      // because Daily/Dashboard call attribution routes through master_managers
+      // regardless of `inOkk`; gating it on OKK left new B2G managers without
+      // a Kommo id and silently dropped them from per-manager call metrics.
+      const autoMatchedKommoId = kommoUserMap.size > 0 ? lookupKommoId(mgr.name) : null;
+      const kommoUserId = mgr.kommoUserId ?? existing?.kommoUserId ?? autoMatchedKommoId ?? null;
+      if (!mgr.kommoUserId && !existing?.kommoUserId && autoMatchedKommoId) {
+        console.log(`[Managers API] auto-matched Kommo id ${autoMatchedKommoId} for ${mgr.name}`);
+      } else if (!kommoUserId) {
+        warnings.push(`Kommo ID не найден для «${mgr.name}» — заполните вручную или проверьте имя в Kommo.`);
+      }
 
       const values = {
         name: mgr.name.trim(),
