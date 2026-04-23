@@ -1,10 +1,14 @@
 // GET  /api/daily/managers?department=b2g
 // PATCH /api/daily/managers  body: { id: string, shiftStartTime?: string|null, shiftEndTime?: string|null }
-// Returns active managers (role=manager) from master_managers for the given department.
+// Returns active managers + "working ROPs" (role=rop with a line assigned) from
+// master_managers for the given department. A ROP with line='2' is a double-status
+// user — counted both as a ROP (access control) and as a line-2 team member
+// (schedule, call metrics). ROPs without a line are pure managers-of-managers
+// and stay out of the schedule popup.
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
   try {
@@ -24,7 +28,10 @@ export async function GET(req: NextRequest) {
         and(
           eq(masterManagers.department, department),
           eq(masterManagers.isActive, true),
-          eq(masterManagers.role, "manager"),
+          or(
+            eq(masterManagers.role, "manager"),
+            and(eq(masterManagers.role, "rop"), sql`${masterManagers.line} IS NOT NULL`),
+          ),
         ),
       )
       .orderBy(masterManagers.name);
