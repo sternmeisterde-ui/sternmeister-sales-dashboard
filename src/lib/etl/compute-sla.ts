@@ -16,13 +16,15 @@
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort, sla, communications } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql, eq, inArray } from "drizzle-orm";
-import { businessHoursSeconds, calendarSeconds } from "./business-hours";
+import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
 
 export async function computeSla(
   fromDate: Date,
   toDate: Date,
+  /** If provided, recompute SLA only for these specific lead IDs (incremental mode). */
+  filterLeadIds?: number[],
 ): Promise<number> {
-  // Find all leads created in this date range
+  // Find leads: either by specific IDs (incremental) or by creation date range (full)
   const leads = await analyticsDb
     .select({
       leadId: leadsCohort.leadId,
@@ -38,10 +40,12 @@ export async function computeSla(
     })
     .from(leadsCohort)
     .where(
-      and(
-        gte(leadsCohort.createdAt, fromDate),
-        lte(leadsCohort.createdAt, toDate),
-      ),
+      filterLeadIds && filterLeadIds.length > 0
+        ? inArray(leadsCohort.leadId, filterLeadIds)
+        : and(
+            gte(leadsCohort.createdAt, fromDate),
+            lte(leadsCohort.createdAt, toDate),
+          ),
     );
 
   if (leads.length === 0) return 0;
@@ -123,6 +127,11 @@ export async function computeSla(
     const slaFirstCallCalSec = comms.firstCallOutAt
       ? calendarSeconds(slaStart, comms.firstCallOutAt)
       : null;
+    // SLA from shift start: calendar seconds from 09:00 Berlin on the DAY OF THE FIRST CALL.
+    // Resets to 09:00 each workday — shows how early/late in the shift the call was made.
+    const slaFirstCallFromShiftSec = comms.firstCallOutAt
+      ? secondsFromShiftStart(comms.firstCallOutAt)
+      : null;
     const bhSinceLastContact = comms.lastContactAt
       ? businessHoursSeconds(slaStart, comms.lastContactAt)
       : null;
@@ -157,6 +166,7 @@ export async function computeSla(
       slaFirstContactSeconds: slaFirstContactSec,
       slaFirstCallSeconds: slaFirstCallSec,
       slaFirstCallCalendarSeconds: slaFirstCallCalSec,
+      slaFirstCallFromShiftSeconds: slaFirstCallFromShiftSec,
       businessHoursSinceLastContact: bhSinceLastContact,
       slaStatus,
     });

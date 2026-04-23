@@ -155,6 +155,7 @@ export const sla = analyticsSchema.table(
     slaFirstContactSeconds: bigint("sla_first_contact_seconds", { mode: "number" }),
     slaFirstCallSeconds: bigint("sla_first_call_seconds", { mode: "number" }),
     slaFirstCallCalendarSeconds: bigint("sla_first_call_calendar_seconds", { mode: "number" }),
+    slaFirstCallFromShiftSeconds: bigint("sla_first_call_from_shift_seconds", { mode: "number" }),
     businessHoursSinceLastContact: bigint("business_hours_since_last_contact", { mode: "number" }),
     slaStatus: text("sla_status"),
   },

@@ -1018,7 +1018,7 @@ export default function Dashboard() {
                     </button>
 
                     {isFilterOpen && (
-                      <div className="absolute top-10 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2">
+                      <div className="absolute bottom-full mb-2 right-0 bg-slate-900 border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-80 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-2">
                         {/* Manager filter inside widget */}
                         <div>
                           <label className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">

@@ -46,6 +46,7 @@ interface ManagerInput {
   // If absent, we preserve the master_managers existing value.
   callgearEmployeeId?: string | null;
   cloudtalkAgentId?: string | null;
+  shiftStartTime?: string | null;
   role: string;
   line: string | null;
   inOkk: boolean;
@@ -96,6 +97,7 @@ export async function POST(request: NextRequest) {
       name: string;
       callgearEmployeeId: string | null;
       cloudtalkAgentId: string | null;
+      shiftStartTime: string | null;
     }>();
     const existingRows = await db
       .select({
@@ -106,6 +108,7 @@ export async function POST(request: NextRequest) {
         name: masterManagers.name,
         callgearEmployeeId: masterManagers.callgearEmployeeId,
         cloudtalkAgentId: masterManagers.cloudtalkAgentId,
+        shiftStartTime: masterManagers.shiftStartTime,
       })
       .from(masterManagers)
       .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
@@ -190,6 +193,7 @@ export async function POST(request: NextRequest) {
         // must survive Dashboard edits that don't explicitly set them.
         callgearEmployeeId: mgr.callgearEmployeeId ?? existing?.callgearEmployeeId ?? null,
         cloudtalkAgentId: mgr.cloudtalkAgentId ?? existing?.cloudtalkAgentId ?? null,
+        shiftStartTime: mgr.shiftStartTime ?? existing?.shiftStartTime ?? null,
         inOkk: mgr.inOkk,
         inRolevki: mgr.inRolevki,
         isActive: true,

@@ -140,6 +140,7 @@ export const masterManagers = pgTable("master_managers", {
   inOkk: boolean("in_okk").default(false),
   inRolevki: boolean("in_rolevki").default(false),
   isActive: boolean("is_active").default(true),
+  shiftStartTime: text("shift_start_time"),           // "09:00", "10:00", etc. (null = default 09:00)
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

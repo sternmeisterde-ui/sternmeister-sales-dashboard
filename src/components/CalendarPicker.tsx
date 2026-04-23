@@ -192,7 +192,7 @@ export default function CalendarPicker({
 
       {/* Popup */}
       {open && (
-        <div className="absolute top-10 right-0 sm:right-auto sm:left-0 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-72 animate-in fade-in slide-in-from-top-2">
+        <div className="absolute bottom-full mb-2 right-0 sm:right-auto sm:left-0 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl z-50 w-72 animate-in fade-in slide-in-from-bottom-2">
           {/* Month navigation */}
           {(() => {
             const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);

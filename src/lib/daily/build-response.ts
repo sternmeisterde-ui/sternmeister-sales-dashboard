@@ -179,16 +179,18 @@ async function getSlaFacts(
   pipelineId: number,
   fromDate: Date,
   toDate: Date,
-): Promise<{ slaMinutes: number | null; tltMinutes: number | null }> {
+): Promise<{ slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }> {
   try {
     const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
       avg_sla: number | null;
+      avg_sla_shift: number | null;
       avg_tlt: number | null;
     }>(
       drizzleSql`
         SELECT
-          round(avg(sla_first_call_seconds) / 60.0)::int    AS avg_sla,
-          round(avg(sla_first_contact_seconds) / 60.0)::int AS avg_tlt
+          round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
+          round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
+          round(avg(sla_first_contact_seconds) / 60.0)::int         AS avg_tlt
         FROM analytics.sla
         WHERE pipeline_id = ${pipelineId}
           AND lead_created_at >= ${fromDate}
@@ -199,10 +201,11 @@ async function getSlaFacts(
     const row = result.rows[0];
     return {
       slaMinutes: row?.avg_sla != null ? Number(row.avg_sla) : null,
+      slaShiftMinutes: row?.avg_sla_shift != null ? Number(row.avg_sla_shift) : null,
       tltMinutes: row?.avg_tlt != null ? Number(row.avg_tlt) : null,
     };
   } catch {
-    return { slaMinutes: null, tltMinutes: null };
+    return { slaMinutes: null, slaShiftMinutes: null, tltMinutes: null };
   }
 }
 
@@ -569,7 +572,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Per-manager OKK/roleplay scores: line → Map<managerId, score>
   const okkPerManager = new Map<string, Map<string, number>>();
   const roleplayPerManager = new Map<string, Map<string, number>>();
-  const slaFacts = new Map<string, { slaMinutes: number | null; tltMinutes: number | null }>();
+  const slaFacts = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
   if (department === "b2g") {
     // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
     // stay index-compatible downstream.
@@ -708,6 +711,10 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "sla_f") {
           const sf = slaFacts.get(section.dbLine);
           fact = sf?.slaMinutes != null ? String(sf.slaMinutes) : null;
+        }
+        if (metric.key === "sla_shift_f") {
+          const sf = slaFacts.get(section.dbLine);
+          fact = sf?.slaShiftMinutes != null ? String(sf.slaShiftMinutes) : null;
         }
         if (metric.key === "tlt_f") {
           const sf = slaFacts.get(section.dbLine);

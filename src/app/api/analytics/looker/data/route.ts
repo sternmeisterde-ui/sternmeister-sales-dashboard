@@ -8,6 +8,12 @@ const DEPT_PIPELINES: Record<string, readonly string[]> = {
   b2b: ["Бух Комм", "Мед Комм"],
 } as const;
 
+// Managers excluded from Looker reporting per department
+const EXCLUDED_MANAGERS: Record<string, readonly string[]> = {
+  b2g: ["Rose"],
+  b2b: [],
+};
+
 const VALID_STATUSES = new Set([
   "Термин ДЦ состоялся",
   "Термин ДЦ отменен/перенесен",
@@ -130,11 +136,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     // Build base WHERE conditions
+    const excludedManagers = EXCLUDED_MANAGERS[dept] ?? [];
+    const excludedManagersSql = excludedManagers.length > 0
+      ? excludedManagers.map((m) => `'${esc(m)}'`).join(", ")
+      : null;
+
     const conditions: string[] = [
       `lc.created_at >= ('${esc(fromStr)} 00:00:00'::timestamp AT TIME ZONE 'Europe/Berlin')`,
       `lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')`,
       `lc.pipeline IN (${pipelineList})`,
     ];
+    if (excludedManagersSql) {
+      conditions.push(`(lc.manager IS NULL OR lc.manager NOT IN (${excludedManagersSql}))`);
+    }
 
     if (managerParam) {
       conditions.push(`lc.manager = '${esc(managerParam)}'`);
@@ -167,6 +181,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         AND lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')
         AND lc.pipeline IN (${pipelineList})
         AND lc.manager IS NOT NULL
+        ${excludedManagersSql ? `AND lc.manager NOT IN (${excludedManagersSql})` : ""}
       ORDER BY lc.manager
       LIMIT 500
     `;

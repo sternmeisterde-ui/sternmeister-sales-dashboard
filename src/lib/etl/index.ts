@@ -21,6 +21,12 @@ export interface SyncOptions {
   toDate: Date;
   /** Skip individual tables if not needed */
   skip?: ("leads" | "communications" | "status_changes" | "tasks" | "sla")[];
+  /**
+   * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
+   * skips tasks (slow), skips status_changes (optional for speed).
+   * Use for scheduled 10-min cron runs. Full backfill should use incremental=false.
+   */
+  incremental?: boolean;
 }
 
 export interface SyncResult {
@@ -34,10 +40,16 @@ export interface SyncResult {
 
 export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const t0 = Date.now();
-  const skip = new Set(opts.skip ?? []);
+  const incremental = opts.incremental ?? false;
+
+  // In incremental mode: skip tasks (slow), use updated_at for leads
+  const skip = new Set([
+    ...(opts.skip ?? []),
+    ...(incremental ? (["tasks", "status_changes"] as const) : []),
+  ]);
 
   console.log(
-    `[ETL] runSync from=${opts.fromDate.toISOString()} to=${opts.toDate.toISOString()}`,
+    `[ETL] runSync mode=${incremental ? "incremental" : "full"} from=${opts.fromDate.toISOString()} to=${opts.toDate.toISOString()}`,
   );
 
   const lookups = await fetchLookups();
@@ -47,7 +59,9 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   let leadCache: Awaited<ReturnType<typeof syncLeads>> = [];
 
   if (!skip.has("leads")) {
-    leadCache = await syncLeads(opts.fromDate, opts.toDate, lookups);
+    // Incremental: fetch by updated_at so we catch status changes + reassignments too
+    const dateField = incremental ? "updated_at" : "created_at";
+    leadCache = await syncLeads(opts.fromDate, opts.toDate, lookups, dateField);
     leadsCount = leadCache.length;
   }
 
@@ -69,9 +83,17 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await updateContactDates(leadCache.map((e) => e.leadId));
   }
 
+  // Incremental: recompute SLA only for leads touched in this window (by ID, not by created_at).
+  // Full: recompute SLA for all leads created in the date range.
+  // Incremental: recompute SLA only for leads touched in this window (by ID, not by created_at).
+  // Full: recompute SLA for all leads created in the date range.
+  const filterLeadIds = incremental && leadCache.length > 0
+    ? leadCache.map((e) => e.leadId)
+    : undefined;
+
   const slaRows = skip.has("sla")
     ? 0
-    : await computeSla(opts.fromDate, opts.toDate);
+    : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
 
   const result: SyncResult = {
     leads: leadsCount,

@@ -1,0 +1,1 @@
+ALTER TABLE "analytics"."sla" ADD COLUMN "sla_first_call_from_shift_seconds" bigint;

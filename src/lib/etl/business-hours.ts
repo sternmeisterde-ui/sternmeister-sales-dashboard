@@ -82,3 +82,28 @@ export function businessHoursSeconds(startUtc: Date, endUtc: Date): number {
 export function calendarSeconds(startUtc: Date, endUtc: Date): number {
   return Math.max(0, Math.floor((endUtc.getTime() - startUtc.getTime()) / 1000));
 }
+
+/**
+ * Returns the UTC timestamp of 09:00 Berlin time on the Berlin calendar date of `d`.
+ * Handles DST automatically (CEST=UTC+2 in summer, CET=UTC+1 in winter).
+ * Used as the "shift start" reference point for SLA-from-shift calculation.
+ */
+export function shiftStartUtc(d: Date): Date {
+  const ymd = berlinYMD(d); // "YYYY-MM-DD" in Berlin time
+  // Probe UTC hours 6..9 — one of these will be 09:00 Berlin regardless of DST
+  for (const utcH of [6, 7, 8, 9]) {
+    const candidate = new Date(`${ymd}T${String(utcH).padStart(2, "0")}:00:00Z`);
+    if (berlinSecondOfDay(candidate) === 9 * 3600) return candidate;
+  }
+  return new Date(`${ymd}T07:00:00Z`); // fallback (CEST)
+}
+
+/**
+ * Seconds from 09:00 Berlin on the day of firstCallAt to firstCallAt.
+ * Shows how deep into the workday the first call happened — resets to 09:00 each day.
+ * Returns 0 if the call was made before 09:00 Berlin (e.g., from a previous shift).
+ */
+export function secondsFromShiftStart(firstCallAt: Date): number {
+  const shift = shiftStartUtc(firstCallAt);
+  return Math.max(0, Math.floor((firstCallAt.getTime() - shift.getTime()) / 1000));
+}

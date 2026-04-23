@@ -44,6 +44,7 @@ export async function syncLeads(
   fromDate: Date,
   toDate: Date,
   lookups: KommoLookups,
+  dateField: "created_at" | "updated_at" = "created_at",
 ): Promise<LeadCacheEntry[]> {
   const fromTs = Math.floor(fromDate.getTime() / 1000);
   const toTs = Math.floor(toDate.getTime() / 1000);
@@ -52,7 +53,7 @@ export async function syncLeads(
     undefined,
     undefined,
     500,
-    { field: "created_at", from: fromTs, to: toTs },
+    { field: dateField, from: fromTs, to: toTs },
     true, // withContacts — needed for call events contact→lead resolution
   );
 

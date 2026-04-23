@@ -13,6 +13,7 @@ interface ManagerRow {
   line: string | null;
   kommoUserId: number | null;
   cloudtalkAgentId: string | null;
+  shiftStartTime: string | null;
   inOkk: boolean;
   inRolevki: boolean;
   isNew?: boolean;
@@ -94,6 +95,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
         line: null,
         kommoUserId: null,
         cloudtalkAgentId: null,
+        shiftStartTime: null,
         inOkk: true,
         inRolevki: true,
         isNew: true,
@@ -131,6 +133,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             kommoUserId: m.kommoUserId,
             role: m.role,
             line: m.line,
+            shiftStartTime: m.shiftStartTime,
             inOkk: m.inOkk,
             inRolevki: m.inRolevki,
           })),
@@ -233,6 +236,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">TG ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">Kommo ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">CloudTalk ID</th>
+                <th className="text-center px-4 py-2 font-semibold text-slate-600">Начало смены</th>
                 <th className="w-10" />
               </tr>
             </thead>
@@ -330,6 +334,15 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                       <span className={`text-xs font-mono ${mgr.cloudtalkAgentId ? "text-slate-400" : "text-slate-600"}`}>
                         {mgr.cloudtalkAgentId || "—"}
                       </span>
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <input
+                        type="text"
+                        value={mgr.shiftStartTime || ""}
+                        onChange={(e) => updateField(i, "shiftStartTime", e.target.value || null)}
+                        placeholder="09:00"
+                        className="bg-transparent border border-white/10 rounded-lg px-2 py-1 text-xs font-mono text-slate-300 focus:border-blue-500/50 focus:outline-none transition-colors w-16 placeholder-slate-600 text-center"
+                      />
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button
