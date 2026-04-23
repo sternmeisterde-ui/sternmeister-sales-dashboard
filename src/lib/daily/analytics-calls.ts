@@ -60,23 +60,28 @@ export async function getAnalyticsCallMetricsByMaster(
     sql`, `,
   );
 
-  // Call counting aligned with src/app/api/analytics/looker/data/route.ts —
-  // any communication_type starting with "call" counts (call_out, call_in,
-  // and any future call_* subtypes the ETL surfaces). "Connected" uses
-  // duration >= 10s (same threshold Looker uses for success_calls) so the
-  // two views report identical totals. Totalled duration sums across all
-  // such calls to stay consistent with Looker's total_duration_sec.
+  // Call counting aligned with src/app/api/analytics/looker/data/route.ts on
+  // the "which rows count as calls" axis (communication_type LIKE 'call%').
+  //
+  // "Дозвон от 1 сек" (Excel spec) = duration >= 1s — the person on the other
+  // end picked up, regardless of whether the conversation was productive.
+  // Looker's success_calls uses >= 10s which is a different, stricter
+  // "successful call" metric and would undercount дозвоны here.
+  //
+  // Missed incoming mirrors the same threshold: anything under 1s (or NULL)
+  // counts as a miss. total_duration_s sums across every call row to stay
+  // consistent with Looker's total_duration_sec.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<AnalyticsRow>(sql`
     SELECT
       manager,
-      COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                        AS calls_total,
-      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 10)                     AS calls_connected,
-      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
-      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
-      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 10)) AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                       AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                     AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
+      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}

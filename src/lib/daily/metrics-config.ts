@@ -39,15 +39,27 @@ const funnelMetrics: MetricDef[] = [
   { key: "qualLeads_p", label: "Всего квал лидов план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
   { key: "qualLeads", label: "Всего квал лидов факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "qualLeadsPercent", label: "% квал. лидов", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  // Квал. разбивка A2 / B1 / B2+ — снапшот по статусам первой линии (формула из Excel)
+  { key: "a2", label: "A2", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "b1", label: "B1", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "b2plus", label: "B2 и выше", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   // --- Воронка ---
   { key: "_grp_funnel", label: "Воронка", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "avgPortfolio", label: "Ср. портфель менеджера", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
+  // Направлено заданий / Передано на консультацию / их конверсии (формулы из Excel)
+  { key: "tasksTotal", label: "Направлено заданий всего", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "tasksNew", label: "Направлено заданий новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "convQualTask", label: "Конверсия из квала в задание (новые)", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  { key: "consultTotal", label: "Передано на консультацию всего", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "consultNew", label: "Передано на консультацию новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "convTaskConsult", label: "Конверсия из задания в консультацию (новые)", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   // --- Воронка Бератер ---
   { key: "_grp_terms", label: "Воронка Бератер", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "termsTotal", label: "Переданы на термин всего", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "termsNew", label: "Переданы на термин новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "awaitTermTotal", label: "Ожидают термин всего", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "awaitTermNew", label: "Ожидают термин новые", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "convConsultTerm", label: "Конверсия из консультации в термин (новые)", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   { key: "termDCCancelled", label: "Термин ДЦ отменен/перенесен", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "termDCDone", label: "Термин ДЦ состоялся", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "termAATransferred", label: "Переведены на термин АА", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
@@ -56,6 +68,11 @@ const funnelMetrics: MetricDef[] = [
   { key: "beraterReview", label: "На рассмотрении бератера", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "delayedStart", label: "Отложенный старт", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
   { key: "appeal", label: "Апелляция", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  // --- Результаты ---
+  { key: "_grp_results", label: "Результаты", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
+  { key: "gutscheinsApproved", label: "Одобрено гутшайнов", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "beraterReject", label: "Отказ бератера", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
+  { key: "appealsSubmitted", label: "Подано апелляций", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_leads" },
 ];
 
 // ====================== QUALIFIER (1st LINE) SECTION ======================
