@@ -584,7 +584,7 @@ export default function Dashboard() {
             { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
-            { id: "tracking", icon: Activity, label: "Трекинг", adminOnly: true },
+            { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
             { id: "looker", icon: Database, label: "Looker", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
