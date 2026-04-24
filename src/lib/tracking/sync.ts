@@ -37,7 +37,14 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        with non-lead-valid types. v3 clears blacklist on restart and
 //        re-backfills without filter[entity]. Proper per-entity loop is
 //        a follow-up; for now we accept lead-scoped default coverage.
-const CURRENT_FILTER_VERSION = 3;
+//   v4 — fetchRawEvents now loops KOMMO_ENTITIES (lead/contact/company/
+//        customer/task) per Kommo's single-value filter[entity] contract,
+//        with a PER-ENTITY blacklist so types valid for one entity aren't
+//        globally suppressed. Covers previously-missed contact/company/
+//        customer/task events — main cause of CRM (green) underfetch and
+//        also fixes dashboard call undercount via getCallEvents→fetchRawEvents
+//        delegation. (2026-04-25)
+const CURRENT_FILTER_VERSION = 4;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have

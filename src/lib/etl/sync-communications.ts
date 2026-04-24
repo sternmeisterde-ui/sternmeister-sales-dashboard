@@ -82,52 +82,89 @@ export async function syncCommunications(
   console.log(`[ETL] comm: ${msgEvents.length} message events`);
 
   // ── Phase 3: build rows per lead ─────────────────────────────────────────
-  // Group all comms by lead_id so we can compute first/last flags + SLA ordering
+  // Group all comms by lead_id so we can compute first/last flags + SLA
+  // ordering. Orphan rows (no lead mapping, e.g. a call on a contact not
+  // linked to any lead) go into a separate bucket — still kept for the
+  // dashboard call-count metric (which groups by manager, not by lead), but
+  // skip the lead-centric flag computation.
   const byLead = new Map<number, CommRow[]>();
+  const orphanRows: CommRow[] = [];
 
   const addRow = (row: CommRow) => {
     const lid = row.leadId ?? null;
-    if (lid === null) return;
+    if (lid === null) {
+      orphanRows.push(row);
+      return;
+    }
     if (!byLead.has(lid)) byLead.set(lid, []);
     byLead.get(lid)!.push(row);
   };
 
-  // Call events → one row per (note, lead) pair. `duration` and `callStatus`
-  // come inline from the note response — no extra round-trip needed.
+  // Call events → exactly ONE row per noteId. Prior code fanned out to N rows
+  // when a call on a contact was linked to N leads, which double-counted the
+  // same physical call in dashboard metrics (`COUNT(*)` on analytics.comms
+  // counted each row). Dedup by noteId also protects against any cross-
+  // entity overlap from fetchRawEvents' output.
+  const seenNoteIds = new Set<number>();
   for (const ev of callEvents) {
-    const leadIds =
-      ev.entityType === "contact"
-        ? (contactMap.get(ev.entityId) ?? [])
-        : [ev.entityId];
+    if (seenNoteIds.has(ev.noteId)) continue;
+    seenNoteIds.add(ev.noteId);
 
-    for (const lid of leadIds) {
-      const lead = leadMap.get(lid);
-      addRow({
-        communicationId: String(ev.noteId),
-        communicationType: ev.type,
-        entityId: ev.entityId,
-        createdAt: new Date(ev.createdAt * 1000),
-        leadId: lid,
-        pipelineId: lead?.pipelineId ?? null,
-        pipelineName: lead?.pipelineName ?? null,
-        category: lead?.category ?? null,
-        leadCreatedAt: lead?.createdAt ?? null,
-        leadDayStart: lead
-          ? new Date(new Date(lead.createdAt).setUTCHours(0, 0, 0, 0))
-          : null,
-        callStatus: ev.callStatus ?? null,
-        duration: ev.duration,
-        manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",
-        statusId: lead?.statusId ?? null,
-        statusName: lead?.statusName ?? null,
-        utmSource: null,
-        firstContactFlg: null,
-        lastContactFlg: null,
-        firstCallAt: null,
-        businessHoursSla: null,
-        businessHoursSinceCommunication: null,
-      });
+    // Canonical lead selection:
+    //   1) Lead-entity event → entity_id IS the lead.
+    //   2) Contact-entity event → prefer a linked lead whose responsible_user
+    //      matches the caller (active deal that prompted the call), else the
+    //      most recently created linked lead.
+    //   3) Company / customer / unmapped contact → orphan row (leadId=null).
+    //      Still counted in manager-level call aggregates via `manager` name.
+    let canonicalLeadId: number | null = null;
+    if (ev.entityType === "lead") {
+      canonicalLeadId = ev.entityId;
+    } else if (ev.entityType === "contact") {
+      const leadIds = contactMap.get(ev.entityId) ?? [];
+      if (leadIds.length > 0) {
+        const ownMatch = leadIds.find(
+          (lid) => leadMap.get(lid)?.responsibleUserId === ev.createdBy,
+        );
+        if (ownMatch != null) {
+          canonicalLeadId = ownMatch;
+        } else {
+          const mostRecent = [...leadIds].sort((a, b) => {
+            const la = leadMap.get(a)?.createdAt.getTime() ?? 0;
+            const lb = leadMap.get(b)?.createdAt.getTime() ?? 0;
+            return lb - la;
+          })[0];
+          canonicalLeadId = mostRecent ?? null;
+        }
+      }
     }
+
+    const lead = canonicalLeadId != null ? leadMap.get(canonicalLeadId) : undefined;
+    addRow({
+      communicationId: String(ev.noteId),
+      communicationType: ev.type,
+      entityId: ev.entityId,
+      createdAt: new Date(ev.createdAt * 1000),
+      leadId: canonicalLeadId,
+      pipelineId: lead?.pipelineId ?? null,
+      pipelineName: lead?.pipelineName ?? null,
+      category: lead?.category ?? null,
+      leadCreatedAt: lead?.createdAt ?? null,
+      leadDayStart: lead
+        ? new Date(new Date(lead.createdAt).setUTCHours(0, 0, 0, 0))
+        : null,
+      callStatus: ev.callStatus ?? null,
+      duration: ev.duration,
+      manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",
+      statusId: lead?.statusId ?? null,
+      statusName: lead?.statusName ?? null,
+      utmSource: null,
+      firstContactFlg: null,
+      lastContactFlg: null,
+      firstCallAt: null,
+      businessHoursSla: null,
+      businessHoursSinceCommunication: null,
+    });
   }
 
   // Message events → one row per message
@@ -195,6 +232,11 @@ export async function syncCommunications(
       allRows.push(row);
     }
   }
+
+  // Orphan rows (leadId=null) skip the per-lead flag loop but are still
+  // included in the final insert — dashboard aggregates them via `manager`
+  // name + pipeline_id IS NULL filter.
+  for (const row of orphanRows) allRows.push(row);
 
   if (allRows.length === 0) {
     console.log("[ETL] sync-communications: 0 rows");

@@ -303,7 +303,11 @@ export async function getLeads(
  */
 export async function getTasks(
   isCompleted: boolean = false,
-  maxPages = 10
+  // Raised from 10 → 100 (× limit=250) so the account-wide overdue-tasks
+  // fetch for dashboard's "Просрочено задач" metric doesn't silently
+  // truncate on busy accounts. Cached 5 min so the higher cap doesn't cost
+  // per-request — first call backfills, rest hit cache.
+  maxPages = 100
 ): Promise<KommoTask[]> {
   const cacheKey = `tasks:${isCompleted}:${maxPages}`;
 
@@ -346,14 +350,6 @@ export async function getCallNotes(
     const baseUrl = await getBaseUrl();
     const headers = await getAuthHeaders();
 
-    // Phase 1: Events API — capture entity_type + real timestamp
-    const eventsUrl = new URL(`${baseUrl}/events`);
-    eventsUrl.searchParams.append("filter[type][]", "outgoing_call");
-    eventsUrl.searchParams.append("filter[type][]", "incoming_call");
-    eventsUrl.searchParams.set("filter[created_at][from]", String(dateFrom));
-    eventsUrl.searchParams.set("filter[created_at][to]", String(dateTo));
-    eventsUrl.searchParams.set("limit", "100");
-
     type CallEventRecord = {
       userId: number;
       type: "call_in" | "call_out";
@@ -362,70 +358,38 @@ export async function getCallNotes(
       entityId: number;
       createdAt: number;
     };
+
+    // Phase 1: Events API — delegate to fetchRawEvents so we get the entity
+    // loop (contact/company/customer calls included) + bisect + retries.
+    // Previously duplicated a stripped-down /events fetch here which missed
+    // non-lead calls entirely, so duration lookup failed and every non-lead
+    // call rendered as a missed call on the Tracking timeline.
+    const raw = await fetchRawEvents(dateFrom, dateTo, {
+      kommoUserIds,
+      types: ["incoming_call", "outgoing_call"],
+      maxPages,
+    });
     const eventList: CallEventRecord[] = [];
-
-    // Kommo limits filter[created_by][] to 10 IDs
-    const USER_BATCH = 10;
-    const idBatches: number[][] = [];
-    if (kommoUserIds && kommoUserIds.length > 0) {
-      for (let i = 0; i < kommoUserIds.length; i += USER_BATCH) {
-        idBatches.push(kommoUserIds.slice(i, i + USER_BATCH));
-      }
-    } else {
-      idBatches.push([]);
-    }
-
-    for (const batch of idBatches) {
-      const batchUrl = new URL(eventsUrl.toString());
-      batch.forEach((id) =>
-        batchUrl.searchParams.append("filter[created_by][]", String(id))
-      );
-
-      let page = 1;
-      while (page <= maxPages) {
-        const pageUrl = new URL(batchUrl.toString());
-        pageUrl.searchParams.set("page", String(page));
-
-        const res = await rateLimitedFetch(pageUrl.toString(), {
-          headers,
-        });
-        if (res.status === 204) break;
-        if (!res.ok) {
-          if (res.status === 404) break;
-          const text = await res.text();
-          throw new Error(`Kommo events API ${res.status}: ${text}`);
-        }
-
-        const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
-        const items = data._embedded?.events || [];
-
-        for (const ev of items) {
-          const noteType = ev.type === "incoming_call" ? "call_in" : "call_out";
-          const noteId = ev.value_after?.[0]?.note?.id ?? null;
-          // Skip events without a note ID — they inflate callsTotal and contribute nothing.
-          if (noteId === null) continue;
-          // Route to correct /{entity}s/notes endpoint. "unsorted" entities have notes
-          // attached as leads (they become leads once sorted), so map them to "lead".
-          const rawType = ev.entity_type;
-          const entityType: CallEventRecord["entityType"] =
-            rawType === "lead" || rawType === "company" || rawType === "customer"
-              ? rawType
-              : rawType === "unsorted"
-                ? "lead"
-                : "contact";
-          eventList.push({
-            userId: ev.created_by,
-            type: noteType,
-            noteId,
-            entityType,
-            entityId: ev.entity_id,
-            createdAt: ev.created_at,
-          });
-        }
-
-        if (!data._links?.next) break;
-        page++;
-      }
+    for (const ev of raw) {
+      if (ev.noteId === null) continue;
+      // Route to the correct /{entity}s/notes endpoint in Phase 2. "unsorted"
+      // entities have notes attached as leads (they become leads once
+      // sorted), so map them to "lead".
+      const rawType = ev.entityType;
+      const entityType: CallEventRecord["entityType"] =
+        rawType === "lead" || rawType === "company" || rawType === "customer"
+          ? rawType
+          : rawType === "unsorted"
+            ? "lead"
+            : "contact";
+      eventList.push({
+        userId: ev.createdBy,
+        type: ev.type === "incoming_call" ? "call_in" : "call_out",
+        noteId: ev.noteId,
+        entityType,
+        entityId: ev.entityId,
+        createdAt: ev.createdAt,
+      });
     }
 
     if (eventList.length === 0) return [];
@@ -827,8 +791,14 @@ export async function getCallEvents(
   createdBy: number;
   createdAt: number;
 }>> {
-  const baseUrl = await getBaseUrl();
-  const headers = await getAuthHeaders();
+  // Delegate to fetchRawEvents so we automatically pick up the entity loop
+  // (covers calls on contacts/companies/customers — previously missed when
+  // Kommo's default lead-only scope silently filtered them out) + bisect +
+  // 5xx retry + rate-limit-aware request pacing.
+  const raw = await fetchRawEvents(dateFrom, dateTo, {
+    types: ["incoming_call", "outgoing_call"],
+    maxPages,
+  });
   const result: Array<{
     type: "call_in" | "call_out";
     noteId: number;
@@ -837,44 +807,17 @@ export async function getCallEvents(
     createdBy: number;
     createdAt: number;
   }> = [];
-
-  let page = 1;
-  while (page <= maxPages) {
-    const url = new URL(`${baseUrl}/events`);
-    url.searchParams.append("filter[type][]", "outgoing_call");
-    url.searchParams.append("filter[type][]", "incoming_call");
-    url.searchParams.set("filter[created_at][from]", String(dateFrom));
-    url.searchParams.set("filter[created_at][to]", String(dateTo));
-    url.searchParams.set("limit", "250");
-    url.searchParams.set("page", String(page));
-
-    const res = await rateLimitedFetch(url.toString(), { headers });
-    if (res.status === 204) break;
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Kommo call events ${res.status}: ${text}`);
-    }
-
-    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
-    const items = data._embedded?.events ?? [];
-
-    for (const ev of items) {
-      const noteId = ev.value_after?.[0]?.note?.id ?? null;
-      if (noteId === null) continue;
-      result.push({
-        type: ev.type === "incoming_call" ? "call_in" : "call_out",
-        noteId,
-        entityType: ev.entity_type,
-        entityId: ev.entity_id,
-        createdBy: ev.created_by,
-        createdAt: ev.created_at,
-      });
-    }
-
-    if (!data._links?.next) break;
-    page++;
+  for (const ev of raw) {
+    if (ev.noteId === null) continue;
+    result.push({
+      type: ev.type === "incoming_call" ? "call_in" : "call_out",
+      noteId: ev.noteId,
+      entityType: ev.entityType,
+      entityId: ev.entityId,
+      createdBy: ev.createdBy,
+      createdAt: ev.createdAt,
+    });
   }
-
   return result;
 }
 
@@ -892,8 +835,16 @@ export async function getMessageEvents(
   createdBy: number;
   createdAt: number;
 }>> {
-  const baseUrl = await getBaseUrl();
-  const headers = await getAuthHeaders();
+  // Delegate to fetchRawEvents for entity-loop + bisect + retry. Downstream
+  // (sync-communications) maps entity_id → leadId; to keep the existing
+  // contract we filter here to only lead-scoped messages. Contact/customer-
+  // scoped messages could be surfaced via the same contactMap mapping that
+  // call events use, but that's a separate ETL enhancement — not done here
+  // to avoid changing sync-communications' message-row semantics.
+  const raw = await fetchRawEvents(dateFrom, dateTo, {
+    types: ["incoming_chat_message", "outgoing_chat_message"],
+    maxPages,
+  });
   const result: Array<{
     type: "outgoing_chat_message" | "incoming_chat_message";
     messageId: string;
@@ -901,45 +852,19 @@ export async function getMessageEvents(
     createdBy: number;
     createdAt: number;
   }> = [];
-
-  let page = 1;
-  while (page <= maxPages) {
-    const url = new URL(`${baseUrl}/events`);
-    url.searchParams.append("filter[type][]", "outgoing_chat_message");
-    url.searchParams.append("filter[type][]", "incoming_chat_message");
-    url.searchParams.set("filter[created_at][from]", String(dateFrom));
-    url.searchParams.set("filter[created_at][to]", String(dateTo));
-    url.searchParams.set("limit", "250");
-    url.searchParams.set("page", String(page));
-
-    const res = await rateLimitedFetch(url.toString(), { headers });
-    if (res.status === 204) break;
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Kommo message events ${res.status}: ${text}`);
-    }
-
-    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
-    const items = data._embedded?.events ?? [];
-
-    for (const ev of items) {
-      const msgId = (ev.value_after?.[0] as Record<string, unknown>)?.message as
-        | { id: string }
-        | undefined;
-      if (!msgId?.id || ev.entity_type !== "lead") continue;
-      result.push({
-        type: ev.type === "incoming_chat_message" ? "incoming_chat_message" : "outgoing_chat_message",
-        messageId: msgId.id,
-        leadId: ev.entity_id,
-        createdBy: ev.created_by,
-        createdAt: ev.created_at,
-      });
-    }
-
-    if (!data._links?.next) break;
-    page++;
+  for (const ev of raw) {
+    const msgWrap = (ev.raw as { value_after?: Array<Record<string, unknown>> })
+      .value_after?.[0];
+    const msg = msgWrap?.message as { id?: string } | undefined;
+    if (!msg?.id || ev.entityType !== "lead") continue;
+    result.push({
+      type: ev.type === "incoming_chat_message" ? "incoming_chat_message" : "outgoing_chat_message",
+      messageId: msg.id,
+      leadId: ev.entityId,
+      createdBy: ev.createdBy,
+      createdAt: ev.createdAt,
+    });
   }
-
   return result;
 }
 
@@ -1125,15 +1050,29 @@ export interface RawKommoEventRow {
 const TYPE_BATCH = 20;
 const USER_BATCH = 10;
 
-// Process-level blacklist of types Kommo has rejected at least once this
-// lifetime. Learned lazily via bisect; cleared on restart (by design — forces
-// a re-verification in case Kommo re-enables a type). Not per-department:
-// both B2G and B2B use the same Kommo account / same API schema.
-const INVALID_EVENT_TYPES = new Set<string>();
+// Kommo /events requires filter[entity] to be a single value (not comma-list
+// or []). To cover call/CRM events across all entity types, we loop through
+// these five in fetchRawEvents. Same account-wide list for B2G and B2B.
+const KOMMO_ENTITIES = ["lead", "contact", "company", "customer", "task"] as const;
+type KommoEntity = (typeof KOMMO_ENTITIES)[number];
 
-/** Snapshot of the current blacklist — for observability/logs/admin endpoints. */
-export function getInvalidEventTypes(): string[] {
-  return Array.from(INVALID_EVENT_TYPES).sort();
+// Per-entity blacklist: (entity, type) pairs Kommo rejected for that entity.
+// Must be per-entity because the same type is often valid for one entity and
+// not another (e.g. `segment_added` works on customer but 400s on lead). A
+// single global Set would permanently lose types that are actually reachable
+// via a different entity. Cleared on process restart — re-learned in ~5
+// extra bisect requests per (entity, type) pair.
+const INVALID_BY_ENTITY = new Map<KommoEntity, Set<string>>(
+  KOMMO_ENTITIES.map((e) => [e, new Set<string>()]),
+);
+
+/** Snapshot of the current per-entity blacklist — for observability/logs. */
+export function getInvalidEventTypes(): Record<KommoEntity, string[]> {
+  const out = {} as Record<KommoEntity, string[]>;
+  for (const e of KOMMO_ENTITIES) {
+    out[e] = Array.from(INVALID_BY_ENTITY.get(e) ?? []).sort();
+  }
+  return out;
 }
 
 type RawBatchResult =
@@ -1152,6 +1091,7 @@ async function fetchBatchPages(
   headers: HeadersInit,
   dateFrom: number,
   dateTo: number,
+  entity: KommoEntity,
   userBatch: number[],
   typeBatch: string[] | null,
   maxPages: number,
@@ -1165,6 +1105,9 @@ async function fetchBatchPages(
     const url = new URL(`${baseUrl}/events`);
     url.searchParams.set("filter[created_at][from]", String(dateFrom));
     url.searchParams.set("filter[created_at][to]", String(dateTo));
+    // filter[entity] is single-value in Kommo. Caller (fetchRawEvents) loops
+    // KOMMO_ENTITIES so contact/company/customer/task events all get covered.
+    url.searchParams.set("filter[entity]", entity);
     // Max per docs is 250, not 100 — 2.5× fewer pages per batch, less risk
     // of hitting the pagination cap on busy managers.
     url.searchParams.set("limit", "250");
@@ -1178,13 +1121,6 @@ async function fetchBatchPages(
     if (typeBatch && typeBatch.length > 0) {
       url.searchParams.set("filter[type]", typeBatch.join(","));
     }
-    // NOTE: filter[entity] is single-value in Kommo — a prior attempt to
-    // pass "lead,contact,company,customer,task" as a comma-list was parsed
-    // as the literal string "lead" and clashed with non-lead types in the
-    // batch ("Entity doesn't match type filter"). Multi-entity coverage
-    // needs an outer loop over entities with their matching type subsets.
-    // Tracked as follow-up; for now we rely on Kommo's default scope + the
-    // bisect/blacklist for types not valid in that scope.
 
     // Per-page retry loop for 5xx. 429 is handled inside rateLimitedFetch;
     // network errors are retried once there but still surface if the retry
@@ -1284,57 +1220,66 @@ async function tryFetchBatchBisected(
   headers: HeadersInit,
   dateFrom: number,
   dateTo: number,
+  entity: KommoEntity,
   userBatch: number[],
   typeBatch: string[] | null,
   maxPages: number,
 ): Promise<RawKommoEventRow[]> {
-  // Re-filter against the (possibly grown) blacklist every recursion level,
-  // so the second half of a bisect doesn't re-encounter a type the first half
-  // just blacklisted. Also keeps later batches in the same `fetchRawEvents`
-  // call from repeating the bisect for the same known-bad type.
-  if (typeBatch && typeBatch.length > 0 && INVALID_EVENT_TYPES.size > 0) {
-    const filtered = typeBatch.filter((t) => !INVALID_EVENT_TYPES.has(t));
+  // Re-filter against the (possibly grown) per-entity blacklist every
+  // recursion level, so the second half of a bisect doesn't re-encounter a
+  // type the first half just blacklisted. Also keeps later batches in the
+  // same `fetchRawEvents` call from repeating bisect for the same (entity,
+  // type) pair.
+  const invalidForEntity = INVALID_BY_ENTITY.get(entity)!;
+  if (typeBatch && typeBatch.length > 0 && invalidForEntity.size > 0) {
+    const filtered = typeBatch.filter((t) => !invalidForEntity.has(t));
     if (filtered.length === 0) return [];
     if (filtered.length < typeBatch.length) typeBatch = filtered;
   }
 
   const result = await fetchBatchPages(
-    baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch, maxPages,
+    baseUrl, headers, dateFrom, dateTo, entity, userBatch, typeBatch, maxPages,
   );
 
   if (result.status === "ok") return result.events;
 
   if (result.status === "skip") {
     console.warn(
-      `[fetchRawEvents] batch skipped: users=[${userBatch.join(",")}] ` +
+      `[fetchRawEvents] batch skipped: entity=${entity} users=[${userBatch.join(",")}] ` +
         `types=[${typeBatch?.join(",") ?? "*"}] — ${result.reason}`,
     );
     return [];
   }
 
-  // invalid_type — need to bisect to find the culprit
+  // invalid_type — Kommo rejected either a type that doesn't exist in the
+  // account OR a type whose scope doesn't match this entity (handled the
+  // same way: narrow the batch until the culprit is isolated, then mark it
+  // as invalid for THIS entity only — the same type may still work for
+  // another entity in a later iteration).
   if (!typeBatch || typeBatch.length === 0) {
-    // Can only happen if Kommo rejects something unrelated to filter[type][]
-    // with that error message. Treat as skip — not our call to make.
+    // Entity-level rejection (e.g. account doesn't support customer events).
+    // Mark the entity by blacklisting all known requested types so we don't
+    // keep hammering it. With typeBatch=null we can't know which types, so
+    // just log and move on — the outer loop will try other entities.
     console.error(
-      `[fetchRawEvents] invalid_type response with no type filter, skipping: ${result.body.slice(0, 200)}`,
+      `[fetchRawEvents] entity=${entity} rejected outright, skipping: ${result.body.slice(0, 200)}`,
     );
     return [];
   }
   if (typeBatch.length === 1) {
     const bad = typeBatch[0];
-    INVALID_EVENT_TYPES.add(bad);
+    invalidForEntity.add(bad);
     console.warn(
-      `[fetchRawEvents] blacklisting unsupported event type "${bad}" — ` +
-        `will be skipped from all future Kommo /events requests this process`,
+      `[fetchRawEvents] blacklisting ${entity}:${bad} — invalid for this entity ` +
+        `(may still be valid for another; other entities still try it)`,
     );
     return [];
   }
 
   const mid = Math.floor(typeBatch.length / 2);
   const [leftEvents, rightEvents] = await Promise.all([
-    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch.slice(0, mid), maxPages),
-    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch.slice(mid), maxPages),
+    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, entity, userBatch, typeBatch.slice(0, mid), maxPages),
+    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, entity, userBatch, typeBatch.slice(mid), maxPages),
   ]);
   return [...leftEvents, ...rightEvents];
 }
@@ -1360,28 +1305,9 @@ export async function fetchRawEvents(
   const headers = await getAuthHeaders();
   const maxPages = opts?.maxPages ?? 100;
 
-  // Pre-filter against the process-level blacklist. Types we already know
-  // Kommo rejects never go into a filter[type][] list again.
-  let effectiveTypes = opts?.types;
-  if (effectiveTypes && effectiveTypes.length > 0 && INVALID_EVENT_TYPES.size > 0) {
-    const filtered = effectiveTypes.filter((t) => !INVALID_EVENT_TYPES.has(t));
-    const dropped = effectiveTypes.length - filtered.length;
-    if (dropped > 0) {
-      console.info(
-        `[fetchRawEvents] pre-filtered ${dropped} blacklisted type(s): ` +
-          `${effectiveTypes.filter((t) => INVALID_EVENT_TYPES.has(t)).join(",")}`,
-      );
-    }
-    // If every requested type is blacklisted, return empty. Crucially, do NOT
-    // fall through to the null-types path below — that would hit Kommo
-    // unfiltered and flood us with events the caller didn't ask for (plus
-    // burn the page budget on system/robot noise).
-    if (filtered.length === 0) return [];
-    effectiveTypes = filtered;
-  }
-
-  // User batches — `filter[created_by][]` caps at 10. Empty list = caller
-  // signalled "no managers" and we short-circuit. Missing = unfiltered (legacy).
+  // User batches — `filter[created_by]` caps at 10. Empty list = caller
+  // signalled "no managers" and we short-circuit. Missing = unfiltered
+  // (legacy path used by ETL callers pulling account-wide call events).
   const idBatches: number[][] = [];
   const userIdsProvided = opts?.kommoUserIds !== undefined;
   if (userIdsProvided && (opts!.kommoUserIds!.length === 0)) {
@@ -1395,35 +1321,60 @@ export async function fetchRawEvents(
     idBatches.push([]);
   }
 
-  // Type batches — chunk for URL-length safety. `null` = no filter[type][]
-  // (kept for ad-hoc callers, but the JSDoc strongly discourages it).
-  const typeBatches: (string[] | null)[] = [];
-  if (effectiveTypes && effectiveTypes.length > 0) {
-    for (let i = 0; i < effectiveTypes.length; i += TYPE_BATCH) {
-      typeBatches.push(effectiveTypes.slice(i, i + TYPE_BATCH));
-    }
-  } else {
-    typeBatches.push(null);
-  }
-
+  const requestedTypes = opts?.types;
   const byId = new Map<number, RawKommoEventRow>();
 
-  for (const userBatch of idBatches) {
-    for (const typeBatch of typeBatches) {
-      const batchEvents = await tryFetchBatchBisected(
-        baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch, maxPages,
-      );
-
-      // Streaming persistence hook: caller gets this batch's events before we
-      // even finish the next one. Errors in the caller's persistence layer
-      // still abort the whole sync — if you can't write, the watermark must
-      // not advance past the last durable insert.
-      if (opts?.onBatch && batchEvents.length > 0) {
-        await opts.onBatch(batchEvents);
+  // Outer loop: KOMMO_ENTITIES. Kommo's /events requires filter[entity] as a
+  // single value, so the only way to cover events across all entities is to
+  // loop here. Per-entity blacklist pre-filters types so after the first
+  // sync this loop costs ~1 request per (entity, user batch) pair on avg.
+  for (const entity of KOMMO_ENTITIES) {
+    // Pre-filter against the per-entity blacklist — types known to be invalid
+    // for THIS entity never go into filter[type] again. (The same type may
+    // still be valid for a different entity in a later iteration.)
+    let entityTypes = requestedTypes;
+    if (entityTypes && entityTypes.length > 0) {
+      const invalidForEntity = INVALID_BY_ENTITY.get(entity)!;
+      if (invalidForEntity.size > 0) {
+        const filtered = entityTypes.filter((t) => !invalidForEntity.has(t));
+        const dropped = entityTypes.length - filtered.length;
+        if (dropped > 0) {
+          console.info(
+            `[fetchRawEvents] entity=${entity}: pre-filtered ${dropped} blacklisted type(s)`,
+          );
+        }
+        if (filtered.length === 0) continue; // nothing to query for this entity
+        entityTypes = filtered;
       }
+    }
 
-      for (const ev of batchEvents) {
-        if (!byId.has(ev.id)) byId.set(ev.id, ev);
+    // Type batches — chunk for URL-length safety.
+    const typeBatches: (string[] | null)[] = [];
+    if (entityTypes && entityTypes.length > 0) {
+      for (let i = 0; i < entityTypes.length; i += TYPE_BATCH) {
+        typeBatches.push(entityTypes.slice(i, i + TYPE_BATCH));
+      }
+    } else {
+      typeBatches.push(null);
+    }
+
+    for (const userBatch of idBatches) {
+      for (const typeBatch of typeBatches) {
+        const batchEvents = await tryFetchBatchBisected(
+          baseUrl, headers, dateFrom, dateTo, entity, userBatch, typeBatch, maxPages,
+        );
+
+        // Streaming persistence hook: caller gets this batch's events before
+        // we even finish the next one. Errors in the caller's persistence
+        // layer still abort the whole call — if you can't write, subsequent
+        // batches must not run either.
+        if (opts?.onBatch && batchEvents.length > 0) {
+          await opts.onBatch(batchEvents);
+        }
+
+        for (const ev of batchEvents) {
+          if (!byId.has(ev.id)) byId.set(ev.id, ev);
+        }
       }
     }
   }
