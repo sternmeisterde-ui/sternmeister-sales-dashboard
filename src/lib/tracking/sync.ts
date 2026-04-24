@@ -5,7 +5,13 @@ import { masterManagers } from "@/lib/db/schema-existing";
 import { eq, and } from "drizzle-orm";
 import { fetchRawEvents, getCallNotes } from "@/lib/kommo/client";
 import { ensureTrackingSchema } from "./init";
-import { CALL_TYPES } from "./event-types";
+import { CALL_TYPES, EVENT_TYPES } from "./event-types";
+
+// All event type keys we care about. Passed explicitly to Kommo `/events` via
+// `filter[type][]` — without it, Kommo returns a mixed page dominated by
+// system/robot events that fail our created_by → manager check, leaving
+// almost no CRM activity in the cache (only calls pass through).
+const ALL_TRACKED_EVENT_TYPES = EVENT_TYPES.map((t) => t.key);
 import type { DepartmentId } from "@/lib/config/tenant";
 
 export type Dept = DepartmentId;
@@ -115,10 +121,14 @@ export async function syncDepartment(
   const kommoIdToManager = new Map(managers.map((m) => [m.kommoUserId, m.id]));
 
   try {
-    // Fetch all events (no type filter — we cache everything; UI filters later)
-    // and call notes (for duration enrichment) in parallel.
+    // Fetch events for every type we track (explicit `filter[type][]` — Kommo
+    // without it returns an unreliable mix that drops most CRM activity) and
+    // call notes (for duration enrichment) in parallel.
     const [events, callNotes] = await Promise.all([
-      fetchRawEvents(dateFromSec, dateToSec, { kommoUserIds }),
+      fetchRawEvents(dateFromSec, dateToSec, {
+        kommoUserIds,
+        types: ALL_TRACKED_EVENT_TYPES,
+      }),
       getCallNotes(dateFromSec, dateToSec, kommoUserIds).catch((err) => {
         console.warn(`[tracking-sync] getCallNotes failed: ${err?.message}; calls will have 0 duration`);
         return [];

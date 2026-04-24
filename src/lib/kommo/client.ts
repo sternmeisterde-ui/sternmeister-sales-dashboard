@@ -1093,9 +1093,23 @@ export interface RawKommoEventRow {
 /**
  * Fetch all events for a date range, optionally filtered by creator (manager
  * Kommo user IDs) and/or event types. No type-specific shaping — consumers
- * classify as needed. Kommo limits filter[created_by][] to 10 IDs per call,
- * so we batch.
+ * classify as needed.
+ *
+ * Kommo `/events` quirks we work around here:
+ *  - `filter[created_by][]` is capped at 10 IDs per call → user batches.
+ *  - Without `filter[type][]`, the endpoint pages are dominated by
+ *    system/robot/chat events (created_by we don't know), which we then
+ *    filter client-side and end up with ~nothing. Result: only calls
+ *    appear in the cache. Callers MUST pass `types` explicitly so we can
+ *    query each type group with `filter[type][]` and get reliable results.
+ *  - `filter[type][]` has no hard cap but URL length matters; we batch
+ *    types in groups of TYPE_BATCH to stay under ~8 KB.
+ *
+ * Per-batch dedup: the same event can appear under multiple (user,type)
+ * pages; we dedup on `ev.id` before returning.
  */
+const TYPE_BATCH = 20;
+
 export async function fetchRawEvents(
   dateFrom: number,
   dateTo: number,
@@ -1115,48 +1129,66 @@ export async function fetchRawEvents(
     idBatches.push([]);
   }
 
-  const out: RawKommoEventRow[] = [];
+  // Type batches — if caller didn't specify types, we make ONE batch with no
+  // filter[type][] (legacy behaviour kept so existing callers keep working).
+  // For sync-tracking callers that pass the full EVENT_TYPES list, we split
+  // into URL-safe chunks.
+  const typeBatches: (string[] | null)[] = [];
+  if (opts?.types && opts.types.length > 0) {
+    for (let i = 0; i < opts.types.length; i += TYPE_BATCH) {
+      typeBatches.push(opts.types.slice(i, i + TYPE_BATCH));
+    }
+  } else {
+    typeBatches.push(null);
+  }
+
+  const byId = new Map<number, RawKommoEventRow>();
 
   for (const batch of idBatches) {
-    let page = 1;
-    while (page <= maxPages) {
-      const url = new URL(`${baseUrl}/events`);
-      url.searchParams.set("filter[created_at][from]", String(dateFrom));
-      url.searchParams.set("filter[created_at][to]", String(dateTo));
-      url.searchParams.set("limit", "100");
-      url.searchParams.set("page", String(page));
-      for (const id of batch) url.searchParams.append("filter[created_by][]", String(id));
-      for (const t of opts?.types ?? []) url.searchParams.append("filter[type][]", t);
+    for (const typeBatch of typeBatches) {
+      let page = 1;
+      while (page <= maxPages) {
+        const url = new URL(`${baseUrl}/events`);
+        url.searchParams.set("filter[created_at][from]", String(dateFrom));
+        url.searchParams.set("filter[created_at][to]", String(dateTo));
+        url.searchParams.set("limit", "100");
+        url.searchParams.set("page", String(page));
+        for (const id of batch) url.searchParams.append("filter[created_by][]", String(id));
+        if (typeBatch) {
+          for (const t of typeBatch) url.searchParams.append("filter[type][]", t);
+        }
 
-      const res = await rateLimitedFetch(url.toString(), { headers });
-      if (res.status === 204) break;
-      if (!res.ok) {
-        if (res.status === 404) break;
-        const text = await res.text();
-        throw new Error(`Kommo events API ${res.status}: ${text}`);
+        const res = await rateLimitedFetch(url.toString(), { headers });
+        if (res.status === 204) break;
+        if (!res.ok) {
+          if (res.status === 404) break;
+          const text = await res.text();
+          throw new Error(`Kommo events API ${res.status}: ${text}`);
+        }
+
+        const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+        const items = data._embedded?.events ?? [];
+
+        for (const ev of items) {
+          if (byId.has(ev.id)) continue;
+          const noteId = ev.value_after?.[0]?.note?.id ?? null;
+          byId.set(ev.id, {
+            id: ev.id,
+            type: ev.type,
+            createdBy: ev.created_by,
+            createdAt: ev.created_at,
+            entityType: ev.entity_type,
+            entityId: ev.entity_id,
+            noteId,
+            raw: { value_after: ev.value_after },
+          });
+        }
+
+        if (!data._links?.next) break;
+        page++;
       }
-
-      const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
-      const items = data._embedded?.events ?? [];
-
-      for (const ev of items) {
-        const noteId = ev.value_after?.[0]?.note?.id ?? null;
-        out.push({
-          id: ev.id,
-          type: ev.type,
-          createdBy: ev.created_by,
-          createdAt: ev.created_at,
-          entityType: ev.entity_type,
-          entityId: ev.entity_id,
-          noteId,
-          raw: { value_after: ev.value_after },
-        });
-      }
-
-      if (!data._links?.next) break;
-      page++;
     }
   }
 
-  return out;
+  return Array.from(byId.values());
 }
