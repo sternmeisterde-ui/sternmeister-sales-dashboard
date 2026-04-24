@@ -123,6 +123,64 @@ export async function getAnalyticsCallMetricsByMaster(
   return byMaster;
 }
 
+/**
+ * Team-level call aggregate across ALL managers (including ex-managers no longer
+ * in master_managers). Use this for the dept-wide call rollup so numbers match
+ * the 3rd-party Looker / Excel which count every call regardless of current
+ * manager status. Per-manager breakdown stays on getAnalyticsCallMetricsByMaster.
+ */
+export async function getAnalyticsTeamCallMetrics(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<UserCallMetrics> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) {
+    return { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 };
+  }
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<AnalyticsRow>(sql`
+    SELECT
+      '' AS manager,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                        AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1))  AS missed_incoming,
+      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+  `);
+
+  const row = result.rows[0];
+  if (!row) {
+    return { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 };
+  }
+  const callsTotal = Number(row.calls_total);
+  const callsConnected = Number(row.calls_connected);
+  const totalSeconds = Number(row.total_duration_s);
+  return {
+    kommoUserId: 0,
+    callsTotal,
+    callsConnected,
+    totalMinutes: Math.round(totalSeconds / 60),
+    avgDialogMinutes: callsConnected > 0 ? Math.round(totalSeconds / 60 / callsConnected) : 0,
+    dialPercent: callsTotal > 0 ? Math.round((callsConnected / callsTotal) * 100) : 0,
+    missedIncoming: Number(row.missed_incoming),
+    incomingTotal: Number(row.incoming_total),
+    outgoingTotal: Number(row.outgoing_total),
+  };
+}
+
 export interface DailyCallBucket {
   date: string;              // YYYY-MM-DD in Europe/Berlin
   callsTotal: number;        // call_out + call_in

@@ -276,10 +276,12 @@ export default function CalendarPicker({
             </div>
           )}
 
-          {/* Month navigation */}
+          {/* Year + Month navigation (≪/≫ year, ◀/▶ month) */}
           {(() => {
             const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);
             const nextMonth = new Date(month.getFullYear(), month.getMonth() + 1, 1);
+            const prevYear = new Date(month.getFullYear() - 1, month.getMonth(), 1);
+            const nextYear = new Date(month.getFullYear() + 1, month.getMonth(), 1);
             const minMonth = minDate
               ? new Date(minDate.getFullYear(), minDate.getMonth(), 1)
               : null;
@@ -288,24 +290,44 @@ export default function CalendarPicker({
               : null;
             const prevDisabled = minMonth !== null && prevMonth < minMonth;
             const nextDisabled = maxMonth !== null && nextMonth > maxMonth;
+            const prevYearDisabled = minMonth !== null && prevYear < minMonth;
+            const nextYearDisabled = maxMonth !== null && nextYear > maxMonth;
             return (
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-3 gap-1">
+                <button
+                  onClick={() => { if (!prevYearDisabled) setMonth(prevYear); }}
+                  disabled={prevYearDisabled}
+                  title="Предыдущий год"
+                  className="px-1.5 py-1 text-[11px] font-bold text-slate-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  «
+                </button>
                 <button
                   onClick={() => { if (!prevDisabled) setMonth(prevMonth); }}
                   disabled={prevDisabled}
+                  title="Предыдущий месяц"
                   className="p-1.5 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   <ChevronLeft className="w-4 h-4 text-slate-400" />
                 </button>
-                <span className="text-xs font-bold text-white capitalize">
+                <span className="text-xs font-bold text-white capitalize flex-1 text-center">
                   {month.toLocaleDateString("ru-RU", { month: "long", year: "numeric" })}
                 </span>
                 <button
                   onClick={() => { if (!nextDisabled) setMonth(nextMonth); }}
                   disabled={nextDisabled}
+                  title="Следующий месяц"
                   className="p-1.5 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   <ChevronRight className="w-4 h-4 text-slate-400" />
+                </button>
+                <button
+                  onClick={() => { if (!nextYearDisabled) setMonth(nextYear); }}
+                  disabled={nextYearDisabled}
+                  title="Следующий год"
+                  className="px-1.5 py-1 text-[11px] font-bold text-slate-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  »
                 </button>
               </div>
             );

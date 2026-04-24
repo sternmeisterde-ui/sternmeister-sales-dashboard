@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 import SchedulePopup from "@/components/SchedulePopup";
+import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // ====================== TYPES ======================
 
@@ -94,8 +95,9 @@ interface DailySnapshot {
 }
 
 interface RangeResponse {
-  mode: "days" | "months";
+  mode: "days" | "weeks" | "months";
   days?: DailySnapshot[];
+  weeks?: DailySnapshot[];
   monthlySummary?: DailySnapshot;
   months?: DailySnapshot[];
   month?: string;
@@ -333,9 +335,9 @@ function SummaryTimeTable({
     <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
       <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
             <tr className="border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[220px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[220px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Метрика
               </th>
               {columnLabels.map((label, i) => (
@@ -581,9 +583,9 @@ function ManagerMetricsTable({
       </div>
       {!collapsed && <div className="w-full overflow-x-auto">
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
             <tr className="border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[160px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[160px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Менеджер
               </th>
               {metricColumns.map((col, i) => (
@@ -683,7 +685,7 @@ function ManagerMetricsTable({
 // ====================== MAIN COMPONENT ======================
 
 export default function DailyTab({ department }: { department: "b2g" | "b2b" }) {
-  const [mode, setMode] = useState<"days" | "months">("days");
+  const [mode, setMode] = useState<"days" | "weeks" | "months">("days");
   const [selectedMonth, setSelectedMonth] = useState<Date>(new Date());
   const [data, setData] = useState<RangeResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -692,6 +694,15 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [showSchedule, setShowSchedule] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
   const [scheduleManagers, setScheduleManagers] = useState<Array<{ id: string; name: string; line: string | null; shiftStartTime: string | null; shiftEndTime: string | null }>>([]);
+  // Preload months-of-year for Managers tab dropdown (so user can pick any month
+  // of the year in parallel with days-of-month).
+  const [monthsOfYear, setMonthsOfYear] = useState<RangeResponse | null>(null);
+  // Sub-tabs внутри Daily для обоих отделов:
+  //   B2B: [Показатели] [Продления] [Менеджеры]
+  //   B2G: [Показатели] [Менеджеры] [Отказы]
+  // Per-manager таблицы и refusal cards вынесены в отдельные табы чтобы
+  // Показатели страница не была перегружена.
+  const [subTab, setSubTab] = useState<"metrics" | "renewals" | "managers" | "refusals">("metrics");
 
   useEffect(() => {
     let abort = false;
@@ -707,15 +718,34 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     return () => { abort = true; };
   }, [department]);
 
+  // Parallel fetch: months-of-year for Managers tab "По датам" dropdown.
+  // Runs when department or year changes — independent of mode.
+  useEffect(() => {
+    let abort = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/daily/range?department=${department}&mode=months&year=${selectedMonth.getFullYear()}`);
+        const json = await res.json();
+        if (!abort) setMonthsOfYear(json);
+      } catch (e) {
+        console.error("Failed to load months-of-year:", e);
+      }
+    })();
+    return () => { abort = true; };
+  }, [department, selectedMonth]);
+
   const fetchData = useCallback(
     async (signal?: AbortSignal) => {
       if (!data) setLoading(true);
       setError(null);
       try {
         let url: string;
+        const monthStr = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
         if (mode === "days") {
-          const monthStr = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
           url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}`;
+        } else if (mode === "weeks") {
+          // Weeks-of-selected-month (4–5 Mon-Sun weeks that touch the month)
+          url = `/api/daily/range?department=${department}&mode=weeks&month=${monthStr}`;
         } else {
           url = `/api/daily/range?department=${department}&mode=months&year=${selectedMonth.getFullYear()}`;
         }
@@ -761,7 +791,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   // Navigation
   const shiftMonth = (dir: -1 | 1) => {
     const d = new Date(selectedMonth);
-    if (mode === "days") {
+    if (mode === "days" || mode === "weeks") {
       d.setMonth(d.getMonth() + dir);
     } else {
       d.setFullYear(d.getFullYear() + dir);
@@ -781,6 +811,14 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         columnLabels: data.days.map((d) => formatDayLabel(d.date)),
         columnSubLabels: data.days.map((d) => formatDaySubLabel(d.date)),
         snapshots: data.days,
+      };
+    }
+
+    if (mode === "weeks" && data.weeks) {
+      return {
+        columnLabels: data.weeks.map((w, i) => `W${i + 1}`),
+        columnSubLabels: data.weeks.map((w) => w.periodDate || ""),
+        snapshots: data.weeks,
       };
     }
 
@@ -827,6 +865,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
             {([
               { id: "days" as const, label: "Месяц (по дням)" },
+              { id: "weeks" as const, label: "Недели" },
               { id: "months" as const, label: "Год (по месяцам)" },
             ]).map((f) => (
               <button
@@ -915,6 +954,83 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
 
       {/* Active Managers Panel removed — replaced by SchedulePopup */}
 
+      {/* Sub-tabs: [Показатели] + per-department extras */}
+      <div className="flex gap-1 p-1 rounded-xl bg-slate-800/40 border border-white/5 w-fit">
+        {(
+          department === "b2b"
+            ? ([
+                { id: "metrics" as const, label: "Показатели" },
+                { id: "renewals" as const, label: "Продления" },
+                { id: "managers" as const, label: "Менеджеры" },
+              ])
+            : ([
+                { id: "metrics" as const, label: "Показатели" },
+                { id: "managers" as const, label: "Менеджеры" },
+                { id: "refusals" as const, label: "Тематики отказов" },
+              ])
+        ).map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setSubTab(t.id)}
+            className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+              subTab === t.id
+                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                : "text-slate-400 hover:text-white border border-transparent"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ===== SUB-TAB: Менеджеры — transposed compare view ===== */}
+      {subTab === "managers" && data && !loading && (
+        <ManagersCompareView
+          department={department}
+          snapshot={selectedDaySnapshot ?? monthlySnapshot}
+          comparisonDates={
+            mode === "days" && data.days
+              ? data.days.map((s) => ({ label: formatDayLabel(s.date), snapshot: s }))
+              : mode === "weeks" && data.weeks
+                ? data.weeks.map((s, i) => ({ label: `W${i + 1}`, snapshot: s }))
+                : mode === "months" && data.months
+                  ? data.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
+                  : undefined
+          }
+          monthlyComparisons={
+            monthsOfYear?.months
+              ? monthsOfYear.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
+              : undefined
+          }
+        />
+      )}
+
+      {/* ===== SUB-TAB: Тематики отказов (B2G) ===== */}
+      {department === "b2g" && subTab === "refusals" && data && !loading && (monthlySnapshot?.refusals || selectedDaySnapshot?.refusals) && (
+        <RefusalReasonsCards
+          monthly={monthlySnapshot?.refusals}
+          daily={selectedDaySnapshot?.refusals}
+          daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
+          monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
+        />
+      )}
+
+      {/* ===== SUB-TAB: Продления (B2B only) ===== */}
+      {department === "b2b" && subTab === "renewals" && (
+        <div className="glass-panel rounded-2xl p-8 border border-white/5 text-center">
+          <div className="text-slate-400 text-sm uppercase tracking-widest font-bold mb-2">Продления</div>
+          <div className="text-slate-500 text-xs">
+            Раздел в разработке. Будет загружать потоки продлений из ТЗ R77-R118 (Выручка 29.04, 27.05, …, 7.04.26).
+          </div>
+        </div>
+      )}
+
+      {/* SUB-TAB "Менеджеры" (B2B) рендерится выше в общем блоке subTab === "managers". */}
+
+      {/* ===== SUB-TAB: Показатели — отображается для B2G всегда, для B2B когда subTab=metrics ===== */}
+      {(department === "b2g" || subTab === "metrics") && (
+        <>
+
       {/* Summary Time Table */}
       {data && !loading && snapshots.length > 0 && (
         <>
@@ -962,42 +1078,10 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </>
       )}
 
-      {/* Per-manager: Monthly summary */}
-      {data && !loading && monthlySnapshot && mode === "days" && (
-        <ManagerMetricsTable
-          snapshot={monthlySnapshot}
-          title={`Месячный показатель — ${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
-          department={department}
-        />
-      )}
+      {/* B2G per-manager tables and refusal cards are now in separate sub-tabs
+          (Менеджеры / Тематики отказов). Nothing renders here — moved above. */}
 
-      {/* Per-manager: Selected day */}
-      {data && !loading && selectedDaySnapshot && mode === "days" && (
-        <ManagerMetricsTable
-          snapshot={selectedDaySnapshot}
-          title={`Дневной показатель — ${formatDaySubLabel(selectedDaySnapshot.date)}`}
-          department={department}
-        />
-      )}
-
-      {/* Refusal reasons (B2G only) — based on whichever snapshot is most
-          representative of the current view: monthly if available, else today */}
-      {data && !loading && department === "b2g" && (monthlySnapshot?.refusals || selectedDaySnapshot?.refusals) && (
-        <RefusalReasonsCards
-          monthly={monthlySnapshot?.refusals}
-          daily={selectedDaySnapshot?.refusals}
-          daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
-          monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
-        />
-      )}
-
-      {/* Per-manager for months mode: selected month */}
-      {data && !loading && mode === "months" && selectedDayIdx !== null && data.months?.[selectedDayIdx] && (
-        <ManagerMetricsTable
-          snapshot={data.months[selectedDayIdx]}
-          title={`${MONTH_NAMES[selectedDayIdx]} ${selectedMonth.getFullYear()}`}
-          department={department}
-        />
+        </>
       )}
 
       {/* Schedule popup */}
@@ -1023,13 +1107,9 @@ interface RefusalCardsProps {
 }
 
 function RefusalReasonsCards({ monthly, daily, daySubLabel, monthLabel }: RefusalCardsProps) {
-  // Show whichever scope we have data for — prefer monthly for the header
-  // layout since it's the broader picture the Excel spec is keyed to.
   const data = monthly ?? daily;
   if (!data) return null;
-
   const label = monthly ? monthLabel : daySubLabel;
-
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <RefusalCard title={`Тематики отказов — Квалификатор (${label})`} rows={data.firstLine} />
@@ -1068,6 +1148,282 @@ function RefusalCard({ title, rows }: { title: string; rows: RefusalRow[] }) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ======================== Managers Compare View ==========================
+// Transposed layout: rows = metrics, columns = managers (or dates in compare mode).
+// Supports multi-select manager filter and dual modes:
+//   "managers" — multiple managers side-by-side for ONE date.
+//   "dates"    — ONE manager side-by-side for MULTIPLE dates/periods.
+
+interface CompareDate {
+  /** YYYY-MM-DD label, e.g. "24.04" */
+  label: string;
+  snapshot: DailySnapshot;
+}
+
+interface ManagersCompareViewProps {
+  /** Current-period snapshot (used in "managers" mode to source per-manager facts). */
+  snapshot: DailySnapshot | undefined;
+  /** Snapshots for "dates" mode — day-granularity (for the current month). */
+  comparisonDates?: CompareDate[];
+  /** Snapshots for "dates" mode — month-granularity (for the current year). */
+  monthlyComparisons?: CompareDate[];
+  department: "b2g" | "b2b";
+  /** initial mode */
+  defaultMode?: "managers" | "dates";
+}
+
+function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, department, defaultMode = "managers" }: ManagersCompareViewProps) {
+  // Combined list of available date options for the "dates" mode dropdown:
+  // daily entries first, then monthly entries with an "M:" prefix to distinguish.
+  const allDateOptions: CompareDate[] = useMemo(() => {
+    const out: CompareDate[] = [];
+    for (const d of comparisonDates ?? []) out.push(d);
+    for (const m of monthlyComparisons ?? []) out.push({ label: `M:${m.label}`, snapshot: m.snapshot });
+    return out;
+  }, [comparisonDates, monthlyComparisons]);
+  void department;
+  const [mode, setMode] = useState<"managers" | "dates">(defaultMode);
+  const allManagers = useMemo(() => collectManagers(snapshot), [snapshot]);
+  // "null" = not yet initialised → auto-select-all on first render; once user
+  // toggles any box we store an explicit Set (possibly empty).
+  const [selectedManagerIds, setSelectedManagerIds] = useState<Set<string> | null>(null);
+  const [selectedSingleMgr, setSelectedSingleMgr] = useState<string | null>(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  // Which date columns to show in "dates" mode (default = all).
+  const [selectedDateLabels, setSelectedDateLabels] = useState<Set<string> | null>(null);
+  // Date-range filter (замена списка чекбоксов). CalendarPicker выдаёт start/end.
+  const [dateRange, setDateRange] = useState<DateRange>({ start: null, end: null });
+
+  const effectiveSelected = selectedManagerIds ?? new Set(allManagers.map((m) => m.id));
+  const effectiveSingle = selectedSingleMgr ?? (allManagers[0]?.id ?? null);
+  // Filter allDateOptions by calendar range (if set) AND/OR by manual selection.
+  // If both are set, prefer explicit selection. If neither is set, show all.
+  const rangeFilteredLabels = useMemo(() => {
+    if (!dateRange.start) return null;
+    const end = dateRange.end ?? dateRange.start;
+    const s = dateRange.start.getTime();
+    const e = new Date(end.getTime() + 86_399_000).getTime(); // end-of-day
+    const ok = new Set<string>();
+    for (const opt of allDateOptions) {
+      const snapTs = new Date(opt.snapshot.date).getTime();
+      if (Number.isFinite(snapTs) && snapTs >= s && snapTs <= e) ok.add(opt.label);
+    }
+    return ok;
+  }, [dateRange, allDateOptions]);
+
+  const effectiveDateLabels =
+    selectedDateLabels ?? rangeFilteredLabels ?? new Set(allDateOptions.map((d) => d.label));
+
+  const visibleManagers = useMemo(() => {
+    if (mode === "dates" && effectiveSingle) {
+      const m = allManagers.find((x) => x.id === effectiveSingle);
+      return m ? [m] : [];
+    }
+    return allManagers.filter((m) => effectiveSelected.has(m.id));
+  }, [allManagers, effectiveSelected, effectiveSingle, mode]);
+
+  // Metrics only from sections marked perManager=true. Skip group headers + skip
+  // plan-rows (hasPlan && !hasFact) since they apply to the department, not a
+  // single manager. Funnel section is dept-wide, excluded from per-manager view.
+  const metrics = useMemo(() => {
+    if (!snapshot) return [];
+    const rows: Array<{ sectionKey: string; sectionTitle: string; metricKey: string; metricLabel: string; isPlanRow: boolean }> = [];
+    for (const sec of snapshot.sections) {
+      if (!sec.perManager) continue;
+      for (const m of sec.metrics) {
+        if (m.isGroupHeader) continue;
+        rows.push({
+          sectionKey: sec.key,
+          sectionTitle: sec.title,
+          metricKey: m.key,
+          metricLabel: m.label,
+          isPlanRow: m.isPlanRow ?? false,
+        });
+      }
+    }
+    return rows;
+  }, [snapshot]);
+
+  if (!snapshot || allManagers.length === 0) {
+    return (
+      <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+        Нет данных для отображения менеджеров
+      </div>
+    );
+  }
+
+  // Column definitions depending on mode
+  const columns: Array<{ key: string; label: string; sub: string; getValue: (m: FlatMetric) => string | null }>
+    = mode === "managers"
+      ? visibleManagers.map((mgr) => ({
+          key: mgr.id,
+          label: mgr.name,
+          sub: mgr.line ? `Линия ${mgr.line}` : "",
+          getValue: (m) => getManagerMetricFact(snapshot, m.sectionKey, m.metricKey, mgr.id),
+        }))
+      : allDateOptions
+          .filter((d) => effectiveDateLabels.has(d.label))
+          .map((d) => ({
+            key: d.label,
+            label: d.label,
+            sub: d.snapshot.date,
+            getValue: (m) => effectiveSingle ? getManagerMetricFact(d.snapshot, m.sectionKey, m.metricKey, effectiveSingle) : null,
+          }));
+
+  type FlatMetric = typeof metrics[number];
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-3">
+        {/* Mode toggle */}
+        <div className="flex bg-slate-800/40 p-1 rounded-lg border border-white/5">
+          {(["managers", "dates"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              disabled={m === "dates" && allDateOptions.length === 0}
+              className={`px-3 py-1.5 rounded-md text-[10px] uppercase tracking-widest font-bold transition-all ${
+                mode === m
+                  ? "bg-emerald-500/20 text-emerald-400"
+                  : "text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400"
+              }`}
+            >
+              {m === "managers" ? "По менеджерам" : "По датам"}
+            </button>
+          ))}
+        </div>
+
+        {/* Manager multi-select (mode = managers) or single-select (mode = dates) */}
+        {mode === "managers" ? (
+          <div className="relative">
+            <button
+              onClick={() => setDropdownOpen(!dropdownOpen)}
+              className="px-3 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold text-slate-300 bg-slate-800/40 border border-white/5 hover:bg-slate-800/70"
+            >
+              Менеджеры ({effectiveSelected.size}/{allManagers.length}) ▾
+            </button>
+            {dropdownOpen && (
+              <div className="absolute z-30 mt-1 min-w-[260px] max-h-[400px] overflow-y-auto rounded-xl border border-white/10 shadow-2xl p-2 bg-slate-900" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+                <div className="flex gap-2 mb-2 border-b border-white/5 pb-2">
+                  <button
+                    onClick={() => setSelectedManagerIds(new Set(allManagers.map((m) => m.id)))}
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300"
+                  >Выбрать всех</button>
+                  <button
+                    onClick={() => setSelectedManagerIds(new Set())}
+                    className="text-[10px] text-slate-400 hover:text-white"
+                  >Снять все</button>
+                </div>
+                {allManagers.map((mgr) => (
+                  <label key={mgr.id} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-white/5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={effectiveSelected.has(mgr.id)}
+                      onChange={() => {
+                        const next = new Set(effectiveSelected);
+                        if (next.has(mgr.id)) next.delete(mgr.id);
+                        else next.add(mgr.id);
+                        setSelectedManagerIds(next);
+                      }}
+                      className="accent-emerald-500"
+                    />
+                    <span className="text-xs text-slate-200">{mgr.name}</span>
+                    {mgr.line && <span className="text-[9px] text-slate-500 ml-auto">L{mgr.line}</span>}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <select
+              value={effectiveSingle ?? ""}
+              onChange={(e) => setSelectedSingleMgr(e.target.value || null)}
+              className="px-3 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold text-slate-300 bg-slate-800/40 border border-white/5"
+            >
+              {allManagers.map((mgr) => (
+                <option key={mgr.id} value={mgr.id}>{mgr.name}</option>
+              ))}
+            </select>
+            {/* Calendar-based date filter — year/month/day/range selection. */}
+            <CalendarPicker
+              mode="range"
+              value={dateRange}
+              onChange={(r) => { setDateRange(r); setSelectedDateLabels(null); }}
+              onClear={() => { setDateRange({ start: null, end: null }); setSelectedDateLabels(null); }}
+              allowModeToggle
+            />
+          </>
+        )}
+
+        <span className="text-[10px] text-slate-500">
+          {mode === "managers" ? `${visibleManagers.length} в таблице` : `${effectiveDateLabels.size} дат`}
+          {" • "}
+          {metrics.length} метрик
+        </span>
+      </div>
+
+      {/* Transposed table */}
+      {columns.length === 0 ? (
+        <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+          Выберите {mode === "managers" ? "менеджеров" : "даты"} для сравнения
+        </div>
+      ) : (
+        <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+          <div className="w-full overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+                <tr className="border-b border-white/10">
+                  <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+                    Метрика
+                  </th>
+                  {columns.map((c) => (
+                    <th key={c.key} className="px-3 py-2 text-center min-w-[110px]">
+                      <div className="text-[10px] uppercase tracking-wider text-slate-300 font-bold leading-tight">{c.label}</div>
+                      {c.sub && <div className="text-[9px] text-slate-500 mt-0.5">{c.sub}</div>}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-xs">
+                {metrics.map((m, i) => {
+                  const prev = i > 0 ? metrics[i - 1] : null;
+                  const newSection = !prev || prev.sectionKey !== m.sectionKey;
+                  return (
+                    <Fragment key={`${m.sectionKey}-${m.metricKey}`}>
+                      {newSection && (
+                        <tr className="bg-slate-800/40 border-t-2 border-white/10">
+                          <td colSpan={columns.length + 1} className="px-4 py-2 text-[10px] uppercase tracking-widest text-slate-400 font-bold sticky left-0 bg-slate-800/80 z-10">
+                            {m.sectionTitle}
+                          </td>
+                        </tr>
+                      )}
+                      <tr className="border-b border-white/5 hover:bg-white/[0.02]">
+                        <td className="px-4 py-2 text-[11px] text-slate-300 sticky left-0 bg-slate-900/90 z-10">
+                          {m.metricLabel}
+                        </td>
+                        {columns.map((c) => {
+                          const val = c.getValue(m);
+                          return (
+                            <td key={c.key} className={`px-3 py-2 text-center tabular-nums ${getCellColor(val)}`}>
+                              {val ?? "—"}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

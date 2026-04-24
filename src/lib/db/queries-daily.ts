@@ -1,5 +1,5 @@
 // DB queries for the Daily tab — plans CRUD + manager-kommo mapping
-import { eq, and, sql, inArray } from "drizzle-orm";
+import { eq, and, sql, inArray, gte, lte } from "drizzle-orm";
 import { db } from "./index";
 import { dailyPlans, managerSchedule, dailySnapshots, masterManagers } from "./schema-existing";
 
@@ -136,6 +136,32 @@ export async function upsertPlan(params: {
  * Returns null if NO schedule entries exist (= show all managers).
  * Managers WITHOUT an entry are assumed ON-LINE by default.
  */
+/**
+ * Count of DISTINCT managers who were on-line at least one day in the range.
+ * Used for R54 "Менеджеров на линии факт" for week/month/year views.
+ */
+export async function getUniqueOnLineManagerCount(
+  fromDate: string,
+  toDate: string,
+  department: string = "b2g",
+): Promise<number> {
+  const rows = await db
+    .select({ userId: managerSchedule.userId })
+    .from(managerSchedule)
+    .innerJoin(masterManagers, eq(managerSchedule.userId, masterManagers.id))
+    .where(
+      and(
+        eq(masterManagers.department, department),
+        eq(masterManagers.isActive, true),
+        eq(managerSchedule.isOnLine, true),
+        gte(managerSchedule.scheduleDate, fromDate),
+        lte(managerSchedule.scheduleDate, toDate),
+      ),
+    );
+  const unique = new Set(rows.map((r) => r.userId));
+  return unique.size;
+}
+
 export async function getScheduleForDate(dateStr: string): Promise<Map<string, boolean> | null> {
   const rows = await db
     .select({

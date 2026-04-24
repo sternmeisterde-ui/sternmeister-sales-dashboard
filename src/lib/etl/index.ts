@@ -10,11 +10,44 @@
 //   7. computeSla        — analytics.sla (from leads_cohort + communications)
 
 import { fetchLookups } from "./lookups";
-import { syncLeads, updateContactDates } from "./sync-leads";
+import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads";
 import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
+import { analyticsDb } from "@/lib/db/analytics";
+import { leadsCohort } from "@/lib/db/schema-analytics";
+import { and, gte, lte } from "drizzle-orm";
+
+/**
+ * Load leadCache from analytics.leads_cohort — used when leads-sync is
+ * skipped but downstream syncs (communications / status_changes / tasks)
+ * still need per-lead metadata.
+ */
+async function loadLeadCacheFromDb(
+  fromDate: Date,
+  toDate: Date,
+): Promise<LeadCacheEntry[]> {
+  const rows = await analyticsDb
+    .select()
+    .from(leadsCohort)
+    .where(and(gte(leadsCohort.createdAt, fromDate), lte(leadsCohort.createdAt, toDate)))
+    .limit(100000);
+
+  return rows.map((r): LeadCacheEntry => ({
+    leadId: Number(r.leadId ?? 0),
+    createdAt: r.createdAt ?? new Date(0),
+    pipelineId: Number(r.pipelineId ?? 0),
+    pipelineName: r.pipeline ?? "",
+    statusId: Number(r.statusId ?? 0),
+    statusName: r.status ?? "",
+    statusOrder: Number(r.statusOrder ?? 0),
+    category: r.category ?? null,
+    manager: r.manager ?? null,
+    responsibleUserId: Number(r.responsibleUserId ?? 0),
+    contactIds: [], // not stored; empty ok for status_changes/tasks which don't use it
+  }));
+}
 
 export interface SyncOptions {
   fromDate: Date;
@@ -63,6 +96,11 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     const dateField = incremental ? "updated_at" : "created_at";
     leadCache = await syncLeads(opts.fromDate, opts.toDate, lookups, dateField);
     leadsCount = leadCache.length;
+  } else if (!skip.has("communications") || !skip.has("status_changes") || !skip.has("tasks")) {
+    // Leads skipped but downstream syncs need per-lead metadata (responsibleUserId,
+    // statusId, etc.). Reload lead cache from analytics.leads_cohort — no Kommo call.
+    leadCache = await loadLeadCacheFromDb(opts.fromDate, opts.toDate);
+    console.log(`[ETL] leadCache rehydrated from DB: ${leadCache.length} leads`);
   }
 
   const [commsCount, statusChangesCount] = await Promise.all([

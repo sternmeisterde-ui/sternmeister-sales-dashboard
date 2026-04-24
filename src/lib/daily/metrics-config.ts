@@ -97,6 +97,7 @@ const qualifierMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
+  { key: "regulationPercent", label: "Выполнение регламента, %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "sla_f", label: "SLA от лида (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
@@ -128,6 +129,7 @@ const secondLineMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
+  { key: "regulationPercent", label: "Выполнение регламента, %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "okk_p", label: "ОКК план", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   { key: "okk_f", label: "ОКК факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
@@ -155,6 +157,7 @@ const thirdLineMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
+  { key: "regulationPercent", label: "Выполнение регламента, %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "sla_f", label: "SLA от лида (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },

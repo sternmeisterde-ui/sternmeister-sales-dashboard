@@ -8,7 +8,8 @@
 //   - pipelineBreakdown: per-pipeline lead distribution (for B2G: Бух Гос + Бух Бератер)
 
 import { NextRequest, NextResponse } from "next/server";
-import { getLeads, getTasks } from "@/lib/kommo/client";
+import { getTasks } from "@/lib/kommo/client";
+import { getAnalyticsLeads } from "@/lib/daily/analytics-leads";
 import {
   aggregateLeadFunnelMetrics,
   aggregateTaskMetrics,
@@ -362,10 +363,12 @@ async function buildDashboardResponse(
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
     const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets] = await Promise.all([
-      getLeads(pipelineIds, activeStatusIds, 10).catch(() => [] as KommoLead[]),
+      // All lead snapshots/filters go through analytics.leads_cohort (local
+      // mirror) instead of Kommo API — ~20x faster, deterministic results.
+      getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
       getTasks(false).catch(() => []),
-      getLeads(pipelineIds, [142], 10, closedDateFilter).catch(() => [] as KommoLead[]),
-      getLeads(pipelineIds, [143], 10, closedDateFilter).catch(() => [] as KommoLead[]),
+      getAnalyticsLeads({ pipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
+      getAnalyticsLeads({ pipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
       getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch((e) => {
         console.error("[Dashboard] analytics calls failed:", e);
         return new Map<string, UserCallMetrics>();

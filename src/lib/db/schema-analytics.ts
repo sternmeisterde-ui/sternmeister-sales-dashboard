@@ -43,11 +43,26 @@ export const leadsCohort = analyticsSchema.table(
     manager: text("manager"),
     responsibleUserId: bigint("responsible_user_id", { mode: "number" }),
     category: text("category"),
+    // B2B Commerce payment tracking (Kommo custom fields, per ТЗ R24).
+    // Pulled by field-name from lead.custom_fields_values in sync-leads.
+    closedAt: timestamp("closed_at"),
+    firstPaymentDate: timestamp("first_payment_date"),
+    firstPaymentAmount: doublePrecision("first_payment_amount"),
+    prepaymentDate: timestamp("prepayment_date"),
+    prepaymentAmount: doublePrecision("prepayment_amount"),
+    // B2G non-qual categorisation (Kommo custom field 879824 enum_id).
+    // enum_ids: 744486 Неправильный номер, 744876/747530/747532/747534/747536 Неквал.*
+    nonQualEnumId: bigint("non_qual_enum_id", { mode: "number" }),
   },
   (t) => [
     index().on(t.leadId),
     index().on(t.createdAt),
     index().on(t.pipeline, t.status),
+    // Optimises Daily Commerce fact queries (ТЗ R24/R28/R29):
+    //   SUM by first_payment_date / prepayment_date ∈ period, per pipeline.
+    index().on(t.pipelineId, t.firstPaymentDate),
+    index().on(t.pipelineId, t.prepaymentDate),
+    index().on(t.closedAt),
   ],
 );
 
@@ -245,6 +260,21 @@ export const customReport = analyticsSchema.table(
     index().on(t.manager, t.dt),
     index().on(t.leadId),
   ],
+);
+
+/**
+ * Enum-option catalog for Kommo lead custom fields used to categorize refusals
+ * (e.g. field 879824 "Причина закрытия Госники"). Populated by ETL lookups step
+ * and consumed by getRefusalReasons() to translate enum_id → human-readable value.
+ */
+export const refusalEnums = analyticsSchema.table(
+  "refusal_enums",
+  {
+    enumId: bigint("enum_id", { mode: "number" }).primaryKey(),
+    value: text("value").notNull(),
+    fieldId: bigint("field_id", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
 );
 
 export const funnel = analyticsSchema.table(

@@ -3,12 +3,61 @@ import type { KommoCallNote, KommoLead, KommoTask } from "./types";
 import {
   FUNNEL_STATUS_MAP,
   NEW_VARIANTS_MAP,
-  QUALIFIED_STATUSES,
   A2_STATUSES,
   B1_STATUSES,
   B2_PLUS_STATUSES,
-  B2B_QUALIFIED_STATUSES,
 } from "./pipeline-config";
+
+/**
+ * Квал-фильтр per user spec 2026-04-24 (финальное уточнение):
+ *
+ *   Квал = лид НЕ закрыт как "Неквал".
+ *   Не-квал = status_id=143 (LOST) И причина закрытия = "Неквал *".
+ *
+ * Источники причины закрытия:
+ *   1) Kommo system loss_reason_id → текст через лукап (для Госников редко заполнен).
+ *   2) Custom field 879824 (enum "Причина закрытия Госники") с enum_ids:
+ *      744486 Неправильный номер, 744876 Неквал лид, 747530 Неквал Образование,
+ *      747532 Неквал Возраст, 747534 Неквал Язык, 747536 Неквал Доход.
+ *   3) Sentinel CFV field_id=999001 с текстом loss_reason для analytics-mapped leads
+ *      (ETL подставляет сюда текст из leads_cohort.loss_reason).
+ *
+ * Все остальные (в том числе LOST без указанной Неквал-причины, E-category и
+ * без category) — **квал по умолчанию**.
+ */
+
+const NEQVAL_ENUM_IDS = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
+
+/** Sentinel CFV field_id used to carry loss_reason text from analytics-leads.ts. */
+export const SYNTH_LOSS_REASON_FIELD_ID = 999001;
+
+export function isQualLead(lead: KommoLead): boolean {
+  // Only leads closed as LOST can be marked "non-qual" per spec.
+  if (lead.status_id !== 143) return true;
+
+  const fields = lead.custom_fields_values || [];
+
+  // Path 2: non-qual reason enum (custom field 879824)
+  const reasonCf = fields.find((f) => f.field_id === 879824);
+  if (reasonCf) {
+    const enumId = reasonCf.values?.[0]?.enum_id;
+    if (typeof enumId === "number" && NEQVAL_ENUM_IDS.has(enumId)) return false;
+  }
+
+  // Path 3: synthesised loss_reason text (analytics-mapped leads)
+  const textCf = fields.find((f) => f.field_id === SYNTH_LOSS_REASON_FIELD_ID);
+  if (textCf) {
+    const v = textCf.values?.[0]?.value;
+    if (typeof v === "string" && /неквал/i.test(v)) return false;
+  }
+
+  // Conservative default: if LOST without an explicit Неквал marker → still qual.
+  return true;
+}
+
+/** Backwards-compatible alias. `hasCategoryLetter` is legacy naming; callers
+ *  should prefer `isQualLead`. Both now share the same implementation. */
+export const hasCategoryLetter = isQualLead;
 
 export interface UserCallMetrics {
   kommoUserId: number;
@@ -163,7 +212,6 @@ export function aggregateLeadFunnelMetrics(
   department = "b2g",
 ): LeadFunnelCounts {
   const isB2B = department === "b2b";
-  const qualifiedSet = isB2B ? B2B_QUALIFIED_STATUSES : QUALIFIED_STATUSES;
 
   const counts: LeadFunnelCounts = {
     activeDeals: 0,
@@ -195,10 +243,10 @@ export function aggregateLeadFunnelMetrics(
       counts.activeDeals++;
     }
 
-    // Qualification stages — only for active pipeline leads (exclude closed WON=142 / LOST=143).
+    // Квал = есть буква в Category (CFV 866934) per user spec 2026-04-24.
     if (lead.status_id !== 142 && lead.status_id !== 143) {
-      if (qualifiedSet.has(lead.status_id)) counts.qualLeads++;
-      // A2/B1/B2+ are B2G-only concepts
+      if (hasCategoryLetter(lead)) counts.qualLeads++;
+      // A2/B1/B2+ are B2G-only status-based tiers
       if (!isB2B) {
         if (A2_STATUSES.has(lead.status_id)) counts.a2++;
         if (B1_STATUSES.has(lead.status_id)) counts.b1++;
@@ -212,17 +260,14 @@ export function aggregateLeadFunnelMetrics(
     if (lead.is_deleted) continue;
 
     const isNew = lead.created_at >= periodStart && lead.created_at <= periodEnd;
+    const qual = hasCategoryLetter(lead);
 
     if (isNew) {
       counts.totalLeads++;
-      if (qualifiedSet.has(lead.status_id)) {
-        counts.qualLeadsNew++;
-      }
+      if (qual) counts.qualLeadsNew++;
     }
 
-    if (qualifiedSet.has(lead.status_id)) {
-      counts.qualLeadsFlow++;
-    }
+    if (qual) counts.qualLeadsFlow++;
 
     // Count by FUNNEL_STATUS_MAP — "total" counts (B2G-only pipeline mappings)
     if (!isB2B) {

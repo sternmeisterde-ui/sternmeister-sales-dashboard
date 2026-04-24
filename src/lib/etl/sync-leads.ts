@@ -6,6 +6,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { sql } from "drizzle-orm";
 import type { KommoLookups } from "./lookups";
+import { B2B_CUSTOM_FIELD_NAMES } from "@/lib/kommo/pipeline-config";
 
 // Custom field IDs in Kommo for this account
 const CF = {
@@ -15,7 +16,63 @@ const CF = {
   UTM_CONTENT: 849504,
   UTM_TERM: 849512,
   CATEGORY: 866934,
+  /**
+   * Non-qual reason (enum): 744486 Неправильный номер, 744876/747530/747532/
+   * 747534/747536 → Неквал (доход / образование / возраст / язык / прочее).
+   * Referenced in build-response.ts B2G qualLeads filter.
+   */
+  NON_QUAL_REASON: 879824,
 } as const;
+
+// ---- B2B payment custom-fields (looked up by name, not by id) ----
+// Field IDs for payment dates/amounts vary per Kommo account, so we match
+// by field_name exactly as used in build-response.ts:findCustomField.
+type CustomFields = Array<{
+  field_id: number;
+  field_name: string;
+  values: Array<{ value: unknown }>;
+}> | null;
+
+function parseDate(v: unknown): Date | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const ms = v > 10_000_000_000 ? v : v * 1000;
+    return new Date(ms);
+  }
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    if (trimmed === "") return null;
+    if (/^\d+$/.test(trimmed)) return parseDate(Number(trimmed));
+    const ms = Date.parse(trimmed);
+    if (!Number.isNaN(ms)) return new Date(ms);
+    // Non-parseable string — log once so unknown formats surface in ETL output.
+    // V8 Date.parse rejects `DD.MM.YYYY` silently; without this log we'd write
+    // NULL and quietly lose a payment date.
+    console.warn(`[ETL:parseDate] unrecognised date string ignored: ${JSON.stringify(trimmed.slice(0, 40))}`);
+  }
+  return null;
+}
+
+function parseNumber(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/\s/g, "").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function findByName(fields: CustomFields, names: readonly string[]): unknown | undefined {
+  if (!fields) return undefined;
+  const normalized = new Set(names.map((n) => n.toLowerCase().trim()));
+  for (const f of fields) {
+    if (f?.field_name && normalized.has(f.field_name.toLowerCase().trim())) {
+      return f.values?.[0]?.value;
+    }
+  }
+  return undefined;
+}
 
 export interface LeadCacheEntry {
   leadId: number;
@@ -38,6 +95,16 @@ function cfVal(
   const f = fields?.find((x) => x.field_id === id);
   const v = f?.values?.[0]?.value;
   return typeof v === "string" && v ? v : null;
+}
+
+/** Extract enum_id for a custom field (used for non-qual reason field 879824). */
+function cfEnumId(
+  fields: Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
+  id: number,
+): number | null {
+  const f = fields?.find((x) => x.field_id === id);
+  const enumId = f?.values?.[0]?.enum_id;
+  return typeof enumId === "number" && Number.isFinite(enumId) ? enumId : null;
 }
 
 export async function syncLeads(
@@ -85,6 +152,17 @@ export async function syncLeads(
     };
     cache.push(entry);
 
+    const cf = lead.custom_fields_values;
+    const closedAt = lead.closed_at ? new Date(lead.closed_at * 1000) : null;
+    const firstPaymentDate = parseDate(findByName(cf, B2B_CUSTOM_FIELD_NAMES.firstPaymentDate));
+    const firstPaymentAmount = parseNumber(findByName(cf, B2B_CUSTOM_FIELD_NAMES.firstPaymentAmount));
+    const prepaymentDate = parseDate(findByName(cf, B2B_CUSTOM_FIELD_NAMES.prepaymentDate));
+    const prepaymentAmount = parseNumber(findByName(cf, B2B_CUSTOM_FIELD_NAMES.prepaymentAmount));
+    const nonQualEnumId = cfEnumId(
+      lead.custom_fields_values as Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
+      CF.NON_QUAL_REASON,
+    );
+
     rows.push({
       leadId: lead.id,
       createdAt,
@@ -107,15 +185,31 @@ export async function syncLeads(
       manager: entry.manager,
       responsibleUserId: lead.responsible_user_id,
       category: entry.category,
+      closedAt,
+      firstPaymentDate,
+      firstPaymentAmount,
+      prepaymentDate,
+      prepaymentAmount,
+      nonQualEnumId,
     });
   }
 
-  // Upsert: delete rows for these lead IDs, then insert fresh
-  const leadIds = rows.map((r) => r.leadId).filter(Boolean) as number[];
+  // Upsert: delete rows for these lead IDs, then insert fresh.
+  // Use parameterized IN (...) instead of sql.raw to avoid injection risk
+  // if `lead.id` is ever non-numeric in a malformed API response.
+  const leadIds = rows.map((r) => r.leadId).filter((id): id is number => typeof id === "number" && Number.isFinite(id));
 
-  await analyticsDb.execute(
-    sql.raw(`DELETE FROM analytics.leads_cohort WHERE lead_id IN (${leadIds.join(",")})`),
-  );
+  if (leadIds.length > 0) {
+    // Chunk to keep parameter count under the Postgres 65535-param limit.
+    const DELETE_CHUNK = 5000;
+    for (let i = 0; i < leadIds.length; i += DELETE_CHUNK) {
+      const slice = leadIds.slice(i, i + DELETE_CHUNK);
+      await analyticsDb.execute(sql`
+        DELETE FROM analytics.leads_cohort
+        WHERE lead_id IN (${sql.join(slice.map((id) => sql`${id}`), sql`, `)})
+      `);
+    }
+  }
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
@@ -129,15 +223,23 @@ export async function syncLeads(
 /** Update contact_date in leads_cohort from the communications table */
 export async function updateContactDates(leadIds: number[]): Promise<void> {
   if (leadIds.length === 0) return;
-  await analyticsDb.execute(sql`
-    UPDATE analytics.leads_cohort lc
-    SET contact_date = sub.first_contact
-    FROM (
-      SELECT lead_id, MIN(created_at) AS first_contact
-      FROM analytics.communications
-      WHERE lead_id IN (${sql.raw(leadIds.join(","))})
-      GROUP BY lead_id
-    ) sub
-    WHERE lc.lead_id = sub.lead_id
-  `);
+  const safe = leadIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
+  if (safe.length === 0) return;
+
+  // Chunk for 65535-param limit.
+  const CHUNK = 5000;
+  for (let i = 0; i < safe.length; i += CHUNK) {
+    const slice = safe.slice(i, i + CHUNK);
+    await analyticsDb.execute(sql`
+      UPDATE analytics.leads_cohort lc
+      SET contact_date = sub.first_contact
+      FROM (
+        SELECT lead_id, MIN(created_at) AS first_contact
+        FROM analytics.communications
+        WHERE lead_id IN (${sql.join(slice.map((id) => sql`${id}`), sql`, `)})
+        GROUP BY lead_id
+      ) sub
+      WHERE lc.lead_id = sub.lead_id
+    `);
+  }
 }

@@ -309,6 +309,21 @@ export const B2B_PREPAYMENT_STATUSES: Set<number> = new Set([
   COMMERCIAL_STATUSES.INSTALLMENT,
 ]);
 
+/**
+ * "WON-family" status_ids per pipeline — used for sales/revenue counting.
+ * Per Excel verification (Apr 2026): leads with first_payment_date/prepayment_date
+ * are only counted as sales if they sit in one of these statuses.
+ *   Бух Комм:  142 (Closed-won), 82946495 (Предоплата), 82946499 (Рассрочка).
+ *   Medical:   142 (Successful), 101858279 (Рассрочка Medical).
+ *     Inst-variants for Medical are pipeline-specific and confirmed via
+ *     SELECT status_id, status FROM analytics.leads_cohort WHERE pipeline_id=13209983
+ *     AND first_payment_date IS NOT NULL.
+ */
+export const B2B_WON_STATUSES_PER_PIPELINE: Record<number, number[]> = {
+  [B2B_PIPELINES.COMMERCIAL]: [142, 82946495, 82946499],
+  [B2B_PIPELINES.MEDICAL_COMM]: [142, 101858279],
+};
+
 // ==================== B2B QUALIFICATION STAGES ====================
 // B2B qualification: "Контакт установлен" and beyond
 

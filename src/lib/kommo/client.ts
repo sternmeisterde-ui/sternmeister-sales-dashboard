@@ -658,6 +658,26 @@ export async function getLossReasons(): Promise<Array<{ id: number; name: string
 }
 
 /**
+ * Fetch enum (select) options for a Kommo lead custom field, e.g. 879824
+ * "Причина закрытия Госники". Returns a map of enum_id → enum value text so
+ * downstream refusal-reason aggregations can label leads by human-readable
+ * reason instead of raw enum id.
+ */
+export async function getLeadCustomFieldEnums(
+  fieldId: number,
+): Promise<Array<{ id: number; value: string; sort: number }>> {
+  try {
+    const data = await kommoGet<{
+      enums?: Array<{ id: number; value: string; sort: number }>;
+    }>(`/leads/custom_fields/${fieldId}`);
+    return data.enums ?? [];
+  } catch (e) {
+    console.warn(`[Kommo] getLeadCustomFieldEnums(${fieldId}) failed:`, e);
+    return [];
+  }
+}
+
+/**
  * Batch-fetch contacts by ID with their linked leads.
  * Used in ETL to resolve contact_id → lead_id[] for call events.
  */

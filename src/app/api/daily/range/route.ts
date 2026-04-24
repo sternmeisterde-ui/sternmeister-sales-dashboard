@@ -83,6 +83,59 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    if (mode === "weeks") {
+      // Недели выбранного месяца (Mon-Sun), пересекающиеся с месяцем.
+      // Каждая неделя репрезентируется датой её ПОНЕДЕЛЬНИКА.
+      // В ответе — массив 4-5 snapshot'ов, каждый — результат buildDailyResponseCached("week", mondayDate).
+      const [yearStr, monthStr] = monthParam.split("-");
+      const year = Number(yearStr);
+      const month = Number(monthStr);
+      if (!year || !month) {
+        return NextResponse.json({ error: "Invalid month param, expected YYYY-MM" }, { status: 400 });
+      }
+
+      // Найти все ISO-недели (Mon-Sun), которые пересекаются с месяцем
+      const monthStart = new Date(Date.UTC(year, month - 1, 1));
+      const monthEnd = new Date(Date.UTC(year, month, 0));
+      // Начало: первый понедельник ≤ monthStart
+      const firstMon = new Date(monthStart);
+      const dayOfWeek = firstMon.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      const diffToMon = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+      firstMon.setUTCDate(firstMon.getUTCDate() + diffToMon);
+
+      const weekMondays: string[] = [];
+      const today = getBusinessToday();
+      const DATA_START = new Date(Date.UTC(2026, 2, 24));
+      for (let cur = new Date(firstMon); cur <= monthEnd; cur.setUTCDate(cur.getUTCDate() + 7)) {
+        const isoDate = cur.toISOString().slice(0, 10);
+        // Skip недели, чей понедельник раньше начала данных или в будущем
+        if (cur >= DATA_START && isoDate <= today) {
+          weekMondays.push(isoDate);
+        }
+      }
+
+      if (weekMondays.length === 0) {
+        return NextResponse.json({ mode: "weeks", month: monthParam, weeks: [] });
+      }
+
+      const results = await fetchWithConcurrency(
+        weekMondays,
+        (mondayStr) => buildDailyResponseCached(department, "week", mondayStr),
+        3,
+      );
+
+      // Расширим каждую неделю красивым подписью "DD.MM-DD.MM"
+      const weeksWithLabels = results.map((snap, i) => {
+        const mon = new Date(`${weekMondays[i]}T00:00:00Z`);
+        const sun = new Date(mon);
+        sun.setUTCDate(mon.getUTCDate() + 6);
+        const fmt = (d: Date) => `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+        return { ...snap, periodDate: `${fmt(mon)}-${fmt(sun)}` };
+      });
+
+      return NextResponse.json({ mode: "weeks", month: monthParam, weeks: weeksWithLabels });
+    }
+
     if (mode === "months") {
       const year = Number(url.searchParams.get("year") || new Date().getFullYear());
       const dates: string[] = [];
@@ -103,7 +156,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ error: "Invalid mode, expected days or months" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid mode, expected days, weeks or months" }, { status: 400 });
   } catch (error) {
     console.error("Daily range API error:", error);
     return NextResponse.json({ error: String(error) }, { status: 500 });
