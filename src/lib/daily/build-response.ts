@@ -1,7 +1,7 @@
 // Shared logic for building Daily API responses
 // Used by both /api/daily and /api/daily/range routes
 import { cached } from "@/lib/kommo/cache";
-import { getLeads, getTasks, getStatusChangeCount } from "@/lib/kommo/client";
+import { getLeads, getTasks, getStatusChangeCount, getLossReasons } from "@/lib/kommo/client";
 import {
   aggregateLeadMetrics,
   aggregateLeadFunnelMetrics,
@@ -12,7 +12,20 @@ import {
 import { getAnalyticsCallMetricsByMaster } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getSnapshot, saveSnapshot } from "@/lib/db/queries-daily";
 import { getDailySections, type SectionDef } from "@/lib/daily/metrics-config";
-import { getPipelineIds, getActiveStatusIds, B2G_PIPELINES, B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_PREPAYMENT_STATUSES, B2B_QUALIFIED_STATUSES, A2_STATUSES, B1_STATUSES, B2_PLUS_STATUSES, FUNNEL_STATUS_MAP } from "@/lib/kommo/pipeline-config";
+import {
+  getPipelineIds,
+  getActiveStatusIds,
+  B2G_PIPELINES,
+  B2B_PIPELINES,
+  A2_STATUSES,
+  B1_STATUSES,
+  B2_PLUS_STATUSES,
+  FUNNEL_STATUS_MAP,
+  B2B_CUSTOM_FIELD_NAMES,
+  B2B_BUH_KOMLEADS_EXCLUDED_STATUSES,
+  B2B_MED_KOMLEADS_EXCLUDED_STATUSES,
+  B2B_KOMLEADS_EXCLUDED_LOSS_REASON_PATTERNS,
+} from "@/lib/kommo/pipeline-config";
 import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { parseDateBoundary } from "@/lib/utils/date";
 
@@ -828,17 +841,141 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const activeSections = getDailySections(department);
 
-  // B2B-specific: split leads by pipeline for Бух/Мед sections
+  // =========================================================================
+  // B2B-specific data assembly
+  // =========================================================================
+  // Pipeline stats are driven by Kommo custom fields per ТЗ:
+  //   - revenue  = sum(Сумма 1-го платежа where Факт. Дата 1-го платежа ∈ period)
+  //              + sum(Сумма предоплаты where Дата предоплаты ∈ period)
+  //   - salesCount        = leads where Факт. Дата 1-го платежа ∈ period
+  //   - prepaymentCount   = leads where Дата предоплаты ∈ period
+  //   - totalLeads        = leads created in period (not deleted)
+  //   - qualLeads         = totalLeads  minus (Incoming for Бух)  minus (lost w/
+  //                         loss_reason Неквал/Спам)
+  // OKK/SLA/avgWait are pulled from the R2 OKK DB + analytics DB similarly to
+  // how the B2G branch handles its per-line аналоги.
   const buhPipelineId = B2B_PIPELINES.COMMERCIAL;
   const medPipelineId = B2B_PIPELINES.MEDICAL_COMM;
-  const buhWonLeads = department === "b2b" ? safeWonLeads.filter((l) => l.pipeline_id === buhPipelineId) : [];
-  const medWonLeads = department === "b2b" ? safeWonLeads.filter((l) => l.pipeline_id === medPipelineId) : [];
-  const buhNewLeads = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === buhPipelineId && !l.is_deleted) : [];
-  const medNewLeads = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === medPipelineId && !l.is_deleted) : [];
+
+  // Per-manager lead subsets for B2B (also used by per-manager tables below)
+  const buhLeadsInPeriod = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === buhPipelineId && !l.is_deleted) : [];
+  const medLeadsInPeriod = department === "b2b" ? safeNewLeadsInPeriod.filter((l) => l.pipeline_id === medPipelineId && !l.is_deleted) : [];
+  const buhLostLeads = department === "b2b" ? safeLostLeads.filter((l) => l.pipeline_id === buhPipelineId) : [];
+  const medLostLeads = department === "b2b" ? safeLostLeads.filter((l) => l.pipeline_id === medPipelineId) : [];
   const buhActiveLeads = department === "b2b" ? safeSnapshotActiveLeads.filter((l) => l.pipeline_id === buhPipelineId && !l.closed_at && !l.is_deleted) : [];
   const medActiveLeads = department === "b2b" ? safeSnapshotActiveLeads.filter((l) => l.pipeline_id === medPipelineId && !l.closed_at && !l.is_deleted) : [];
-  const buhPrepayments = department === "b2b" ? buhActiveLeads.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)) : [];
-  const medPrepayments = department === "b2b" ? medActiveLeads.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)) : [];
+
+  // Qualified leads (уровень отдела): created-in-period minus Incoming minus lost(Неквал/Спам).
+  let buhQualLeads: KommoLead[] = [];
+  let medQualLeads: KommoLead[] = [];
+  let buhStats: B2BPipelineStats = { revenue: 0, salesCount: 0, prepaymentCount: 0, totalLeads: 0, qualLeads: 0 };
+  let medStats: B2BPipelineStats = { revenue: 0, salesCount: 0, prepaymentCount: 0, totalLeads: 0, qualLeads: 0 };
+
+  // B2B-specific async metrics (OKK, SLA, avgWait). Fetched in parallel.
+  let okkBuh1: number | null = null;
+  let okkBuh2: number | null = null;
+  let okkMed: number | null = null;
+  let slaMinutesB2B: number | null = null;
+  let avgWaitSecondsB2B: number | null = null;
+  // Per-manager OKK scores for B2B: managerId → score (combined across prompts)
+  const okkPerManagerB2B = new Map<string, number>();
+
+  if (department === "b2b") {
+    const fromDate = new Date(from * 1000);
+    const toDate = new Date(to * 1000);
+
+    // Loss-reason cache first (needed by qual-leads filter)
+    const lossReasonById = await getLossReasonMap();
+
+    buhQualLeads = filterB2BQualLeads(
+      buhLeadsInPeriod,
+      buhLostLeads,
+      getExcludedStatusesForPipeline(buhPipelineId),
+      lossReasonById,
+    );
+    medQualLeads = filterB2BQualLeads(
+      medLeadsInPeriod,
+      medLostLeads,
+      getExcludedStatusesForPipeline(medPipelineId),
+      lossReasonById,
+    );
+
+    // Pull "sold / prepaid" signals from leads that may be outside the created-in-period cohort:
+    // Факт. Дата 1-го платежа may be on any lead — including active ones in snapshot.
+    // For historical dates safeClosedAfterDate contains leads closed after D but
+    // that were alive on D; their custom payment-dates may legitimately fall into
+    // the target window. Include them so we don't under-count revenue/sales.
+    const buhAllLeads = [
+      ...buhLeadsInPeriod,
+      ...buhActiveLeads,
+      ...safeWonLeads.filter((l) => l.pipeline_id === buhPipelineId),
+      ...buhLostLeads,
+      ...safeClosedAfterDate.filter((l) => l.pipeline_id === buhPipelineId),
+    ];
+    const medAllLeads = [
+      ...medLeadsInPeriod,
+      ...medActiveLeads,
+      ...safeWonLeads.filter((l) => l.pipeline_id === medPipelineId),
+      ...medLostLeads,
+      ...safeClosedAfterDate.filter((l) => l.pipeline_id === medPipelineId),
+    ];
+    const buhDedup = Array.from(new Map(buhAllLeads.map((l) => [l.id, l])).values());
+    const medDedup = Array.from(new Map(medAllLeads.map((l) => [l.id, l])).values());
+
+    const buhFacts = computeB2BCommercialFacts(buhDedup, from, to);
+    const medFacts = computeB2BCommercialFacts(medDedup, from, to);
+
+    buhStats = {
+      revenue: buhFacts.newRevenue,
+      salesCount: buhFacts.salesCount,
+      prepaymentCount: buhFacts.prepaymentCount,
+      totalLeads: buhLeadsInPeriod.length,
+      qualLeads: buhQualLeads.length,
+    };
+    medStats = {
+      revenue: medFacts.newRevenue,
+      salesCount: medFacts.salesCount,
+      prepaymentCount: medFacts.prepaymentCount,
+      totalLeads: medLeadsInPeriod.length,
+      qualLeads: medQualLeads.length,
+    };
+
+    // OKK for B2B: prompt types are defined in src/lib/config/tenant.ts (LINES.b2b).
+    // Each line has its own prompt_type in `okk_evaluations.prompt_type`:
+    //   buh1 → r2_commercial, buh2 → r2_decisions, med1 → r2_med_commercial
+    const [avgBuh1, avgBuh2, avgMed, okkPerMgr] = await Promise.all([
+      getOkkAvgScore("b2b", from, to, ["r2_commercial"]),
+      getOkkAvgScore("b2b", from, to, ["r2_decisions"]),
+      getOkkAvgScore("b2b", from, to, ["r2_med_commercial"]),
+      getOkkPerManagerScores("b2b", from, to, ["r2_commercial", "r2_decisions", "r2_med_commercial"]),
+    ]);
+    okkBuh1 = avgBuh1;
+    okkBuh2 = avgBuh2;
+    okkMed = avgMed;
+    for (const [mgrId, v] of okkPerMgr) okkPerManagerB2B.set(mgrId, v);
+
+    // SLA & avg wait — одна воронка в телефонии, используем Бух Комм.
+    const slaFactsB2B = await getSlaFacts(buhPipelineId, fromDate, toDate);
+    slaMinutesB2B = slaFactsB2B.slaMinutes;
+    // avgWait: берём из analytics.communications — среднее время ожидания входящих.
+    try {
+      const r = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
+        avg_wait: number | string | null;
+      }>(
+        drizzleSql`
+          SELECT COALESCE(AVG(wait_time), 0)::int AS avg_wait
+          FROM analytics.communications
+          WHERE pipeline_id IN (${buhPipelineId}, ${medPipelineId})
+            AND created_at >= ${fromDate}
+            AND created_at <= ${toDate}
+            AND communication_type = 'call_in'
+            AND wait_time IS NOT NULL
+        `,
+      );
+      const v = r.rows[0]?.avg_wait;
+      avgWaitSecondsB2B = v != null && Number(v) > 0 ? Number(v) : null;
+    } catch { /* leave null */ }
+  }
 
   const sections = activeSections.map((section) => {
     const sectionManagers = department === "b2b"
@@ -877,17 +1014,44 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
       }
 
+      // B2B plan-row defaults per ТЗ (when no Monthly plan is saved yet)
+      if (department === "b2b" && metric.hasPlan && !metric.hasFact) {
+        if (plan == null || plan === "") {
+          const defaults: Record<string, string> = {
+            buh_ql2p_p: "8",
+            med_ql2p_p: "8",
+            buh_l2p_p: "5",
+            med_l2p_p: "5",
+            calls_avgWait_p: "35",
+            calls_dialPercent_p: "65",
+            calls_sla_p: "25",
+            okk_buh1_p: "85",
+            okk_buh2_p: "85",
+            okk_med_p: "85",
+            ue_conversion_p: "3.5",
+          };
+          if (defaults[metric.key]) plan = defaults[metric.key];
+        }
+      }
+
       // Plan-row metrics (hasPlan && !hasFact): display plan target as the fact value
       // Works for BOTH B2G and B2B
       if (metric.hasPlan && !metric.hasFact) {
         fact = plan;
       } else if (department === "b2b") {
         fact = getB2BFact(metric.key, section.key, {
-          summaryCallMetrics, managersOnLineCount, sectionManagers,
-          buhWonLeads, medWonLeads, buhNewLeads, medNewLeads,
-          buhActiveLeads, medActiveLeads, buhPrepayments, medPrepayments,
-          allNewLeads: safeNewLeadsInPeriod, allWonLeads: safeWonLeads,
-          getPlan, sectionDbLine: section.dbLine,
+          summaryCallMetrics,
+          managersOnLineCount,
+          sectionManagers,
+          buh: buhStats,
+          med: medStats,
+          getPlan,
+          sectionDbLine: section.dbLine,
+          okkBuh1,
+          okkBuh2,
+          okkMed,
+          slaMinutes: slaMinutesB2B,
+          avgWaitSeconds: avgWaitSecondsB2B,
         });
       } else if (section.key === "funnel") {
         fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
@@ -978,7 +1142,17 @@ export async function buildDailyResponse(department: string, period: string, dat
     }> = [];
 
     if (department === "b2b" && section.perManager) {
-      // B2B per-manager: sales (Бух/Мед) and calls
+      // B2B per-manager: sales (Бух / Мед) + calls.
+      // salesBuh/salesMed реализованы через те же commercial-facts formulas,
+      // что и team-level расчёт, — чтобы строки "Кол-во продаж Бух факт" и
+      // "Выручка Бух факт" рассчитывались по custom-полям, а не по lead.price.
+      const pipeId = section.key === "salesBuh"
+        ? buhPipelineId
+        : section.key === "salesMed"
+          ? medPipelineId
+          : null;
+      const prefix = section.key === "salesBuh" ? "buh" : section.key === "salesMed" ? "med" : null;
+
       managerData = sectionManagers.map((mgr) => {
         const uid = mgr.kommoUserId;
         const mgrCallMetrics = callMetricsMap.get(mgr.id);
@@ -989,52 +1163,65 @@ export async function buildDailyResponse(department: string, period: string, dat
             const plan = getPlan(section.dbLine, mgr.id, metric.key);
             let fact: string | null = null;
 
-            // Plan-row metrics: show plan value as fact
             if (metric.hasPlan && !metric.hasFact) {
               fact = plan;
             } else if (section.key === "b2bCalls") {
-              // Call metrics per manager (fact rows)
               if (metric.key === "calls_managersOnLine_f") fact = "1";
+              else if (metric.key === "calls_total_p") fact = "80";
               else if (metric.key === "calls_total_f") fact = String(mgrCallMetrics?.callsTotal ?? 0);
+              else if (metric.key === "calls_totalMinutes_p") fact = "160";
               else if (metric.key === "calls_totalMinutes_f") fact = String(mgrCallMetrics?.totalMinutes ?? 0);
               else if (metric.key === "calls_dialPercent_f") fact = String(mgrCallMetrics?.dialPercent ?? 0);
-            } else {
-              // Sales per manager (Бух or Мед) — fact rows only
-              const pipeId = section.key === "salesBuh" ? buhPipelineId : medPipelineId;
-              const mgrWon = uid ? safeWonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId) : [];
-              const mgrNew = uid ? safeNewLeadsInPeriod.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId && !l.is_deleted) : [];
-              const mgrActive = uid ? safeSnapshotActiveLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId && !l.closed_at && !l.is_deleted) : [];
-              const mgrRevenue = mgrWon.reduce((s, l) => s + (l.price || 0), 0);
+              else if (metric.key === "calls_sla_f") fact = slaMinutesB2B != null ? String(slaMinutesB2B) : null;
+              else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(avgWaitSecondsB2B) : null;
+            } else if (pipeId !== null && prefix !== null) {
+              // Per-manager commercial facts driven by custom fields.
+              const mgrAllLeads = uid
+                ? safeSnapshotActiveLeads
+                    .concat(safeWonLeads, safeLostLeads, safeNewLeadsInPeriod, safeClosedAfterDate)
+                    .filter((l) => l.responsible_user_id === uid && l.pipeline_id === pipeId)
+                : [];
+              const mgrDedup = Array.from(new Map(mgrAllLeads.map((l) => [l.id, l])).values());
+              const mgrCreated = mgrDedup.filter((l) => !l.is_deleted && l.created_at >= from && l.created_at <= to);
+              // Lost = closed at status_id=143; robust against object-identity drift.
+              const mgrLost = mgrDedup.filter((l) => l.status_id === 143 && l.closed_at != null);
+              // Qual filter uses same rules; loss-reason map already cached — fetch once.
+              // Note: async getLossReasonMap() inside sync map — keep same snapshot by
+              // resolving synchronously via _lossReasonCache (already populated above).
+              const reasonCache = _lossReasonCache?.byId ?? new Map<number, string>();
+              const mgrQual = filterB2BQualLeads(
+                mgrCreated,
+                mgrLost,
+                getExcludedStatusesForPipeline(pipeId),
+                reasonCache,
+              );
+              const mgrFacts = computeB2BCommercialFacts(mgrDedup, from, to);
 
-              const prefix = section.key === "salesBuh" ? "buh" : "med";
               switch (metric.key) {
                 case `${prefix}_salesPlusRenewals_f`:
                 case `${prefix}_revenue_f`:
-                  fact = String(mgrRevenue);
+                  fact = String(mgrFacts.newRevenue);
                   break;
                 case `${prefix}_komLeads_f`:
-                  fact = String(mgrActive.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length);
+                  fact = String(mgrQual.length);
                   break;
                 case `${prefix}_totalLeads_f`:
-                  fact = String(mgrNew.length);
+                  fact = String(mgrCreated.length);
                   break;
                 case `${prefix}_sales_f`:
-                  fact = String(mgrWon.length);
+                  fact = String(mgrFacts.salesCount);
                   break;
                 case `${prefix}_prepayments`:
-                  fact = String(mgrActive.filter((l) => B2B_PREPAYMENT_STATUSES.has(l.status_id)).length);
+                  fact = String(mgrFacts.prepaymentCount);
                   break;
-                case `${prefix}_ql2p_f`: {
-                  const qualL = mgrActive.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
-                  fact = qualL > 0 ? String(Math.round((mgrWon.length / qualL) * 100)) : "0";
+                case `${prefix}_ql2p_f`:
+                  fact = String(pct(mgrFacts.salesCount, mgrQual.length));
                   break;
-                }
-                case `${prefix}_l2p_f`: {
-                  fact = mgrNew.length > 0 ? String(Math.round((mgrWon.length / mgrNew.length) * 100)) : "0";
+                case `${prefix}_l2p_f`:
+                  fact = String(pct(mgrFacts.salesCount, mgrCreated.length));
                   break;
-                }
                 case `${prefix}_avgCheck_f`:
-                  fact = mgrWon.length > 0 ? String(Math.round(mgrRevenue / mgrWon.length)) : "0";
+                  fact = String(avgCheck(mgrFacts.newRevenue, mgrFacts.salesCount));
                   break;
               }
             }
@@ -1385,112 +1572,388 @@ export async function buildDailyResponse(department: string, period: string, dat
   };
 }
 
+// ==================== B2B HELPERS ====================
+
+/**
+ * Parse a Kommo custom-field value that may be a unix timestamp (number),
+ * numeric string, or ISO-like date string. Returns seconds since epoch, or null.
+ */
+function parseKommoDate(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    // Kommo date fields are always seconds, but be tolerant of ms.
+    return v > 10_000_000_000 ? Math.floor(v / 1000) : Math.floor(v);
+  }
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    if (/^\d+$/.test(trimmed)) return parseKommoDate(Number(trimmed));
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) return Math.floor(parsed / 1000);
+  }
+  return null;
+}
+
+function parseKommoNumber(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/\s/g, "").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/** Find a custom-field value on a lead by one of the accepted field names. */
+function findCustomField(
+  lead: KommoLead,
+  names: readonly string[],
+): unknown | undefined {
+  const fields = lead.custom_fields_values;
+  if (!fields) return undefined;
+  const normalized = new Set(names.map((n) => n.toLowerCase().trim()));
+  for (const f of fields) {
+    if (!f) continue;
+    const name = f.field_name?.toLowerCase().trim();
+    if (name && normalized.has(name)) {
+      return f.values?.[0]?.value;
+    }
+  }
+  return undefined;
+}
+
+function getLeadFirstPaymentDate(lead: KommoLead): number | null {
+  return parseKommoDate(findCustomField(lead, B2B_CUSTOM_FIELD_NAMES.firstPaymentDate));
+}
+function getLeadFirstPaymentAmount(lead: KommoLead): number | null {
+  return parseKommoNumber(findCustomField(lead, B2B_CUSTOM_FIELD_NAMES.firstPaymentAmount));
+}
+function getLeadPrepaymentDate(lead: KommoLead): number | null {
+  return parseKommoDate(findCustomField(lead, B2B_CUSTOM_FIELD_NAMES.prepaymentDate));
+}
+function getLeadPrepaymentAmount(lead: KommoLead): number | null {
+  return parseKommoNumber(findCustomField(lead, B2B_CUSTOM_FIELD_NAMES.prepaymentAmount));
+}
+
+/** Lead counts as "sale" in period if Факт. Дата 1-го платежа ∈ [from, to]. */
+function leadSoldIn(lead: KommoLead, from: number, to: number): boolean {
+  const d = getLeadFirstPaymentDate(lead);
+  return d !== null && d >= from && d <= to;
+}
+/** Lead counts as "prepayment" in period if Дата предоплаты ∈ [from, to]. */
+function leadPrepaidIn(lead: KommoLead, from: number, to: number): boolean {
+  const d = getLeadPrepaymentDate(lead);
+  return d !== null && d >= from && d <= to;
+}
+
+interface B2BCommercialFacts {
+  newRevenue: number;
+  salesCount: number;
+  prepaymentCount: number;
+}
+
+/** Sum first-payment + prepayment amounts, count sales and prepayments, by pipeline + range.
+ *
+ *  Per ТЗ (ТЗ по Daily дашборду, row R24): "Воронка Бух Комм:
+ *    — «Факт. Дата 1-го платежа» за период
+ *    — «Дата предоплаты» за период
+ *    — Сумма значений за период: «Сумма 1-го платежа» + «Сумма предоплаты»"
+ *
+ *  This is ADDITIVE by design: a single lead with both a prepayment and a full
+ *  first-payment inside the same window contributes BOTH amounts — that's the
+ *  real cash received in the period (partial prepay + later full payment).
+ *
+ *  `lead.price` is a fallback for `Сумма 1-го платежа` because legacy Kommo
+ *  leads populate `price` when the custom field is empty. No equivalent fallback
+ *  exists for prepayment amount — if the custom field is empty, skip that lead.
+ */
+function computeB2BCommercialFacts(
+  leads: KommoLead[],
+  from: number,
+  to: number,
+): B2BCommercialFacts {
+  let newRevenue = 0;
+  let salesCount = 0;
+  let prepaymentCount = 0;
+  for (const lead of leads) {
+    if (leadSoldIn(lead, from, to)) {
+      salesCount += 1;
+      newRevenue += getLeadFirstPaymentAmount(lead) ?? lead.price ?? 0;
+    }
+    if (leadPrepaidIn(lead, from, to)) {
+      prepaymentCount += 1;
+      newRevenue += getLeadPrepaymentAmount(lead) ?? 0;
+    }
+  }
+  return { newRevenue, salesCount, prepaymentCount };
+}
+
+/**
+ * Cached Kommo loss-reason lookup: reason_id → name. 10 min TTL.
+ */
+let _lossReasonCache: { loadedAt: number; byId: Map<number, string> } | null = null;
+const LOSS_REASON_TTL_MS = 10 * 60 * 1000;
+
+async function getLossReasonMap(): Promise<Map<number, string>> {
+  if (_lossReasonCache && Date.now() - _lossReasonCache.loadedAt < LOSS_REASON_TTL_MS) {
+    return _lossReasonCache.byId;
+  }
+  try {
+    const reasons = await getLossReasons();
+    const byId = new Map<number, string>();
+    for (const r of reasons) byId.set(r.id, r.name);
+    _lossReasonCache = { loadedAt: Date.now(), byId };
+    return byId;
+  } catch {
+    // Install a short-TTL empty sentinel so downstream sync fallbacks
+    // (in per-manager loops) don't silently see `_lossReasonCache === null`
+    // which would translate every lost lead into a qual-lead inflation.
+    if (!_lossReasonCache) {
+      _lossReasonCache = { loadedAt: Date.now() - LOSS_REASON_TTL_MS + 60_000, byId: new Map() };
+    }
+    return _lossReasonCache.byId;
+  }
+}
+
+function isExcludedLossReason(name: string | undefined): boolean {
+  if (!name) return false;
+  for (const rx of B2B_KOMLEADS_EXCLUDED_LOSS_REASON_PATTERNS) {
+    if (rx.test(name)) return true;
+  }
+  return false;
+}
+
+/**
+ * "Квал ком. лидов факт" per ТЗ:
+ *   все лиды pipeline, созданные в period,
+ *   кроме: Incoming (только для Бух) и lost с loss_reason Неквал/Спам.
+ *
+ *   @param excludedStatuses  statuses counted as "Incoming" or similar
+ *   @param lossReasonById    prefetched loss-reason lookup (id → name)
+ *   @param leadsInPeriod     all leads for this pipeline created in period
+ *   @param lostLeads         all leads closed as LOST in period (same pipeline)
+ */
+function filterB2BQualLeads(
+  leadsInPeriod: KommoLead[],
+  lostLeads: KommoLead[],
+  excludedStatuses: Set<number>,
+  lossReasonById: Map<number, string>,
+): KommoLead[] {
+  const lostExcludedIds = new Set<number>();
+  for (const l of lostLeads) {
+    const reasonName = l.loss_reason_id != null ? lossReasonById.get(l.loss_reason_id) : undefined;
+    if (isExcludedLossReason(reasonName)) lostExcludedIds.add(l.id);
+  }
+  return leadsInPeriod.filter((l) => {
+    if (l.is_deleted) return false;
+    if (excludedStatuses.has(l.status_id)) return false;
+    if (lostExcludedIds.has(l.id)) return false;
+    return true;
+  });
+}
+
+function getExcludedStatusesForPipeline(pipelineId: number): Set<number> {
+  if (pipelineId === B2B_PIPELINES.COMMERCIAL) return B2B_BUH_KOMLEADS_EXCLUDED_STATUSES;
+  return B2B_MED_KOMLEADS_EXCLUDED_STATUSES;
+}
+
 // ==================== B2B FACT RESOLVER ====================
+
+interface B2BPipelineStats {
+  /** commercial facts per ТЗ: sum of Сумма 1-го платежа + Сумма предоплаты */
+  revenue: number;
+  /** кол-во продаж = Факт. Дата 1-го платежа ∈ period */
+  salesCount: number;
+  /** кол-во предоплат = Дата предоплаты ∈ period */
+  prepaymentCount: number;
+  /** все лиды пайплайна, созданные в period */
+  totalLeads: number;
+  /** квал лиды = созданные в period за вычетом Incoming + lost(Неквал/Спам) */
+  qualLeads: number;
+}
 
 interface B2BFactContext {
   summaryCallMetrics: UserCallMetrics;
   managersOnLineCount: number;
   sectionManagers: Array<{ id: string; kommoUserId: number | null; line: string | null }>;
-  buhWonLeads: KommoLead[];
-  medWonLeads: KommoLead[];
-  buhNewLeads: KommoLead[];
-  medNewLeads: KommoLead[];
-  buhActiveLeads: KommoLead[];
-  medActiveLeads: KommoLead[];
-  buhPrepayments: KommoLead[];
-  medPrepayments: KommoLead[];
-  allNewLeads: KommoLead[];
-  allWonLeads: KommoLead[];
+  buh: B2BPipelineStats;
+  med: B2BPipelineStats;
   getPlan: (line: string, userId: string | null, metricKey: string) => string | null;
   sectionDbLine: string;
+  okkBuh1: number | null;
+  okkBuh2: number | null;
+  okkMed: number | null;
+  slaMinutes: number | null;
+  avgWaitSeconds: number | null;
+}
+
+/** Safe integer percent = Math.round(num/den * 100); 0 when den is 0. */
+function pct(num: number, den: number): number {
+  if (!den || den <= 0) return 0;
+  return Math.round((num / den) * 100);
+}
+
+function avgCheck(revenue: number, sales: number): number {
+  if (!sales || sales <= 0) return 0;
+  return Math.round(revenue / sales);
+}
+
+function planDone(fact: number, planStr: string | null): string | null {
+  const plan = Number(planStr ?? 0);
+  if (!plan || plan <= 0) return "0";
+  return String(Math.round((fact / plan) * 100));
 }
 
 function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): string | null {
-  const { summaryCallMetrics, managersOnLineCount } = ctx;
+  const { summaryCallMetrics, managersOnLineCount, buh, med } = ctx;
+  const totalRevenue = buh.revenue + med.revenue;
+  const totalSales = buh.salesCount + med.salesCount;
+  const totalQualLeads = buh.qualLeads + med.qualLeads;
+  const totalLeads = buh.totalLeads + med.totalLeads;
+
+  // ===== Plan helpers (pulled from manual Monthly inputs) =====
+  const buhKomLeadsPlan = Number(ctx.getPlan("salesBuh", null, "buh_komLeads_p") ?? 0);
+  const medKomLeadsPlan = Number(ctx.getPlan("salesMed", null, "med_komLeads_p") ?? 0);
+  const buhQl2pPlan = Number(ctx.getPlan("salesBuh", null, "buh_ql2p_p") ?? 0);
+  const medQl2pPlan = Number(ctx.getPlan("salesMed", null, "med_ql2p_p") ?? 0);
+  const buhAvgCheckPlan = Number(ctx.getPlan("salesBuh", null, "buh_avgCheck_p") ?? 0);
+  const medAvgCheckPlan = Number(ctx.getPlan("salesMed", null, "med_avgCheck_p") ?? 0);
+  const buhSalesPlan = buhKomLeadsPlan && buhQl2pPlan ? Math.round(buhKomLeadsPlan * buhQl2pPlan / 100) : 0;
+  const medSalesPlan = medKomLeadsPlan && medQl2pPlan ? Math.round(medKomLeadsPlan * medQl2pPlan / 100) : 0;
+  const buhRevenuePlan = buhSalesPlan * buhAvgCheckPlan;
+  const medRevenuePlan = medSalesPlan * medAvgCheckPlan;
+  // Renewals plan/fact aggregate: sum of per-date manually-entered rows
+  // (ren_${DATE}_plan). Each _plan key is hasPlan:true, so it's stored in daily_plans.
+  const RENEWAL_DATES = ["29.04","27.05","27.06","28.07","29.08","29.09","17.10","10.11","28.11","8.12","19.01","9.02","9.03.26","7.04.26"];
+  let buhRenewalsPlan = 0;
+  let buhRenewalsFact = 0;
+  for (const d of RENEWAL_DATES) {
+    const p = Number(ctx.getPlan("renewals", null, `ren_${d}_plan`) ?? 0);
+    const f = Number(ctx.getPlan("renewals", null, `ren_${d}_fact`) ?? 0);
+    if (Number.isFinite(p)) buhRenewalsPlan += p;
+    if (Number.isFinite(f)) buhRenewalsFact += f;
+  }
+  const buhSalesPlusRenewalsPlan = buhRevenuePlan + buhRenewalsPlan;
+  const medSalesPlusRenewalsPlan = medRevenuePlan;
 
   // === Продажи ТОТАЛ ===
   if (sectionKey === "salesTotal") {
-    const totalRevenue = ctx.buhWonLeads.reduce((s, l) => s + (l.price || 0), 0) +
-      ctx.medWonLeads.reduce((s, l) => s + (l.price || 0), 0);
-    if (key === "st_salesPlusRenewals_f") return String(totalRevenue);
+    switch (key) {
+      case "st_revenueTotal_f": return String(totalRevenue + buhRenewalsPlan);
+      case "st_revenueNew_p": return String(buhRevenuePlan + medRevenuePlan);
+      case "st_revenueNew_f": return String(totalRevenue);
+      case "st_komLeads_p": return String(buhKomLeadsPlan + medKomLeadsPlan);
+      case "st_komLeads_f": return String(totalQualLeads);
+      case "st_sales_p": return String(buhSalesPlan + medSalesPlan);
+      case "st_sales_f": return String(totalSales);
+      case "st_prepayments": return String(buh.prepaymentCount + med.prepaymentCount);
+      case "st_ql2p_p": {
+        const avg = [buhQl2pPlan, medQl2pPlan].filter((v) => v > 0);
+        return avg.length ? String(Math.round(avg.reduce((s, v) => s + v, 0) / avg.length)) : "8";
+      }
+      case "st_ql2p_f": return String(pct(totalSales, totalQualLeads));
+      case "st_avgCheck_p": {
+        const avg = [buhAvgCheckPlan, medAvgCheckPlan].filter((v) => v > 0);
+        return avg.length ? String(Math.round(avg.reduce((s, v) => s + v, 0) / avg.length)) : "0";
+      }
+      case "st_avgCheck_f": return String(avgCheck(totalRevenue, totalSales));
+      case "st_planDoneTotal": {
+        const plan = Number(ctx.getPlan("salesTotal", null, "st_revenueTotal_p") ?? 0);
+        return plan > 0 ? String(Math.round(((totalRevenue + buhRenewalsPlan) / plan) * 100)) : "0";
+      }
+      case "st_planDoneNew": {
+        const plan = buhRevenuePlan + medRevenuePlan;
+        return plan > 0 ? String(Math.round((totalRevenue / plan) * 100)) : "0";
+      }
+    }
   }
 
   // === Продажи Бух ===
   if (sectionKey === "salesBuh") {
-    const won = ctx.buhWonLeads;
-    const newLeads = ctx.buhNewLeads;
-    const active = ctx.buhActiveLeads;
-    const revenue = won.reduce((s, l) => s + (l.price || 0), 0);
-    const qualLeads = active.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
-
     switch (key) {
-      case "buh_salesPlusRenewals_f": return String(revenue);
-      case "buh_revenue_f": return String(revenue);
-      case "buh_komLeads_f": return String(qualLeads);
-      case "buh_totalLeads_f": return String(newLeads.length);
-      case "buh_sales_f": return String(won.length);
-      case "buh_prepayments": return String(ctx.buhPrepayments.length);
-      case "buh_ql2p_f": return qualLeads > 0 ? String(Math.round((won.length / qualLeads) * 100)) : "0";
-      case "buh_l2p_f": return newLeads.length > 0 ? String(Math.round((won.length / newLeads.length) * 100)) : "0";
-      case "buh_avgCheck_f": return won.length > 0 ? String(Math.round(revenue / won.length)) : "0";
-      case "buh_planDone": {
-        const planVal = ctx.getPlan(ctx.sectionDbLine, null, "buh_revenue_p");
-        return planVal && Number(planVal) > 0 ? String(Math.round((revenue / Number(planVal)) * 100)) : "0";
-      }
+      case "buh_salesPlusRenewals_p": return String(buhSalesPlusRenewalsPlan);
+      case "buh_salesPlusRenewals_f": return String(buh.revenue + buhRenewalsPlan);
+      case "buh_revenue_p": return String(buhRevenuePlan);
+      case "buh_revenue_f": return String(buh.revenue);
+      case "buh_komLeads_f": return String(buh.qualLeads);
+      case "buh_totalLeads_f": return String(buh.totalLeads);
+      case "buh_sales_p": return String(buhSalesPlan);
+      case "buh_sales_f": return String(buh.salesCount);
+      case "buh_prepayments": return String(buh.prepaymentCount);
+      case "buh_ql2p_f": return String(pct(buh.salesCount, buh.qualLeads));
+      case "buh_l2p_f": return String(pct(buh.salesCount, buh.totalLeads));
+      case "buh_avgCheck_f": return String(avgCheck(buh.revenue, buh.salesCount));
+      case "buh_planDoneTotal": return planDone(buh.revenue + buhRenewalsPlan, String(buhSalesPlusRenewalsPlan));
+      case "buh_planDoneNew": return planDone(buh.revenue, String(buhRevenuePlan));
     }
   }
 
   // === Продажи Мед ===
   if (sectionKey === "salesMed") {
-    const won = ctx.medWonLeads;
-    const active = ctx.medActiveLeads;
-    const revenue = won.reduce((s, l) => s + (l.price || 0), 0);
-    const qualLeads = active.filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
-    const newLeads = ctx.medNewLeads;
-
     switch (key) {
-      case "med_salesPlusRenewals_f": return String(revenue);
-      case "med_revenue_f": return String(revenue);
-      case "med_komLeads_f": return String(qualLeads);
-      case "med_sales_f": return String(won.length);
-      case "med_prepayments": return String(ctx.medPrepayments.length);
-      case "med_ql2p_f": return qualLeads > 0 ? String(Math.round((won.length / qualLeads) * 100)) : "0";
-      case "med_avgCheck_f": return won.length > 0 ? String(Math.round(revenue / won.length)) : "0";
-      case "med_planDone": {
-        const planVal = ctx.getPlan(ctx.sectionDbLine, null, "med_revenue_p");
-        return planVal && Number(planVal) > 0 ? String(Math.round((revenue / Number(planVal)) * 100)) : "0";
+      case "med_salesPlusRenewals_p": return String(medSalesPlusRenewalsPlan);
+      case "med_salesPlusRenewals_f": return String(med.revenue);
+      case "med_revenue_p": return String(medRevenuePlan);
+      case "med_revenue_f": return String(med.revenue);
+      case "med_komLeads_f": return String(med.qualLeads);
+      case "med_totalLeads_f": return String(med.totalLeads);
+      case "med_sales_p": return String(medSalesPlan);
+      case "med_sales_f": return String(med.salesCount);
+      case "med_prepayments": return String(med.prepaymentCount);
+      case "med_ql2p_f": return String(pct(med.salesCount, med.qualLeads));
+      case "med_l2p_f": return String(pct(med.salesCount, med.totalLeads));
+      case "med_avgCheck_f": return String(avgCheck(med.revenue, med.salesCount));
+      case "med_planDoneTotal": return planDone(med.revenue, String(medSalesPlusRenewalsPlan));
+      case "med_planDoneNew": return planDone(med.revenue, String(medRevenuePlan));
+    }
+  }
+
+  // === Звонки (fact rows + computed plan rows) ===
+  if (sectionKey === "b2bCalls") {
+    switch (key) {
+      case "calls_managersOnLine_f": return String(managersOnLineCount);
+      case "calls_total_p": return String(managersOnLineCount * 80);
+      case "calls_total_f": return String(summaryCallMetrics.callsTotal);
+      case "calls_totalMinutes_p": return String(managersOnLineCount * 160);
+      case "calls_totalMinutes_f": return String(summaryCallMetrics.totalMinutes);
+      case "calls_avgWait_f": return ctx.avgWaitSeconds != null ? String(ctx.avgWaitSeconds) : null;
+      case "calls_dialPercent_f": return String(summaryCallMetrics.dialPercent);
+      case "calls_sla_f": return ctx.slaMinutes != null ? String(ctx.slaMinutes) : null;
+    }
+  }
+
+  // === ОКК ===
+  if (sectionKey === "okk") {
+    switch (key) {
+      case "okk_buh1_f": return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : null;
+      case "okk_buh2_f": return ctx.okkBuh2 != null ? String(ctx.okkBuh2) : null;
+      case "okk_med_f":  return ctx.okkMed  != null ? String(ctx.okkMed)  : null;
+      case "okk_avg_p": {
+        const p = [
+          Number(ctx.getPlan("okk", null, "okk_buh1_p") ?? 85),
+          Number(ctx.getPlan("okk", null, "okk_buh2_p") ?? 85),
+          Number(ctx.getPlan("okk", null, "okk_med_p")  ?? 85),
+        ];
+        return String(Math.round(p.reduce((s, v) => s + v, 0) / p.length));
+      }
+      case "okk_avg_f": {
+        const vals = [ctx.okkBuh1, ctx.okkBuh2, ctx.okkMed].filter((v): v is number => v != null);
+        if (!vals.length) return null;
+        return String(Math.round(vals.reduce((s, v) => s + v, 0) / vals.length));
       }
     }
   }
 
-  // === Звонки (fact rows only, _f suffix) ===
-  if (sectionKey === "b2bCalls") {
-    switch (key) {
-      case "calls_managersOnLine_f": return String(managersOnLineCount);
-      case "calls_total_f": return String(summaryCallMetrics.callsTotal);
-      case "calls_totalMinutes_f": return String(summaryCallMetrics.totalMinutes);
-      case "calls_dialPercent_f": return String(summaryCallMetrics.dialPercent);
-    }
-  }
-
-  // === Total UE (computed from Бух + Мед) ===
+  // === Total UE ===
   if (sectionKey === "totalUE") {
-    const totalRevenue = ctx.buhWonLeads.reduce((s, l) => s + (l.price || 0), 0) +
-      ctx.medWonLeads.reduce((s, l) => s + (l.price || 0), 0);
-    const totalSales = ctx.buhWonLeads.length + ctx.medWonLeads.length;
-    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
-    const totalQualLeads = [...ctx.buhActiveLeads, ...ctx.medActiveLeads].filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
-
     switch (key) {
-      case "ue_ltv": return null; // Manual / formula — needs plan input
       case "ue_cac_f": {
         const budget = Number(ctx.getPlan("marketing", null, "mkt_budget_p") ?? 0);
         return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
       }
-      case "ue_leadsTotal": return String(totalNewLeads);
+      case "ue_leadsTotal": return String(totalLeads);
       case "ue_leadsQual": return String(totalQualLeads);
       case "ue_revenue_f": return String(totalRevenue);
-      case "ue_conversion_f": return totalNewLeads > 0 ? String(Math.round((totalSales / totalNewLeads) * 1000) / 10) : "0";
+      case "ue_conversion_f": return totalLeads > 0 ? String(Math.round((totalSales / totalLeads) * 1000) / 10) : "0";
       case "ue_ltv_cac": {
         const cac = ctx.getPlan(ctx.sectionDbLine, null, "ue_cac_p");
         const ltv = ctx.getPlan(ctx.sectionDbLine, null, "ue_ltv");
@@ -1500,26 +1963,34 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
     }
   }
 
-  // === Marketing (computed formulas) ===
+  // === Marketing ===
   if (sectionKey === "marketing") {
     const budget = Number(ctx.getPlan(ctx.sectionDbLine, null, "mkt_budget_p") ?? 0);
-    const totalNewLeads = ctx.allNewLeads.filter((l) => !l.is_deleted).length;
-    const totalSales = ctx.allWonLeads.length;
-
     switch (key) {
-      case "mkt_leads": return String(totalNewLeads);
-      case "mkt_cpl": return totalNewLeads > 0 ? String(Math.round(budget / totalNewLeads)) : "0";
+      case "mkt_leads": return String(totalLeads);
+      case "mkt_leadsABC": return String(totalQualLeads);
+      case "mkt_cpl": return totalLeads > 0 ? String(Math.round(budget / totalLeads)) : "0";
       case "mkt_cac": return totalSales > 0 ? String(Math.round(budget / totalSales)) : "0";
       case "mkt_budget_f": return null; // manual input
-      case "mkt_nonQualLeads_f": {
-        // Non-qualified = total - qualified
-        const qualCount = [...ctx.buhActiveLeads, ...ctx.medActiveLeads].filter((l) => B2B_QUALIFIED_STATUSES.has(l.status_id)).length;
-        return String(Math.max(0, totalNewLeads - qualCount));
-      }
+      case "mkt_nonQualLeads_f": return String(Math.max(0, totalLeads - totalQualLeads));
     }
   }
 
-  // === ОКК (placeholder — needs R2 DB query, will show plan only for now) ===
+  // === Продления ===
+  if (sectionKey === "renewals") {
+    // Per-date rows: _plan and _fact are hasPlan:true → stored in daily_plans,
+    // _toPay is computed = plan − fact.
+    if (key === "ren_renewalsBuh_p") return String(buhRenewalsPlan);
+    if (key === "ren_renewalsBuh_f") return String(buhRenewalsFact);
+    if (key === "ren_totalToPay") return String(Math.max(0, buhRenewalsPlan - buhRenewalsFact));
+    const m = /^ren_(.+)_toPay$/.exec(key);
+    if (m) {
+      const dateKey = m[1];
+      const plan = Number(ctx.getPlan("renewals", null, `ren_${dateKey}_plan`) ?? 0);
+      const fact = Number(ctx.getPlan("renewals", null, `ren_${dateKey}_fact`) ?? 0);
+      return String(Math.max(0, plan - fact));
+    }
+  }
 
   return null;
 }

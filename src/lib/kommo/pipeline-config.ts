@@ -347,3 +347,48 @@ export function getActiveStatusIds(department: string): number[] {
   if (department === "b2b") return B2B_ALL_ACTIVE_STATUS_IDS;
   return ALL_ACTIVE_STATUS_IDS; // default: b2g
 }
+
+// ==================== B2B CUSTOM FIELDS (Kommo lead) ====================
+// Resolved by field NAME (case-insensitive, trimmed) so the code works
+// across pipelines/accounts where field_id differs.
+//
+// The integrator documents these as "Факт. дата 1-го платежа / Сумма 1-го
+// платежа / Дата предоплаты / Сумма предоплаты". Spelling varies in the wild
+// (Факт. дата vs Фактическая дата, 1-го vs 1ого); we accept the common forms.
+
+export const B2B_CUSTOM_FIELD_NAMES = {
+  firstPaymentDate: [
+    "Факт. Дата 1-го платежа",
+    "Фактическая дата 1-го платежа",
+    "Факт. дата 1-го платежа",
+    "Дата 1-го платежа",
+  ],
+  firstPaymentAmount: [
+    "Сумма 1-го платежа",
+    "Сумма первого платежа",
+  ],
+  prepaymentDate: [
+    "Дата предоплаты",
+  ],
+  prepaymentAmount: [
+    "Сумма предоплаты",
+  ],
+} as const;
+
+/** B2B lead is excluded from "Квал Бух лидов факт" if it sits in these statuses. */
+export const B2B_BUH_KOMLEADS_EXCLUDED_STATUSES: Set<number> = new Set([
+  COMMERCIAL_STATUSES.INCOMING,
+]);
+
+/** B2B Medical has no Incoming stage — nothing to exclude by status. */
+export const B2B_MED_KOMLEADS_EXCLUDED_STATUSES: Set<number> = new Set([]);
+
+/**
+ * Loss-reason names that disqualify a lead from "Квал ком. лидов факт".
+ * Matched case-insensitively against loss_reason.name; substring match so
+ * variants like "Неквал: доход < ...", "Спам (бот)" are covered.
+ */
+export const B2B_KOMLEADS_EXCLUDED_LOSS_REASON_PATTERNS = [
+  /неквал/i,
+  /спам/i,
+] as const;
