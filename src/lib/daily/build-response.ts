@@ -25,6 +25,7 @@ import {
 } from "@/lib/kommo/pipeline-config";
 import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { getB2BPipelineStatsSQL, getB2BPerManagerStatsSQL, type B2BPipelineStats as B2BStatsSQL } from "@/lib/daily/analytics-b2b";
+import { B2B_FIXED_PLAN_DEFAULTS } from "@/lib/daily/metrics-config-b2b";
 import { getAnalyticsLeads, getAnalyticsStatusChangeCount } from "@/lib/daily/analytics-leads";
 import { reconstructSnapshotAt, type HistoricalSnapshot } from "@/lib/daily/historical-snapshot";
 import { parseDateBoundary } from "@/lib/utils/date";
@@ -1086,15 +1087,11 @@ export async function buildDailyResponse(department: string, period: string, dat
       // daily_plans, она побеждает SQL-computed значение.
       if (metric.hasPlan && !metric.hasFact) {
         if (!plan && department === "b2b") {
-          const B2B_PLAN_DEFAULTS: Record<string, string> = {
-            calls_sla_p: "25",
-            calls_avgWait_p: "35",
-            calls_dialPercent_p: "65",
-            okk_buh1_p: "85",
-            okk_buh2_p: "85",
-            okk_med1_p: "85",
-          };
-          plan = B2B_PLAN_DEFAULTS[metric.key] ?? plan;
+          // ТЗ-дефолты подтягиваются из единого словаря в metrics-config-b2b
+          // (B2B_FIXED_PLAN_DEFAULTS) — чтобы не расходились между UI-рендером
+          // и getB2BFact, который читает те же дефолты для derived планов.
+          const def = B2B_FIXED_PLAN_DEFAULTS[metric.key];
+          if (def != null) plan = String(def);
         }
         if (!plan && department === "b2b") {
           // Derived plan (e.g., buh_newRevenue_p = sales × avgCheck) — compute.
@@ -1701,17 +1698,18 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   const totalQualLeads = buh.qualLeads + med.qualLeads;
 
   // ===== Manual plan inputs (Monthly) propagated to Daily/Weekly =====
+  // Fallbacks from B2B_FIXED_PLAN_DEFAULTS (Excel Daily_Numbers row65/80 etc.)
+  // so derived plans (newRevenue = sales × avgCheck) produce sensible numbers
+  // even when the admin hasn't manually entered every single plan cell.
   const buhKomLeadsPlan = Number(ctx.getPlan("salesBuh", null, "buh_komLeads_p") ?? 0);
   const medKomLeadsPlan = Number(ctx.getPlan("salesMed", null, "med_komLeads_p") ?? 0);
-  const buhAvgCheckPlan = Number(ctx.getPlan("salesBuh", null, "buh_avgCheck_p") ?? 0);
-  const medAvgCheckPlan = Number(ctx.getPlan("salesMed", null, "med_avgCheck_p") ?? 0);
-  // QL2P: жёстко 8% для total и buh (R14/R30); med — редактируемый (R46)
-  const BUH_QL2P_DEFAULT = 8;
-  // Пользовательский план buh_ql2p_p (если сохранён в daily_plans) имеет
-  // приоритет над hardcoded 8%. Позволяет настраивать план без кода.
-  const buhQl2pPlan = Number(ctx.getPlan("salesBuh", null, "buh_ql2p_p") ?? BUH_QL2P_DEFAULT);
-  const TOTAL_QL2P_DEFAULT = 8;
-  const medQl2pPlan = Number(ctx.getPlan("salesMed", null, "med_ql2p_p") ?? 0);
+  const buhAvgCheckPlan = Number(ctx.getPlan("salesBuh", null, "buh_avgCheck_p") ?? B2B_FIXED_PLAN_DEFAULTS.buh_avgCheck_p);
+  const medAvgCheckPlan = Number(ctx.getPlan("salesMed", null, "med_avgCheck_p") ?? B2B_FIXED_PLAN_DEFAULTS.med_avgCheck_p);
+  // QL2P: Excel row61 = 0.075 (buh), row78 = 0.05 (med), total = среднее.
+  // Пользовательский план, если сохранён в daily_plans, перекрывает дефолт.
+  const buhQl2pPlan = Number(ctx.getPlan("salesBuh", null, "buh_ql2p_p") ?? B2B_FIXED_PLAN_DEFAULTS.buh_ql2p_p);
+  const medQl2pPlan = Number(ctx.getPlan("salesMed", null, "med_ql2p_p") ?? B2B_FIXED_PLAN_DEFAULTS.med_ql2p_p);
+  const TOTAL_QL2P_DEFAULT = Number(B2B_FIXED_PLAN_DEFAULTS.total_ql2p_p);
 
   // Derived plans
   const buhSalesPlan = Math.round(buhKomLeadsPlan * buhQl2pPlan / 100);
@@ -1719,11 +1717,14 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   const buhRevenuePlan = buhSalesPlan * buhAvgCheckPlan;
   const medRevenuePlan = medSalesPlan * medAvgCheckPlan;
 
-  // Renewals (отдельная вкладка позже): пока всегда 0. Оставляем хук на будущее.
-  const buhRenewalsPlan = 0;
-  const buhRenewalsFact = 0;
-  const medRenewalsPlan = 0;
-  const medRenewalsFact = 0;
+  // Renewals — Excel row126/127 "Общая выручка план/факт" inside the
+  // "Продления" block. The dashboard stores Бух/Мед separately as editable
+  // cells so the split is visible per-stream; defaults to 0 until the user
+  // enters a value.
+  const buhRenewalsPlan = Number(ctx.getPlan("salesBuh", null, "buh_renewalsRevenue_p") ?? 0);
+  const buhRenewalsFact = Number(ctx.getPlan("salesBuh", null, "buh_renewalsRevenue_f") ?? 0);
+  const medRenewalsPlan = Number(ctx.getPlan("salesMed", null, "med_renewalsRevenue_p") ?? 0);
+  const medRenewalsFact = Number(ctx.getPlan("salesMed", null, "med_renewalsRevenue_f") ?? 0);
 
   // User-override helper: пустая строка / null означает "не задано".
   const overrideNum = (line: string, metricKey: string, fallback: number): number => {
@@ -1743,8 +1744,10 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   const newRevenuePlan = overrideNum("salesTotal", "total_newRevenue_p", buhRevenuePlan + medRevenuePlan);
   const newRevenueFactComputed = buhRevenueFact + medRevenueFact;
   const newRevenueFact = overrideNum("salesTotal", "total_newRevenue_f", newRevenueFactComputed);
-  const revenueTotalPlan = overrideNum("salesTotal", "total_revenueTotal_p", newRevenuePlan + buhRenewalsPlan);
-  const revenueTotalFactComputed = newRevenueFact + buhRenewalsFact;
+  const totalRenewalsPlan = buhRenewalsPlan + medRenewalsPlan;
+  const totalRenewalsFact = buhRenewalsFact + medRenewalsFact;
+  const revenueTotalPlan = overrideNum("salesTotal", "total_revenueTotal_p", newRevenuePlan + totalRenewalsPlan);
+  const revenueTotalFactComputed = newRevenueFact + totalRenewalsFact;
   const revenueTotalFact = overrideNum("salesTotal", "total_revenueTotal_f", revenueTotalFactComputed);
   const buhSalesPlusRenewalsPlan = overrideNum("salesBuh", "buh_salesPlusRenewals_p", buhRevenuePlan + buhRenewalsPlan);
   const buhSalesPlusRenewalsFactComputed = buhRevenueFact + buhRenewalsFact;
@@ -1794,6 +1797,8 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "buh_salesPlusRenewals_f": return String(buhSalesPlusRenewalsFact); // R22
       case "buh_newRevenue_p": return String(buhRevenuePlan);                  // R23
       case "buh_newRevenue_f": return String(buhRevenueFact);                  // R24
+      case "buh_renewalsRevenue_p": return String(buhRenewalsPlan);            // Excel row126 (Бух portion)
+      case "buh_renewalsRevenue_f": return String(buhRenewalsFact);            // Excel row127 (Бух portion)
       case "buh_komLeads_f":   return String(buh.qualLeads);                   // R26
       case "buh_sales_p":      return String(buhSalesPlan);                    // R27
       case "buh_sales_f":      return String(buh.salesCount);                  // R28
@@ -1813,6 +1818,8 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "med_salesPlusRenewals_f": return String(medSalesPlusRenewalsFact); // R38
       case "med_newRevenue_p": return String(medRevenuePlan);                  // R39
       case "med_newRevenue_f": return String(medRevenueFact);                  // R40
+      case "med_renewalsRevenue_p": return String(medRenewalsPlan);            // Excel row126 (Мед portion)
+      case "med_renewalsRevenue_f": return String(medRenewalsFact);            // Excel row127 (Мед portion)
       case "med_komLeads_f":   return String(med.qualLeads);                   // R42
       case "med_sales_p":      return String(medSalesPlan);                    // R43
       case "med_sales_f":      return String(med.salesCount);                  // R44

@@ -28,11 +28,20 @@ const salesTotalMetrics: MetricDef[] = [
 ];
 
 // ====================== 2. ПРОДАЖИ БУХ (R21–R35) ======================
+// Keyed to Excel "Daily_Numbers" rows 47-67 / columns NC-OF:
+//   R21=row50, R22=row51, R23=row52, R24=row53, R25=row54, R26=row55,
+//   R27=row58, R28=row59, R29=row60, R30=row61, R31=row62,
+//   R32=row65, R33=row66, R34=row67, + Продления (row126-127).
 const salesBuhMetrics: MetricDef[] = [
   { key: "buh_salesPlusRenewals_p", label: "Продажи + Продления Total Бух план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "buh_salesPlusRenewals_f", label: "Продажи + Продления Total Бух факт", hasPlan: true, hasFact: true, unit: "", factSource: "computed" },
   { key: "buh_newRevenue_p", label: "Новая выручка Бух план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "buh_newRevenue_f", label: "Новая выручка Бух факт", hasPlan: true, hasFact: true, unit: "", factSource: "db" },
+  // Продления Бух — Excel row126/127 "Общая выручка план/факт" внутри блока
+  // "Продления" (rows 125-170), изначально суммировалось по датам окончания
+  // платёжных планов. В дашборде — один агрегированный редактируемый ввод.
+  { key: "buh_renewalsRevenue_p", label: "Продления Бух план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
+  { key: "buh_renewalsRevenue_f", label: "Продления Бух факт", hasPlan: true, hasFact: true, unit: "", factSource: "manual" },
   { key: "buh_komLeads_p", label: "Квал ком. Бух лидов план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
   { key: "buh_komLeads_f", label: "Квал ком. Бух лидов факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "buh_sales_p", label: "Количество продаж Бух план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
@@ -52,6 +61,10 @@ const salesMedMetrics: MetricDef[] = [
   { key: "med_salesPlusRenewals_f", label: "Продажи + Продления Total Мед факт", hasPlan: true, hasFact: true, unit: "", factSource: "computed" },
   { key: "med_newRevenue_p", label: "Новая выручка Мед план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "med_newRevenue_f", label: "Новая выручка Мед факт", hasPlan: true, hasFact: true, unit: "", factSource: "db" },
+  // Продления Мед — симметрично Бух (Excel row126/127 tracks обе стрима,
+  // dashboard разбивает отдельно для per-stream прозрачности).
+  { key: "med_renewalsRevenue_p", label: "Продления Мед план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
+  { key: "med_renewalsRevenue_f", label: "Продления Мед факт", hasPlan: true, hasFact: true, unit: "", factSource: "manual" },
   { key: "med_komLeads_p", label: "Квал ком. Мед лидов план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
   { key: "med_komLeads_f", label: "Квал ком. Мед лидов факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "med_sales_p", label: "Количество продаж Мед план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
@@ -99,9 +112,20 @@ export const b2bDailySections: SectionDef[] = [
   { key: "calls",      title: "Звонки",        icon: "Phone",          dbLine: "calls",      perManager: true,  metrics: callsMetrics },
 ];
 
+// Plan defaults. Non-cumulative keys (%, среднее, время) are passed through
+// unchanged to the UI. Cumulative keys (leads per day, sales per day) would
+// scale by the period divisor — those aren't listed here on purpose because
+// the business value is "enter once per month, it'll split". Numbers are
+// kept in sync with Excel Daily_Numbers defaults (rows 61/65/78/80, column
+// NC = April 1 2026 daily baseline).
 export const B2B_FIXED_PLAN_DEFAULTS: Record<string, number> = {
-  total_ql2p_p: 8,
-  buh_ql2p_p: 8,
+  // % / averages (non-cumulative, shown as-is in the UI)
+  total_ql2p_p: 7.5,
+  buh_ql2p_p: 7.5,       // Excel row61 = 0.075
+  med_ql2p_p: 5,         // Excel row78 = 0.05
+  buh_avgCheck_p: 900,   // Excel row65
+  med_avgCheck_p: 500,   // Excel row80
+  // Звонки / ОКК (per ТЗ defaults)
   calls_avgWait_p: 35,
   calls_dialPercent_p: 65,
   calls_sla_p: 25,
