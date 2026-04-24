@@ -450,9 +450,13 @@ function SummaryTimeTable({
                   >
                     <td
                       colSpan={columnLabels.length + 1}
-                      className={`px-4 py-2.5 sticky left-0 z-10 light-panel-header ${accent.cellBg} ${accent.border}`}
+                      className={`p-0 light-panel-header ${accent.cellBg} ${accent.border}`}
                     >
-                      <div className="flex items-center justify-between">
+                      {/* Inner sticky wrapper — sticky on td+colSpan doesn't
+                          pin content on horizontal scroll (cell already spans
+                          the whole row). Wrapping the content in an inner
+                          sticky div keeps the label visible at the left edge. */}
+                      <div className="sticky left-0 w-fit inline-flex items-center gap-3 px-4 py-2.5 z-10">
                         <div className="flex items-center gap-2">
                           {getSectionIcon(m.sectionIcon)}
                           <span className={`text-[11px] uppercase tracking-widest font-bold ${accent.text}`}>
@@ -478,9 +482,12 @@ function SummaryTimeTable({
                   <tr key={`${m.sectionKey}-${m.metricKey}`} className="daily-group-header bg-slate-800/30">
                     <td
                       colSpan={columnLabels.length + 1}
-                      className="daily-group-header px-4 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-8 sticky left-0 bg-slate-800/30 z-10"
+                      className="daily-group-header p-0 bg-slate-800/30"
                     >
-                      {m.metricLabel}
+                      {/* Inner sticky wrapper — see section-header fix above. */}
+                      <div className="sticky left-0 w-fit px-4 py-1.5 pl-8 text-[10px] uppercase tracking-widest text-slate-500 font-bold z-10">
+                        {m.metricLabel}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -697,12 +704,15 @@ function ManagerMetricsTable({
                   <tr className="light-panel-header border-t-2 border-white/10">
                     <td
                       colSpan={metricColumns.length + 1}
-                      className={`px-4 py-2 sticky left-0 z-10 text-[11px] uppercase tracking-widest font-bold ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} ${getSectionAccent(group.line).text}`}
+                      className={`p-0 ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border}`}
                     >
-                      {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
-                      <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
-                        · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
-                      </span>
+                      {/* Inner sticky wrapper — see Daily main-table fix. */}
+                      <div className={`sticky left-0 w-fit px-4 py-2 text-[11px] uppercase tracking-widest font-bold z-10 ${getSectionAccent(group.line).text}`}>
+                        {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
+                        <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
+                          · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -1596,8 +1606,11 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
                     <Fragment key={`${m.sectionKey}-${m.metricKey}`}>
                       {newSection && (
                         <tr className="bg-slate-800/40 border-t-2 border-white/10">
-                          <td colSpan={columns.length + 1} className="px-4 py-2 text-[10px] uppercase tracking-widest text-slate-400 font-bold sticky left-0 bg-slate-800/80 z-10">
-                            {m.sectionTitle}
+                          <td colSpan={columns.length + 1} className="p-0 bg-slate-800/80">
+                            {/* Inner sticky wrapper — see Daily main-table fix. */}
+                            <div className="sticky left-0 w-fit px-4 py-2 text-[10px] uppercase tracking-widest text-slate-400 font-bold z-10">
+                              {m.sectionTitle}
+                            </div>
                           </td>
                         </tr>
                       )}
