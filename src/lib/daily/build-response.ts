@@ -1029,9 +1029,13 @@ export async function buildDailyResponse(department: string, period: string, dat
         } else {
           fact = plan;
         }
-      } else if (department === "b2b" && metric.hasFact && plan != null && plan !== "") {
-        // Any stored daily_plans value wins over SQL — covers historical
-        // import for Jan-Mar 2026 (no analytics data) and user manual override.
+      } else if (department === "b2b" && metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
+        // Editable fact (revenue _f рядом с _p): manual entry always wins.
+        fact = plan;
+      } else if (department === "b2b" && metric.hasFact && !metric.hasPlan && plan != null && plan !== "" && dateStr < "2026-04-01") {
+        // Pure-fact backfill: Excel Jan–Mar 2026 values win. April+ always
+        // uses live SQL (analytics.leads_cohort) — даже если строка импорта
+        // есть, SQL побеждает.
         fact = plan;
       } else if (department === "b2b") {
         fact = getB2BFact(metric.key, section.key, {
@@ -1125,7 +1129,11 @@ export async function buildDailyResponse(department: string, period: string, dat
         fact = gutPlan && Number(gutPlan) > 0 ? String(Math.round((gutFact / Number(gutPlan)) * 100)) : "0";
       }
 
-      return { key: metric.key, label: metric.label, plan, fact, percent, isGroupHeader: false, isPlanRow: metric.hasPlan && !metric.hasFact };
+      // Hide plan column for pure-fact metrics so percent doesn't render as 100%
+      // when the stored daily_plans value is used only as fact backfill.
+      const planOut = metric.hasPlan ? plan : null;
+      const percentOut = metric.hasPlan ? percent : null;
+      return { key: metric.key, label: metric.label, plan: planOut, fact, percent: percentOut, isGroupHeader: false, isPlanRow: metric.hasPlan && !metric.hasFact };
     });
 
     let managerData: Array<{
@@ -1160,8 +1168,11 @@ export async function buildDailyResponse(department: string, period: string, dat
 
             if (metric.hasPlan && !metric.hasFact) {
               fact = plan;
-            } else if (metric.hasFact && plan != null && plan !== "") {
-              // Stored plan wins over SQL (historical import + manual override).
+            } else if (metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
+              // Editable revenue per-manager — manual override always wins.
+              fact = plan;
+            } else if (metric.hasFact && !metric.hasPlan && plan != null && plan !== "" && dateStr < "2026-04-01") {
+              // Jan–Mar 2026 Excel backfill; April+ live SQL.
               fact = plan;
             } else if (section.key === "calls") {
               if (metric.key === "calls_managersOnLine_f") fact = "1";
@@ -1214,7 +1225,9 @@ export async function buildDailyResponse(department: string, period: string, dat
             if (plan && fact && Number(plan) > 0 && metric.unit !== "%") {
               percent = Math.round((Number(fact) / Number(plan)) * 100);
             }
-            return { key: metric.key, plan, fact, percent };
+            const planOut = metric.hasPlan ? plan : null;
+            const percentOut = metric.hasPlan ? percent : null;
+            return { key: metric.key, plan: planOut, fact, percent: percentOut };
           });
 
         return { id: mgr.id, name: mgr.name, line: mgr.line, kommoUserId: mgr.kommoUserId, metrics: mgrMetrics };
