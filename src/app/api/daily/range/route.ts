@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
       const daysInMonth = new Date(year, month, 0).getDate();
       const today = getBusinessToday();
       // Data starts from March 24, 2026 — skip earlier dates
-      const DATA_START = new Date(2026, 2, 24); // March 24, 2026
+      const DATA_START = new Date(2026, 0, 1); // January 1, 2026
       const dates: string[] = [];
       for (let d = 1; d <= daysInMonth; d++) {
         const dateObj = new Date(year, month - 1, d);
@@ -105,7 +105,7 @@ export async function GET(req: NextRequest) {
 
       const weekMondays: string[] = [];
       const today = getBusinessToday();
-      const DATA_START = new Date(Date.UTC(2026, 2, 24));
+      const DATA_START = new Date(Date.UTC(2026, 0, 1));
       for (let cur = new Date(firstMon); cur <= monthEnd; cur.setUTCDate(cur.getUTCDate() + 7)) {
         const isoDate = cur.toISOString().slice(0, 10);
         // Skip недели, чей понедельник раньше начала данных или в будущем

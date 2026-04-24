@@ -1029,8 +1029,9 @@ export async function buildDailyResponse(department: string, period: string, dat
         } else {
           fact = plan;
         }
-      } else if (department === "b2b" && metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
-        // Overridable: user's manual value wins over computed SQL fact.
+      } else if (department === "b2b" && metric.hasFact && plan != null && plan !== "") {
+        // Any stored daily_plans value wins over SQL — covers historical
+        // import for Jan-Mar 2026 (no analytics data) and user manual override.
         fact = plan;
       } else if (department === "b2b") {
         fact = getB2BFact(metric.key, section.key, {
@@ -1159,8 +1160,8 @@ export async function buildDailyResponse(department: string, period: string, dat
 
             if (metric.hasPlan && !metric.hasFact) {
               fact = plan;
-            } else if (metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
-              // User override wins over SQL-computed fact (revenue rows etc.)
+            } else if (metric.hasFact && plan != null && plan !== "") {
+              // Stored plan wins over SQL (historical import + manual override).
               fact = plan;
             } else if (section.key === "calls") {
               if (metric.key === "calls_managersOnLine_f") fact = "1";
