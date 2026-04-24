@@ -44,6 +44,10 @@ export const trackingSyncState = pgTable("tracking_sync_state", {
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
   lastEventTs: timestamp("last_event_ts", { withTimezone: true }),      // max createdAt we saw — delta cursor forward
   earliestEventTs: timestamp("earliest_event_ts", { withTimezone: true }), // min createdAt cached — backfill watermark
+  // Bumped when the Kommo fetch logic changes in a way that makes past cache
+  // incomplete (e.g. new filter[type][] semantics). On mismatch, ensureRangeCached
+  // forces a full re-backfill instead of trusting the earliest_event_ts watermark.
+  filterVersion: integer("filter_version").default(0),
   lastError: text("last_error"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });

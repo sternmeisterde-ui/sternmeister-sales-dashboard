@@ -53,6 +53,10 @@ export async function ensureTrackingSchema(): Promise<void> {
     ALTER TABLE tracking_sync_state
     ADD COLUMN IF NOT EXISTS earliest_event_ts TIMESTAMPTZ
   `;
+  await sql`
+    ALTER TABLE tracking_sync_state
+    ADD COLUMN IF NOT EXISTS filter_version INTEGER DEFAULT 0
+  `;
 
   initialized = true;
 }

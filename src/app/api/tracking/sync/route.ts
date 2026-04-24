@@ -10,6 +10,11 @@ import { syncDepartment } from "@/lib/tracking/sync";
 
 export const dynamic = "force-dynamic";
 
+// Dates in the URL are Moscow calendar dates (same convention as the Dashboard
+// GET route). Convert to UTC bounds using the same offset so backfills cover
+// the full Moscow day, not the UTC day that happens to share the ISO prefix.
+const DASHBOARD_TZ_OFFSET_MIN = 180;
+
 function parseDateParam(s: string | null): Date | null {
   if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
   const d = new Date(`${s}T00:00:00Z`);
@@ -38,9 +43,16 @@ export async function POST(req: NextRequest) {
 
     const syncOpts: Parameters<typeof syncDepartment>[1] = { force };
     if (fromParam && toParam) {
-      // Include full `to` day: shift to end-of-day UTC.
-      const windowTo = new Date(toParam.getTime() + 24 * 60 * 60_000 - 1);
-      syncOpts.windowFrom = fromParam;
+      // Moscow-local calendar dates → UTC bounds. Moscow midnight = UTC 21:00,
+      // so the Moscow day ends 3h BEFORE the UTC day with the same ISO prefix.
+      // Using plain +24h would miss events from 21:00-23:59 MSK.
+      const windowFrom = new Date(
+        fromParam.getTime() - DASHBOARD_TZ_OFFSET_MIN * 60_000,
+      );
+      const windowTo = new Date(
+        toParam.getTime() + (24 * 60 - DASHBOARD_TZ_OFFSET_MIN) * 60_000,
+      );
+      syncOpts.windowFrom = windowFrom;
       syncOpts.windowTo = windowTo;
       syncOpts.isBackfill = true;
     }

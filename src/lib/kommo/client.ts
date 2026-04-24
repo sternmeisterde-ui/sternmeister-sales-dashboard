@@ -334,7 +334,13 @@ export async function getCallNotes(
   kommoUserIds?: number[],
   maxPages = 20
 ): Promise<KommoCallNote[]> {
-  const cacheKey = `calls:${dateFrom}:${dateTo}:${kommoUserIds?.join(",") ?? "all"}:${maxPages}`;
+  // Sort user IDs before joining — two callers passing the same IDs in
+  // different order would otherwise hit different cache entries and burst
+  // Kommo twice for the same data.
+  const sortedIds = kommoUserIds
+    ? [...kommoUserIds].sort((a, b) => a - b).join(",")
+    : "all";
+  const cacheKey = `calls:${dateFrom}:${dateTo}:${sortedIds}:${maxPages}`;
 
   return cached(cacheKey, CACHE_TTL.CALLS, async () => {
     const baseUrl = await getBaseUrl();
@@ -1119,8 +1125,17 @@ export async function fetchRawEvents(
   const headers = await getAuthHeaders();
   const maxPages = opts?.maxPages ?? 100;
 
+  // User batches — Kommo limits filter[created_by][] to 10 IDs per call.
+  // If the caller explicitly passed an empty array, that means "no managers
+  // to query" and we short-circuit. If `kommoUserIds` wasn't passed at all,
+  // we push one batch with no filter so the caller gets all-account events
+  // (legacy behaviour kept for any ad-hoc callers).
   const USER_BATCH = 10;
   const idBatches: number[][] = [];
+  const userIdsProvided = opts?.kommoUserIds !== undefined;
+  if (userIdsProvided && (opts!.kommoUserIds!.length === 0)) {
+    return [];
+  }
   if (opts?.kommoUserIds && opts.kommoUserIds.length > 0) {
     for (let i = 0; i < opts.kommoUserIds.length; i += USER_BATCH) {
       idBatches.push(opts.kommoUserIds.slice(i, i + USER_BATCH));
@@ -1186,6 +1201,17 @@ export async function fetchRawEvents(
 
         if (!data._links?.next) break;
         page++;
+        if (page > maxPages) {
+          // Silent truncation would let ensureRangeCached advance the earliest
+          // watermark past events we never fetched. Log so operators notice
+          // and can narrow the sync window.
+          console.warn(
+            `[fetchRawEvents] pagination cap hit (${maxPages} pages) for batch ` +
+              `users=[${batch.join(",")}] types=[${typeBatch?.join(",") ?? "*"}] ` +
+              `range=${new Date(dateFrom * 1000).toISOString()}..${new Date(dateTo * 1000).toISOString()} ` +
+              `— further events from this batch were dropped`,
+          );
+        }
       }
     }
   }

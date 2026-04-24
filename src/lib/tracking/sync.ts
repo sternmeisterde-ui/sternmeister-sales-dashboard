@@ -20,6 +20,15 @@ const SYNC_MIN_INTERVAL_MS = 60_000; // debounce concurrent triggers
 const BACKFILL_HOURS_ON_FIRST_RUN = 24; // first ever sync covers last 24h
 const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pull > 90 days of Kommo
 
+// Bump this when the Kommo fetch logic changes in a way that invalidates past
+// cache. On next sync, ensureRangeCached detects the version mismatch, resets
+// earliest_event_ts, and re-backfills MAX_BACKFILL_DAYS so admins don't need
+// to trigger manual /api/tracking/sync?from=…&to=… calls per department.
+//
+//   v0 — pre-filter-bug (no filter[type][], only calls landed reliably)
+//   v1 — explicit filter[type][] with EVENT_TYPES batches (2026-04-24 fix)
+const CURRENT_FILTER_VERSION = 1;
+
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
  *  different cadence and would skew timelines, so we keep them out of the
@@ -231,6 +240,7 @@ async function upsertSyncState(
       lastSyncedAt,
       lastEventTs,
       earliestEventTs,
+      filterVersion: CURRENT_FILTER_VERSION,
       lastError,
       updatedAt: new Date(),
     })
@@ -240,6 +250,7 @@ async function upsertSyncState(
         lastSyncedAt,
         lastEventTs,
         earliestEventTs,
+        filterVersion: CURRENT_FILTER_VERSION,
         lastError,
         updatedAt: new Date(),
       },
@@ -292,6 +303,23 @@ export async function ensureRangeCached(
   if (!state) {
     await syncDepartment(department, {
       windowFrom: effectiveFrom,
+      windowTo: now,
+      isBackfill: true,
+    });
+    return true;
+  }
+
+  // Filter-version mismatch → past cache was built with an older fetch strategy
+  // that missed event types. Re-pull the full MAX_BACKFILL_DAYS window so past
+  // days auto-recover after a fetch-logic bugfix, without requiring an admin
+  // to POST the manual /api/tracking/sync?from=…&to=… endpoint per department.
+  if ((state.filterVersion ?? 0) < CURRENT_FILTER_VERSION) {
+    const fullBackfillFrom = new Date(now.getTime() - MAX_BACKFILL_DAYS * 24 * 60 * 60_000);
+    console.info(
+      `[tracking-sync] ${department}: filter_version ${state.filterVersion ?? 0} < ${CURRENT_FILTER_VERSION}, forcing full ${MAX_BACKFILL_DAYS}d re-backfill`,
+    );
+    await syncDepartment(department, {
+      windowFrom: fullBackfillFrom,
       windowTo: now,
       isBackfill: true,
     });
