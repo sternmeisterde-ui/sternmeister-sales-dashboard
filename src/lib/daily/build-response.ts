@@ -609,9 +609,22 @@ export async function buildDailyResponse(department: string, period: string, dat
     Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0),
   ).getUTCDate();
 
-  const [allManagers, monthlyPlans, scheduleMap] = await Promise.all([
+  // Plans come in two tiers:
+  //   • "month" records — admin enters once per month; scaled by planDivisor
+  //     to day/week/year views (monthly 480 → daily 480/30 = 16).
+  //   • day-granular overrides (period_type='day') — when the admin edits a
+  //     specific daily cell inline, that value is stored per-day and should
+  //     override the monthly cascade for THAT day only. Previously the code
+  //     only loaded monthly records, so inline day edits were orphaned and
+  //     the UI kept showing the monthly-scaled value instead of the user's
+  //     freshly-typed number. This is what caused "Новая выручка факт
+  //     откуда взялось" — users entered 1190 on Apr 2 but the UI rendered a
+  //     different (computed or monthly-scaled) value because the day record
+  //     never reached getPlan.
+  const [allManagers, monthlyPlans, dayPlans, scheduleMap] = await Promise.all([
     getManagersWithKommo(department),
     getPlans(department, "month", monthPeriodDate),
+    periodType === "day" ? getPlans(department, "day", dateStr) : Promise.resolve([]),
     period === "day" ? getScheduleForDate(dateStr) : Promise.resolve(null),
   ]);
 
@@ -815,6 +828,14 @@ export async function buildDailyResponse(department: string, period: string, dat
     const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
     planLookup.set(key, p.planValue);
   }
+  // Day-granular overrides (period_type='day'). Kept in a SEPARATE map so
+  // the getPlan fetcher can distinguish "admin typed a specific day value,
+  // use as-is" from "admin typed a monthly value, scale by planDivisor".
+  const dayPlanLookup = new Map<string, string>();
+  for (const p of dayPlans) {
+    const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
+    dayPlanLookup.set(key, p.planValue);
+  }
 
   // Non-cumulative planов НЕ делятся по дням: они — константы (процент,
   // среднее, время, количество-на-линии). Без этого, напр., SLA план 25 мин
@@ -840,6 +861,17 @@ export async function buildDailyResponse(department: string, period: string, dat
   ]);
 
   const getPlan = (line: string, userId: string | null, metricKey: string): string | null => {
+    // Day-level override wins for day views — admin edited THIS specific
+    // cell inline, return the exact value they typed, never scale it.
+    if (periodType === "day") {
+      let dayVal: string | undefined;
+      if (userId) dayVal = dayPlanLookup.get(`${line}:${userId}:${metricKey}`);
+      if (dayVal === undefined) dayVal = dayPlanLookup.get(`${line}:null:${metricKey}`);
+      if (dayVal !== undefined) return dayVal;
+    }
+
+    // Monthly-stored plan — the admin's "once per month" entry. Scaled
+    // down by planDivisor for day/week views (and multiplied for year).
     let val: string | undefined;
     if (userId) {
       val = planLookup.get(`${line}:${userId}:${metricKey}`);
