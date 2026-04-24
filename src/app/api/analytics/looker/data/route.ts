@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
-import { getDeptManagerWhitelist } from "@/lib/daily/dept-manager-whitelist";
+import { getDeptManagerWhitelist, getDeptScheduleOverrides } from "@/lib/daily/dept-manager-whitelist";
 
 const DEPT_PIPELINES: Record<string, readonly string[]> = {
   b2g: ["Бух Гос", "Бух Бератер"],
@@ -157,16 +157,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ? `CASE ${aliasCases.join(" ")} ELSE lc.manager END`
       : `lc.manager`;
 
-    // Shift-start hour per manager (canonical name) → used to compute
-    // "SLA по смене" = first_call - max(lead_time, shift_start_of_lead_day).
+    // Shift-start hour per manager (canonical name) — master default.
     // Default 9 (09:00 Berlin) when the master has no shift configured.
     const shiftCases: string[] = [];
     for (const [name, hour] of shiftHourByName) {
       shiftCases.push(`WHEN fl.manager = '${esc(name)}' THEN ${hour}`);
     }
-    const shiftHourExpr = shiftCases.length > 0
+    const masterShiftHourExpr = shiftCases.length > 0
       ? `CASE ${shiftCases.join(" ")} ELSE 9 END`
       : `9`;
+
+    // Per-day shift overrides from manager_schedule (Daily calendar).
+    // Built as an inline VALUES CTE and LEFT JOIN'd on (manager, lead_date).
+    // Empty-safe: if no overrides in the date range, we still emit a dummy
+    // row with NULLs so the LEFT JOIN never matches and the master default
+    // stands. PG doesn't allow `VALUES` with zero rows.
+    const scheduleOverrides = await getDeptScheduleOverrides(dept, fromStr, toStr);
+    const scheduleValues = scheduleOverrides.length > 0
+      ? scheduleOverrides
+          .map((o) => `('${esc(o.name)}', DATE '${esc(o.date)}', ${o.hour})`)
+          .join(", ")
+      : `(NULL::text, NULL::date, NULL::int)`;
+    const scheduleOverridesCte = `
+      schedule_overrides(manager_name, schedule_date, shift_hour) AS (
+        VALUES ${scheduleValues}
+      )
+    `;
+    // Effective shift hour: per-day override wins, master default is fallback.
+    const effectiveShiftHourExpr = `COALESCE(so.shift_hour, ${masterShiftHourExpr})`;
 
     // Also canonicalise the manager filter param itself: the UI passes the canonical
     // name from the dropdown (which we already normalise below), but the stored row
@@ -311,10 +329,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       //   avg_sla_from_shift_sec   = AVG(first_call_out_at - GREATEST(sla_start, shift_start_on_lead_day))
       //     — если лид упал ДО начала смены, отсчитываем от начала смены;
       //       если ПОСЛЕ — совпадает с metric A.
-      // Both excluded when no outgoing call exists or call happened before start.
+      //
+      // Shift hour precedence:
+      //   1. manager_schedule.shift_start_time for the lead's Berlin date (per-day override)
+      //   2. master_managers.shift_start_time (manager's default)
+      //   3. 9 (fallback)
+      // Both SLA columns exclude leads without an outgoing call.
       mainQuery = `
         WITH ${filteredLeadsCte},
-        ${commAggCte}
+        ${commAggCte},
+        ${scheduleOverridesCte}
         SELECT
           fl.manager,
           COUNT(fl.lead_id) AS lead_count,
@@ -336,7 +360,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
                    s.first_call_out_at
                    - GREATEST(
                        s.sla_start,
-                       date_trunc('day', s.sla_start) + (${shiftHourExpr}) * INTERVAL '1 hour'
+                       date_trunc('day', s.sla_start) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
                      )
                  )))
             END
@@ -345,6 +369,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         FROM filtered_leads fl
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        LEFT JOIN schedule_overrides so
+          ON so.manager_name = fl.manager
+         AND so.schedule_date = s.sla_start::date
         GROUP BY fl.manager
         ORDER BY lead_count DESC
       `;

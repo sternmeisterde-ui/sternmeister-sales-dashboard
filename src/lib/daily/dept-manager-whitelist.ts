@@ -11,8 +11,8 @@
 // (Rose, Виктор, etc.) that aren't in master_managers at all.
 
 import { db } from "@/lib/db";
-import { masterManagers } from "@/lib/db/schema-existing";
-import { and, eq, isNotNull, or } from "drizzle-orm";
+import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
+import { and, between, eq, isNotNull, or } from "drizzle-orm";
 import { NAME_ALIASES } from "./name-aliases";
 
 export interface DeptManagerWhitelist {
@@ -68,4 +68,53 @@ export async function getDeptManagerWhitelist(
     }
   }
   return { names: [...names], aliasToCanonical, shiftHourByName };
+}
+
+export interface ScheduleOverride {
+  /** Canonical master_managers.name of the manager on duty that date. */
+  name: string;
+  /** YYYY-MM-DD (Berlin calendar date). */
+  date: string;
+  /** Shift start hour (0–23) from manager_schedule.shift_start_time. */
+  hour: number;
+}
+
+/**
+ * Per-day shift-start overrides from the Daily calendar (manager_schedule)
+ * for a department and a date range. Used to refine "SLA от начала смены" —
+ * e.g. if Рузанна switched to a 14:00 shift on a specific day, that day's
+ * SLA measures from 14:00 instead of her master default.
+ *
+ * `fromDate` / `toDate` must be YYYY-MM-DD strings. Rows without
+ * shift_start_time are skipped (they don't override the default).
+ */
+export async function getDeptScheduleOverrides(
+  department: "b2g" | "b2b" | string,
+  fromDate: string,
+  toDate: string,
+): Promise<ScheduleOverride[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const rows = await db
+    .select({
+      name: masterManagers.name,
+      date: managerSchedule.scheduleDate,
+      shiftStartTime: managerSchedule.shiftStartTime,
+    })
+    .from(managerSchedule)
+    .innerJoin(masterManagers, eq(managerSchedule.userId, masterManagers.id))
+    .where(
+      and(
+        eq(masterManagers.department, dept),
+        eq(masterManagers.isActive, true),
+        isNotNull(managerSchedule.shiftStartTime),
+        between(managerSchedule.scheduleDate, fromDate, toDate),
+      ),
+    );
+
+  const out: ScheduleOverride[] = [];
+  for (const r of rows) {
+    const hour = parseHour(r.shiftStartTime);
+    if (hour !== null) out.push({ name: r.name, date: r.date, hour });
+  }
+  return out;
 }
