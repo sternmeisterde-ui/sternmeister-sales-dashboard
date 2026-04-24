@@ -199,8 +199,17 @@ function getTrafficLightClass(
  *   buh_newRevenue_f → buh_newRevenue_p
  *   totalLeads       → totalLeads_p
  *   okk_f            → okk_p
+ *   sla_shift_f / tlt_f → sla_p (same target threshold)
  */
+const FACT_TO_PLAN_ALIAS: Record<string, string> = {
+  sla_shift_f: "sla_p",
+  tlt_f: "sla_p",
+  calls_frozenLeads_f: "",
+};
+
 function planKeyFor(factKey: string): string {
+  const aliased = FACT_TO_PLAN_ALIAS[factKey];
+  if (aliased !== undefined) return aliased;
   if (factKey.endsWith("_f")) return `${factKey.slice(0, -2)}_p`;
   return `${factKey}_p`;
 }
@@ -536,8 +545,9 @@ function SummaryTimeTable({
                       // is a 4px left-edge bar via the .traffic-{green|yellow|
                       // red} class — keeps numbers readable across 10+ cols.
                       const isFactRow = !isPlan && /факт/i.test(m.metricLabel);
-                      const planVal = isFactRow
-                        ? getMetricFact(snap, m.sectionKey, planKeyFor(m.metricKey))
+                      const planKey = isFactRow ? planKeyFor(m.metricKey) : "";
+                      const planVal = isFactRow && planKey
+                        ? getMetricFact(snap, m.sectionKey, planKey)
                         : null;
                       const trafficCls = isFactRow ? getTrafficLightClass(val, planVal, m.metricKey) : "";
                       return (

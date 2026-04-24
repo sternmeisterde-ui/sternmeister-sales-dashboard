@@ -81,7 +81,12 @@ export async function getAnalyticsCallMetricsByMaster(
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
-      AND pipeline_id IN (${pipelineList})
+      -- pipeline_id IS NULL covers calls made before a lead enters a pipeline
+      -- (или после удаления лида). Такие коммуникации всё равно принадлежат
+      -- менеджеру — без NULL теряли ~60% звонков линии 2. Проверено 2026-04-24:
+      -- ни один мастер-менеджер не числится одновременно в b2g и b2b, поэтому
+      -- "double count" между департаментами невозможен.
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
       AND manager IS NOT NULL AND manager <> ''
     GROUP BY manager
   `);

@@ -120,6 +120,12 @@ export const BERATER_STATUSES = {
 // A2 = "Контакт установлен" — first contact made, interest not confirmed
 // B1 = "Консультация проведена" — consultation done, ready for docs
 // B2+ = "Документы отправлены в ДЦ" and beyond — advanced stage
+//
+// TODO(2026-04-24): User asked to tie A2/B1/B2+ to Kommo CFV[869928]
+// ("технически поля") instead of status IDs. That requires (1) adding CFV
+// 869928 to the analytics.leads_cohort ETL mirror and (2) rewriting the
+// status-membership logic below into a CFV value lookup. Status-based
+// fallback stays in place until the CFV mirror exists.
 
 /** Status IDs that count as "A2" (contact made, not yet consulted) */
 export const A2_STATUSES: Set<number> = new Set([

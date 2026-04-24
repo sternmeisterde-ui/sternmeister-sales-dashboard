@@ -177,7 +177,10 @@ export const dailySections: SectionDef[] = [
     key: "funnel",
     title: "Сделки на активных этапах и Воронка",
     icon: "TrendingUp",
-    dbLine: "funnel",
+    // dbLine='1' — funnel shares line-1 plan storage (totalLeads_p/qualLeads_p
+    // etc come into квалификатор). Stale line='funnel' rows were dropped
+    // 2026-04-24; this keeps UI saves consistent with imported daily plans.
+    dbLine: "1",
     perManager: false,
     metrics: funnelMetrics,
   },

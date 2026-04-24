@@ -533,9 +533,17 @@ export async function buildDailyResponseCached(department: string, period: strin
   // daily_snapshots removed: analytics.* is now the single source of truth,
   // so every request recomputes from Postgres directly (sub-second). We keep
   // a 5-minute in-memory TTL per department+period+date to absorb bursts.
+  //
+  // isHistorical: период считается историческим, если его конец в прошлом.
+  // Это триггерит реконструкцию activeDeals/awaitTerm (closed+active на дату),
+  // иначе snapshot-метрики одинаковы для любой даты (всегда "сейчас"). Для
+  // текущего дня/недели/месяца остаётся live snapshot.
+  const { to } = getDateRange(period, dateStr);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isHistorical = to < nowSec;
   const cacheKey = `daily-response:${department}:${period}:${dateStr}`;
   return cached(cacheKey, RESPONSE_CACHE_TTL, () =>
-    buildDailyResponse(department, period, dateStr, false),
+    buildDailyResponse(department, period, dateStr, isHistorical),
   );
 }
 
