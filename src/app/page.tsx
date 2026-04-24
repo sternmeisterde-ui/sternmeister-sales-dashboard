@@ -68,6 +68,7 @@ interface SessionUser {
   userId: string;
   name: string;
   role: "admin" | "manager";
+  masterRole: "admin" | "rop" | "manager";
   department: "b2g" | "b2b";
   telegramUsername: string;
   line: string | null;
@@ -613,6 +614,17 @@ export default function Dashboard() {
             {isSidebarOpen && (
               <div className="text-xs text-slate-400 mb-2 truncate px-2">
                 <span className="text-white font-medium">{session.name}</span>
+                <span
+                  className={`ml-2 inline-block align-middle text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                    session.masterRole === "rop"
+                      ? "bg-amber-500/20 text-amber-400"
+                      : session.masterRole === "admin"
+                        ? "bg-purple-500/20 text-purple-400"
+                        : "bg-slate-500/20 text-slate-300"
+                  }`}
+                >
+                  {session.masterRole === "rop" ? "РОП" : session.masterRole === "admin" ? "Админ" : "Менеджер"}
+                </span>
                 <br />
                 <span className="text-[10px]">@{session.telegramUsername}</span>
               </div>

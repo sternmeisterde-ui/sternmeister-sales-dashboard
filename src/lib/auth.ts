@@ -3,7 +3,14 @@ import { cookies } from "next/headers";
 export interface SessionUser {
   userId: string;
   name: string;
+  // Access gate — kept as "admin" | "manager" so every existing permission
+  // check (`session.role === "admin"`) keeps working. ROPs get access as
+  // admin but the master-table role stays on `masterRole` for UI display.
   role: "admin" | "manager";
+  // Raw role from master_managers (single source of truth from the Managers
+  // tab). Use this to label the user in the UI ("РОП" vs "Админ" vs
+  // "Менеджер") without changing any access gate.
+  masterRole: "admin" | "rop" | "manager";
   department: "b2g" | "b2b";
   telegramUsername: string;
   line: string | null;
@@ -127,11 +134,15 @@ export async function verifySession(cookieValue: string): Promise<SessionUser | 
 
   try {
     const json = decoder.decode(fromBase64Url(payload));
-    const parsed = JSON.parse(json) as SessionUser;
+    const parsed = JSON.parse(json) as Partial<SessionUser>;
     if (!parsed.userId || !parsed.name || !parsed.role || !parsed.department) {
       return null;
     }
-    return parsed;
+    // Older sessions (signed before masterRole was introduced) only carry
+    // `role`. Derive a sensible default so the UI doesn't crash, then rely
+    // on next login to populate the real master_managers role.
+    const masterRole = parsed.masterRole ?? (parsed.role === "admin" ? "admin" : "manager");
+    return { ...parsed, masterRole } as SessionUser;
   } catch {
     return null;
   }

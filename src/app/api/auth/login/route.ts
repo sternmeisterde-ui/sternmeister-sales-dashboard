@@ -42,16 +42,18 @@ async function resolveTelegramId(username: string): Promise<string | null> {
 }
 
 /**
- * Aggregate roles from every table the user might exist in. If ANY source
- * records admin or rop we hand out full access — master_managers can be
- * authoritative while d1_users/r1_users are mid-sync, and vice versa.
- * "Double-status" users (e.g. rop in master + manager in r1) therefore
- * still get elevated access.
+ * Collapse a master-table role into the permission gate used everywhere:
+ * ROPs and admins both get full "admin" access, plain managers get "manager".
+ * The original master role is preserved separately in session.masterRole
+ * so the UI can still show the right badge ("РОП" vs "Админ").
  */
-function elevateRole(dbRoles: Array<string | null | undefined>): "admin" | "manager" {
-  for (const r of dbRoles) {
-    if (r === "admin" || r === "rop") return "admin";
-  }
+function gateFromMasterRole(masterRole: string | null | undefined): "admin" | "manager" {
+  return masterRole === "admin" || masterRole === "rop" ? "admin" : "manager";
+}
+
+function normaliseMasterRole(role: string | null | undefined): "admin" | "rop" | "manager" {
+  if (role === "admin") return "admin";
+  if (role === "rop") return "rop";
   return "manager";
 }
 
@@ -115,42 +117,53 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Elevate role based on ALL sources — any rop/admin anywhere grants access.
-    const role = elevateRole([d1User?.role, r1User?.role, masterUser?.role]);
-
-    // Prefer d1 → r1 → master for the profile fields. Department comes from
-    // the first table that matched; master is the final fallback.
+    // master_managers is the authoritative source (it's what the Managers tab
+    // edits). When the user exists there, master wins for role + department
+    // over whatever d1_users/r1_users happen to record — those are sync
+    // targets that can drift and shouldn't silently demote a ROP to manager.
+    // d1/r1 remain a fallback for legacy users who haven't been added to
+    // master yet.
     let session: SessionUser;
-    if (d1User) {
+    if (masterUser) {
+      const masterRole = normaliseMasterRole(masterUser.role);
+      const department = (masterUser.department === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
+      // Prefer the department-table id for downstream joins if it exists in
+      // the matching department's table — this keeps call history joins
+      // working for legacy managers. Otherwise fall back to master's id.
+      const deptUser = department === "b2g" ? d1User : r1User;
+      session = {
+        userId: deptUser?.id ?? masterUser.id,
+        name: masterUser.name,
+        role: gateFromMasterRole(masterRole),
+        masterRole,
+        department,
+        telegramUsername: masterUser.telegramUsername ?? username,
+        line: masterUser.line ?? deptUser?.line ?? null,
+        kommoUserId: masterUser.kommoUserId ?? deptUser?.kommoUserId ?? null,
+      };
+    } else if (d1User) {
+      const masterRole = normaliseMasterRole(d1User.role);
       session = {
         userId: d1User.id,
         name: d1User.name,
-        role,
+        role: gateFromMasterRole(masterRole),
+        masterRole,
         department: "b2g",
         telegramUsername: d1User.telegramUsername ?? username,
         line: d1User.line ?? null,
         kommoUserId: d1User.kommoUserId ?? null,
       };
-    } else if (r1User) {
-      session = {
-        userId: r1User.id,
-        name: r1User.name,
-        role,
-        department: "b2b",
-        telegramUsername: r1User.telegramUsername ?? username,
-        line: r1User.line ?? null,
-        kommoUserId: r1User.kommoUserId ?? null,
-      };
     } else {
-      // master-only path: ROP/admin whose department tables aren't synced.
+      const masterRole = normaliseMasterRole(r1User!.role);
       session = {
-        userId: masterUser!.id,
-        name: masterUser!.name,
-        role,
-        department: (masterUser!.department === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b",
-        telegramUsername: masterUser!.telegramUsername ?? username,
-        line: masterUser!.line ?? null,
-        kommoUserId: masterUser!.kommoUserId ?? null,
+        userId: r1User!.id,
+        name: r1User!.name,
+        role: gateFromMasterRole(masterRole),
+        masterRole,
+        department: "b2b",
+        telegramUsername: r1User!.telegramUsername ?? username,
+        line: r1User!.line ?? null,
+        kommoUserId: r1User!.kommoUserId ?? null,
       };
     }
 
