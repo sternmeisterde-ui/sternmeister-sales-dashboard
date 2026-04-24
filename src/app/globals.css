@@ -162,6 +162,16 @@ body {
   background-color: #e0f2fe !important; /* sky-100 on hover */
 }
 
+/* Group sub-headers inside Daily tables (Воронка Бератер / Звонки / Время /
+   Качество / Воронка / Лиды / Результаты). The generic `tr/td transparent`
+   rule above made them invisible in light mode — this restores a
+   distinctive tinted band with darker text so sections visually separate. */
+.theme-light tr.daily-group-header,
+.theme-light tr.daily-group-header td {
+  background-color: #dbeafe !important; /* blue-100 */
+  color: #1e3a8a !important;            /* blue-900 — strong contrast */
+}
+
 /* Black/white overlays used as scrims */
 .theme-light .bg-black\/20,
 .theme-light .bg-black\/30,

@@ -1081,12 +1081,14 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "okk_p") fact = "85";
         if (metric.key === "okk_f") {
           const v = okkScores.get(section.dbLine);
-          fact = v !== undefined ? String(v) : null;
+          // OKK DB started 2026-03-04 — для ранних дат fallback на Excel.
+          fact = v !== undefined ? String(v) : (plan != null && plan !== "" ? plan : null);
         }
         if (metric.key === "roleplay_p") fact = "85";
         if (metric.key === "roleplay_f") {
           const v = roleplayScores.get(section.dbLine);
-          fact = v !== undefined ? String(v) : null;
+          // Аналогично: ролевка недавняя, для ранних дат fallback на Excel.
+          fact = v !== undefined ? String(v) : (plan != null && plan !== "" ? plan : null);
         }
         if (metric.key === "avgWait_p") fact = "30";
         if (metric.key === "sla_f") {
@@ -1711,9 +1713,11 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(ctx.avgWaitSeconds) : null; // R60
       case "calls_dialPercent_f":    return String(summaryCallMetrics.dialPercent); // R62
       case "calls_sla_f":            return ctx.slaMinutes != null ? String(ctx.slaMinutes) : null; // R64
-      case "okk_buh1_f":             return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : null; // R66
-      case "okk_buh2_f":             return ctx.okkBuh2 != null ? String(ctx.okkBuh2) : null; // R68
-      case "okk_med1_f":             return ctx.okkMed != null ? String(ctx.okkMed) : null; // R70
+      // OKK facts: prefer OKK DB; fall back to stored daily_plans for dates
+      // before OKK launch (≈ 2026-03-04) where Excel has the only record.
+      case "okk_buh1_f":             return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : (ctx.getPlan("calls", null, "okk_buh1_f") ?? null);
+      case "okk_buh2_f":             return ctx.okkBuh2 != null ? String(ctx.okkBuh2) : (ctx.getPlan("calls", null, "okk_buh2_f") ?? null);
+      case "okk_med1_f":             return ctx.okkMed  != null ? String(ctx.okkMed)  : (ctx.getPlan("calls", null, "okk_med1_f") ?? null);
       case "okk_avg_p": {                                                     // R71 = AVG(plans)
         const p1 = Number(ctx.getPlan("calls", null, "okk_buh1_p") ?? 85);
         const p2 = Number(ctx.getPlan("calls", null, "okk_buh2_p") ?? 85);
@@ -1722,8 +1726,9 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       }
       case "okk_avg_f": {                                                     // R72
         const vals = [ctx.okkBuh1, ctx.okkBuh2, ctx.okkMed].filter((v): v is number => v != null);
-        if (!vals.length) return null;
-        return String(Math.round(vals.reduce((s, v) => s + v, 0) / vals.length));
+        if (vals.length) return String(Math.round(vals.reduce((s, v) => s + v, 0) / vals.length));
+        // Все три OKK DB-значения null → fallback на Excel-значение okk_avg_f.
+        return ctx.getPlan("calls", null, "okk_avg_f") ?? null;
       }
     }
   }

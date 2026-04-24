@@ -311,15 +311,18 @@ def iso_week_monday(d: date) -> date:
 # override logic isn't shadowing live SQL.
 # ─────────────────────────────────────────────────────────────────────
 
+# Keys skipped from import because analytics.* is the authoritative source.
+# OKK/Roleplay facts are NOT in this set — OKK DB started 2026-03-04 and
+# rolevki have thin history, so Excel is their only Jan-Feb 2026 source.
 B2B_PURE_FACT_SKIP = {
     "buh_avgCheck_f", "buh_komLeads_f", "buh_planDoneNew", "buh_planDoneTotal",
     "buh_prepayments", "buh_ql2p_f", "buh_sales_f", "calls_dialPercent_f",
     "calls_managersOnLine_f", "calls_sla_f", "calls_totalMinutes_f", "calls_total_f",
     "med_avgCheck_f", "med_komLeads_f", "med_planDoneNew", "med_planDoneTotal",
-    "med_prepayments", "med_ql2p_f", "med_sales_f", "okk_avg_f", "okk_buh1_f",
-    "okk_buh2_f", "okk_med1_f", "total_avgCheck_f", "total_komLeads_f",
-    "total_planDoneNew", "total_planDoneTotal", "total_prepayments",
-    "total_ql2p_f", "total_sales_f",
+    "med_prepayments", "med_ql2p_f", "med_sales_f", "total_avgCheck_f",
+    "total_komLeads_f", "total_planDoneNew", "total_planDoneTotal",
+    "total_prepayments", "total_ql2p_f", "total_sales_f",
+    # NOT skipped (keep in import): okk_avg_f, okk_buh1_f, okk_buh2_f, okk_med1_f
 }
 B2G_PURE_FACT_SKIP = {
     "a2", "activeDeals", "appeal", "appealsSubmitted", "avgCallsPerLead",
@@ -328,12 +331,13 @@ B2G_PURE_FACT_SKIP = {
     "beraterReview", "callsConnected", "callsTotal", "callsTotal_p",
     "consultNew", "consultTotal", "convConsultTerm", "convQualTask",
     "convTaskConsult", "delayedStart", "dialPercent", "gutscheinsApproved",
-    "managersOnLine", "missedIncoming", "okk_f", "okk_p", "overdueTasks",
-    "qualLeads", "qualLeadsPercent", "revenue", "roleplay_f", "roleplay_p",
-    "sla_f", "sla_p", "sla_shift_f", "staffCount", "tasksNew", "tasksTotal",
-    "termAACancelled", "termAACount", "termAATransferred", "termDCCancelled",
-    "termDCDone", "termsNew", "termsTotal", "tlt_f", "totalLeads",
-    "totalMinutes", "totalMinutes_p",
+    "managersOnLine", "missedIncoming", "okk_p", "overdueTasks",
+    "qualLeads", "qualLeadsPercent", "revenue",
+    "roleplay_p", "sla_f", "sla_p", "sla_shift_f", "staffCount", "tasksNew",
+    "tasksTotal", "termAACancelled", "termAACount", "termAATransferred",
+    "termDCCancelled", "termDCDone", "termsNew", "termsTotal", "tlt_f",
+    "totalLeads", "totalMinutes", "totalMinutes_p",
+    # NOT skipped (keep in import): okk_f, roleplay_f — Excel has Jan-Feb 2026
 }
 
 

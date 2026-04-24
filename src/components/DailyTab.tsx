@@ -397,10 +397,10 @@ function SummaryTimeTable({
               // ── Group sub-header ──────────────────────────────────────────
               if (m.isGroupHeader) {
                 return (
-                  <tr key={`${m.sectionKey}-${m.metricKey}`} className="bg-slate-800/30">
+                  <tr key={`${m.sectionKey}-${m.metricKey}`} className="daily-group-header bg-slate-800/30">
                     <td
                       colSpan={columnLabels.length + 1}
-                      className="px-4 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-8 sticky left-0 bg-slate-800/30 z-10"
+                      className="daily-group-header px-4 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-bold pl-8 sticky left-0 bg-slate-800/30 z-10"
                     >
                       {m.metricLabel}
                     </td>
