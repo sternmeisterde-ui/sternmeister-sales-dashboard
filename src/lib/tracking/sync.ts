@@ -44,7 +44,13 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        customer/task events — main cause of CRM (green) underfetch and
 //        also fixes dashboard call undercount via getCallEvents→fetchRawEvents
 //        delegation. (2026-04-25)
-const CURRENT_FILTER_VERSION = 4;
+//   v5 — force re-backfill after fixing upsertSyncState bug where a failed
+//        re-backfill was silently advancing filter_version, earliestEventTs
+//        and lastEventTs in the DB — masking the failure and leaving
+//        tracking_events with gaps on non-lead entities. v5 re-triggers
+//        the 90d backfill on next tab open so partial-fail data is
+//        completed. (2026-04-25)
+const CURRENT_FILTER_VERSION = 5;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
@@ -133,12 +139,14 @@ export async function syncDepartment(
   // Manager list
   const managers = await getManagersForDept(department);
   if (managers.length === 0) {
-    await upsertSyncState(
+    // Nothing to sync but don't disturb watermarks/filter_version — treat as
+    // a no-op success so the debounce kicks in but a future run with a
+    // populated manager list still does the full re-backfill if needed.
+    await upsertSyncStateOnSuccess(
       department,
       now,
-      state?.lastEventTs ?? null,
+      state?.lastEventTs ? new Date(state.lastEventTs) : null,
       state?.earliestEventTs ? new Date(state.earliestEventTs) : null,
-      null,
     );
     return { inserted: 0, windowFrom, windowTo, skipped: "no managers with kommo_user_id" };
   }
@@ -237,38 +245,45 @@ export async function syncDepartment(
     );
   } finally {
     // Watermark policy:
-    //  • On success: advance lastEventTs past the batches we observed. The
-    //    1h-overlap in the next delta window catches any late-arriving event
-    //    with a timestamp slightly before our max.
-    //  • On fatal error: KEEP lastEventTs at the previous value. Already-
-    //    persisted events are idempotent (ON CONFLICT DO NOTHING), and the
-    //    next run re-covers the entire window. Advancing on partial progress
-    //    would risk skipping events from unfetched batches whose timestamps
-    //    fall earlier than our streamed max − 1h (Kommo events are not
-    //    globally sorted across (user × type) batches).
-    const effectiveEarliest = minEventTs && minEventTs < windowFrom ? minEventTs : windowFrom;
-    const newEarliest = state?.earliestEventTs
-      ? new Date(Math.min(new Date(state.earliestEventTs).getTime(), effectiveEarliest.getTime()))
-      : effectiveEarliest;
+    //  • On success: advance lastEventTs past the batches we observed, set
+    //    filter_version to CURRENT, extend earliest_event_ts to cover the
+    //    full window. The 1h-overlap on next delta absorbs late events.
+    //  • On fatal error: KEEP everything pinned to the pre-sync state. This
+    //    is critical: advancing filter_version to CURRENT on a failed re-
+    //    backfill would mask the failure — ensureRangeCached's version
+    //    check would pass and skip the re-backfill on next open, leaving
+    //    tracking_events permanently incomplete. Same logic for
+    //    earliest_event_ts and last_event_ts — any advance on partial
+    //    progress risks skipping events from unfetched batches whose
+    //    timestamps fall earlier than our streamed max − 1h.
     const lastErrorMsg = fatalError
       ? (fatalError instanceof Error ? fatalError.message : String(fatalError))
       : null;
-    const persistedLastEventTs = fatalError
-      ? (state?.lastEventTs ? new Date(state.lastEventTs) : null)
-      : maxEventTs;
-    await upsertSyncState(department, now, persistedLastEventTs, newEarliest, lastErrorMsg);
+
+    if (fatalError) {
+      await upsertSyncStateOnFailure(department, now, state, lastErrorMsg);
+    } else {
+      const effectiveEarliest = minEventTs && minEventTs < windowFrom ? minEventTs : windowFrom;
+      const newEarliest = state?.earliestEventTs
+        ? new Date(Math.min(new Date(state.earliestEventTs).getTime(), effectiveEarliest.getTime()))
+        : effectiveEarliest;
+      await upsertSyncStateOnSuccess(department, now, maxEventTs, newEarliest);
+    }
   }
 
   if (fatalError) throw fatalError;
   return { inserted, windowFrom, windowTo };
 }
 
-async function upsertSyncState(
+/**
+ * Persist sync state after a successful sync. Advances filterVersion to
+ * CURRENT so subsequent opens don't re-trigger backfill.
+ */
+async function upsertSyncStateOnSuccess(
   department: Dept,
   lastSyncedAt: Date,
   lastEventTs: Date | null,
   earliestEventTs: Date | null,
-  lastError: string | null,
 ): Promise<void> {
   await trackingDb
     .insert(trackingSyncState)
@@ -278,7 +293,7 @@ async function upsertSyncState(
       lastEventTs,
       earliestEventTs,
       filterVersion: CURRENT_FILTER_VERSION,
-      lastError,
+      lastError: null,
       updatedAt: new Date(),
     })
     .onConflictDoUpdate({
@@ -288,11 +303,51 @@ async function upsertSyncState(
         lastEventTs,
         earliestEventTs,
         filterVersion: CURRENT_FILTER_VERSION,
+        lastError: null,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+/**
+ * Persist sync state after a fatal failure. Records the error for
+ * observability and updates lastSyncedAt (so the debounce kicks in), but
+ * preserves filterVersion / earliestEventTs / lastEventTs from the pre-sync
+ * snapshot. Critical: if a re-backfill crashes mid-stream, the next open
+ * MUST re-trigger it, which requires filterVersion to stay at the old value.
+ */
+async function upsertSyncStateOnFailure(
+  department: Dept,
+  lastSyncedAt: Date,
+  previousState: TrackingSyncStateRow | undefined,
+  lastError: string | null,
+): Promise<void> {
+  await trackingDb
+    .insert(trackingSyncState)
+    .values({
+      department,
+      lastSyncedAt,
+      lastEventTs: previousState?.lastEventTs ?? null,
+      earliestEventTs: previousState?.earliestEventTs ?? null,
+      filterVersion: previousState?.filterVersion ?? 0,
+      lastError,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: trackingSyncState.department,
+      set: {
+        lastSyncedAt,
+        // Intentionally DO NOT update: lastEventTs, earliestEventTs,
+        // filterVersion — they stay pinned to whatever was in the row
+        // before this failed attempt, so the next invocation re-runs
+        // the full backfill instead of assuming success.
         lastError,
         updatedAt: new Date(),
       },
     });
 }
+
+type TrackingSyncStateRow = Awaited<ReturnType<typeof getSyncState>>;
 
 /**
  * Ensure cache is fresh enough before serving a request.
