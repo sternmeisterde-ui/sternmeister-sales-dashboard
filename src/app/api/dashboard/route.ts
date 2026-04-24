@@ -191,12 +191,20 @@ function buildPipelineBreakdown(
   leads: KommoLead[],
   department: string,
 ): PipelineStats[] {
-  const pipelineNames: Record<number, string> = {
-    [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
-    [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
-    [B2B_PIPELINES.COMMERCIAL]: "Бух Комм (Бух 1 + Бух 2)",
-    [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
-  };
+  // Department-scoped name maps. Cross-dept labels are NEVER visible from the
+  // other tab — even if a lead with a foreign pipeline_id somehow slipped past
+  // the inArray filter, it would hit the `|| "Pipeline X"` fallback below
+  // instead of rendering the other department's funnel name.
+  const pipelineNames: Record<number, string> =
+    department === "b2b"
+      ? {
+          [B2B_PIPELINES.COMMERCIAL]: "Бух Комм (Бух 1 + Бух 2)",
+          [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
+        }
+      : {
+          [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
+          [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
+        };
 
   // Pipeline status names (synced 2026-04-22 from Kommo API)
   const statusNames: Record<number, string> = {
