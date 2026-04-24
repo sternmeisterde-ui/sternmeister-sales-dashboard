@@ -2,17 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
+import { getDeptManagerWhitelist } from "@/lib/daily/dept-manager-whitelist";
 
 const DEPT_PIPELINES: Record<string, readonly string[]> = {
   b2g: ["Бух Гос", "Бух Бератер"],
   b2b: ["Бух Комм", "Мед Комм"],
 } as const;
-
-// Managers excluded from Looker reporting per department
-const EXCLUDED_MANAGERS: Record<string, readonly string[]> = {
-  b2g: ["Rose"],
-  b2b: [],
-};
 
 const VALID_STATUSES = new Set([
   "Термин ДЦ состоялся",
@@ -135,23 +130,59 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       });
     }
 
-    // Build base WHERE conditions
-    const excludedManagers = EXCLUDED_MANAGERS[dept] ?? [];
-    const excludedManagersSql = excludedManagers.length > 0
-      ? excludedManagers.map((m) => `'${esc(m)}'`).join(", ")
-      : null;
+    // Build department manager whitelist from master_managers (role='manager',
+    // is_active=true) with NAME_ALIASES folded in so integrator-side spellings match.
+    // This replaces the old hardcoded EXCLUDED_MANAGERS: it also strips role=rop/admin
+    // and cross-department contamination (e.g. a b2b manager attached to a b2g lead).
+    const { names: whitelistNames, aliasToCanonical } = await getDeptManagerWhitelist(dept);
+    if (whitelistNames.length === 0) {
+      return NextResponse.json({
+        view,
+        rows: [],
+        total: 0,
+        filterOptions: { managers: [] },
+      });
+    }
+    const whitelistSql = whitelistNames.map((n) => `'${esc(n)}'`).join(", ");
+
+    // CASE expression mapping integrator spellings to canonical master_managers.name
+    // so downstream GROUP BY aggregates aliases together and the UI shows the right name.
+    const aliasCases: string[] = [];
+    for (const [alias, canonical] of aliasToCanonical) {
+      if (alias !== canonical) {
+        aliasCases.push(`WHEN lc.manager = '${esc(alias)}' THEN '${esc(canonical)}'`);
+      }
+    }
+    const canonicalManagerExpr = aliasCases.length > 0
+      ? `CASE ${aliasCases.join(" ")} ELSE lc.manager END`
+      : `lc.manager`;
+
+    // Also canonicalise the manager filter param itself: the UI passes the canonical
+    // name from the dropdown (which we already normalise below), but the stored row
+    // might use the alias spelling.
+    const normalisedManagerParam = managerParam
+      ? aliasToCanonical.get(managerParam) ?? managerParam
+      : "";
 
     const conditions: string[] = [
       `lc.created_at >= ('${esc(fromStr)} 00:00:00'::timestamp AT TIME ZONE 'Europe/Berlin')`,
       `lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')`,
       `lc.pipeline IN (${pipelineList})`,
+      `lc.manager IN (${whitelistSql})`,
     ];
-    if (excludedManagersSql) {
-      conditions.push(`(lc.manager IS NULL OR lc.manager NOT IN (${excludedManagersSql}))`);
-    }
 
-    if (managerParam) {
-      conditions.push(`lc.manager = '${esc(managerParam)}'`);
+    if (normalisedManagerParam) {
+      // Match any integrator spelling that canonicalises to the requested manager.
+      const matchingAliases: string[] = [];
+      for (const [alias, canonical] of aliasToCanonical) {
+        if (canonical === normalisedManagerParam) matchingAliases.push(alias);
+      }
+      if (matchingAliases.length > 0) {
+        const inList = matchingAliases.map((a) => `'${esc(a)}'`).join(", ");
+        conditions.push(`lc.manager IN (${inList})`);
+      } else {
+        conditions.push(`lc.manager = '${esc(normalisedManagerParam)}'`);
+      }
     }
 
     if (statusesParam) {
@@ -173,16 +204,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const slaCondition = slaParam && VALID_SLA.has(slaParam) ? buildSlaCondition(slaParam) : "";
     const needSlaJoinInFiltered = slaCondition !== "";
 
-    // filterOptions.managers — always full dept+date range, no other filters
+    // filterOptions.managers — always full dept+date range, no other filters.
+    // Returns canonical names (aliases folded) so the dropdown matches the
+    // Managers tab and master_managers.
     const managerOptionsQuery = `
-      SELECT DISTINCT lc.manager
+      SELECT DISTINCT ${canonicalManagerExpr} AS manager
       FROM analytics.leads_cohort lc
       WHERE lc.created_at >= ('${esc(fromStr)} 00:00:00'::timestamp AT TIME ZONE 'Europe/Berlin')
         AND lc.created_at <= ('${esc(toStr)} 23:59:59'::timestamp AT TIME ZONE 'Europe/Berlin')
         AND lc.pipeline IN (${pipelineList})
-        AND lc.manager IS NOT NULL
-        ${excludedManagersSql ? `AND lc.manager NOT IN (${excludedManagersSql})` : ""}
-      ORDER BY lc.manager
+        AND lc.manager IN (${whitelistSql})
+      ORDER BY manager
       LIMIT 500
     `;
 
@@ -191,7 +223,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     const filteredLeadsCte = `
       filtered_leads AS (
-        SELECT lc.lead_id, lc.manager, lc.created_at
+        SELECT lc.lead_id, ${canonicalManagerExpr} AS manager, lc.created_at
         FROM analytics.leads_cohort lc
         ${needSlaJoinInFiltered ? "LEFT JOIN analytics.sla s ON s.lead_id = lc.lead_id" : ""}
         WHERE ${baseWhere}
@@ -202,7 +234,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // TLT variant — includes extra columns for pivot slice grouping
     const tltFilteredLeadsCte = `
       filtered_leads AS (
-        SELECT lc.lead_id, lc.manager, lc.created_at, lc.utm_source, lc.status, lc.pipeline, lc.category
+        SELECT lc.lead_id, ${canonicalManagerExpr} AS manager, lc.created_at, lc.utm_source, lc.status, lc.pipeline, lc.category
         FROM analytics.leads_cohort lc
         ${needSlaJoinInFiltered ? "LEFT JOIN analytics.sla s ON s.lead_id = lc.lead_id" : ""}
         WHERE ${baseWhere}
