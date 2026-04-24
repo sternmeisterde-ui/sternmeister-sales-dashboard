@@ -13,6 +13,7 @@ import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { KommoLead } from "@/lib/kommo/types";
 import { SYNTH_LOSS_REASON_FIELD_ID } from "@/lib/kommo/metrics";
+import { cached } from "@/lib/kommo/cache";
 
 export interface AnalyticsLeadsFilter {
   pipelineIds?: number[];
@@ -30,10 +31,19 @@ export interface AnalyticsLeadsFilter {
  * Fetch leads from analytics.leads_cohort matching the given filters.
  * Returned rows are mapped to the KommoLead shape so they're drop-in
  * replacements for `getLeads()` results.
+ *
+ * 60s TTL + in-flight dedup: для /api/daily/range 12 месяцев параллельно
+ * запрашивают тот же snapshot (activeOnly=true → 1691 лид) — без дедупа
+ * это было 12× одинаковых HTTP-fetch'ей к Neon, что триггерило rate-limit.
  */
 export async function getAnalyticsLeads(
   opts: AnalyticsLeadsFilter,
 ): Promise<KommoLead[]> {
+  const cacheKey = `analytics-leads:${JSON.stringify(opts)}`;
+  return cached(cacheKey, 60 * 1000, () => fetchAnalyticsLeads(opts));
+}
+
+async function fetchAnalyticsLeads(opts: AnalyticsLeadsFilter): Promise<KommoLead[]> {
   const conds = [];
   if (opts.pipelineIds && opts.pipelineIds.length > 0) {
     conds.push(inArray(leadsCohort.pipelineId, opts.pipelineIds));
@@ -148,19 +158,22 @@ export async function getAnalyticsStatusChangeCount(
   statusIds: number[],
 ): Promise<number> {
   if (statusIds.length === 0) return 0;
-  const fromDate = new Date(fromSec * 1000);
-  const toDate = new Date(toSec * 1000);
-  const res = await (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<{
-    cnt: number | string;
-  }>(sql`
-    SELECT COUNT(DISTINCT lead_id)::int AS cnt
-    FROM analytics.lead_status_changes
-    WHERE pipeline_id = ${pipelineId}
-      AND status_id IN (${sql.join(statusIds.map((s) => sql`${s}`), sql`, `)})
-      AND event_at >= ${fromDate}
-      AND event_at <= ${toDate}
-  `);
-  return Number(res.rows[0]?.cnt ?? 0);
+  const cacheKey = `status-change:${pipelineId}:${statusIds.join(",")}:${fromSec}:${toSec}`;
+  return cached(cacheKey, 60 * 1000, async () => {
+    const fromDate = new Date(fromSec * 1000);
+    const toDate = new Date(toSec * 1000);
+    const res = await (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<{
+      cnt: number | string;
+    }>(sql`
+      SELECT COUNT(DISTINCT lead_id)::int AS cnt
+      FROM analytics.lead_status_changes
+      WHERE pipeline_id = ${pipelineId}
+        AND status_id IN (${sql.join(statusIds.map((s) => sql`${s}`), sql`, `)})
+        AND event_at >= ${fromDate}
+        AND event_at <= ${toDate}
+    `);
+    return Number(res.rows[0]?.cnt ?? 0);
+  });
 }
 
 // re-export for tree-shake clarity

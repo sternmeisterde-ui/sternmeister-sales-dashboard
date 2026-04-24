@@ -63,16 +63,17 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      // Fetch days + monthly summary in parallel. Each buildDailyResponse is
-      // independent (different period/date), so concurrency bottlenecks only
-      // on the underlying Neon connection pool. 8 parallel keeps pool happy
-      // while cutting wall-time ~3x vs the previous concurrency=3.
+      // Каждый buildDailyResponse внутри делает ~10 параллельных Neon-запросов,
+      // так что 8 × 10 = 80+ одновременных HTTP-fetch'ей перегрузили Neon
+      // serverless (видели fetch failed с двумя ретраями в логах 2026-04-24).
+      // Concurrency=4 даёт ~40 одновременных — стабильно, умеренно быстро.
+      // Monthly summary идёт параллельно — это "+1 билд", не влияет на лимит.
       const monthDate = `${year}-${String(month).padStart(2, "0")}-01`;
       const [results, monthlySummary] = await Promise.all([
         fetchWithConcurrency(
           dates,
           (dateStr) => buildDailyResponseCached(department, "day", dateStr),
-          8,
+          4,
         ),
         buildDailyResponseCached(department, "month", monthDate),
       ]);
@@ -123,7 +124,7 @@ export async function GET(req: NextRequest) {
       const results = await fetchWithConcurrency(
         weekMondays,
         (mondayStr) => buildDailyResponseCached(department, "week", mondayStr),
-        8,
+        4,
       );
 
       // Расширим каждую неделю красивым подписью "DD.MM-DD.MM"
@@ -148,7 +149,7 @@ export async function GET(req: NextRequest) {
       const results = await fetchWithConcurrency(
         dates,
         (dateStr) => buildDailyResponseCached(department, "month", dateStr),
-        12,
+        4,
       );
 
       return NextResponse.json({
