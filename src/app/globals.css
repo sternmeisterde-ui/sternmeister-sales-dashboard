@@ -210,6 +210,53 @@ body {
   background-color: #f1f5f9 !important; /* slate-100 */
 }
 
+/* ─────────────────────────────────────────────────────────────
+   Plan-vs-Fact Traffic Light (Daily summary table)
+   Color band on the LEFT edge of a fact cell, tinted text.
+   Per UX research (NN Group, Harley 2016): full-cell backgrounds on
+   every numeric cell create a "christmas tree" effect and scan
+   fatigue beyond ~6 columns. The 4px edge bar preserves numeric
+   scanning while making outliers pop peripherally.
+
+   Thresholds (set in getTrafficLightClass):
+     green  — fact ≥ 80% of plan (close-to-plan or over-achieved)
+     yellow — 40–80% of plan
+     red    — below 40% of plan
+   Metrics in LOWER_IS_BETTER (SLA, avgWait, overdueTasks) flip
+   the logic: green ≤1.2× plan, yellow 1.2–2.5×, red >2.5×.
+   ───────────────────────────────────────────────────────────── */
+td.traffic-green,
+td.traffic-yellow,
+td.traffic-red {
+  position: relative;
+  font-weight: 600;
+}
+td.traffic-green::before,
+td.traffic-yellow::before,
+td.traffic-red::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 2px;
+}
+td.traffic-green::before  { background-color: #22c55e; }   /* emerald-500 */
+td.traffic-yellow::before { background-color: #eab308; }   /* yellow-500  */
+td.traffic-red::before    { background-color: #ef4444; }   /* red-500     */
+
+/* Tint the text lightly too so the signal is readable when the
+   sticky left column scrolls across and covers the bar for a tick. */
+td.traffic-green  { color: #86efac !important; }   /* emerald-300 */
+td.traffic-yellow { color: #fde047 !important; }   /* yellow-300  */
+td.traffic-red    { color: #fca5a5 !important; }   /* red-300     */
+
+/* Light theme: darker tints for contrast on white bg. */
+.theme-light td.traffic-green  { color: #166534 !important; }   /* emerald-800 */
+.theme-light td.traffic-yellow { color: #854d0e !important; }   /* yellow-800  */
+.theme-light td.traffic-red    { color: #991b1b !important; }   /* red-800     */
+
 /* Black/white overlays used as scrims */
 .theme-light .bg-black\/20,
 .theme-light .bg-black\/30,

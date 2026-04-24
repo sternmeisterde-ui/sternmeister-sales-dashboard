@@ -141,6 +141,54 @@ function getCellColor(value: string | null): string {
   return "text-white";
 }
 
+// Metrics where "lower is better" — SLA times, wait times, overdue counts.
+// For these, over-performance = fact < plan, so the ratio is inverted.
+const LOWER_IS_BETTER = new Set<string>([
+  "calls_sla_f", "sla_f", "sla_shift_f", "tlt_f",
+  "calls_avgWait_f", "avgWait_f",
+  "overdueTasks",
+]);
+
+/**
+ * Traffic-light color class for a fact cell based on % of plan.
+ * User thresholds:
+ *   green:  within 20 % of plan or over-achieved (ratio ≥ 0.80 higher-better
+ *           / ratio ≤ 1.20 lower-better)
+ *   yellow: 40–80 % of plan (or 1.2–2.5× for lower-better)
+ *   red:    below 40 % (or above 2.5× for lower-better)
+ * Returns empty string when no color should apply (missing plan/fact).
+ */
+function getTrafficLightClass(
+  fact: string | null,
+  plan: string | null,
+  metricKey: string,
+): string {
+  if (!fact || fact === "—" || !plan || plan === "—") return "";
+  const factNum = Number(fact);
+  const planNum = Number(plan);
+  if (!Number.isFinite(factNum) || !Number.isFinite(planNum) || planNum === 0) return "";
+  const ratio = factNum / planNum;
+  const lowerBetter = LOWER_IS_BETTER.has(metricKey);
+  if (lowerBetter) {
+    if (ratio <= 1.2) return "traffic-green";
+    if (ratio <= 2.5) return "traffic-yellow";
+    return "traffic-red";
+  }
+  if (ratio >= 0.8) return "traffic-green";
+  if (ratio >= 0.4) return "traffic-yellow";
+  return "traffic-red";
+}
+
+/** Derive the plan-metric key from a fact-metric key.
+ *   buh_newRevenue_f → buh_newRevenue_p
+ *   totalLeads       → totalLeads_p
+ *   okk_f            → okk_p
+ */
+function planKeyFor(factKey: string): string {
+  if (factKey.endsWith("_f")) return `${factKey.slice(0, -2)}_p`;
+  return `${factKey}_p`;
+}
+
 function getSectionAccent(dbLine: string): {
   rowBg: string;
   cellBg: string;
@@ -461,13 +509,23 @@ function SummaryTimeTable({
                     // Normal display
                     snapshots.map((snap, colIdx) => {
                       const val = getMetricFact(snap, m.sectionKey, m.metricKey);
+                      // Traffic-light: applies only to fact rows (not plan-only
+                      // rows), when we can find a sibling plan value for the
+                      // same metric in the same snapshot column. Visual cue
+                      // is a 4px left-edge bar via the .traffic-{green|yellow|
+                      // red} class — keeps numbers readable across 10+ cols.
+                      const isFactRow = !isPlan && /факт/i.test(m.metricLabel);
+                      const planVal = isFactRow
+                        ? getMetricFact(snap, m.sectionKey, planKeyFor(m.metricKey))
+                        : null;
+                      const trafficCls = isFactRow ? getTrafficLightClass(val, planVal, m.metricKey) : "";
                       return (
                         <td
                           key={colIdx}
                           onClick={() => isPlan && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
                           className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
-                          } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)}`}
+                          } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
                         >
                           {val ?? "—"}
                         </td>
@@ -1217,25 +1275,102 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
     return allManagers.filter((m) => effectiveSelected.has(m.id));
   }, [allManagers, effectiveSelected, effectiveSingle, mode]);
 
-  // Metrics only from sections marked perManager=true. Skip group headers + skip
-  // plan-rows (hasPlan && !hasFact) since they apply to the department, not a
-  // single manager. Funnel section is dept-wide, excluded from per-manager view.
+  // Per-manager view follows a sales-ops diagnosis framework (see agent recs):
+  // the table is a variance-hunting tool — not a scorecard — so team-aggregate
+  // metrics and plan-only rows are hidden. Order is ВОРОНКА → ЗВОНКИ → SLA →
+  // КАЧЕСТВО so a ROP can read left-to-right and spot the weak link fast.
   const metrics = useMemo(() => {
     if (!snapshot) return [];
-    const rows: Array<{ sectionKey: string; sectionTitle: string; metricKey: string; metricLabel: string; isPlanRow: boolean }> = [];
+
+    // Keys that make no sense per-manager:
+    //  • plan constants set by ROP team-wide (*_p, regulation, targets)
+    //  • identity/count stubs that always equal 1 per row (staffCount,
+    //    managersOnLine, _managersOnLine_f)
+    //  • pipeline-stage snapshot counters (berater* / delayed* / appeal*)
+    //    that reflect team case queues, not individual output
+    //  • duplicate / derived metrics (avgDialogPerEmployee = avgDialogMinutes)
+    //  • team-level B2B totals ("total_*") — салestotal section is team-only
+    const DENYLIST = new Set<string>([
+      "staffCount", "managersOnLine", "calls_managersOnLine_f",
+      "avgDialogPerEmployee", "missedIncoming",
+      // plan-coefficient rows (ROP sets dept-wide, not per individual)
+      "regulationPercent", "callsTotal_p", "totalMinutes_p", "avgWait_p",
+      "sla_p", "okk_p", "roleplay_p",
+      "calls_sla_p", "calls_total_p", "calls_totalMinutes_p",
+      "calls_avgWait_p", "calls_dialPercent_p", "calls_managersOnLine_p",
+      "buh_ql2p_p", "med_ql2p_p", "okk_buh1_p", "okk_buh2_p", "okk_med1_p", "okk_avg_p",
+      // pipeline-stage counters (team case queue, not individual KPI)
+      "beraterReview", "beraterReject", "delayedStart", "appeal",
+      "appealsSubmitted", "termAACancelled", "termDCCancelled",
+      "awaitTermTotal", "awaitTermNew",
+      // team-level derived / rollup rows
+      "buh_planDoneTotal", "buh_planDoneNew", "med_planDoneTotal",
+      "med_planDoneNew", "total_planDoneTotal", "total_planDoneNew",
+      "total_revenueTotal_p", "total_revenueTotal_f", "total_newRevenue_p",
+      "total_newRevenue_f", "total_komLeads_p", "total_komLeads_f",
+      "total_sales_p", "total_sales_f", "total_prepayments",
+      "total_ql2p_p", "total_ql2p_f", "total_avgCheck_p", "total_avgCheck_f",
+    ]);
+
+    // Order map: ВОРОНКА (volume/output) → ЗВОНКИ → СКОРОСТЬ (SLA) → КАЧЕСТВО.
+    // Primary diagnosis columns per the agent's 5-metric framework bubble up
+    // naturally by having low ranks.
+    const ORDER: Record<string, number> = {
+      // ── ВОРОНКА (volume + output) ──
+      revenue: 10, buh_newRevenue_f: 10, med_newRevenue_f: 10,
+      buh_salesPlusRenewals_f: 11, med_salesPlusRenewals_f: 11,
+      gutscheinsApproved: 12,
+      buh_sales_f: 13, med_sales_f: 13,
+      buh_avgCheck_f: 14, med_avgCheck_f: 14,
+      totalLeads: 15, buh_komLeads_f: 15, med_komLeads_f: 15,
+      qualLeads: 16, buh_ql2p_f: 17, med_ql2p_f: 17, qualLeadsPercent: 17,
+      a2: 18, b1: 19, b2plus: 20, avgPortfolio: 21,
+      tasksTotal: 22, tasksNew: 23, convQualTask: 24,
+      consultTotal: 25, consultNew: 26, convTaskConsult: 27,
+      termsTotal: 28, termsNew: 29, convConsultTerm: 30,
+      termDCDone: 31, termAATransferred: 32, termAACount: 33,
+      buh_prepayments: 34, med_prepayments: 34,
+      // ── ЗВОНКИ ──
+      callsTotal: 40, calls_total_f: 40,
+      callsConnected: 41,
+      dialPercent: 42, calls_dialPercent_f: 42,
+      totalMinutes: 43, calls_totalMinutes_f: 43,
+      avgDialogMinutes: 44,
+      // ── СКОРОСТЬ / SLA ──
+      sla_f: 50, calls_sla_f: 50,
+      sla_shift_f: 51,
+      tlt_f: 52,
+      calls_avgWait_f: 53,
+      avgCallsPerLead: 54,
+      overdueTasks: 55,
+      // ── КАЧЕСТВО ──
+      okk_f: 70, okk_buh1_f: 70, okk_buh2_f: 70, okk_med1_f: 70, okk_avg_f: 71,
+      roleplay_f: 72,
+    };
+
+    const rows: Array<{
+      sectionKey: string; sectionTitle: string; metricKey: string;
+      metricLabel: string; isPlanRow: boolean; rank: number;
+    }> = [];
     for (const sec of snapshot.sections) {
       if (!sec.perManager) continue;
       for (const m of sec.metrics) {
         if (m.isGroupHeader) continue;
+        if (DENYLIST.has(m.key)) continue;
+        // Skip pure plan rows (hasPlan && !hasFact) — no per-manager context
+        if (m.isPlanRow) continue;
         rows.push({
           sectionKey: sec.key,
           sectionTitle: sec.title,
           metricKey: m.key,
           metricLabel: m.label,
-          isPlanRow: m.isPlanRow ?? false,
+          isPlanRow: false,
+          rank: ORDER[m.key] ?? 999,
         });
       }
     }
+    // Stable sort by rank (metrics without ORDER entry fall to the bottom)
+    rows.sort((a, b) => a.rank - b.rank);
     return rows;
   }, [snapshot]);
 
