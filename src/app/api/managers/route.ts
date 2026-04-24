@@ -19,6 +19,21 @@ export async function GET(request: NextRequest) {
     }
 
     const dept = request.nextUrl.searchParams.get("department") === "b2b" ? "b2b" : "b2g";
+    const okkDept = dept === "b2g" ? "d2" : "r2";
+
+    // Lazy OKK → master pull. cloudtalk_agent_id / callgear_employee_id are
+    // born in OKK (populated by CloudTalk/CallGear webhooks on the first
+    // matched call via OKK/src/webhook/*.ts). Nothing automatically writes
+    // them back to master_managers — the reverse-sync in syncToTargets()
+    // only fires on manual Save. So between webhook auto-link and next Save,
+    // master has null while OKK has the real ID.
+    //
+    // Fix: on every open of the Managers tab, silently merge any OKK-known
+    // IDs into master rows that are still null. Error-isolated so an OKK
+    // outage never blocks the admin view.
+    await pullTelephonyIdsFromOkk(dept, okkDept).catch((err) => {
+      console.warn("[Managers API GET] pull-from-okk failed (non-fatal):", err);
+    });
 
     const rows = await db
       .select()
@@ -31,6 +46,95 @@ export async function GET(request: NextRequest) {
     console.error("[Managers API GET]", error);
     const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
+/**
+ * Pull telephony IDs from OKK managers into master_managers for the given
+ * department. Only touches master rows where the field is NULL — never
+ * overwrites an existing value (master wins on conflict, same precedence as
+ * the merge rule inside syncToTargets).
+ *
+ * Match order, high-to-low confidence:
+ *   1. master.kommoUserId  ↔  okkManagers.kommoUserId   (both non-null, exact)
+ *   2. master.telegramId   ↔  okkManagers.telegramId    (both non-null, exact)
+ *   3. master.name (trimmed) ↔ okkManagers.name (trimmed) within same dept
+ */
+async function pullTelephonyIdsFromOkk(
+  dept: "b2g" | "b2b",
+  okkDept: "d2" | "r2",
+): Promise<void> {
+  const okkDb = getOkkDbForDepartment(dept);
+
+  // Only pull for managers who opted in to OKK sync and are missing at least one ID.
+  const masterRows = await db
+    .select({
+      id: masterManagers.id,
+      name: masterManagers.name,
+      kommoUserId: masterManagers.kommoUserId,
+      telegramId: masterManagers.telegramId,
+      callgearEmployeeId: masterManagers.callgearEmployeeId,
+      cloudtalkAgentId: masterManagers.cloudtalkAgentId,
+    })
+    .from(masterManagers)
+    .where(
+      and(
+        eq(masterManagers.department, dept),
+        eq(masterManagers.isActive, true),
+        eq(masterManagers.inOkk, true),
+      ),
+    );
+
+  const needsPull = masterRows.filter(
+    (m) => m.callgearEmployeeId === null || m.cloudtalkAgentId === null,
+  );
+  if (needsPull.length === 0) return;
+
+  const okkRows = await okkDb
+    .select({
+      id: okkManagers.id,
+      name: okkManagers.name,
+      kommoUserId: okkManagers.kommoUserId,
+      telegramId: okkManagers.telegramId,
+      callgearEmployeeId: okkManagers.callgearEmployeeId,
+      cloudtalkAgentId: okkManagers.cloudtalkAgentId,
+    })
+    .from(okkManagers)
+    .where(and(eq(okkManagers.department, okkDept), eq(okkManagers.isActive, true)));
+
+  const byKommo = new Map<number, typeof okkRows[number]>();
+  const byTg = new Map<string, typeof okkRows[number]>();
+  const byName = new Map<string, typeof okkRows[number]>();
+  for (const r of okkRows) {
+    if (r.kommoUserId) byKommo.set(r.kommoUserId, r);
+    if (r.telegramId) byTg.set(r.telegramId, r);
+    if (r.name) byName.set(r.name.trim(), r);
+  }
+
+  for (const m of needsPull) {
+    const match =
+      (m.kommoUserId && byKommo.get(m.kommoUserId)) ||
+      (m.telegramId && byTg.get(m.telegramId)) ||
+      byName.get(m.name.trim()) ||
+      null;
+    if (!match) continue;
+
+    const nextCg = m.callgearEmployeeId ?? match.callgearEmployeeId ?? null;
+    const nextCt = m.cloudtalkAgentId ?? match.cloudtalkAgentId ?? null;
+    if (nextCg === m.callgearEmployeeId && nextCt === m.cloudtalkAgentId) continue;
+
+    await db
+      .update(masterManagers)
+      .set({
+        callgearEmployeeId: nextCg,
+        cloudtalkAgentId: nextCt,
+        updatedAt: new Date(),
+      })
+      .where(eq(masterManagers.id, m.id));
+
+    console.log(
+      `[Managers API GET] pulled OKK IDs for "${m.name}" (dept=${dept}): cg=${nextCg}, ct=${nextCt}`,
+    );
   }
 }
 
