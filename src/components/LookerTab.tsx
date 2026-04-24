@@ -392,7 +392,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="border-b border-white/10">
-              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA лид → звонок (ср)", "SLA от начала смены (ср)"].map((h) => (
+              {["Менеджер", "SLA лид → звонок (ср)", "SLA от начала смены (ср)", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид"].map((h) => (
                 <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
                   {h}
                 </th>
@@ -417,26 +417,26 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                 {safeRows.map((r, i) => (
                   <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_lead_to_call_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_from_shift_sec)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? Number(r.avg_calls_per_lead) : "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_lead_to_call_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_from_shift_sec)}</td>
                   </tr>
                 ))}
                 <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
                   <td className="px-4 py-2.5 text-slate-200">Итого</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgLeadToCall)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgFromShift)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalLeads)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalOut)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalMsg)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{fmtPct(totalPct)}</td>
                   <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalDur)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{avgCallsPerLead != null ? avgCallsPerLead : "—"}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgLeadToCall)}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgFromShift)}</td>
                 </tr>
               </>
             )}
