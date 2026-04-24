@@ -141,6 +141,22 @@ function getCellColor(value: string | null): string {
   return "text-white";
 }
 
+// Numbers with >3 digits get a space thousands-separator (500 000 instead
+// of 500000). Small values (counts, percentages) stay as-is. Non-numeric
+// strings are returned verbatim so labels like "—" or "N/A" are preserved.
+function formatCellNumber(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "" || value === "—") return "—";
+  const str = String(value);
+  const num = Number(str);
+  if (!Number.isFinite(num)) return str;
+  if (Math.abs(num) <= 999) return str;
+  const isFloat = !Number.isInteger(num);
+  return num.toLocaleString("ru-RU", {
+    maximumFractionDigits: isFloat ? 2 : 0,
+    minimumFractionDigits: 0,
+  });
+}
+
 // Metrics where "lower is better" — SLA times, wait times, overdue counts.
 // For these, over-performance = fact < plan, so the ratio is inverted.
 const LOWER_IS_BETTER = new Set<string>([
@@ -532,7 +548,7 @@ function SummaryTimeTable({
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
                           } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
                         >
-                          {val ?? "—"}
+                          {formatCellNumber(val)}
                         </td>
                       );
                     })
@@ -698,7 +714,7 @@ function ManagerMetricsTable({
                           key={`${col.sectionKey}-${col.metricKey}-${i}`}
                           className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
                         >
-                          {val ?? "—"}
+                          {formatCellNumber(val)}
                         </td>
                       );
                     })}
@@ -717,7 +733,7 @@ function ManagerMetricsTable({
                   key={i}
                   className="px-2 py-2 text-right font-mono text-[12px] font-bold text-white"
                 >
-                  {val ?? "—"}
+                  {formatCellNumber(val)}
                 </td>
               ))}
             </tr>
@@ -732,7 +748,7 @@ function ManagerMetricsTable({
                   key={i}
                   className="px-2 py-2 text-right font-mono text-[12px] text-slate-400"
                 >
-                  {t.count > 0 ? t.avg : "—"}
+                  {t.count > 0 ? formatCellNumber(t.avg) : "—"}
                 </td>
               ))}
             </tr>
@@ -1583,7 +1599,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
                           const val = c.getValue(m);
                           return (
                             <td key={c.key} className={`px-3 text-center tabular-nums ${m.rank < 40 ? "py-3 text-[13px] font-semibold" : "py-2"} ${getCellColor(val)}`}>
-                              {val ?? "—"}
+                              {formatCellNumber(val)}
                             </td>
                           );
                         })}
@@ -1671,12 +1687,12 @@ function RatingFirstLineView({ monthlySnapshot, monthPeriodDate }: {
                 <tr key={r.id} className="border-b border-white/5 hover:bg-white/[0.02]">
                   <td className="px-4 py-2.5 text-[12px] text-slate-500 tabular-nums">{i + 1}</td>
                   <td className="px-4 py-2.5 text-[13px] text-slate-200 font-semibold">{r.name}</td>
-                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{r.leads}</td>
-                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{r.terms}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{formatCellNumber(r.leads)}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{formatCellNumber(r.terms)}</td>
                   <td className={`px-4 py-2.5 text-[13px] text-right tabular-nums font-bold ${
                     r.conv >= 40 ? "text-emerald-400" : r.conv >= 25 ? "text-yellow-400" : "text-red-400"
                   }`}>{convStr}</td>
-                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{rr}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{formatCellNumber(rr)}</td>
                 </tr>
               );
             })}

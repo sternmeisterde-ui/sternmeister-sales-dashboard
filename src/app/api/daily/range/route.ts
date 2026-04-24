@@ -63,17 +63,19 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      // Fetch days with limited concurrency — past dates with snapshots are instant,
-      // only today (and days without snapshots) hit Kommo API
-      const results = await fetchWithConcurrency(
-        dates,
-        (dateStr) => buildDailyResponseCached(department, "day", dateStr),
-        3,
-      );
-
-      // Also fetch the full month summary
+      // Fetch days + monthly summary in parallel. Each buildDailyResponse is
+      // independent (different period/date), so concurrency bottlenecks only
+      // on the underlying Neon connection pool. 8 parallel keeps pool happy
+      // while cutting wall-time ~3x vs the previous concurrency=3.
       const monthDate = `${year}-${String(month).padStart(2, "0")}-01`;
-      const monthlySummary = await buildDailyResponseCached(department, "month", monthDate);
+      const [results, monthlySummary] = await Promise.all([
+        fetchWithConcurrency(
+          dates,
+          (dateStr) => buildDailyResponseCached(department, "day", dateStr),
+          8,
+        ),
+        buildDailyResponseCached(department, "month", monthDate),
+      ]);
 
       return NextResponse.json({
         mode: "days",
@@ -121,7 +123,7 @@ export async function GET(req: NextRequest) {
       const results = await fetchWithConcurrency(
         weekMondays,
         (mondayStr) => buildDailyResponseCached(department, "week", mondayStr),
-        3,
+        8,
       );
 
       // Расширим каждую неделю красивым подписью "DD.MM-DD.MM"
@@ -146,7 +148,7 @@ export async function GET(req: NextRequest) {
       const results = await fetchWithConcurrency(
         dates,
         (dateStr) => buildDailyResponseCached(department, "month", dateStr),
-        3,
+        12,
       );
 
       return NextResponse.json({

@@ -1653,14 +1653,33 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   const medRenewalsPlan = 0;
   const medRenewalsFact = 0;
 
-  const newRevenuePlan = buhRevenuePlan + medRevenuePlan;
-  const newRevenueFact = buh.revenue + med.revenue;
-  const revenueTotalPlan = newRevenuePlan + buhRenewalsPlan;
-  const revenueTotalFact = newRevenueFact + buhRenewalsFact;
-  const buhSalesPlusRenewalsPlan = buhRevenuePlan + buhRenewalsPlan;
-  const buhSalesPlusRenewalsFact = buh.revenue + buhRenewalsFact;
-  const medSalesPlusRenewalsPlan = medRevenuePlan + medRenewalsPlan;
-  const medSalesPlusRenewalsFact = med.revenue + medRenewalsFact;
+  // User-override helper: пустая строка / null означает "не задано".
+  const overrideNum = (line: string, metricKey: string, fallback: number): number => {
+    const v = ctx.getPlan(line, null, metricKey);
+    if (v == null || v === "") return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  // Каскад факт-значений (Excel: B50=B66+B86, B48=B50+B141, B22=B24+B141):
+  //   если пользователь перекрыл buh_newRevenue_f / med_newRevenue_f вручную,
+  //   агрегаты (total_newRevenue_f, total_revenueTotal_f, *_salesPlusRenewals_f)
+  //   должны учитывать именно этот ввод — иначе на экране получится три
+  //   одинаковые цифры из SQL вместо реально разных значений.
+  const buhRevenueFact = overrideNum("salesBuh", "buh_newRevenue_f", buh.revenue);
+  const medRevenueFact = overrideNum("salesMed", "med_newRevenue_f", med.revenue);
+  const newRevenuePlan = overrideNum("salesTotal", "total_newRevenue_p", buhRevenuePlan + medRevenuePlan);
+  const newRevenueFactComputed = buhRevenueFact + medRevenueFact;
+  const newRevenueFact = overrideNum("salesTotal", "total_newRevenue_f", newRevenueFactComputed);
+  const revenueTotalPlan = overrideNum("salesTotal", "total_revenueTotal_p", newRevenuePlan + buhRenewalsPlan);
+  const revenueTotalFactComputed = newRevenueFact + buhRenewalsFact;
+  const revenueTotalFact = overrideNum("salesTotal", "total_revenueTotal_f", revenueTotalFactComputed);
+  const buhSalesPlusRenewalsPlan = overrideNum("salesBuh", "buh_salesPlusRenewals_p", buhRevenuePlan + buhRenewalsPlan);
+  const buhSalesPlusRenewalsFactComputed = buhRevenueFact + buhRenewalsFact;
+  const buhSalesPlusRenewalsFact = overrideNum("salesBuh", "buh_salesPlusRenewals_f", buhSalesPlusRenewalsFactComputed);
+  const medSalesPlusRenewalsPlan = overrideNum("salesMed", "med_salesPlusRenewals_p", medRevenuePlan + medRenewalsPlan);
+  const medSalesPlusRenewalsFactComputed = medRevenueFact + medRenewalsFact;
+  const medSalesPlusRenewalsFact = overrideNum("salesMed", "med_salesPlusRenewals_f", medSalesPlusRenewalsFactComputed);
 
   // ========== 1. ПРОДАЖИ ТОТАЛ (R5-R19) ==========
   if (sectionKey === "salesTotal") {
@@ -1686,8 +1705,8 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
         return vals.length ? String(Math.round(vals.reduce((s, v) => s + v, 0) / vals.length)) : "0";
       }
       case "total_avgCheck_f": {                                              // R17
-        const buhAC = avgCheck(buh.revenue, buh.salesCount);
-        const medAC = avgCheck(med.revenue, med.salesCount);
+        const buhAC = avgCheck(buhRevenueFact, buh.salesCount);
+        const medAC = avgCheck(medRevenueFact, med.salesCount);
         const vals = [buhAC, medAC].filter((v) => v > 0);
         return vals.length ? String(Math.round(vals.reduce((s, v) => s + v, 0) / vals.length)) : "0";
       }
@@ -1702,16 +1721,16 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "buh_salesPlusRenewals_p": return String(buhSalesPlusRenewalsPlan); // R21
       case "buh_salesPlusRenewals_f": return String(buhSalesPlusRenewalsFact); // R22
       case "buh_newRevenue_p": return String(buhRevenuePlan);                  // R23
-      case "buh_newRevenue_f": return String(buh.revenue);                     // R24
+      case "buh_newRevenue_f": return String(buhRevenueFact);                  // R24
       case "buh_komLeads_f":   return String(buh.qualLeads);                   // R26
       case "buh_sales_p":      return String(buhSalesPlan);                    // R27
       case "buh_sales_f":      return String(buh.salesCount);                  // R28
       case "buh_prepayments":  return String(buh.prepaymentCount);             // R29
       case "buh_ql2p_p":       return String(buhQl2pPlan);                    // R30 (default 8%)
       case "buh_ql2p_f":       return String(pct(buh.salesCount, buh.qualLeads)); // R31
-      case "buh_avgCheck_f":   return String(avgCheck(buh.revenue, buh.salesCount)); // R33
+      case "buh_avgCheck_f":   return String(avgCheck(buhRevenueFact, buh.salesCount)); // R33
       case "buh_planDoneTotal": return planDone(buhSalesPlusRenewalsFact, String(buhSalesPlusRenewalsPlan)); // R34
-      case "buh_planDoneNew":   return planDone(buh.revenue, String(buhRevenuePlan));                        // R35
+      case "buh_planDoneNew":   return planDone(buhRevenueFact, String(buhRevenuePlan));                     // R35
     }
   }
 
@@ -1721,15 +1740,15 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "med_salesPlusRenewals_p": return String(medSalesPlusRenewalsPlan); // R37
       case "med_salesPlusRenewals_f": return String(medSalesPlusRenewalsFact); // R38
       case "med_newRevenue_p": return String(medRevenuePlan);                  // R39
-      case "med_newRevenue_f": return String(med.revenue);                     // R40
+      case "med_newRevenue_f": return String(medRevenueFact);                  // R40
       case "med_komLeads_f":   return String(med.qualLeads);                   // R42
       case "med_sales_p":      return String(medSalesPlan);                    // R43
       case "med_sales_f":      return String(med.salesCount);                  // R44
       case "med_prepayments":  return String(med.prepaymentCount);             // R45
       case "med_ql2p_f":       return String(pct(med.salesCount, med.qualLeads)); // R47
-      case "med_avgCheck_f":   return String(avgCheck(med.revenue, med.salesCount)); // R49
+      case "med_avgCheck_f":   return String(avgCheck(medRevenueFact, med.salesCount)); // R49
       case "med_planDoneTotal": return planDone(medSalesPlusRenewalsFact, String(medSalesPlusRenewalsPlan)); // R50
-      case "med_planDoneNew":   return planDone(med.revenue, String(medRevenuePlan));                        // R51
+      case "med_planDoneNew":   return planDone(medRevenueFact, String(medRevenuePlan));                     // R51
     }
   }
 
