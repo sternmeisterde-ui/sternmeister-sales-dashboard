@@ -306,6 +306,38 @@ def iso_week_monday(d: date) -> date:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Pure-fact keys (hasPlan:false, hasFact:true) — these come from analytics.*
+# and must NOT be written to daily_plans. Keeps the table clean so our
+# override logic isn't shadowing live SQL.
+# ─────────────────────────────────────────────────────────────────────
+
+B2B_PURE_FACT_SKIP = {
+    "buh_avgCheck_f", "buh_komLeads_f", "buh_planDoneNew", "buh_planDoneTotal",
+    "buh_prepayments", "buh_ql2p_f", "buh_sales_f", "calls_dialPercent_f",
+    "calls_managersOnLine_f", "calls_sla_f", "calls_totalMinutes_f", "calls_total_f",
+    "med_avgCheck_f", "med_komLeads_f", "med_planDoneNew", "med_planDoneTotal",
+    "med_prepayments", "med_ql2p_f", "med_sales_f", "okk_avg_f", "okk_buh1_f",
+    "okk_buh2_f", "okk_med1_f", "total_avgCheck_f", "total_komLeads_f",
+    "total_planDoneNew", "total_planDoneTotal", "total_prepayments",
+    "total_ql2p_f", "total_sales_f",
+}
+B2G_PURE_FACT_SKIP = {
+    "a2", "activeDeals", "appeal", "appealsSubmitted", "avgCallsPerLead",
+    "avgDialogMinutes", "avgDialogPerEmployee", "avgPortfolio", "avgWait_p",
+    "awaitTermNew", "awaitTermTotal", "b1", "b2plus", "beraterReject",
+    "beraterReview", "callsConnected", "callsTotal", "callsTotal_p",
+    "consultNew", "consultTotal", "convConsultTerm", "convQualTask",
+    "convTaskConsult", "delayedStart", "dialPercent", "gutscheinsApproved",
+    "managersOnLine", "missedIncoming", "okk_f", "okk_p", "overdueTasks",
+    "qualLeads", "qualLeadsPercent", "revenue", "roleplay_f", "roleplay_p",
+    "sla_f", "sla_p", "sla_shift_f", "staffCount", "tasksNew", "tasksTotal",
+    "termAACancelled", "termAACount", "termAATransferred", "termDCCancelled",
+    "termDCDone", "termsNew", "termsTotal", "tlt_f", "totalLeads",
+    "totalMinutes", "totalMinutes_p",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Extraction
 # ─────────────────────────────────────────────────────────────────────
 
@@ -321,7 +353,7 @@ def extract_b2b_rows() -> list[tuple]:
         if col is None:
             continue
         for metric_key, line, drow, _mrow, pct in B2B_METRICS:
-            if drow is None:
+            if drow is None or metric_key in B2B_PURE_FACT_SKIP:
                 continue
             v = daily.cell(drow, col).value
             val = coerce(v, pct)
@@ -335,7 +367,7 @@ def extract_b2b_rows() -> list[tuple]:
             continue
         period_date = f"{yr}-{mo:02d}"
         for metric_key, line, _drow, mrow, pct in B2B_METRICS:
-            if mrow is None:
+            if mrow is None or metric_key in B2B_PURE_FACT_SKIP:
                 continue
             v = monthly.cell(mrow, col).value
             val = coerce(v, pct)
@@ -358,7 +390,7 @@ def extract_b2g_rows() -> list[tuple]:
         if col is None:
             continue
         for metric_key, drow, _mrow, pct in B2G_FUNNEL_METRICS:
-            if drow is None:
+            if drow is None or metric_key in B2G_PURE_FACT_SKIP:
                 continue
             v = daily.cell(drow, col).value
             val = coerce(v, pct)
@@ -369,6 +401,8 @@ def extract_b2g_rows() -> list[tuple]:
         # Calls — each of 3 lines has its own block
         for line in ("1", "2", "3"):
             for key in B2G_CALL_METRIC_KEYS:
+                if key in B2G_PURE_FACT_SKIP:
+                    continue
                 drow = b2g_calls_row(line, key)
                 if drow is None:
                     continue
@@ -385,7 +419,7 @@ def extract_b2g_rows() -> list[tuple]:
             continue
         period_date = f"{yr}-{mo:02d}"
         for metric_key, _drow, mrow, pct in B2G_FUNNEL_METRICS:
-            if mrow is None:
+            if mrow is None or metric_key in B2G_PURE_FACT_SKIP:
                 continue
             v = monthly.cell(mrow, col).value
             val = coerce(v, pct)
