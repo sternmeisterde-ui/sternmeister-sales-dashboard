@@ -1268,7 +1268,22 @@ export async function buildDailyResponse(department: string, period: string, dat
       // when the stored daily_plans value is used only as fact backfill.
       const planOut = metric.hasPlan ? plan : null;
       const percentOut = metric.hasPlan ? percent : null;
-      return { key: metric.key, label: metric.label, plan: planOut, fact, percent: percentOut, isGroupHeader: false, isPlanRow: metric.hasPlan && !metric.hasFact };
+      return {
+        key: metric.key,
+        label: metric.label,
+        plan: planOut,
+        fact,
+        percent: percentOut,
+        isGroupHeader: false,
+        // Pure plan rows (hasPlan && !hasFact) render as blue-styled "plan"
+        // cells — this flag controls that visual treatment.
+        isPlanRow: metric.hasPlan && !metric.hasFact,
+        // isEditable is broader than isPlanRow: any row with hasPlan is
+        // admin-overridable, including revenue _f cells (hasPlan && hasFact)
+        // where typing a value overrides the SQL-computed fact. Used by the
+        // UI to gate the pencil icon + inline-edit click.
+        isEditable: metric.hasPlan,
+      };
     });
 
     let managerData: Array<{

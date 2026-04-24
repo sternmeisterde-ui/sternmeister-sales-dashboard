@@ -33,7 +33,10 @@ interface MetricRow {
   fact: string | null;
   percent: number | null;
   isGroupHeader: boolean;
+  /** Blue "plan" styling (hasPlan && !hasFact). */
   isPlanRow?: boolean;
+  /** Pencil icon + inline-edit click (hasPlan — includes editable revenue _f). */
+  isEditable?: boolean;
 }
 
 interface ManagerData {
@@ -351,6 +354,7 @@ interface FlatMetric {
   metricLabel: string;
   isGroupHeader: boolean;
   isPlanRow: boolean;
+  isEditable: boolean;
 }
 
 function getAllMetrics(snapshot: DailySnapshot | undefined): FlatMetric[] {
@@ -366,6 +370,7 @@ function getAllMetrics(snapshot: DailySnapshot | undefined): FlatMetric[] {
       metricLabel: sec.title,
       isGroupHeader: false,
       isPlanRow: false,
+      isEditable: false,
     });
     for (const m of sec.metrics) {
       result.push({
@@ -377,6 +382,9 @@ function getAllMetrics(snapshot: DailySnapshot | undefined): FlatMetric[] {
         metricLabel: m.label,
         isGroupHeader: m.isGroupHeader,
         isPlanRow: m.isPlanRow ?? false,
+        // Fall back to isPlanRow when the server predates isEditable — keeps
+        // legacy snapshots editing the same cells they always did.
+        isEditable: m.isEditable ?? (m.isPlanRow ?? false),
       });
     }
   }
@@ -549,6 +557,7 @@ function SummaryTimeTable({
               }
 
               const isPlan = m.isPlanRow;
+              const isEditable = m.isEditable;
               const cellId = `${m.sectionKey}:${m.metricKey}`;
               const isEditing = editingCell === cellId;
 
@@ -564,11 +573,11 @@ function SummaryTimeTable({
                     isPlan ? "text-blue-300 bg-slate-900/90" : "text-slate-300 bg-slate-900/90"
                   }`}>
                     <div className="flex items-center gap-1.5">
-                      {isPlan && <Pencil className="w-3 h-3 text-blue-400/50 flex-shrink-0" />}
+                      {isEditable && <Pencil className={`w-3 h-3 flex-shrink-0 ${isPlan ? "text-blue-400/50" : "text-amber-400/50"}`} />}
                       {m.metricLabel}
                     </div>
                   </td>
-                  {isPlan && isEditing ? (
+                  {isEditable && isEditing ? (
                     // Editing mode: single input spanning all columns
                     <td colSpan={columnLabels.length} className="px-2 py-1">
                       <div className="flex items-center gap-2">
@@ -615,7 +624,7 @@ function SummaryTimeTable({
                       return (
                         <td
                           key={colIdx}
-                          onClick={() => isPlan && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
+                          onClick={() => isEditable && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
                           className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
                           } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
@@ -1222,6 +1231,30 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             department={department}
             monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
             onPlanSave={async (dbLine, metricKey, value, periodType, periodDate) => {
+              // Optimistic UI — flip the edited metric's plan value in place
+              // across every snapshot (monthly save affects all days), then
+              // fire the PUT. Refetch runs in the background for derived
+              // cells (sales_p = komLeads × ql2p, etc.) — UI does NOT wait
+              // so the sheet no longer flashes into a loading state after
+              // every keystroke save.
+              setData((prev) => {
+                if (!prev) return prev;
+                const patchSection = (sec: Section): Section => (
+                  sec.dbLine === dbLine
+                    ? { ...sec, metrics: sec.metrics.map((m) => m.key === metricKey ? { ...m, plan: value } : m) }
+                    : sec
+                );
+                const patchSnap = (s: DailySnapshot): DailySnapshot => (
+                  { ...s, sections: s.sections.map(patchSection) }
+                );
+                return {
+                  ...prev,
+                  days: prev.days?.map(patchSnap),
+                  weeks: prev.weeks?.map(patchSnap),
+                  months: prev.months?.map(patchSnap),
+                  monthlySummary: prev.monthlySummary ? patchSnap(prev.monthlySummary) : prev.monthlySummary,
+                };
+              });
               setSaving(true);
               try {
                 const res = await fetch("/api/daily/plans", {
@@ -1237,10 +1270,19 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
                     periodDate,
                   }),
                 });
-                if (!res.ok) console.error("Plan save error:", await res.text());
-                await fetchData();
+                if (!res.ok) {
+                  console.error("Plan save error:", await res.text());
+                  // Server rejected — reconcile by forcing a refetch so the
+                  // UI drops the optimistic value.
+                  fetchData();
+                  return;
+                }
+                // Background refetch so derived/computed cells pick up the
+                // new plan. Fire-and-forget — user keeps editing freely.
+                fetchData();
               } catch (e) {
                 console.error("Plan save error:", e);
+                fetchData();
               } finally {
                 setSaving(false);
               }
