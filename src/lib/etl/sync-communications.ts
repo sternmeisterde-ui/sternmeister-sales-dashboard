@@ -8,8 +8,7 @@
 //   business_hours_sla, business_hours_since_communication
 
 import {
-  getCallEvents,
-  getCallNoteParams,
+  getAllCallNotesByDate,
   getContactsWithLeads,
   getMessageEvents,
 } from "@/lib/kommo/client";
@@ -52,9 +51,15 @@ export async function syncCommunications(
   // Contact→lead from our lead cache (covers leads synced in this run)
   const contactMap = buildContactMap(leadCache);
 
-  // ── Phase 1: fetch call events ───────────────────────────────────────────
-  const callEvents = await getCallEvents(fromTs, toTs);
-  console.log(`[ETL] comm: ${callEvents.length} call events`);
+  // ── Phase 1: fetch call notes directly from /contacts/notes + /leads/notes ──
+  // Old path (getCallEvents via Events API) was documented to miss ~18% of
+  // real calls that never emit an event row. getAllCallNotesByDate hits the
+  // note endpoints directly and returns the same shape PLUS duration /
+  // call_status inline, so the old Phase-2 getCallNoteParams round-trip is
+  // no longer needed. Kommo's own reference confirms /notes is the
+  // authoritative list for note_type=call_in/call_out.
+  const callEvents = await getAllCallNotesByDate(fromTs, toTs);
+  console.log(`[ETL] comm: ${callEvents.length} call notes`);
 
   // Resolve contacts not in our cache via batch API call
   const unknownContactIds = [
@@ -72,12 +77,6 @@ export async function syncCommunications(
     console.log(`[ETL] comm: resolved ${unknownContactIds.length} unknown contacts`);
   }
 
-  // Fetch note params split by entity type — contact notes from /contacts/notes,
-  // lead notes from /leads/notes — eliminates wasted 204 responses from old approach.
-  const noteParams = await getCallNoteParams(
-    callEvents.map((e) => ({ noteId: e.noteId, entityType: e.entityType })),
-  );
-
   // ── Phase 2: fetch message events ────────────────────────────────────────
   const msgEvents = await getMessageEvents(fromTs, toTs);
   console.log(`[ETL] comm: ${msgEvents.length} message events`);
@@ -93,9 +92,9 @@ export async function syncCommunications(
     byLead.get(lid)!.push(row);
   };
 
-  // Call events → one row per (note, lead) pair
+  // Call events → one row per (note, lead) pair. `duration` and `callStatus`
+  // come inline from the note response — no extra round-trip needed.
   for (const ev of callEvents) {
-    const note = noteParams.get(ev.noteId);
     const leadIds =
       ev.entityType === "contact"
         ? (contactMap.get(ev.entityId) ?? [])
@@ -116,8 +115,8 @@ export async function syncCommunications(
         leadDayStart: lead
           ? new Date(new Date(lead.createdAt).setUTCHours(0, 0, 0, 0))
           : null,
-        callStatus: note?.callStatus ?? null,
-        duration: note?.duration ?? 0,
+        callStatus: ev.callStatus ?? null,
+        duration: ev.duration,
         manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",
         statusId: lead?.statusId ?? null,
         statusName: lead?.statusName ?? null,
