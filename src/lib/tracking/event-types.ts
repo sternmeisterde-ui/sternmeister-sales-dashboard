@@ -64,7 +64,9 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // ── Communications (non-call) ──────────────────────────────────────
   { key: "incoming_chat_message", label: "Входящее сообщение", category: "crm", group: "Коммуникации" },
   { key: "outgoing_chat_message", label: "Исходящее сообщение", category: "crm", group: "Коммуникации" },
-  { key: "internal_chat_message", label: "Внутреннее сообщение", category: "crm", group: "Коммуникации" },
+  // `internal_chat_message` rejected by Kommo's /events filter on this account
+  // (400 "Invalid params passed to filter" with key=type). Removed so the
+  // whole types batch stops 400ing. If Kommo re-enables it, restore the entry.
   { key: "incoming_email", label: "Входящее письмо", category: "crm", group: "Коммуникации" },
   { key: "outgoing_email", label: "Исходящее письмо", category: "crm", group: "Коммуникации" },
   { key: "incoming_sms", label: "Входящее SMS", category: "crm", group: "Коммуникации" },

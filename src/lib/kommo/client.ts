@@ -1101,36 +1101,270 @@ export interface RawKommoEventRow {
  * Kommo user IDs) and/or event types. No type-specific shaping — consumers
  * classify as needed.
  *
- * Kommo `/events` quirks we work around here:
- *  - `filter[created_by][]` is capped at 10 IDs per call → user batches.
- *  - Without `filter[type][]`, the endpoint pages are dominated by
- *    system/robot/chat events (created_by we don't know), which we then
- *    filter client-side and end up with ~nothing. Result: only calls
- *    appear in the cache. Callers MUST pass `types` explicitly so we can
- *    query each type group with `filter[type][]` and get reliable results.
- *  - `filter[type][]` has no hard cap but URL length matters; we batch
- *    types in groups of TYPE_BATCH to stay under ~8 KB.
+ * Resilience model (see `tryFetchBatchBisected` + `fetchBatchPages`):
+ *  - Auth errors (401/403) abort the whole call — fix credentials.
+ *  - Unknown event type (400 "Invalid params" value=<T>) → bisect the type
+ *    batch until the culprit is isolated, then blacklist it in-process so
+ *    future calls skip it. Other types in the batch still sync.
+ *  - 5xx errors → retried up to 3× with exponential backoff; then the batch
+ *    is skipped (logged) and the next batch proceeds.
+ *  - Other 4xx → batch skipped, logged.
+ *  - Pagination cap hit → batch truncated, logged.
  *
- * Per-batch dedup: the same event can appear under multiple (user,type)
- * pages; we dedup on `ev.id` before returning.
+ * Streaming mode: if `onBatch` is provided, it fires after every successful
+ * (user × type) batch with that batch's deduped events. Lets callers
+ * incrementally persist — no more "lost 30k events because page 50 threw".
+ * Return value still contains all events (legacy callers unchanged).
+ *
+ * Kommo `/events` batching constraints we respect:
+ *  - `filter[created_by][]` capped at 10 IDs per call → USER_BATCH=10.
+ *  - Without `filter[type][]`, pages are dominated by system/robot events
+ *    we can't attribute. Callers MUST pass `types` explicitly.
+ *  - `filter[type][]` has no hard cap but URL length matters → TYPE_BATCH=20.
  */
 const TYPE_BATCH = 20;
+const USER_BATCH = 10;
+
+// Process-level blacklist of types Kommo has rejected at least once this
+// lifetime. Learned lazily via bisect; cleared on restart (by design — forces
+// a re-verification in case Kommo re-enables a type). Not per-department:
+// both B2G and B2B use the same Kommo account / same API schema.
+const INVALID_EVENT_TYPES = new Set<string>();
+
+/** Snapshot of the current blacklist — for observability/logs/admin endpoints. */
+export function getInvalidEventTypes(): string[] {
+  return Array.from(INVALID_EVENT_TYPES).sort();
+}
+
+type RawBatchResult =
+  | { status: "ok"; events: RawKommoEventRow[]; truncated: boolean }
+  | { status: "invalid_type"; body: string }
+  | { status: "skip"; reason: string };
+
+/**
+ * Fetch all pages for one (userBatch, typeBatch) pair. Retries transient
+ * failures (5xx) up to 3× per page with exponential backoff. Returns a
+ * discriminated result so the caller can react to "invalid type in filter"
+ * with bisection instead of giving up.
+ */
+async function fetchBatchPages(
+  baseUrl: string,
+  headers: HeadersInit,
+  dateFrom: number,
+  dateTo: number,
+  userBatch: number[],
+  typeBatch: string[] | null,
+  maxPages: number,
+): Promise<RawBatchResult> {
+  const events: RawKommoEventRow[] = [];
+  const seen = new Set<number>();
+  let truncated = false;
+  let page = 1;
+
+  while (page <= maxPages) {
+    const url = new URL(`${baseUrl}/events`);
+    url.searchParams.set("filter[created_at][from]", String(dateFrom));
+    url.searchParams.set("filter[created_at][to]", String(dateTo));
+    url.searchParams.set("limit", "100");
+    url.searchParams.set("page", String(page));
+    for (const id of userBatch) url.searchParams.append("filter[created_by][]", String(id));
+    if (typeBatch) {
+      for (const t of typeBatch) url.searchParams.append("filter[type][]", t);
+    }
+
+    // Per-page retry loop for 5xx. 429 is handled inside rateLimitedFetch;
+    // network errors are retried once there but still surface if the retry
+    // also fails, so we catch here and convert to a `skip` result instead of
+    // letting the exception kill the whole sync.
+    let res: Response | null = null;
+    let lastErr = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        res = await rateLimitedFetch(url.toString(), { headers });
+      } catch (networkErr) {
+        lastErr = networkErr instanceof Error ? networkErr.message : String(networkErr);
+        const backoffMs = 1000 * 2 ** attempt;
+        console.warn(
+          `[fetchRawEvents] network error on page ${page} (attempt ${attempt + 1}/3), ` +
+            `backing off ${backoffMs}ms — ${lastErr}`,
+        );
+        await new Promise<void>((r) => setTimeout(r, backoffMs));
+        continue;
+      }
+      if (res.status < 500 || res.status === 501) break;
+      lastErr = `${res.status} ${res.statusText}`;
+      const backoffMs = 1000 * 2 ** attempt;
+      console.warn(
+        `[fetchRawEvents] 5xx on page ${page} (attempt ${attempt + 1}/3), ` +
+          `backing off ${backoffMs}ms — ${lastErr}`,
+      );
+      await new Promise<void>((r) => setTimeout(r, backoffMs));
+    }
+    if (!res) return { status: "skip", reason: `no response after 3 attempts: ${lastErr}` };
+
+    if (res.status === 204) break;
+    if (res.status === 404) break;
+    if (res.status >= 500) {
+      return { status: "skip", reason: `5xx after retries: ${lastErr}` };
+    }
+    if (res.status === 401 || res.status === 403) {
+      // Fatal — not our problem to paper over. Caller's try/catch will surface
+      // it to the operator (credentials need rotating / scope adjusted).
+      throw new Error(`Kommo events API ${res.status}: auth/permission`);
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      if (res.status === 400 && text.includes('"Invalid params passed to filter"')) {
+        return { status: "invalid_type", body: text };
+      }
+      return { status: "skip", reason: `${res.status}: ${text.slice(0, 200)}` };
+    }
+
+    const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
+    const items = data._embedded?.events ?? [];
+
+    for (const ev of items) {
+      if (seen.has(ev.id)) continue;
+      seen.add(ev.id);
+      const noteId = ev.value_after?.[0]?.note?.id ?? null;
+      events.push({
+        id: ev.id,
+        type: ev.type,
+        createdBy: ev.created_by,
+        createdAt: ev.created_at,
+        entityType: ev.entity_type,
+        entityId: ev.entity_id,
+        noteId,
+        raw: { value_after: ev.value_after },
+      });
+    }
+
+    if (!data._links?.next) break;
+    page++;
+    if (page > maxPages) {
+      truncated = true;
+      console.warn(
+        `[fetchRawEvents] pagination cap hit (${maxPages} pages) for ` +
+          `users=[${userBatch.join(",")}] types=[${typeBatch?.join(",") ?? "*"}] ` +
+          `range=${new Date(dateFrom * 1000).toISOString()}..${new Date(dateTo * 1000).toISOString()} ` +
+          `— further events from this batch dropped`,
+      );
+    }
+  }
+
+  return { status: "ok", events, truncated };
+}
+
+/**
+ * Attempts to fetch a batch; on "invalid type" rejection, recursively bisects
+ * the type batch to isolate the offender, blacklists it, and retries the good
+ * halves. Parallel recursion is safe — rateLimitedFetch serializes at the HTTP
+ * layer. With a 20-type batch, bisect adds at most ~5 extra requests to find
+ * the single bad type; subsequent calls skip it entirely.
+ */
+async function tryFetchBatchBisected(
+  baseUrl: string,
+  headers: HeadersInit,
+  dateFrom: number,
+  dateTo: number,
+  userBatch: number[],
+  typeBatch: string[] | null,
+  maxPages: number,
+): Promise<RawKommoEventRow[]> {
+  // Re-filter against the (possibly grown) blacklist every recursion level,
+  // so the second half of a bisect doesn't re-encounter a type the first half
+  // just blacklisted. Also keeps later batches in the same `fetchRawEvents`
+  // call from repeating the bisect for the same known-bad type.
+  if (typeBatch && typeBatch.length > 0 && INVALID_EVENT_TYPES.size > 0) {
+    const filtered = typeBatch.filter((t) => !INVALID_EVENT_TYPES.has(t));
+    if (filtered.length === 0) return [];
+    if (filtered.length < typeBatch.length) typeBatch = filtered;
+  }
+
+  const result = await fetchBatchPages(
+    baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch, maxPages,
+  );
+
+  if (result.status === "ok") return result.events;
+
+  if (result.status === "skip") {
+    console.warn(
+      `[fetchRawEvents] batch skipped: users=[${userBatch.join(",")}] ` +
+        `types=[${typeBatch?.join(",") ?? "*"}] — ${result.reason}`,
+    );
+    return [];
+  }
+
+  // invalid_type — need to bisect to find the culprit
+  if (!typeBatch || typeBatch.length === 0) {
+    // Can only happen if Kommo rejects something unrelated to filter[type][]
+    // with that error message. Treat as skip — not our call to make.
+    console.error(
+      `[fetchRawEvents] invalid_type response with no type filter, skipping: ${result.body.slice(0, 200)}`,
+    );
+    return [];
+  }
+  if (typeBatch.length === 1) {
+    const bad = typeBatch[0];
+    INVALID_EVENT_TYPES.add(bad);
+    console.warn(
+      `[fetchRawEvents] blacklisting unsupported event type "${bad}" — ` +
+        `will be skipped from all future Kommo /events requests this process`,
+    );
+    return [];
+  }
+
+  const mid = Math.floor(typeBatch.length / 2);
+  const [leftEvents, rightEvents] = await Promise.all([
+    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch.slice(0, mid), maxPages),
+    tryFetchBatchBisected(baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch.slice(mid), maxPages),
+  ]);
+  return [...leftEvents, ...rightEvents];
+}
 
 export async function fetchRawEvents(
   dateFrom: number,
   dateTo: number,
-  opts?: { kommoUserIds?: number[]; types?: string[]; maxPages?: number },
+  opts?: {
+    kommoUserIds?: number[];
+    types?: string[];
+    maxPages?: number;
+    /**
+     * Fires after every successful (user × type) batch. Events are deduped
+     * within the batch but NOT across batches — the caller is expected to
+     * rely on its own idempotent persistence (ON CONFLICT DO NOTHING). Use
+     * this to stream events into the DB so partial failures don't lose
+     * already-fetched data.
+     */
+    onBatch?: (events: RawKommoEventRow[]) => Promise<void>;
+  },
 ): Promise<RawKommoEventRow[]> {
   const baseUrl = await getBaseUrl();
   const headers = await getAuthHeaders();
   const maxPages = opts?.maxPages ?? 100;
 
-  // User batches — Kommo limits filter[created_by][] to 10 IDs per call.
-  // If the caller explicitly passed an empty array, that means "no managers
-  // to query" and we short-circuit. If `kommoUserIds` wasn't passed at all,
-  // we push one batch with no filter so the caller gets all-account events
-  // (legacy behaviour kept for any ad-hoc callers).
-  const USER_BATCH = 10;
+  // Pre-filter against the process-level blacklist. Types we already know
+  // Kommo rejects never go into a filter[type][] list again.
+  let effectiveTypes = opts?.types;
+  if (effectiveTypes && effectiveTypes.length > 0 && INVALID_EVENT_TYPES.size > 0) {
+    const filtered = effectiveTypes.filter((t) => !INVALID_EVENT_TYPES.has(t));
+    const dropped = effectiveTypes.length - filtered.length;
+    if (dropped > 0) {
+      console.info(
+        `[fetchRawEvents] pre-filtered ${dropped} blacklisted type(s): ` +
+          `${effectiveTypes.filter((t) => INVALID_EVENT_TYPES.has(t)).join(",")}`,
+      );
+    }
+    // If every requested type is blacklisted, return empty. Crucially, do NOT
+    // fall through to the null-types path below — that would hit Kommo
+    // unfiltered and flood us with events the caller didn't ask for (plus
+    // burn the page budget on system/robot noise).
+    if (filtered.length === 0) return [];
+    effectiveTypes = filtered;
+  }
+
+  // User batches — `filter[created_by][]` caps at 10. Empty list = caller
+  // signalled "no managers" and we short-circuit. Missing = unfiltered (legacy).
   const idBatches: number[][] = [];
   const userIdsProvided = opts?.kommoUserIds !== undefined;
   if (userIdsProvided && (opts!.kommoUserIds!.length === 0)) {
@@ -1144,14 +1378,12 @@ export async function fetchRawEvents(
     idBatches.push([]);
   }
 
-  // Type batches — if caller didn't specify types, we make ONE batch with no
-  // filter[type][] (legacy behaviour kept so existing callers keep working).
-  // For sync-tracking callers that pass the full EVENT_TYPES list, we split
-  // into URL-safe chunks.
+  // Type batches — chunk for URL-length safety. `null` = no filter[type][]
+  // (kept for ad-hoc callers, but the JSDoc strongly discourages it).
   const typeBatches: (string[] | null)[] = [];
-  if (opts?.types && opts.types.length > 0) {
-    for (let i = 0; i < opts.types.length; i += TYPE_BATCH) {
-      typeBatches.push(opts.types.slice(i, i + TYPE_BATCH));
+  if (effectiveTypes && effectiveTypes.length > 0) {
+    for (let i = 0; i < effectiveTypes.length; i += TYPE_BATCH) {
+      typeBatches.push(effectiveTypes.slice(i, i + TYPE_BATCH));
     }
   } else {
     typeBatches.push(null);
@@ -1159,59 +1391,22 @@ export async function fetchRawEvents(
 
   const byId = new Map<number, RawKommoEventRow>();
 
-  for (const batch of idBatches) {
+  for (const userBatch of idBatches) {
     for (const typeBatch of typeBatches) {
-      let page = 1;
-      while (page <= maxPages) {
-        const url = new URL(`${baseUrl}/events`);
-        url.searchParams.set("filter[created_at][from]", String(dateFrom));
-        url.searchParams.set("filter[created_at][to]", String(dateTo));
-        url.searchParams.set("limit", "100");
-        url.searchParams.set("page", String(page));
-        for (const id of batch) url.searchParams.append("filter[created_by][]", String(id));
-        if (typeBatch) {
-          for (const t of typeBatch) url.searchParams.append("filter[type][]", t);
-        }
+      const batchEvents = await tryFetchBatchBisected(
+        baseUrl, headers, dateFrom, dateTo, userBatch, typeBatch, maxPages,
+      );
 
-        const res = await rateLimitedFetch(url.toString(), { headers });
-        if (res.status === 204) break;
-        if (!res.ok) {
-          if (res.status === 404) break;
-          const text = await res.text();
-          throw new Error(`Kommo events API ${res.status}: ${text}`);
-        }
+      // Streaming persistence hook: caller gets this batch's events before we
+      // even finish the next one. Errors in the caller's persistence layer
+      // still abort the whole sync — if you can't write, the watermark must
+      // not advance past the last durable insert.
+      if (opts?.onBatch && batchEvents.length > 0) {
+        await opts.onBatch(batchEvents);
+      }
 
-        const data = (await res.json()) as KommoPaginatedResponse<KommoEvent>;
-        const items = data._embedded?.events ?? [];
-
-        for (const ev of items) {
-          if (byId.has(ev.id)) continue;
-          const noteId = ev.value_after?.[0]?.note?.id ?? null;
-          byId.set(ev.id, {
-            id: ev.id,
-            type: ev.type,
-            createdBy: ev.created_by,
-            createdAt: ev.created_at,
-            entityType: ev.entity_type,
-            entityId: ev.entity_id,
-            noteId,
-            raw: { value_after: ev.value_after },
-          });
-        }
-
-        if (!data._links?.next) break;
-        page++;
-        if (page > maxPages) {
-          // Silent truncation would let ensureRangeCached advance the earliest
-          // watermark past events we never fetched. Log so operators notice
-          // and can narrow the sync window.
-          console.warn(
-            `[fetchRawEvents] pagination cap hit (${maxPages} pages) for batch ` +
-              `users=[${batch.join(",")}] types=[${typeBatch?.join(",") ?? "*"}] ` +
-              `range=${new Date(dateFrom * 1000).toISOString()}..${new Date(dateTo * 1000).toISOString()} ` +
-              `— further events from this batch were dropped`,
-          );
-        }
+      for (const ev of batchEvents) {
+        if (!byId.has(ev.id)) byId.set(ev.id, ev);
       }
     }
   }

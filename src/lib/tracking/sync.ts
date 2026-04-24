@@ -129,65 +129,68 @@ export async function syncDepartment(
   const kommoUserIds = managers.map((m) => m.kommoUserId);
   const kommoIdToManager = new Map(managers.map((m) => [m.kommoUserId, m.id]));
 
-  try {
-    // Fetch events for every type we track (explicit `filter[type][]` — Kommo
-    // without it returns an unreliable mix that drops most CRM activity) and
-    // call notes (for duration enrichment) in parallel.
-    const [events, callNotes] = await Promise.all([
-      fetchRawEvents(dateFromSec, dateToSec, {
-        kommoUserIds,
-        types: ALL_TRACKED_EVENT_TYPES,
-      }),
-      getCallNotes(dateFromSec, dateToSec, kommoUserIds).catch((err) => {
-        console.warn(`[tracking-sync] getCallNotes failed: ${err?.message}; calls will have 0 duration`);
-        return [];
-      }),
-    ]);
+  // Durable progress counters. Mutated inside the streaming onBatch callback
+  // so a mid-sync crash still leaves the watermark reflecting what actually
+  // made it to the DB (tracked in the `finally` block below).
+  let inserted = 0;
+  let maxEventTs = state?.lastEventTs ? new Date(state.lastEventTs) : new Date(0);
+  let minEventTs: Date | null = state?.earliestEventTs ? new Date(state.earliestEventTs) : null;
+  let fatalError: unknown = null;
 
-    // Build noteId -> duration map
+  try {
+    // Call notes first — needed for duration enrichment inside the events
+    // callback. Soft-fails to empty map (calls get duration=0) so a /notes
+    // outage doesn't block the much more important event capture.
+    const callNotes = await getCallNotes(dateFromSec, dateToSec, kommoUserIds).catch((err) => {
+      console.warn(`[tracking-sync] getCallNotes failed: ${err?.message}; calls will have 0 duration`);
+      return [] as Awaited<ReturnType<typeof getCallNotes>>;
+    });
     const durationByNoteId = new Map<number, number>();
     for (const note of callNotes) {
       const dur = Number(note.params?.duration) || 0;
       if (dur > 0) durationByNoteId.set(note.id, dur);
     }
 
-    // Upsert events
-    let inserted = 0;
-    let maxEventTs = state?.lastEventTs ? new Date(state.lastEventTs) : new Date(0);
-    let minEventTs: Date | null = state?.earliestEventTs ? new Date(state.earliestEventTs) : null;
+    // Stream: fetchRawEvents invokes this for every successful (user × type)
+    // batch. We insert immediately so partial sync failures still leave the
+    // already-fetched events in the DB — the next run's delta window picks up
+    // where this one stopped. Watermark counters are updated here so the
+    // `finally` block can persist the real maximum even if we throw later.
+    await fetchRawEvents(dateFromSec, dateToSec, {
+      kommoUserIds,
+      types: ALL_TRACKED_EVENT_TYPES,
+      onBatch: async (batchEvents) => {
+        // Phase 1: build rows. Do NOT mutate maxEventTs/minEventTs yet — if the
+        // insert fails mid-chunk and the watermark has already advanced past an
+        // event that's not in the DB, the next delta window skips it forever.
+        const rowsToInsert = batchEvents
+          .map((ev) => {
+            const managerId = kommoIdToManager.get(ev.createdBy);
+            if (!managerId) return null; // event created by user not in our manager set — skip
+            const evTs = new Date(ev.createdAt * 1000);
+            const isCall = CALL_TYPES.has(ev.type);
+            const duration = isCall && ev.noteId ? (durationByNoteId.get(ev.noteId) ?? 0) : 0;
+            return {
+              department,
+              managerId,
+              kommoUserId: ev.createdBy,
+              eventId: String(ev.id),
+              eventType: ev.type,
+              createdAt: evTs,
+              durationSec: duration,
+              entityType: ev.entityType,
+              entityId: ev.entityId,
+              noteId: ev.noteId,
+              raw: ev.raw as unknown as Record<string, unknown>,
+            };
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null);
+        if (rowsToInsert.length === 0) return;
 
-    if (events.length > 0) {
-      // Batch insert with ON CONFLICT DO NOTHING
-      const rowsToInsert = events
-        .map((ev) => {
-          const managerId = kommoIdToManager.get(ev.createdBy);
-          if (!managerId) return null; // event from user who isn't in our manager list — skip
-
-          const evTs = new Date(ev.createdAt * 1000);
-          if (evTs > maxEventTs) maxEventTs = evTs;
-          if (!minEventTs || evTs < minEventTs) minEventTs = evTs;
-
-          const isCall = CALL_TYPES.has(ev.type);
-          const duration = isCall && ev.noteId ? (durationByNoteId.get(ev.noteId) ?? 0) : 0;
-
-          return {
-            department,
-            managerId,
-            kommoUserId: ev.createdBy,
-            eventId: String(ev.id),
-            eventType: ev.type,
-            createdAt: evTs,
-            durationSec: duration,
-            entityType: ev.entityType,
-            entityId: ev.entityId,
-            noteId: ev.noteId,
-            raw: ev.raw as unknown as Record<string, unknown>,
-          };
-        })
-        .filter((r): r is NonNullable<typeof r> => r !== null);
-
-      if (rowsToInsert.length > 0) {
-        // Chunked insert — Neon HTTP caps payload size per call.
+        // Phase 2: chunked insert. ON CONFLICT DO NOTHING absorbs cross-batch
+        // and cross-sync duplicates (1h overlap window). After each chunk
+        // succeeds, advance watermarks only for rows in that chunk — if a
+        // later chunk throws, the watermark reflects exactly what's durable.
         const CHUNK = 500;
         for (let i = 0; i < rowsToInsert.length; i += CHUNK) {
           const chunk = rowsToInsert.slice(i, i + CHUNK);
@@ -197,33 +200,50 @@ export async function syncDepartment(
             .onConflictDoNothing({ target: [trackingEvents.department, trackingEvents.eventId] })
             .returning({ id: trackingEvents.id });
           inserted += result.length;
+          // Chunk persisted. Advance watermarks over the rows we just wrote
+          // (even duplicates count — they prove we've already seen the ts).
+          for (const row of chunk) {
+            if (row.createdAt > maxEventTs) maxEventTs = row.createdAt;
+            if (!minEventTs || row.createdAt < minEventTs) minEventTs = row.createdAt;
+          }
         }
-      }
-    }
-
-    // earliestEventTs watermark — extend to whichever is earlier: the sync
-    // window's floor (ensures we mark the full range as "covered" even if
-    // Kommo returned no events in the early part of it), or the oldest event
-    // we actually observed.
+      },
+    });
+  } catch (err) {
+    // fetchRawEvents only throws on fatal errors (auth). Everything else is
+    // soft-skipped batch-by-batch. Stash it so we still persist the watermark
+    // for whatever streamed through before the failure.
+    fatalError = err;
+    console.error(
+      `[tracking-sync] ${department} aborted mid-stream (persisting partial progress):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  } finally {
+    // Watermark policy:
+    //  • On success: advance lastEventTs past the batches we observed. The
+    //    1h-overlap in the next delta window catches any late-arriving event
+    //    with a timestamp slightly before our max.
+    //  • On fatal error: KEEP lastEventTs at the previous value. Already-
+    //    persisted events are idempotent (ON CONFLICT DO NOTHING), and the
+    //    next run re-covers the entire window. Advancing on partial progress
+    //    would risk skipping events from unfetched batches whose timestamps
+    //    fall earlier than our streamed max − 1h (Kommo events are not
+    //    globally sorted across (user × type) batches).
     const effectiveEarliest = minEventTs && minEventTs < windowFrom ? minEventTs : windowFrom;
     const newEarliest = state?.earliestEventTs
       ? new Date(Math.min(new Date(state.earliestEventTs).getTime(), effectiveEarliest.getTime()))
       : effectiveEarliest;
-
-    await upsertSyncState(department, now, maxEventTs, newEarliest, null);
-    return { inserted, windowFrom, windowTo };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[tracking-sync] ${department} failed:`, msg);
-    await upsertSyncState(
-      department,
-      now,
-      state?.lastEventTs ?? null,
-      state?.earliestEventTs ? new Date(state.earliestEventTs) : null,
-      msg,
-    );
-    throw err;
+    const lastErrorMsg = fatalError
+      ? (fatalError instanceof Error ? fatalError.message : String(fatalError))
+      : null;
+    const persistedLastEventTs = fatalError
+      ? (state?.lastEventTs ? new Date(state.lastEventTs) : null)
+      : maxEventTs;
+    await upsertSyncState(department, now, persistedLastEventTs, newEarliest, lastErrorMsg);
   }
+
+  if (fatalError) throw fatalError;
+  return { inserted, windowFrom, windowTo };
 }
 
 async function upsertSyncState(
