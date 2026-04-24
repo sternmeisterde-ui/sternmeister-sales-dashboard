@@ -125,6 +125,11 @@ export const B2B_FIXED_PLAN_DEFAULTS: Record<string, number> = {
   med_ql2p_p: 5,         // Excel row78 = 0.05
   buh_avgCheck_p: 900,   // Excel row65
   med_avgCheck_p: 500,   // Excel row80
+  // Cumulative leads plans — stored as MONTHLY totals; getPlan divides by
+  // planDivisor (daysInMonth / weeks / 1/12 yr) before rendering, so daily
+  // view lands on Excel's per-day figures (16 Бух, 6.66 Мед for Apr 2026).
+  buh_komLeads_p: 480,   // Excel row54 = 16/day × 30 days ≈ 480/month
+  med_komLeads_p: 200,   // Excel row73 = 6.66/day × 30 ≈ 200/month
   // Звонки / ОКК (per ТЗ defaults)
   calls_avgWait_p: 35,
   calls_dialPercent_p: 65,

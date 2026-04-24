@@ -837,6 +837,14 @@ export async function buildDailyResponse(department: string, period: string, dat
     if (val === undefined) {
       val = planLookup.get(`${line}:null:${metricKey}`);
     }
+    // Fall back to B2B fixed defaults when no admin-stored value exists.
+    // Defaults are stored at MONTHLY scale (matches how admins enter plans),
+    // so they flow through the same planDivisor scaling below — one code
+    // path instead of duplicating the scaling in every default-aware caller.
+    if (val === undefined && department === "b2b") {
+      const def = B2B_FIXED_PLAN_DEFAULTS[metricKey];
+      if (def != null) val = String(def);
+    }
     if (val === undefined) return null;
     // Skip division for non-cumulative metrics.
     if (NON_CUMULATIVE_PLAN_KEYS.has(metricKey)) return val;
@@ -1086,13 +1094,8 @@ export async function buildDailyResponse(department: string, period: string, dat
       // Overridable facts (hasPlan && hasFact — выручка): если есть запись в
       // daily_plans, она побеждает SQL-computed значение.
       if (metric.hasPlan && !metric.hasFact) {
-        if (!plan && department === "b2b") {
-          // ТЗ-дефолты подтягиваются из единого словаря в metrics-config-b2b
-          // (B2B_FIXED_PLAN_DEFAULTS) — чтобы не расходились между UI-рендером
-          // и getB2BFact, который читает те же дефолты для derived планов.
-          const def = B2B_FIXED_PLAN_DEFAULTS[metric.key];
-          if (def != null) plan = String(def);
-        }
+        // `plan` already contains the fixed-default fallback (getPlan handles
+        // B2B_FIXED_PLAN_DEFAULTS with the same scaling as stored plans).
         if (!plan && department === "b2b") {
           // Derived plan (e.g., buh_newRevenue_p = sales × avgCheck) — compute.
           fact = getB2BFact(metric.key, section.key, {
@@ -1697,18 +1700,16 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   const totalSales = buh.salesCount + med.salesCount;
   const totalQualLeads = buh.qualLeads + med.qualLeads;
 
-  // ===== Manual plan inputs (Monthly) propagated to Daily/Weekly =====
-  // Fallbacks from B2B_FIXED_PLAN_DEFAULTS (Excel Daily_Numbers row65/80 etc.)
-  // so derived plans (newRevenue = sales × avgCheck) produce sensible numbers
-  // even when the admin hasn't manually entered every single plan cell.
+  // ===== Manual plan inputs (Monthly, scaled by getPlan) =====
+  // getPlan now falls back to B2B_FIXED_PLAN_DEFAULTS and applies the same
+  // planDivisor scaling as for admin-stored values, so every "?? 0" here
+  // trips only when the metric has no fixed default (currently none).
   const buhKomLeadsPlan = Number(ctx.getPlan("salesBuh", null, "buh_komLeads_p") ?? 0);
   const medKomLeadsPlan = Number(ctx.getPlan("salesMed", null, "med_komLeads_p") ?? 0);
-  const buhAvgCheckPlan = Number(ctx.getPlan("salesBuh", null, "buh_avgCheck_p") ?? B2B_FIXED_PLAN_DEFAULTS.buh_avgCheck_p);
-  const medAvgCheckPlan = Number(ctx.getPlan("salesMed", null, "med_avgCheck_p") ?? B2B_FIXED_PLAN_DEFAULTS.med_avgCheck_p);
-  // QL2P: Excel row61 = 0.075 (buh), row78 = 0.05 (med), total = среднее.
-  // Пользовательский план, если сохранён в daily_plans, перекрывает дефолт.
-  const buhQl2pPlan = Number(ctx.getPlan("salesBuh", null, "buh_ql2p_p") ?? B2B_FIXED_PLAN_DEFAULTS.buh_ql2p_p);
-  const medQl2pPlan = Number(ctx.getPlan("salesMed", null, "med_ql2p_p") ?? B2B_FIXED_PLAN_DEFAULTS.med_ql2p_p);
+  const buhAvgCheckPlan = Number(ctx.getPlan("salesBuh", null, "buh_avgCheck_p") ?? 0);
+  const medAvgCheckPlan = Number(ctx.getPlan("salesMed", null, "med_avgCheck_p") ?? 0);
+  const buhQl2pPlan = Number(ctx.getPlan("salesBuh", null, "buh_ql2p_p") ?? 0);
+  const medQl2pPlan = Number(ctx.getPlan("salesMed", null, "med_ql2p_p") ?? 0);
   const TOTAL_QL2P_DEFAULT = Number(B2B_FIXED_PLAN_DEFAULTS.total_ql2p_p);
 
   // Derived plans
