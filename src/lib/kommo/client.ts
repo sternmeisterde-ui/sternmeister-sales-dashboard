@@ -1170,21 +1170,21 @@ async function fetchBatchPages(
     url.searchParams.set("limit", "250");
     url.searchParams.set("page", String(page));
     // Kommo docs specify filter[created_by] and filter[type] as comma-
-    // separated STRING values, not PHP-style repeated `[]` keys. The `[]`
-    // form sometimes works but silently narrows results for multi-entity
-    // event types — major cause of under-reported CRM activity on the
-    // timeline before we switched. Keep .set() (single key) with join.
+    // separated STRING values, not PHP-style repeated `[]` keys. Keep .set()
+    // (single key) with join.
     if (userBatch.length > 0) {
       url.searchParams.set("filter[created_by]", userBatch.join(","));
     }
     if (typeBatch && typeBatch.length > 0) {
       url.searchParams.set("filter[type]", typeBatch.join(","));
     }
-    // Without filter[entity], /events returns only lead-scoped events by
-    // default — contact/company/customer/task events (contact_linked,
-    // task_completed, custom_field_value_changed on non-leads, etc.) never
-    // come through, which is ~half of CRM-activity minute coverage.
-    url.searchParams.set("filter[entity]", "lead,contact,company,customer,task");
+    // NOTE: filter[entity] is single-value in Kommo — a prior attempt to
+    // pass "lead,contact,company,customer,task" as a comma-list was parsed
+    // as the literal string "lead" and clashed with non-lead types in the
+    // batch ("Entity doesn't match type filter"). Multi-entity coverage
+    // needs an outer loop over entities with their matching type subsets.
+    // Tracked as follow-up; for now we rely on Kommo's default scope + the
+    // bisect/blacklist for types not valid in that scope.
 
     // Per-page retry loop for 5xx. 429 is handled inside rateLimitedFetch;
     // network errors are retried once there but still surface if the retry
@@ -1228,9 +1228,9 @@ async function fetchBatchPages(
     }
     if (!res.ok) {
       const text = await res.text();
-      // Kommo returns the error detail either with or without a trailing
-      // period depending on the version, and sometimes wraps it in different
-      // quoting. Match the stable prefix without quotes so both variants hit.
+      // Kommo 400 "Invalid params passed to filter" names the single bad
+      // type in the body — bisect isolates it without blacklisting siblings.
+      // Match without quotes to cover both "filter." and "filter" variants.
       if (res.status === 400 && text.includes("Invalid params passed to filter")) {
         return { status: "invalid_type", body: text };
       }

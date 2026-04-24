@@ -31,7 +31,13 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        as comma-separated strings, added filter[entity] covering contact/
 //        company/customer/task (was defaulting to lead-only, which dropped
 //        ~half of CRM events), bumped limit 100 → 250 (2026-04-25)
-const CURRENT_FILTER_VERSION = 2;
+//   v3 — reverted filter[entity]: Kommo treats it as single-value, not
+//        comma-list, so v2 was parsed as entity=lead and broke all multi-
+//        entity batches. The v2 run also poisoned the in-process blacklist
+//        with non-lead-valid types. v3 clears blacklist on restart and
+//        re-backfills without filter[entity]. Proper per-entity loop is
+//        a follow-up; for now we accept lead-scoped default coverage.
+const CURRENT_FILTER_VERSION = 3;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
