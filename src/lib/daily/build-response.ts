@@ -1846,8 +1846,12 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "buh_sales_p":      return String(buhSalesPlan);                    // R27
       case "buh_sales_f":      return String(buh.salesCount);                  // R28
       case "buh_prepayments":  return String(buh.prepaymentCount);             // R29
-      case "buh_ql2p_p":       return String(buhQl2pPlan);                    // R30 (default 8%)
+      case "buh_ql2p_p":       return String(buhQl2pPlan);                    // R30 (default 7.5%)
       case "buh_ql2p_f":       return String(pct(buh.salesCount, buh.qualLeads)); // R31
+      // L2P Бух — Excel rows 63/64 "L2P Total". Ratio of sales to total
+      // leads (not qualified). Plan value comes through the regular
+      // hasPlan-true path; _f is computed here from analytics totals.
+      case "buh_l2p_f":        return String(pct(buh.salesCount, buh.totalLeads));
       case "buh_avgCheck_f":   return String(avgCheck(buhRevenueFact, buh.salesCount)); // R33
       case "buh_planDoneTotal": return planDone(buhSalesPlusRenewalsFact, String(buhSalesPlusRenewalsPlan)); // R34
       case "buh_planDoneNew":   return planDone(buhRevenueFact, String(buhRevenuePlan));                     // R35
@@ -1868,6 +1872,8 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "med_sales_f":      return String(med.salesCount);                  // R44
       case "med_prepayments":  return String(med.prepaymentCount);             // R45
       case "med_ql2p_f":       return String(pct(med.salesCount, med.qualLeads)); // R47
+      // L2P Мед — симметрично Бух (sales / total leads).
+      case "med_l2p_f":        return String(pct(med.salesCount, med.totalLeads));
       case "med_avgCheck_f":   return String(avgCheck(medRevenueFact, med.salesCount)); // R49
       case "med_planDoneTotal": return planDone(medSalesPlusRenewalsFact, String(medSalesPlusRenewalsPlan)); // R50
       case "med_planDoneNew":   return planDone(medRevenueFact, String(medRevenuePlan));                     // R51

@@ -49,6 +49,11 @@ const salesBuhMetrics: MetricDef[] = [
   { key: "buh_prepayments", label: "Количество предоплат Бух", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "buh_ql2p_p", label: "QL2P Бух план %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "buh_ql2p_f", label: "QL2P Бух факт %", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  // L2P (Lead-to-Payment) — Excel row63/64 "L2P Total план/факт" within
+  // the Бух section. Ratio of sales to TOTAL leads (not only qualified),
+  // so QL2P ≥ L2P by construction. Plan default 4 % (Excel NC63 = 0.04).
+  { key: "buh_l2p_p", label: "L2P Бух план %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
+  { key: "buh_l2p_f", label: "L2P Бух факт %", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   { key: "buh_avgCheck_p", label: "Средний чек Бух план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "buh_avgCheck_f", label: "Средний чек Бух факт", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
   { key: "buh_planDoneTotal", label: "Выполнено плана TOTAL БУХ", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
@@ -72,6 +77,9 @@ const salesMedMetrics: MetricDef[] = [
   { key: "med_prepayments", label: "Количество предоплат Мед", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "med_ql2p_p", label: "QL2P Мед план %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "med_ql2p_f", label: "QL2P Мед факт %", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
+  // Симметрично Бух — L2P для Мед-потока.
+  { key: "med_l2p_p", label: "L2P Мед план %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
+  { key: "med_l2p_f", label: "L2P Мед факт %", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
   { key: "med_avgCheck_p", label: "Средний чек Мед план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
   { key: "med_avgCheck_f", label: "Средний чек Мед факт", hasPlan: false, hasFact: true, unit: "", factSource: "computed" },
   { key: "med_planDoneTotal", label: "Выполнено плана TOTAL МЕД", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
@@ -125,6 +133,8 @@ export const B2B_FIXED_PLAN_DEFAULTS: Record<string, number> = {
   med_ql2p_p: 5,         // Excel row78 = 0.05
   buh_avgCheck_p: 900,   // Excel row65
   med_avgCheck_p: 500,   // Excel row80
+  buh_l2p_p: 4,          // Excel row63 = 0.04
+  med_l2p_p: 4,          // симметрично Бух, пока без отдельного Excel-дефолта
   // Cumulative leads plans — stored as MONTHLY totals; getPlan divides by
   // planDivisor (daysInMonth / weeks / 1/12 yr) before rendering, so daily
   // view lands on Excel's per-day figures (16 Бух, 6.66 Мед for Apr 2026).
