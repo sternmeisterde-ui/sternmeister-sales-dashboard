@@ -267,10 +267,14 @@ function buildPipelineBreakdown(
     101858279: "Рассрочка",
   };
 
-  const pipelineIds = getPipelineIds(department);
+  // Only render cards for pipelines with a registered label in the active
+  // department. Anything else (e.g. B2G Medical Gov = 13209991) is aggregated
+  // elsewhere but intentionally hidden from this breakdown — no "Pipeline X"
+  // fallback card is ever emitted.
+  const namedPipelineIds = Object.keys(pipelineNames).map(Number);
   const byPipeline = new Map<number, KommoLead[]>();
 
-  for (const pid of pipelineIds) {
+  for (const pid of namedPipelineIds) {
     byPipeline.set(pid, []);
   }
 
@@ -335,9 +339,11 @@ function buildPipelineBreakdown(
       }))
       .sort((a, b) => b.count - a.count);
 
+    // pipelineNames[pipelineId] is guaranteed to exist — byPipeline was seeded
+    // from namedPipelineIds = Object.keys(pipelineNames).
     result.push({
       pipelineId,
-      pipelineName: pipelineNames[pipelineId] || `Pipeline ${pipelineId}`,
+      pipelineName: pipelineNames[pipelineId],
       activeDeals: active.length,
       statuses,
     });
