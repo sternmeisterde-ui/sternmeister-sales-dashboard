@@ -197,7 +197,11 @@ export async function getScheduleForMonth(
 }
 
 /**
- * Set schedule for a manager on a specific date
+ * Set schedule for a manager on a specific date.
+ *
+ * Shift fields have three-value semantics: `undefined` = don't touch existing
+ * value (preserve historical snapshot); `null` = explicit clear; `"HH:MM"` =
+ * new value. Same contract on insert: `undefined` maps to column default (NULL).
  */
 export async function setSchedule(
   userId: string,
@@ -207,7 +211,6 @@ export async function setSchedule(
   shiftStartTime?: string | null,
   shiftEndTime?: string | null,
 ): Promise<void> {
-  // Check if exists
   const existing = await db
     .select({ id: managerSchedule.id })
     .from(managerSchedule)
@@ -220,16 +223,20 @@ export async function setSchedule(
     .limit(1);
 
   if (existing.length > 0) {
-    await db
-      .update(managerSchedule)
-      .set({
-        isOnLine,
-        scheduleValue: scheduleValue ?? null,
-        shiftStartTime: shiftStartTime ?? null,
-        shiftEndTime: shiftEndTime ?? null,
-        updatedAt: new Date(),
-      })
-      .where(eq(managerSchedule.id, existing[0].id));
+    const patch: {
+      isOnLine: boolean;
+      scheduleValue: string | null;
+      shiftStartTime?: string | null;
+      shiftEndTime?: string | null;
+      updatedAt: Date;
+    } = {
+      isOnLine,
+      scheduleValue: scheduleValue ?? null,
+      updatedAt: new Date(),
+    };
+    if (shiftStartTime !== undefined) patch.shiftStartTime = shiftStartTime;
+    if (shiftEndTime !== undefined) patch.shiftEndTime = shiftEndTime;
+    await db.update(managerSchedule).set(patch).where(eq(managerSchedule.id, existing[0].id));
   } else {
     await db.insert(managerSchedule).values({
       userId,

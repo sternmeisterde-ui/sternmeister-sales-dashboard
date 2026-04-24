@@ -38,6 +38,7 @@ export async function PUT(req: NextRequest) {
     const body = await req.json();
 
     // Bulk update: { entries: [{ userId, date, scheduleValue, shiftStartTime?, shiftEndTime? }] }
+    // Shift fields are tri-state: omitted = preserve DB value; null = clear; string = set.
     if (body.entries && Array.isArray(body.entries)) {
       for (const entry of body.entries) {
         const isOnLine = scheduleValueToIsOnLine(entry.scheduleValue);
@@ -46,8 +47,8 @@ export async function PUT(req: NextRequest) {
           entry.date,
           isOnLine,
           entry.scheduleValue ?? null,
-          entry.shiftStartTime ?? null,
-          entry.shiftEndTime ?? null,
+          entry.shiftStartTime,
+          entry.shiftEndTime,
         );
       }
       clearCache();
@@ -72,8 +73,8 @@ export async function PUT(req: NextRequest) {
       date,
       effectiveIsOnLine,
       scheduleValue ?? null,
-      shiftStartTime ?? null,
-      shiftEndTime ?? null,
+      shiftStartTime,
+      shiftEndTime,
     );
     clearCache();
     return NextResponse.json({ ok: true });

@@ -82,7 +82,7 @@ interface PickerState {
   style: React.CSSProperties;
 }
 
-export default function SchedulePopup({ isOpen, onClose, month, managers, onSaved }: SchedulePopupProps) {
+export default function SchedulePopup({ isOpen, onClose, month, department, managers, onSaved }: SchedulePopupProps) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
 
@@ -224,24 +224,19 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
   const handleSave = async () => {
     setSaving(true);
     try {
-      const entries: Array<{
-        userId: string;
-        date: string;
-        scheduleValue: string;
-        shiftStartTime: string | null;
-        shiftEndTime: string | null;
-      }> = [];
+      // Bundle only the workday codes (8/4/-/о). Per-day shift_start/end must NOT
+      // be replayed here — the input at the top of each row saves via onBlur to
+      // master_managers (default). If we also wrote it into every manager_schedule
+      // row for the month, every save would overwrite historical per-day overrides
+      // with the current input value. Keep shift fields out so snapshots persist.
+      const entries: Array<{ userId: string; date: string; scheduleValue: string }> = [];
       for (const [managerId, row] of Object.entries(grid)) {
-        const s = shiftStart[managerId]?.trim() || null;
-        const e = shiftEnd[managerId]?.trim() || null;
         for (let d = 0; d < row.length; d++) {
           if (row[d]) {
             entries.push({
               userId: managerId,
               date: fmtDate(year, mo, d + 1),
               scheduleValue: row[d],
-              shiftStartTime: s,
-              shiftEndTime: e,
             });
           }
         }
@@ -260,13 +255,22 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
     }
   };
 
-  // Group managers by line
+  // Group managers by line.
+  // B2B (Коммерция) does not use lines — all managers share one group and we
+  // hide the "Без линии" header to avoid an empty section title. B2G keeps
+  // per-line grouping and surfaces the "Без линии" bucket when present.
   const lines   = ["1", "2", "3"];
-  const grouped = lines
-    .map((l) => ({ line: l, label: LINE_LABELS[l] || `Линия ${l}`, managers: managers.filter((m) => m.line === l) }))
-    .filter((g) => g.managers.length > 0);
-  const noLine = managers.filter((m) => !m.line || !lines.includes(m.line));
-  if (noLine.length > 0) grouped.push({ line: "other", label: "Без линии", managers: noLine });
+  const grouped: Array<{ line: string; label: string; managers: Manager[] }> = [];
+  if (department === "b2b") {
+    grouped.push({ line: "all", label: "", managers });
+  } else {
+    for (const l of lines) {
+      const lm = managers.filter((m) => m.line === l);
+      if (lm.length > 0) grouped.push({ line: l, label: LINE_LABELS[l] || `Линия ${l}`, managers: lm });
+    }
+    const noLine = managers.filter((m) => !m.line || !lines.includes(m.line));
+    if (noLine.length > 0) grouped.push({ line: "other", label: "Без линии", managers: noLine });
+  }
 
   if (!isOpen || !mounted) return null;
 
@@ -353,11 +357,13 @@ export default function SchedulePopup({ isOpen, onClose, month, managers, onSave
                     );
                     return (
                       <>
-                        <tr key={`hdr-${group.line}`} className="border-t border-white/10">
-                          <td colSpan={daysCount + 2} className="sticky left-0 z-10 bg-slate-800/60 px-3 py-1.5">
-                            <span className="text-[10px] uppercase tracking-widest font-bold text-slate-300">{group.label}</span>
-                          </td>
-                        </tr>
+                        {group.label && (
+                          <tr key={`hdr-${group.line}`} className="border-t border-white/10">
+                            <td colSpan={daysCount + 2} className="sticky left-0 z-10 bg-slate-800/60 px-3 py-1.5">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-slate-300">{group.label}</span>
+                            </td>
+                          </tr>
+                        )}
                         {/* Day count row */}
                         <tr key={`cnt-${group.line}`}>
                           <td className="sticky left-0 z-10 bg-slate-900/95 px-3 py-0.5 text-[9px] text-slate-600 italic">онлайн</td>
