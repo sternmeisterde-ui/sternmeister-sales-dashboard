@@ -172,6 +172,44 @@ body {
   color: #1e3a8a !important;            /* blue-900 — strong contrast */
 }
 
+/* Sticky cells need a solid background, otherwise when the user scrolls
+   horizontally the "sticky" column is transparent and the data columns
+   bleed through making it look like the header column is sliding with the
+   scroll. The generic `tr/td/th transparent` rule above was hiding them.
+   These overrides restore a solid surface for any sticky cell. Specificity
+   (tbody/thead + tag + class) beats the generic `tr td` rule. */
+.theme-light tbody tr td.sticky,
+.theme-light tbody tr th.sticky {
+  background-color: #f0f9ff !important; /* sky-50 — subtle but solid */
+}
+.theme-light thead tr th.sticky {
+  background-color: #bedcff !important; /* matches thead bg, corner cell */
+}
+/* Group-header sticky cell keeps its tinted bg (higher specificity). */
+.theme-light tr.daily-group-header td.sticky {
+  background-color: #dbeafe !important;
+}
+
+/* Managers dropdown inside "По менеджерам" sub-tab. Dark mode inline bg
+   was #0f172a; light mode needs solid white with dark text. Also bump
+   z-index via inline style to beat sticky table headers (z-40/z-50). */
+.theme-light .daily-managers-dropdown {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;   /* slate-300 */
+  color: #0f172a !important;
+}
+.theme-light .daily-managers-dropdown span,
+.theme-light .daily-managers-dropdown button,
+.theme-light .daily-managers-dropdown label {
+  color: #0f172a !important;
+}
+.theme-light .daily-managers-dropdown .border-white\/5 {
+  border-color: #e2e8f0 !important;   /* slate-200 */
+}
+.theme-light .daily-managers-dropdown label:hover {
+  background-color: #f1f5f9 !important; /* slate-100 */
+}
+
 /* Black/white overlays used as scrims */
 .theme-light .bg-black\/20,
 .theme-light .bg-black\/30,

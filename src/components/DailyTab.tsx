@@ -702,7 +702,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   //   B2G: [Показатели] [Менеджеры] [Отказы]
   // Per-manager таблицы и refusal cards вынесены в отдельные табы чтобы
   // Показатели страница не была перегружена.
-  const [subTab, setSubTab] = useState<"metrics" | "renewals" | "managers" | "refusals">("metrics");
+  const [subTab, setSubTab] = useState<"metrics" | "managers" | "refusals">("metrics");
 
   useEffect(() => {
     let abort = false;
@@ -960,7 +960,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           department === "b2b"
             ? ([
                 { id: "metrics" as const, label: "Показатели" },
-                { id: "renewals" as const, label: "Продления" },
                 { id: "managers" as const, label: "Менеджеры" },
               ])
             : ([
@@ -1013,16 +1012,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
           monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
         />
-      )}
-
-      {/* ===== SUB-TAB: Продления (B2B only) ===== */}
-      {department === "b2b" && subTab === "renewals" && (
-        <div className="glass-panel rounded-2xl p-8 border border-white/5 text-center">
-          <div className="text-slate-400 text-sm uppercase tracking-widest font-bold mb-2">Продления</div>
-          <div className="text-slate-500 text-xs">
-            Раздел в разработке. Будет загружать потоки продлений из ТЗ R77-R118 (Выручка 29.04, 27.05, …, 7.04.26).
-          </div>
-        </div>
       )}
 
       {/* SUB-TAB "Менеджеры" (B2B) рендерится выше в общем блоке subTab === "managers". */}
@@ -1310,7 +1299,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
               Менеджеры ({effectiveSelected.size}/{allManagers.length}) ▾
             </button>
             {dropdownOpen && (
-              <div className="absolute z-30 mt-1 min-w-[260px] max-h-[400px] overflow-y-auto rounded-xl border border-white/10 shadow-2xl p-2 bg-slate-900" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+              <div className="daily-managers-dropdown absolute mt-1 min-w-[260px] max-h-[400px] overflow-y-auto rounded-xl border border-white/10 shadow-2xl p-2 bg-slate-900" style={{ zIndex: 100 }}>
                 <div className="flex gap-2 mb-2 border-b border-white/5 pb-2">
                   <button
                     onClick={() => setSelectedManagerIds(new Set(allManagers.map((m) => m.id)))}
