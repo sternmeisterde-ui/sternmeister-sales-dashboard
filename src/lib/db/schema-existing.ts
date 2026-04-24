@@ -1,4 +1,4 @@
-import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb, date } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 // ==================== D1 TABLES (Госники - B2G) ====================
@@ -147,6 +147,20 @@ export const masterManagers = pgTable("master_managers", {
 });
 
 // ==================== SHARED TABLES ====================
+
+// Bug / error reports submitted via the "Сообщить об ошибке" popup.
+// Free-form feedback from admins/managers — also mirrored to Discord for ops.
+export const bugReports = pgTable("bug_reports", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  reporterId: uuid("reporter_id"),                    // master_managers.id snapshot (nullable on purpose: admin-only users may not have a master row)
+  reporterName: text("reporter_name").notNull(),
+  reporterRole: text("reporter_role").notNull(),     // 'admin' | 'rop' | 'manager'
+  reporterDepartment: text("reporter_department").notNull(), // 'b2g' | 'b2b'
+  section: text("section").notNull(),                // tab id from the sidebar
+  description: text("description").notNull(),
+  reportDate: date("report_date").notNull(),         // YYYY-MM-DD
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
 
 export const dailyPlans = pgTable("daily_plans", {
   id: serial("id").primaryKey(),

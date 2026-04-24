@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -26,6 +26,7 @@ import { Sun, Moon } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import CallsChart from "@/components/CallsChart";
 import WorstCallsPanel from "@/components/WorstCallsPanel";
+import ReportBugPopup from "@/components/ReportBugPopup";
 
 // Функция для очистки текста от markdown и специальных символов
 const cleanText = (text: string) => {
@@ -155,6 +156,9 @@ export default function Dashboard() {
 
   // Theme switcher (light / dark). Default dark. Persists to localStorage.
   const { theme, toggleTheme } = useTheme();
+
+  // "Сообщить об ошибке" popup — opens via the bug icon next to the theme toggle.
+  const [bugReportOpen, setBugReportOpen] = useState(false);
 
   // Audio player — extracted into a dedicated hook so this component doesn't
   // have to manage 7 useState + useRef + 3 useCallback for audio concerns.
@@ -672,16 +676,29 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Theme toggle — top-right, visible on every page. */}
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="ml-auto flex items-center justify-center w-9 h-9 rounded-lg border border-amber-400/30 bg-slate-800/40 text-amber-400 hover:bg-amber-500/10 transition-all"
-            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
-            aria-label={theme === "dark" ? "Переключить на светлую тему" : "Переключить на тёмную тему"}
-          >
-            {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-          </button>
+          {/* Right-side action cluster: report bug + theme toggle */}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setBugReportOpen(true)}
+              className="flex items-center justify-center w-9 h-9 rounded-lg border border-rose-400/30 bg-slate-800/40 text-rose-400 hover:bg-rose-500/10 transition-all"
+              title="Сообщить об ошибке"
+              aria-label="Сообщить об ошибке"
+            >
+              <Bug className="w-4 h-4" />
+            </button>
+
+            {/* Theme toggle — top-right, visible on every page. */}
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="flex items-center justify-center w-9 h-9 rounded-lg border border-amber-400/30 bg-slate-800/40 text-amber-400 hover:bg-amber-500/10 transition-all"
+              title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+              aria-label={theme === "dark" ? "Переключить на светлую тему" : "Переключить на тёмную тему"}
+            >
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+          </div>
         </header>
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}
@@ -2018,6 +2035,15 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Report-a-bug popup — opens via the bug icon next to the theme toggle */}
+      <ReportBugPopup
+        isOpen={bugReportOpen}
+        onClose={() => setBugReportOpen(false)}
+        reporter={session
+          ? { name: session.name, role: session.masterRole, department: session.department }
+          : null}
+      />
     </div>
   );
 }
