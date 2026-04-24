@@ -22,6 +22,8 @@ import {
   B1_STATUSES,
   B2_PLUS_STATUSES,
   FUNNEL_STATUS_MAP,
+  FIRST_LINE_STATUSES,
+  BERATER_STATUSES,
 } from "@/lib/kommo/pipeline-config";
 import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { getB2BPipelineStatsSQL, getB2BPerManagerStatsSQL, type B2BPipelineStats as B2BStatsSQL } from "@/lib/daily/analytics-b2b";
@@ -704,7 +706,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch(trackAnalyticsError),
     getAnalyticsLeads({ pipelineIds: [firstLinePipelineId], statusIds: [142], dateFilter: termsDateFilter }).catch(trackError("terms won")),
     getAnalyticsLeads({ pipelineIds: [firstLinePipelineId], dateFilter: createdDateFilter }).catch(trackError("new leads")),
-    getAnalyticsStatusChangeCount(from, to, beraterPipelineId, [102183943, 102183947]).catch(trackError("term AA events")),
+    getAnalyticsStatusChangeCount(from, to, beraterPipelineId, [BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]).catch(trackError("term AA events")),
     // Historical: fetch leads closed AFTER this date (they were active on this date)
     closedAfterDateFilter
       ? getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [142, 143], dateFilter: closedAfterDateFilter }).catch(trackError("closed after date"))
@@ -1383,8 +1385,21 @@ export async function buildDailyResponse(department: string, period: string, dat
     } else if (section.key === "funnel") {
       const funnelManagers = managers.filter((m) => m.line === "1" || m.line === "2" || m.line === "3");
       if (funnelManagers.length > 0) {
-        const excludePortfolio = new Set([142, 143, 93485479, 95514987]);
-        const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
+        // Portfolio excludes won/lost + База + Отложенный старт — leads in
+        // these statuses shouldn't weight a manager's active portfolio.
+        const excludePortfolio = new Set<number>([
+          FIRST_LINE_STATUSES.WON,
+          FIRST_LINE_STATUSES.LOST,
+          FIRST_LINE_STATUSES.BASE,
+          FIRST_LINE_STATUSES.DELAYED_START,
+        ]);
+        // Berater statuses where the lead is awaiting a term appointment.
+        const awaitStatuses = new Set<number>([
+          BERATER_STATUSES.RECEIVED_FROM_FIRST,
+          BERATER_STATUSES.DOVEDENIE,
+          BERATER_STATUSES.CONSULT_BEFORE_DC,
+          BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+        ]);
         const beraterPipeline = beraterPipelineId;
         const firstLinePipeline = firstLinePipelineId;
 
@@ -1417,19 +1432,19 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 case "totalLeads": {
                   // Exclude Неразобранное(83873487) and База(93485479)
-                  fact = String(mgrNewLeads.filter((l) => l.status_id !== 83873487 && l.status_id !== 93485479).length);
+                  fact = String(mgrNewLeads.filter((l) => l.status_id !== FIRST_LINE_STATUSES.UNSORTED && l.status_id !== FIRST_LINE_STATUSES.BASE).length);
                   break;
                 }
                 case "qualLeads": {
                   // Квал = есть буква в Category (CFV 866934). Per user spec 2026-04-24.
                   fact = String(mgrNewLeads.filter((l) => {
-                    if (l.status_id === 83873487 || l.status_id === 93485479) return false;
+                    if (l.status_id === FIRST_LINE_STATUSES.UNSORTED || l.status_id === FIRST_LINE_STATUSES.BASE) return false;
                     return hasCategoryLetter(l);
                   }).length);
                   break;
                 }
                 case "qualLeadsPercent": {
-                  const mgrFiltered = mgrNewLeads.filter((l) => l.status_id !== 83873487 && l.status_id !== 93485479);
+                  const mgrFiltered = mgrNewLeads.filter((l) => l.status_id !== FIRST_LINE_STATUSES.UNSORTED && l.status_id !== FIRST_LINE_STATUSES.BASE);
                   const mgrQual = mgrFiltered.filter(hasCategoryLetter).length;
                   fact = mgrFiltered.length > 0 ? String(Math.round((mgrQual / mgrFiltered.length) * 100)) : "0";
                   break;
@@ -1506,7 +1521,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                 case "convQualTask": {
                   // tasksTotal / qualLeads × 100. Qual = has category letter.
                   const mgrQual = mgrNewLeads.filter((l) => {
-                    if (l.status_id === 83873487 || l.status_id === 93485479) return false;
+                    if (l.status_id === FIRST_LINE_STATUSES.UNSORTED || l.status_id === FIRST_LINE_STATUSES.BASE) return false;
                     return hasCategoryLetter(l);
                   }).length;
                   const mgrTasks = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.tasksTotal?.statusIds.has(l.status_id)).length;
@@ -1530,7 +1545,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "appealsSubmitted": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860891).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.APPEAL).length);
                   break;
                 }
                 case "revenue": {
@@ -1539,11 +1554,11 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "termDCCancelled": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860875).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_DC_CANCELLED).length);
                   break;
                 }
                 case "termDCDone": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93886075).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_DC_DONE).length);
                   break;
                 }
                 case "termAATransferred": {
@@ -1556,28 +1571,30 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "termAACancelled": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860883).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_AA_CANCELLED).length);
                   break;
                 }
                 case "termAACount": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860879).length);
+                  // BERATER_STATUSES.TERM_AA is the intermediate "Термин АА"
+                  // stage — distinct from CONSULT_BEFORE_AA which feeds it.
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_AA).length);
                   break;
                 }
                 case "beraterReview": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860887).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.BERATER_REVIEW).length);
                   break;
                 }
                 case "delayedStart": {
                   // Matches team-level FUNNEL_STATUS_MAP.delayedStart which
                   // covers BOTH pipelines' "Отложенный старт" statuses.
                   fact = String(mgrActiveLeads.filter((l) =>
-                    (l.pipeline_id === beraterPipeline && l.status_id === 95515895)
-                    || (l.pipeline_id === firstLinePipeline && l.status_id === 95514987),
+                    (l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.DELAYED_START)
+                    || (l.pipeline_id === firstLinePipeline && l.status_id === FIRST_LINE_STATUSES.DELAYED_START),
                   ).length);
                   break;
                 }
                 case "appeal": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === 93860891).length);
+                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.APPEAL).length);
                   break;
                 }
               }
@@ -1996,15 +2013,16 @@ function getFunnelFact(
     case "managersOnLine":
       return String(managersOnLine);
     case "totalLeads": {
-      // All leads from first line created in period, excluding Неразобранное(83873487) and База(93485479)
-      const excludeFromTotal = new Set([83873487, 93485479]);
+      // All leads from first line created in period, excluding Неразобранное
+      // and База — those are mailbox/staging stages, not real leads.
+      const excludeFromTotal = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
       const allNew = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !excludeFromTotal.has(l.status_id));
       return String(allNew.length);
     }
     case "qualLeads": {
       // Квал = есть буква в Category (CFV 866934). Per user spec 2026-04-24.
       // Не-квал = category NULL/empty — лид закрыт как "Неквал лид" или не оценен.
-      const excludeS = new Set([83873487, 93485479]);
+      const excludeS = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
       const qualCount = (newLeadsInPeriod || []).filter((l) => {
         if (l.is_deleted || excludeS.has(l.status_id)) return false;
         return hasCategoryLetter(l);
@@ -2018,7 +2036,13 @@ function getFunnelFact(
     case "b2plus":
       return String(fc.b2plus);
     case "avgPortfolio": {
-      const excludeStatuses = new Set([142, 143, 93485479, 95514987]);
+      // Portfolio excludes won/lost + База + Отложенный старт (staging).
+      const excludeStatuses = new Set<number>([
+        FIRST_LINE_STATUSES.WON,
+        FIRST_LINE_STATUSES.LOST,
+        FIRST_LINE_STATUSES.BASE,
+        FIRST_LINE_STATUSES.DELAYED_START,
+      ]);
       const pipelineId = flPipeline;
       const portfolioLeads = (snapshotLeads || []).filter(
         (l) => l.pipeline_id === pipelineId && !l.is_deleted && !excludeStatuses.has(l.status_id)
@@ -2027,7 +2051,12 @@ function getFunnelFact(
       return String(Math.round(portfolioLeads.length / divisor));
     }
     case "awaitTermTotal": {
-      const awaitStatuses = new Set([93860331, 102183931, 102183935, 102183939]);
+      const awaitStatuses = new Set<number>([
+        BERATER_STATUSES.RECEIVED_FROM_FIRST,
+        BERATER_STATUSES.DOVEDENIE,
+        BERATER_STATUSES.CONSULT_BEFORE_DC,
+        BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+      ]);
       const beraterPipeline = brPipeline;
       const awaiting = (snapshotLeads || []).filter(
         (l) => l.pipeline_id === beraterPipeline && !l.is_deleted && !l.closed_at && awaitStatuses.has(l.status_id)
@@ -2036,7 +2065,12 @@ function getFunnelFact(
     }
     case "awaitTermNew": {
       // Awaiting term + created in current month
-      const awaitStatusesNew = new Set([93860331, 102183931, 102183935, 102183939]);
+      const awaitStatusesNew = new Set<number>([
+        BERATER_STATUSES.RECEIVED_FROM_FIRST,
+        BERATER_STATUSES.DOVEDENIE,
+        BERATER_STATUSES.CONSULT_BEFORE_DC,
+        BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+      ]);
       const beraterPipelineNew = brPipeline;
       const { start: mStartNew, end: mEndNew } = monthBoundsSec(dateStr ?? "2026-01-01");
       const awaitingNew = (snapshotLeads || []).filter(
@@ -2051,57 +2085,51 @@ function getFunnelFact(
       return String(awaitingNew.length);
     }
     case "qualLeadsPercent": {
-      const exS = new Set([83873487, 93485479]);
+      const exS = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
       const allNewP = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !exS.has(l.status_id));
       const qualP = allNewP.filter(hasCategoryLetter).length;
       return allNewP.length > 0 ? String(Math.round((qualP / allNewP.length) * 100)) : "0";
     }
     // ─── Berater pipeline snapshot metrics ───
     case "termDCCancelled": {
-      // Термин ДЦ отменен/перенесен: status 93860875 in berater pipeline 12154099
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860875
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_DC_CANCELLED
       ).length);
     }
     case "termDCDone": {
-      // Термин ДЦ состоялся: status 93886075 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93886075
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_DC_DONE
       ).length);
     }
     case "termAATransferred": {
-      // Переведены на термин АА: counted via Events API (status changes)
+      // Переведены на термин АА: counted via Events API (status changes).
       return String(termAATransferredCount ?? 0);
     }
     case "termAACancelled": {
-      // Термин АА отменен/перенесен: status 93860883 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860883
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_AA_CANCELLED
       ).length);
     }
     case "termAACount": {
-      // Термин АА (на этапе): statuses 102183943 + 102183947 in berater pipeline
-      const aaStatuses = new Set([102183943, 102183947]);
+      // Both CONSULT_BEFORE_AA stages count as "Термин АА (на этапе)".
+      const aaStatuses = new Set<number>([BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]);
       return String((snapshotLeads || []).filter(
         (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
       ).length);
     }
     case "beraterReview": {
-      // На рассмотрении бератера: status 93860887
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860887
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.BERATER_REVIEW
       ).length);
     }
     case "delayedStart": {
-      // Отложенный старт: status 95515895 in berater pipeline
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 95515895
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.DELAYED_START
       ).length);
     }
     case "appeal": {
-      // Апелляция: status 93860891
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === 93860891
+        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.APPEAL
       ).length);
     }
     case "gutscheinPlanDone":
