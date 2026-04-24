@@ -119,7 +119,12 @@ async function getOkkAvgScore(department: "b2g" | "b2b", fromTs: number, toTs: n
         )
       );
     return rows[0]?.avg ?? null;
-  } catch { return null; }
+  } catch (e) {
+    // Залогируем, чтобы не терять диагностику: если D2/R2 env-var не задан
+    // или Neon в ретрае, OKK тихо возвращал null и Daily показывал пусто.
+    console.error(`[OKK] getOkkAvgScore(${department}, [${promptTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 /** Get average roleplay score for a line on a specific date */
@@ -141,7 +146,10 @@ async function getRoleplayAvgScore(department: "b2g" | "b2b", fromTs: number, to
         )
       );
     return rows[0]?.avg ?? null;
-  } catch { return null; }
+  } catch (e) {
+    console.error(`[Roleplay] getRoleplayAvgScore(${department}, [${callTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 /** Get per-manager OKK avg scores: managerId → score */

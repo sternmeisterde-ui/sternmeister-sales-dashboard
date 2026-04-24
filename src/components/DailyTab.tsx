@@ -157,6 +157,38 @@ function formatCellNumber(value: string | number | null | undefined): string {
   });
 }
 
+// SLA / TLT keys хранятся в минутах (build-response.ts делит секунды на 60).
+// Пользователь ждёт Looker-style HH:MM:SS ("04:58:44" вместо "245 min").
+const DURATION_MIN_KEYS = new Set<string>([
+  "sla_f", "sla_shift_f", "tlt_f", "sla_p",
+  "calls_sla_f", "calls_sla_p",
+]);
+// Эти — в секундах (ожидание — "сек" в label, планы 30/35 сек).
+const DURATION_SEC_KEYS = new Set<string>([
+  "avgWait_f", "avgWait_p",
+  "calls_avgWait_f", "calls_avgWait_p",
+]);
+
+function formatDuration(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "—";
+  const rounded = Math.round(totalSeconds);
+  const h = Math.floor(rounded / 3600);
+  const m = Math.floor((rounded % 3600) / 60);
+  const s = rounded % 60;
+  const pad = (x: number) => String(x).padStart(2, "0");
+  if (h > 0) return `${pad(h)}:${pad(m)}:${pad(s)}`;
+  return `${pad(m)}:${pad(s)}`;
+}
+
+function formatCell(value: string | number | null | undefined, metricKey: string): string {
+  if (value === null || value === undefined || value === "" || value === "—") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (DURATION_MIN_KEYS.has(metricKey)) return formatDuration(n * 60);
+  if (DURATION_SEC_KEYS.has(metricKey)) return formatDuration(n);
+  return formatCellNumber(value);
+}
+
 // Metrics where "lower is better" — SLA times, wait times, overdue counts.
 // For these, over-performance = fact < plan, so the ratio is inverted.
 const LOWER_IS_BETTER = new Set<string>([
@@ -565,7 +597,7 @@ function SummaryTimeTable({
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
                           } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
                         >
-                          {formatCellNumber(val)}
+                          {formatCell(val, m.metricKey)}
                         </td>
                       );
                     })
@@ -734,7 +766,7 @@ function ManagerMetricsTable({
                           key={`${col.sectionKey}-${col.metricKey}-${i}`}
                           className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
                         >
-                          {formatCellNumber(val)}
+                          {formatCell(val, col.metricKey)}
                         </td>
                       );
                     })}
@@ -753,7 +785,7 @@ function ManagerMetricsTable({
                   key={i}
                   className="px-2 py-2 text-right font-mono text-[12px] font-bold text-white"
                 >
-                  {formatCellNumber(val)}
+                  {formatCell(val, metricColumns[i]?.metricKey ?? "")}
                 </td>
               ))}
             </tr>
@@ -1622,7 +1654,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
                           const val = c.getValue(m);
                           return (
                             <td key={c.key} className={`px-3 text-center tabular-nums ${m.rank < 40 ? "py-3 text-[13px] font-semibold" : "py-2"} ${getCellColor(val)}`}>
-                              {formatCellNumber(val)}
+                              {formatCell(val, m.metricKey)}
                             </td>
                           );
                         })}

@@ -14,6 +14,12 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
 import { getPipelineIds } from "@/lib/kommo/pipeline-config";
 import type { UserCallMetrics } from "@/lib/kommo/metrics";
+import { cached } from "@/lib/kommo/cache";
+
+// 60s TTL + in-flight dedup для всех analytics-запросов. В months-mode 12
+// параллельных buildDailyResponse фирят ~60 дублирующихся HTTP-fetch'ей на
+// одни и те же SQL — кэш рубит их до 1 запроса per key.
+const ANALYTICS_TTL = 60 * 1000;
 
 // Known name drift between `master_managers.name` (authoritative) and
 // `analytics.communications.manager` (from integrator). Add entries here when
@@ -47,7 +53,18 @@ export async function getAnalyticsCallMetricsByMaster(
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return new Map();
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `call-metrics:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchCallMetricsByMaster(managers, dept, pipelineIds, fromTs, toTs));
+}
 
+async function fetchCallMetricsByMaster(
+  managers: Array<{ id: string; name: string }>,
+  dept: "b2g" | "b2b",
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, UserCallMetrics>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
 
@@ -144,7 +161,11 @@ export async function getAnalyticsTeamCallMetrics(
   if (pipelineIds.length === 0) {
     return { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 };
   }
+  const cacheKey = `team-calls:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(pipelineIds, fromTs, toTs));
+}
 
+async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
@@ -205,7 +226,17 @@ export async function getFrozenLeadsByManager(
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return new Map();
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `frozen-by-mgr:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsByManager(managers, pipelineIds, fromTs, toTs));
+}
 
+async function fetchFrozenLeadsByManager(
+  managers: Array<{ id: string; name: string }>,
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, number>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
@@ -257,6 +288,18 @@ export async function getOverdueTasksByManager(
   managers: Array<{ id: string; name: string }>,
   asOfTs?: number,
 ): Promise<Map<string, number>> {
+  // Bucket asOf to the nearest minute — snapshot metric, per-request stability
+  // matters more than sub-minute freshness.
+  const bucket = asOfTs ? Math.floor(asOfTs / 60) : Math.floor(Date.now() / 60_000);
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `overdue-tasks:${bucket}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchOverdueTasks(managers, asOfTs));
+}
+
+async function fetchOverdueTasks(
+  managers: Array<{ id: string; name: string }>,
+  asOfTs?: number,
+): Promise<Map<string, number>> {
   const asOf = asOfTs ? new Date(asOfTs * 1000) : new Date();
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -298,7 +341,11 @@ export async function getFrozenLeadsTeam(
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return 0;
+  const cacheKey = `frozen-team:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsTeam(pipelineIds, fromTs, toTs));
+}
 
+async function fetchFrozenLeadsTeam(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
