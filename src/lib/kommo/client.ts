@@ -1165,12 +1165,26 @@ async function fetchBatchPages(
     const url = new URL(`${baseUrl}/events`);
     url.searchParams.set("filter[created_at][from]", String(dateFrom));
     url.searchParams.set("filter[created_at][to]", String(dateTo));
-    url.searchParams.set("limit", "100");
+    // Max per docs is 250, not 100 — 2.5× fewer pages per batch, less risk
+    // of hitting the pagination cap on busy managers.
+    url.searchParams.set("limit", "250");
     url.searchParams.set("page", String(page));
-    for (const id of userBatch) url.searchParams.append("filter[created_by][]", String(id));
-    if (typeBatch) {
-      for (const t of typeBatch) url.searchParams.append("filter[type][]", t);
+    // Kommo docs specify filter[created_by] and filter[type] as comma-
+    // separated STRING values, not PHP-style repeated `[]` keys. The `[]`
+    // form sometimes works but silently narrows results for multi-entity
+    // event types — major cause of under-reported CRM activity on the
+    // timeline before we switched. Keep .set() (single key) with join.
+    if (userBatch.length > 0) {
+      url.searchParams.set("filter[created_by]", userBatch.join(","));
     }
+    if (typeBatch && typeBatch.length > 0) {
+      url.searchParams.set("filter[type]", typeBatch.join(","));
+    }
+    // Without filter[entity], /events returns only lead-scoped events by
+    // default — contact/company/customer/task events (contact_linked,
+    // task_completed, custom_field_value_changed on non-leads, etc.) never
+    // come through, which is ~half of CRM-activity minute coverage.
+    url.searchParams.set("filter[entity]", "lead,contact,company,customer,task");
 
     // Per-page retry loop for 5xx. 429 is handled inside rateLimitedFetch;
     // network errors are retried once there but still surface if the retry

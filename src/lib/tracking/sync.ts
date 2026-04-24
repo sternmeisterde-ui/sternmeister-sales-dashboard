@@ -27,7 +27,11 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //
 //   v0 — pre-filter-bug (no filter[type][], only calls landed reliably)
 //   v1 — explicit filter[type][] with EVENT_TYPES batches (2026-04-24 fix)
-const CURRENT_FILTER_VERSION = 1;
+//   v2 — corrected Kommo syntax per docs: filter[type]/filter[created_by]
+//        as comma-separated strings, added filter[entity] covering contact/
+//        company/customer/task (was defaulting to lead-only, which dropped
+//        ~half of CRM events), bumped limit 100 → 250 (2026-04-25)
+const CURRENT_FILTER_VERSION = 2;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
