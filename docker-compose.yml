@@ -59,6 +59,10 @@ services:
       - TELEGRAM_SESSION=${TELEGRAM_SESSION}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_OKK_BOT_TOKEN=${TELEGRAM_OKK_BOT_TOKEN}
+
+      # Discord webhook for user-submitted bug reports ("Сообщить об ошибке").
+      # Must be set in Dokploy; the server only sends to Discord if present.
+      - DISCORD_BUG_REPORT_WEBHOOK_URL=${DISCORD_BUG_REPORT_WEBHOOK_URL}
     restart: unless-stopped
     networks:
       - sternmeister-network
