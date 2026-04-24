@@ -12,6 +12,11 @@
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
 import { B2B_PIPELINES, COMMERCIAL_STATUSES, B2B_WON_STATUSES_PER_PIPELINE } from "@/lib/kommo/pipeline-config";
+import { cached } from "@/lib/kommo/cache";
+
+// 60s TTL + in-flight dedup — a burst of Daily range requests (30 days, x4
+// concurrency) now shares a single DB hit per (pipeline, from, to) key.
+const B2B_ANALYTICS_TTL = 60 * 1000;
 
 export interface B2BPipelineStats {
   /** SUM(Сумма 1-го платежа where Факт.Дата ∈ period) + SUM(Сумма предоплаты where Дата пред ∈ period). */
@@ -34,8 +39,18 @@ type Row = {
   qual_leads: number | string;
 };
 
-/** Team-level pipeline stats for Bух Комм (10631243). Single round-trip. */
+/** Team-level pipeline stats for Bух Комм (10631243). Single round-trip,
+ *  cached 60 s so parallel Daily builds within a request share one DB hit. */
 export async function getB2BPipelineStatsSQL(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<B2BPipelineStats> {
+  const key = `b2b-pipeline-stats:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}`;
+  return cached(key, B2B_ANALYTICS_TTL, () => fetchB2BPipelineStatsSQL(pipelineId, fromDate, toDate));
+}
+
+async function fetchB2BPipelineStatsSQL(
   pipelineId: number,
   fromDate: Date,
   toDate: Date,
@@ -139,8 +154,18 @@ export async function getB2BPipelineStatsSQL(
 /**
  * Per-manager breakdown of the same stats. Keyed by responsible_user_id.
  * Kept as a separate query so the team-level call stays trivially fast.
+ * Cached 60 s for the same reason as the team-level version.
  */
 export async function getB2BPerManagerStatsSQL(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<Map<number, B2BPipelineStats>> {
+  const key = `b2b-per-manager-stats:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}`;
+  return cached(key, B2B_ANALYTICS_TTL, () => fetchB2BPerManagerStatsSQL(pipelineId, fromDate, toDate));
+}
+
+async function fetchB2BPerManagerStatsSQL(
   pipelineId: number,
   fromDate: Date,
   toDate: Date,

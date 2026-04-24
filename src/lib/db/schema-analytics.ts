@@ -63,6 +63,14 @@ export const leadsCohort = analyticsSchema.table(
     index().on(t.pipelineId, t.firstPaymentDate),
     index().on(t.pipelineId, t.prepaymentDate),
     index().on(t.closedAt),
+    // Phase 1 of Daily refactor (2026-04-24): added via hand-rolled migration
+    // drizzle/analytics/0003_daily_hot_indexes.sql (CREATE INDEX CONCURRENTLY,
+    // which Drizzle can't emit). Declared here so schema/DB don't drift.
+    index("idx_lc_pipeline_closed").on(t.pipelineId, t.closedAt),
+    index("idx_lc_pipeline_created").on(t.pipelineId, t.createdAt),
+    index("idx_lc_pipeline_status").on(t.pipelineId, t.statusId),
+    index("idx_lc_responsible").on(t.responsibleUserId),
+    index("idx_lc_non_qual").on(t.nonQualEnumId),
   ],
 );
 
@@ -98,6 +106,9 @@ export const communications = analyticsSchema.table(
     index().on(t.createdAt),
     index().on(t.manager, t.createdAt),
     index().on(t.communicationType),
+    // Phase 1 of Daily refactor: see leads_cohort note above.
+    index("idx_comm_pipeline_created").on(t.pipelineId, t.createdAt),
+    index("idx_comm_manager_pipeline_created").on(t.manager, t.pipelineId, t.createdAt),
   ],
 );
 
@@ -120,6 +131,9 @@ export const tasks = analyticsSchema.table(
     index().on(t.leadId),
     index().on(t.deadline),
     index().on(t.isCompleted, t.deadline),
+    // Phase 1 of Daily refactor: getOverdueTasksByManager filters by
+    // (task_manager, is_completed, deadline).
+    index("idx_tasks_mgr_completed_deadline").on(t.taskManager, t.isCompleted, t.deadline),
   ],
 );
 
@@ -178,6 +192,9 @@ export const sla = analyticsSchema.table(
     index().on(t.leadId),
     index().on(t.leadCreatedAt),
     index().on(t.slaStatus),
+    // Phase 1 of Daily refactor: getSlaFacts + getFrozenLeadsTeam.
+    index("idx_sla_pipeline_leadcreated").on(t.pipelineId, t.leadCreatedAt),
+    index("idx_sla_status_leadcreated").on(t.slaStatus, t.leadCreatedAt),
   ],
 );
 

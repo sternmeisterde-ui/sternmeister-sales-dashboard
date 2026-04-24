@@ -157,16 +157,22 @@ function formatCellNumber(value: string | number | null | undefined): string {
   });
 }
 
-// SLA / TLT keys хранятся в минутах (build-response.ts делит секунды на 60).
-// Пользователь ждёт Looker-style HH:MM:SS ("04:58:44" вместо "245 min").
-const DURATION_MIN_KEYS = new Set<string>([
-  "sla_f", "sla_shift_f", "tlt_f", "sla_p",
-  "calls_sla_f", "calls_sla_p",
-]);
-// Эти — в секундах (ожидание — "сек" в label, планы 30/35 сек).
+// Unit split for HH:MM:SS formatting. Fact values come from analytics.sla
+// already as raw seconds (see getSlaFactsCombined in build-response.ts) so we
+// show them with second-level precision. Plan values are user-entered in
+// minutes (admin types "25" → 25 мин SLA target), so they're multiplied by 60
+// before formatting. Keeping the two in different units lets admins type a
+// round number of minutes while the fact keeps seconds precision.
 const DURATION_SEC_KEYS = new Set<string>([
+  // Facts — raw seconds from the SQL roll-ups.
+  "sla_f", "sla_shift_f", "tlt_f", "calls_sla_f",
+  // Legacy seconds fields (Callgear/Cloudtalk ring time).
   "avgWait_f", "avgWait_p",
   "calls_avgWait_f", "calls_avgWait_p",
+]);
+const DURATION_MIN_KEYS = new Set<string>([
+  // Plans — admin-entered minute-granular targets.
+  "sla_p", "calls_sla_p",
 ]);
 
 function formatDuration(totalSeconds: number): string {
@@ -213,8 +219,17 @@ function getTrafficLightClass(
 ): string {
   if (!fact || fact === "—" || !plan || plan === "—") return "";
   const factNum = Number(fact);
-  const planNum = Number(plan);
+  let planNum = Number(plan);
   if (!Number.isFinite(factNum) || !Number.isFinite(planNum) || planNum === 0) return "";
+  // Unit normalisation: SLA/TLT facts now come from the backend as seconds
+  // (DURATION_SEC_KEYS), while admin-entered plans are still in minutes
+  // (DURATION_MIN_KEYS). Convert the plan up to seconds before taking the
+  // ratio — otherwise 25 min plan vs 3180 s fact = 127× overage, forcing
+  // every SLA cell permanently red.
+  const planKey = planKeyFor(metricKey);
+  if (DURATION_SEC_KEYS.has(metricKey) && DURATION_MIN_KEYS.has(planKey)) {
+    planNum = planNum * 60;
+  }
   const ratio = factNum / planNum;
   const lowerBetter = LOWER_IS_BETTER.has(metricKey);
   if (lowerBetter) {
@@ -480,27 +495,32 @@ function SummaryTimeTable({
                     className={`light-panel-header cursor-pointer select-none border-t-2 border-white/10 ${accent.rowBg}`}
                     onClick={() => toggleSection(m.sectionKey)}
                   >
+                    {/* First cell is sticky-left with the label; remaining N
+                        cells carry the accent background so the row looks
+                        continuous. sticky on a <td colSpan=N> never pins on
+                        horizontal scroll — the cell already spans the whole
+                        row and has nowhere to offset to. Splitting into a
+                        single sticky cell + placeholder cells is the same
+                        pattern as the first column of data rows, which has
+                        worked reliably across browsers. */}
                     <td
-                      colSpan={columnLabels.length + 1}
-                      className={`p-0 light-panel-header ${accent.cellBg} ${accent.border}`}
+                      className={`sticky left-0 z-10 px-4 py-2.5 light-panel-header ${accent.cellBg} ${accent.border} min-w-[220px]`}
                     >
-                      {/* Inner sticky wrapper — sticky on td+colSpan doesn't
-                          pin content on horizontal scroll (cell already spans
-                          the whole row). Wrapping the content in an inner
-                          sticky div keeps the label visible at the left edge. */}
-                      <div className="sticky left-0 w-fit inline-flex items-center gap-3 px-4 py-2.5 z-10">
-                        <div className="flex items-center gap-2">
-                          {getSectionIcon(m.sectionIcon)}
-                          <span className={`text-[11px] uppercase tracking-widest font-bold ${accent.text}`}>
-                            {m.sectionTitle}
-                          </span>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        {getSectionIcon(m.sectionIcon)}
+                        <span className={`text-[11px] uppercase tracking-widest font-bold ${accent.text}`}>
+                          {m.sectionTitle}
+                        </span>
                         {isCollapsed
                           ? <ChevronRight className={`w-3.5 h-3.5 ${accent.text} opacity-60`} />
                           : <ChevronDown className={`w-3.5 h-3.5 ${accent.text} opacity-60`} />
                         }
                       </div>
                     </td>
+                    <td
+                      colSpan={columnLabels.length}
+                      className={`light-panel-header ${accent.cellBg} ${accent.border} p-0`}
+                    />
                   </tr>
                 );
               }
@@ -509,18 +529,21 @@ function SummaryTimeTable({
               if (collapsedSections.has(m.sectionKey)) return null;
 
               // ── Group sub-header ──────────────────────────────────────────
+              // Same sticky-split pattern as the section header above: first
+              // <td> sticky-left with the label, second <td colSpan={N}> fills
+              // the rest of the row with the group-header tint.
               if (m.isGroupHeader) {
                 return (
                   <tr key={`${m.sectionKey}-${m.metricKey}`} className="daily-group-header bg-slate-800/30">
                     <td
-                      colSpan={columnLabels.length + 1}
-                      className="daily-group-header p-0 bg-slate-800/30"
+                      className="daily-group-header sticky left-0 z-10 px-4 py-1.5 pl-8 text-[10px] uppercase tracking-widest text-slate-500 font-bold bg-slate-800/30 min-w-[220px]"
                     >
-                      {/* Inner sticky wrapper — see section-header fix above. */}
-                      <div className="sticky left-0 w-fit px-4 py-1.5 pl-8 text-[10px] uppercase tracking-widest text-slate-500 font-bold z-10">
-                        {m.metricLabel}
-                      </div>
+                      {m.metricLabel}
                     </td>
+                    <td
+                      colSpan={columnLabels.length}
+                      className="daily-group-header bg-slate-800/30 p-0"
+                    />
                   </tr>
                 );
               }
@@ -696,9 +719,13 @@ function ManagerMetricsTable({
   });
 
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
+    // NOT glass-panel / overflow-hidden — both break position: sticky on the
+    // thead and first-column cells (backdrop-filter creates a containing
+    // block, overflow-hidden clips sticky). Plain bg + border reproduces the
+    // same visual and keeps sticky working. Matches the main Daily table.
+    <div className="text-slate-200 rounded-2xl border border-white/5 shadow-2xl bg-slate-900/40">
       <div
-        className="px-4 py-3 border-b border-white/5 bg-slate-900/40 cursor-pointer hover:bg-slate-800/50 transition-colors flex items-center justify-between"
+        className="px-4 py-3 border-b border-white/5 bg-slate-900/40 cursor-pointer hover:bg-slate-800/50 transition-colors flex items-center justify-between rounded-t-2xl"
         onClick={() => setCollapsed((v) => !v)}
       >
         <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">
@@ -709,8 +736,8 @@ function ManagerMetricsTable({
           : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
         }
       </div>
-      {!collapsed && <div className="w-full overflow-x-auto">
-        <table className="w-full text-left border-collapse">
+      {!collapsed && <div className="w-full overflow-x-auto rounded-b-2xl">
+        <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
             <tr className="border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[160px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
@@ -734,18 +761,20 @@ function ManagerMetricsTable({
               <Fragment key={group.line ?? "_flat"}>
                 {group.line !== null && (
                   <tr className="light-panel-header border-t-2 border-white/10">
+                    {/* Split-td pattern: first cell sticky with the label,
+                        second cell fills the rest of the row with the accent. */}
                     <td
-                      colSpan={metricColumns.length + 1}
-                      className={`p-0 ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border}`}
+                      className={`sticky left-0 z-10 px-4 py-2 text-[11px] uppercase tracking-widest font-bold min-w-[160px] ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} ${getSectionAccent(group.line).text}`}
                     >
-                      {/* Inner sticky wrapper — see Daily main-table fix. */}
-                      <div className={`sticky left-0 w-fit px-4 py-2 text-[11px] uppercase tracking-widest font-bold z-10 ${getSectionAccent(group.line).text}`}>
-                        {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
-                        <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
-                          · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
-                        </span>
-                      </div>
+                      {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
+                      <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
+                        · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
+                      </span>
                     </td>
+                    <td
+                      colSpan={metricColumns.length}
+                      className={`${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} p-0`}
+                    />
                   </tr>
                 )}
                 {group.managers.map((mgr) => (
@@ -1638,12 +1667,11 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
                     <Fragment key={`${m.sectionKey}-${m.metricKey}`}>
                       {newSection && (
                         <tr className="bg-slate-800/40 border-t-2 border-white/10">
-                          <td colSpan={columns.length + 1} className="p-0 bg-slate-800/80">
-                            {/* Inner sticky wrapper — see Daily main-table fix. */}
-                            <div className="sticky left-0 w-fit px-4 py-2 text-[10px] uppercase tracking-widest text-slate-400 font-bold z-10">
-                              {m.sectionTitle}
-                            </div>
+                          {/* Split-td: sticky label cell + empty colSpan filler. */}
+                          <td className="sticky left-0 z-10 px-4 py-2 text-[10px] uppercase tracking-widest text-slate-400 font-bold bg-slate-800/80 min-w-[260px]">
+                            {m.sectionTitle}
                           </td>
+                          <td colSpan={columns.length} className="bg-slate-800/80 p-0" />
                         </tr>
                       )}
                       <tr className={`border-b border-white/5 hover:bg-white/[0.02] ${m.rank < 40 ? "daily-primary-row" : ""}`}>

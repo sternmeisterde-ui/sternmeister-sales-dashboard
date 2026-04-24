@@ -208,55 +208,64 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
 }
 
 /**
- * Frozen-lead counts per manager for a pipeline window. A "frozen" lead is
- * one the integrator flagged in `analytics.sla.sla_status = 'frozen'` —
- * typically: lead created, SLA clock started, no first-call attempt within
- * the expected window. The single highest-value diagnostic in the per-manager
- * view when team revenue dips: "whose leads are we sitting on?"
+ * Combined team + per-manager frozen-lead counts via GROUPING SETS.
+ * A "frozen" lead is one the integrator flagged in
+ * `analytics.sla.sla_status = 'frozen'` — typically: lead created, SLA clock
+ * started, no first-call attempt within the expected window. Replaces the
+ * old getFrozenLeadsByManager + getFrozenLeadsTeam pair which hit the same
+ * WHERE clause twice.
  *
- * Returns Map<master_manager.id, count>. Zero for managers with no frozen
- * leads in the window.
+ * Returns { team, perManager: Map<master_manager.id, count> }. Zero for
+ * managers with no frozen leads in the window.
  */
-export async function getFrozenLeadsByManager(
+export async function getFrozenLeadsCombined(
   managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
-): Promise<Map<string, number>> {
+): Promise<{ team: number; perManager: Map<string, number> }> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return new Map();
+  if (pipelineIds.length === 0) return { team: 0, perManager: new Map() };
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `frozen-by-mgr:${dept}:${fromTs}:${toTs}:${managerIds}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsByManager(managers, pipelineIds, fromTs, toTs));
+  const cacheKey = `frozen-combined:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsCombined(managers, pipelineIds, fromTs, toTs));
 }
 
-async function fetchFrozenLeadsByManager(
+async function fetchFrozenLeadsCombined(
   managers: Array<{ id: string; name: string }>,
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
-): Promise<Map<string, number>> {
+): Promise<{ team: number; perManager: Map<string, number> }> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ manager: string; frozen_cnt: string | number }>(sql`
-    SELECT manager, COUNT(*) AS frozen_cnt
+  }).execute<{ manager: string | null; is_total: number; frozen_cnt: string | number }>(sql`
+    SELECT
+      manager                AS manager,
+      GROUPING(manager)::int AS is_total,
+      COUNT(*)               AS frozen_cnt
     FROM analytics.sla
     WHERE sla_status = 'frozen'
       AND lead_created_at >= ${fromDate}
       AND lead_created_at <= ${toDate}
       AND pipeline_id IN (${pipelineList})
-      AND manager IS NOT NULL AND manager <> ''
-    GROUP BY manager
+    GROUP BY GROUPING SETS ((), (manager))
   `);
 
+  let team = 0;
   const byName = new Map<string, number>();
   for (const row of result.rows) {
-    byName.set(row.manager, Number(row.frozen_cnt));
+    const n = Number(row.frozen_cnt);
+    if (row.is_total === 1) {
+      team = n;
+    } else if (row.manager) {
+      byName.set(row.manager, n);
+    }
   }
 
   // Name → master id (with aliases, same pattern as call metrics above).
@@ -274,7 +283,20 @@ async function fetchFrozenLeadsByManager(
     }
     byMaster.set(m.id, n);
   }
-  return byMaster;
+  return { team, perManager: byMaster };
+}
+
+/** @deprecated Use getFrozenLeadsCombined which fetches team + per-manager
+ *  in a single round-trip. Kept as a thin wrapper for callers that only
+ *  need per-manager; to be removed once all callers are migrated. */
+export async function getFrozenLeadsByManager(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, number>> {
+  const { perManager } = await getFrozenLeadsCombined(managers, department, fromTs, toTs);
+  return perManager;
 }
 
 /**
@@ -301,13 +323,18 @@ async function fetchOverdueTasks(
   asOfTs?: number,
 ): Promise<Map<string, number>> {
   const asOf = asOfTs ? new Date(asOfTs * 1000) : new Date();
+  // "Overdue at asOf" = deadline < asOf AND (still open at asOf). The second
+  // part needs BOTH "not completed at all" OR "completed only after asOf" so
+  // historical views capture tasks that were overdue then but have since
+  // been closed — otherwise past Daily always showed 0 overdue tasks as
+  // the mirror eventually completed them.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ task_manager: string; overdue_cnt: string | number }>(sql`
     SELECT task_manager, COUNT(*) AS overdue_cnt
     FROM analytics.tasks
-    WHERE is_completed = 0
-      AND deadline < ${asOf}
+    WHERE deadline < ${asOf}
+      AND (is_completed = 0 OR completed_at IS NULL OR completed_at > ${asOf})
       AND task_manager IS NOT NULL AND task_manager <> ''
     GROUP BY task_manager
   `);
@@ -332,34 +359,16 @@ async function fetchOverdueTasks(
   return byMaster;
 }
 
-/** Team total of frozen leads across the department's pipelines. */
+/** @deprecated Use getFrozenLeadsCombined instead — pass the full manager
+ *  list (an empty array is fine when only the team total matters) and pluck
+ *  .team from the result. This wrapper stays so existing callers don't break. */
 export async function getFrozenLeadsTeam(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<number> {
-  const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return 0;
-  const cacheKey = `frozen-team:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsTeam(pipelineIds, fromTs, toTs));
-}
-
-async function fetchFrozenLeadsTeam(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
-  const fromDate = new Date(fromTs * 1000);
-  const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-
-  const result = await (analyticsDb as unknown as {
-    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ cnt: string | number }>(sql`
-    SELECT COUNT(*) AS cnt FROM analytics.sla
-    WHERE sla_status = 'frozen'
-      AND lead_created_at >= ${fromDate}
-      AND lead_created_at <= ${toDate}
-      AND pipeline_id IN (${pipelineList})
-  `);
-  return Number(result.rows[0]?.cnt ?? 0);
+  const { team } = await getFrozenLeadsCombined([], department, fromTs, toTs);
+  return team;
 }
 
 export interface DailyCallBucket {

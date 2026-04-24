@@ -10,7 +10,7 @@ import {
   hasCategoryLetter,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsByManager, getFrozenLeadsTeam, getOverdueTasksByManager } from "@/lib/daily/analytics-calls";
+import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsCombined, getOverdueTasksByManager } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
 import { getDailySections } from "@/lib/daily/metrics-config";
 import {
@@ -26,6 +26,7 @@ import {
 import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { getB2BPipelineStatsSQL, getB2BPerManagerStatsSQL, type B2BPipelineStats as B2BStatsSQL } from "@/lib/daily/analytics-b2b";
 import { getAnalyticsLeads, getAnalyticsStatusChangeCount } from "@/lib/daily/analytics-leads";
+import { reconstructSnapshotAt, type HistoricalSnapshot } from "@/lib/daily/historical-snapshot";
 import { parseDateBoundary } from "@/lib/utils/date";
 
 /** APP_TZ-aware month bounds in epoch seconds. Replaces the hand-rolled
@@ -100,150 +101,218 @@ export function getBusinessToday(): string {
 
 // ==================== OKK / Roleplay avg score helpers ====================
 
-/** Get average OKK score for a line on a specific date */
-async function getOkkAvgScore(department: "b2g" | "b2b", fromTs: number, toTs: number, promptTypes: string[]): Promise<number | null> {
+// Cache TTLs. OKK/Roleplay scores are recomputed slowly (human evaluators
+// behind them); caching for 5 minutes eats a whole burst of Daily views
+// without noticeably stale numbers. SLA/AvgCalls/Refusal facts change
+// continuously through the day, so 60 s is safer.
+const SCORES_TTL = 5 * 60 * 1000;
+const ANALYTICS_FACTS_TTL = 60 * 1000;
+
+/** Combined team + per-manager OKK avg scores in a single round-trip.
+ *  Uses GROUPING SETS so team (manager_id IS NULL via GROUPING()) and
+ *  per-manager rows come back together — halves round-trips vs. the old
+ *  getOkkAvgScore + getOkkPerManagerScores pair. Cached per
+ *  (department, from, to, promptTypes) so repeat callers in the same
+ *  request share a single DB hit. */
+async function getOkkScores(
+  department: "b2g" | "b2b",
+  fromTs: number,
+  toTs: number,
+  promptTypes: string[],
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const empty = { team: null as number | null, perManager: new Map<string, number>() };
+  if (promptTypes.length === 0) return empty;
+  const key = `okk-scores:${department}:${fromTs}:${toTs}:${[...promptTypes].sort().join(",")}`;
+  return cached(key, SCORES_TTL, () => fetchOkkScores(department, fromTs, toTs, promptTypes));
+}
+
+async function fetchOkkScores(
+  department: "b2g" | "b2b",
+  fromTs: number,
+  toTs: number,
+  promptTypes: string[],
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const empty = { team: null as number | null, perManager: new Map<string, number>() };
   try {
     const db = getOkkDbForDepartment(department);
     const from = new Date(fromTs * 1000);
     const to = new Date(toTs * 1000);
-    const rows = await db
-      .select({ avg: drizzleSql<number>`round(avg(${okkEvaluations.totalScore}))::int` })
-      .from(okkEvaluations)
-      .innerJoin(okkCalls, eq(okkEvaluations.callId, okkCalls.id))
-      .where(
-        and(
-          gte(okkCalls.callCreatedAt, from),
-          lte(okkCalls.callCreatedAt, to),
-          isNotNull(okkEvaluations.totalScore),
-          drizzleSql`${okkEvaluations.promptType} IN (${drizzleSql.join(promptTypes.map(p => drizzleSql`${p}`), drizzleSql`, `)})`,
-        )
-      );
-    return rows[0]?.avg ?? null;
+    const promptList = drizzleSql.join(promptTypes.map(p => drizzleSql`${p}`), drizzleSql`, `);
+    const rows = await (db as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{ manager_id: string | null; is_total: number; avg: number | null }>(drizzleSql`
+      SELECT
+        ${okkEvaluations.managerId}                         AS manager_id,
+        GROUPING(${okkEvaluations.managerId})::int          AS is_total,
+        ROUND(AVG(${okkEvaluations.totalScore}))::int       AS avg
+      FROM ${okkEvaluations}
+      INNER JOIN ${okkCalls} ON ${okkEvaluations.callId} = ${okkCalls.id}
+      WHERE ${okkCalls.callCreatedAt} >= ${from}
+        AND ${okkCalls.callCreatedAt} <= ${to}
+        AND ${okkEvaluations.totalScore} IS NOT NULL
+        AND ${okkEvaluations.promptType} IN (${promptList})
+      GROUP BY GROUPING SETS ((), (${okkEvaluations.managerId}))
+    `);
+    const perManager = new Map<string, number>();
+    let team: number | null = null;
+    for (const r of rows.rows) {
+      if (r.is_total === 1) {
+        team = r.avg != null ? Number(r.avg) : null;
+      } else if (r.manager_id && r.avg != null) {
+        perManager.set(r.manager_id, Number(r.avg));
+      }
+    }
+    return { team, perManager };
   } catch (e) {
     // Залогируем, чтобы не терять диагностику: если D2/R2 env-var не задан
     // или Neon в ретрае, OKK тихо возвращал null и Daily показывал пусто.
-    console.error(`[OKK] getOkkAvgScore(${department}, [${promptTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
-    return null;
+    console.error(`[OKK] getOkkScores(${department}, [${promptTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
+    return empty;
   }
 }
 
-/** Get average roleplay score for a line on a specific date */
-async function getRoleplayAvgScore(department: "b2g" | "b2b", fromTs: number, toTs: number, callTypes: string[]): Promise<number | null> {
+/** Combined team + per-manager roleplay avg scores via GROUPING SETS.
+ *  Cached the same way as getOkkScores. */
+async function getRoleplayScores(
+  department: "b2g" | "b2b",
+  fromTs: number,
+  toTs: number,
+  callTypes: string[],
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const empty = { team: null as number | null, perManager: new Map<string, number>() };
+  if (callTypes.length === 0) return empty;
+  const key = `roleplay-scores:${department}:${fromTs}:${toTs}:${[...callTypes].sort().join(",")}`;
+  return cached(key, SCORES_TTL, () => fetchRoleplayScores(department, fromTs, toTs, callTypes));
+}
+
+async function fetchRoleplayScores(
+  department: "b2g" | "b2b",
+  fromTs: number,
+  toTs: number,
+  callTypes: string[],
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const empty = { team: null as number | null, perManager: new Map<string, number>() };
   try {
     const db = getDbForDepartment(department);
     const callsTable = department === "b2b" ? r1Calls : d1Calls;
     const from = new Date(fromTs * 1000);
     const to = new Date(toTs * 1000);
-    const rows = await db
-      .select({ avg: drizzleSql<number>`round(avg(${callsTable.score}))::int` })
-      .from(callsTable)
-      .where(
-        and(
-          gte(callsTable.startedAt, from),
-          lte(callsTable.startedAt, to),
-          isNotNull(callsTable.score),
-          drizzleSql`${callsTable.callType} IN (${drizzleSql.join(callTypes.map(ct => drizzleSql`${ct}`), drizzleSql`, `)})`,
-        )
-      );
-    return rows[0]?.avg ?? null;
+    const typesList = drizzleSql.join(callTypes.map(t => drizzleSql`${t}`), drizzleSql`, `);
+    const rows = await (db as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{ user_id: string | null; is_total: number; avg: number | null }>(drizzleSql`
+      SELECT
+        ${callsTable.userId}                                  AS user_id,
+        GROUPING(${callsTable.userId})::int                   AS is_total,
+        ROUND(AVG(${callsTable.score}))::int                  AS avg
+      FROM ${callsTable}
+      WHERE ${callsTable.startedAt} >= ${from}
+        AND ${callsTable.startedAt} <= ${to}
+        AND ${callsTable.score} IS NOT NULL
+        AND ${callsTable.callType} IN (${typesList})
+      GROUP BY GROUPING SETS ((), (${callsTable.userId}))
+    `);
+    const perManager = new Map<string, number>();
+    let team: number | null = null;
+    for (const r of rows.rows) {
+      if (r.is_total === 1) {
+        team = r.avg != null ? Number(r.avg) : null;
+      } else if (r.user_id && r.avg != null) {
+        perManager.set(r.user_id, Number(r.avg));
+      }
+    }
+    return { team, perManager };
   } catch (e) {
-    console.error(`[Roleplay] getRoleplayAvgScore(${department}, [${callTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
-    return null;
+    console.error(`[Roleplay] getRoleplayScores(${department}, [${callTypes.join(",")}]) failed:`, e instanceof Error ? e.message : e);
+    return empty;
   }
 }
 
-/** Get per-manager OKK avg scores: managerId → score */
-async function getOkkPerManagerScores(department: "b2g" | "b2b", fromTs: number, toTs: number, promptTypes: string[]): Promise<Map<string, number>> {
-  const result = new Map<string, number>();
-  try {
-    const okkDb = getOkkDbForDepartment(department);
-    const from = new Date(fromTs * 1000);
-    const to = new Date(toTs * 1000);
-    const rows = await okkDb
-      .select({
-        managerId: okkEvaluations.managerId,
-        avg: drizzleSql<number>`round(avg(${okkEvaluations.totalScore}))::int`,
-      })
-      .from(okkEvaluations)
-      .innerJoin(okkCalls, eq(okkEvaluations.callId, okkCalls.id))
-      .where(
-        and(
-          gte(okkCalls.callCreatedAt, from),
-          lte(okkCalls.callCreatedAt, to),
-          isNotNull(okkEvaluations.totalScore),
-          drizzleSql`${okkEvaluations.promptType} IN (${drizzleSql.join(promptTypes.map(p => drizzleSql`${p}`), drizzleSql`, `)})`,
-        )
-      )
-      .groupBy(okkEvaluations.managerId);
-    for (const r of rows) {
-      if (r.managerId && r.avg !== null) result.set(r.managerId, r.avg);
-    }
-  } catch { /* ignore */ }
-  return result;
+/** Shape returned by the SLA/TLT queries. Seconds at the source, converted
+ *  to minutes here to match the existing callers. Naming stays *Minutes for
+ *  backwards compatibility even though the UI formatter now prefers raw
+ *  seconds for HH:MM:SS display — see note on formatSlaValue in DailyTab. */
+interface SlaFacts {
+  slaMinutes: number | null;
+  slaShiftMinutes: number | null;
+  tltMinutes: number | null;
+  /** Raw seconds — preserved so the UI can render HH:MM:SS without
+   *  losing precision to integer-minute rounding. null when no data. */
+  slaSeconds: number | null;
+  slaShiftSeconds: number | null;
+  tltSeconds: number | null;
 }
 
-/** Get per-manager roleplay avg scores: userId → score */
-async function getRoleplayPerManagerScores(department: "b2g" | "b2b", fromTs: number, toTs: number, callTypes: string[]): Promise<Map<string, number>> {
-  const result = new Map<string, number>();
-  try {
-    const rpDb = getDbForDepartment(department);
-    const callsTable = department === "b2b" ? r1Calls : d1Calls;
-    const from = new Date(fromTs * 1000);
-    const to = new Date(toTs * 1000);
-    const rows = await rpDb
-      .select({
-        userId: callsTable.userId,
-        avg: drizzleSql<number>`round(avg(${callsTable.score}))::int`,
-      })
-      .from(callsTable)
-      .where(
-        and(
-          gte(callsTable.startedAt, from),
-          lte(callsTable.startedAt, to),
-          isNotNull(callsTable.score),
-          drizzleSql`${callsTable.callType} IN (${drizzleSql.join(callTypes.map(ct => drizzleSql`${ct}`), drizzleSql`, `)})`,
-        )
-      )
-      .groupBy(callsTable.userId);
-    for (const r of rows) {
-      if (r.userId && r.avg !== null) result.set(r.userId, r.avg);
-    }
-  } catch { /* ignore */ }
-  return result;
-}
+const EMPTY_SLA: SlaFacts = {
+  slaMinutes: null, slaShiftMinutes: null, tltMinutes: null,
+  slaSeconds: null, slaShiftSeconds: null, tltSeconds: null,
+};
 
-/** Get average SLA and TLT (minutes) for a pipeline from analytics.sla */
-async function getSlaFacts(
+/** Combined team + per-manager SLA/TLT for a pipeline in a single round-trip.
+ *  GROUPING SETS ((), (manager)) returns the team aggregate (is_total=1) and
+ *  per-manager rows together. Replaces getSlaFacts + getSlaFactsByManager.
+ *  Cached per (pipeline, fromTs, toTs, managerIds) — per-manager alias
+ *  resolution is the only per-request work, rest comes from DB once. */
+async function getSlaFactsCombined(
+  managers: Array<{ id: string; name: string }>,
   pipelineId: number,
   fromDate: Date,
   toDate: Date,
-): Promise<{ slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }> {
+): Promise<{ team: SlaFacts; perManager: Map<string, SlaFacts> }> {
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const key = `sla-combined:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchSlaFactsCombined(managers, pipelineId, fromDate, toDate));
+}
+
+async function fetchSlaFactsCombined(
+  managers: Array<{ id: string; name: string }>,
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<{ team: SlaFacts; perManager: Map<string, SlaFacts> }> {
   try {
     const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
-      avg_sla: number | null;
-      avg_sla_shift: number | null;
-      avg_tlt: number | null;
+      manager: string | null;
+      is_total: number;
+      avg_sla_s: number | null;
+      avg_sla_shift_s: number | null;
+      avg_tlt_s: number | null;
     }>(
       drizzleSql`
         SELECT
-          round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
-          round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
-          round(avg(business_hours_since_last_contact) / 60.0)::int AS avg_tlt
+          manager                                          AS manager,
+          GROUPING(manager)::int                           AS is_total,
+          round(avg(sla_first_call_seconds))::int          AS avg_sla_s,
+          round(avg(sla_first_call_from_shift_seconds))::int AS avg_sla_shift_s,
+          round(avg(business_hours_since_last_contact))::int AS avg_tlt_s
         FROM analytics.sla
         WHERE pipeline_id = ${pipelineId}
           AND lead_created_at >= ${fromDate}
           AND lead_created_at <= ${toDate}
           AND sla_first_call_seconds IS NOT NULL
+        GROUP BY GROUPING SETS ((), (manager))
       `,
     );
-    const row = result.rows[0];
-    return {
-      slaMinutes: row?.avg_sla != null ? Number(row.avg_sla) : null,
-      slaShiftMinutes: row?.avg_sla_shift != null ? Number(row.avg_sla_shift) : null,
-      tltMinutes: row?.avg_tlt != null ? Number(row.avg_tlt) : null,
-    };
+    let team: SlaFacts = EMPTY_SLA;
+    const byName = new Map<string, SlaFacts>();
+    for (const row of result.rows) {
+      const facts: SlaFacts = {
+        slaSeconds: row.avg_sla_s != null ? Number(row.avg_sla_s) : null,
+        slaShiftSeconds: row.avg_sla_shift_s != null ? Number(row.avg_sla_shift_s) : null,
+        tltSeconds: row.avg_tlt_s != null ? Number(row.avg_tlt_s) : null,
+        slaMinutes: row.avg_sla_s != null ? Math.round(Number(row.avg_sla_s) / 60) : null,
+        slaShiftMinutes: row.avg_sla_shift_s != null ? Math.round(Number(row.avg_sla_shift_s) / 60) : null,
+        tltMinutes: row.avg_tlt_s != null ? Math.round(Number(row.avg_tlt_s) / 60) : null,
+      };
+      if (row.is_total === 1) {
+        team = facts;
+      } else if (row.manager) {
+        byName.set(row.manager, facts);
+      }
+    }
+    return { team, perManager: resolveByAlias(managers, byName) };
   } catch {
-    return { slaMinutes: null, slaShiftMinutes: null, tltMinutes: null };
+    return { team: EMPTY_SLA, perManager: new Map() };
   }
 }
 
@@ -255,6 +324,15 @@ async function getSlaFacts(
  *  Per-lead: if both are set we count the enum-field value (more specific);
  *  if only text is set we fall back to it. */
 async function getRefusalReasons(
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<Array<{ reason: string; count: number; percent: number }>> {
+  const key = `refusal-reasons:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchRefusalReasons(pipelineId, fromDate, toDate));
+}
+
+async function fetchRefusalReasons(
   pipelineId: number,
   fromDate: Date,
   toDate: Date,
@@ -297,57 +375,37 @@ async function getRefusalReasons(
   }
 }
 
-/** Avg calls per lead for a pipeline: total calls ÷ distinct lead_ids that
- *  received at least one call in range. Team-level. */
-async function getAvgCallsPerLead(
-  pipelineId: number,
-  fromDate: Date,
-  toDate: Date,
-): Promise<number | null> {
-  try {
-    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
-      total_calls: number | string;
-      unique_leads: number | string;
-    }>(
-      drizzleSql`
-        SELECT
-          COUNT(*)::int                  AS total_calls,
-          COUNT(DISTINCT lead_id)::int   AS unique_leads
-        FROM analytics.communications
-        WHERE pipeline_id = ${pipelineId}
-          AND created_at >= ${fromDate}
-          AND created_at <= ${toDate}
-          AND communication_type LIKE 'call%'
-          AND lead_id IS NOT NULL
-      `,
-    );
-    const row = result.rows[0];
-    if (!row) return null;
-    const totalCalls = Number(row.total_calls);
-    const uniqueLeads = Number(row.unique_leads);
-    if (uniqueLeads <= 0) return null;
-    return Math.round((totalCalls / uniqueLeads) * 10) / 10;
-  } catch {
-    return null;
-  }
-}
-
-/** Per-manager avg calls per lead — same metric grouped by `manager`. */
-async function getAvgCallsPerLeadByManager(
+/** Combined team + per-manager avg calls per lead via GROUPING SETS.
+ *  Team row (manager IS NULL, is_total=1) and per-manager rows come back
+ *  together — replaces the old getAvgCallsPerLead + getAvgCallsPerLeadByManager pair. */
+async function getAvgCallsPerLeadCombined(
   managers: Array<{ id: string; name: string }>,
   pipelineId: number,
   fromDate: Date,
   toDate: Date,
-): Promise<Map<string, number>> {
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const key = `acpl-combined:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchAvgCallsPerLeadCombined(managers, pipelineId, fromDate, toDate));
+}
+
+async function fetchAvgCallsPerLeadCombined(
+  managers: Array<{ id: string; name: string }>,
+  pipelineId: number,
+  fromDate: Date,
+  toDate: Date,
+): Promise<{ team: number | null; perManager: Map<string, number> }> {
   try {
     const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
-      manager: string;
+      manager: string | null;
+      is_total: number;
       total_calls: number | string;
       unique_leads: number | string;
     }>(
       drizzleSql`
         SELECT
-          manager,
+          manager                        AS manager,
+          GROUPING(manager)::int         AS is_total,
           COUNT(*)::int                  AS total_calls,
           COUNT(DISTINCT lead_id)::int   AS unique_leads
         FROM analytics.communications
@@ -356,63 +414,25 @@ async function getAvgCallsPerLeadByManager(
           AND created_at <= ${toDate}
           AND communication_type LIKE 'call%'
           AND lead_id IS NOT NULL
-          AND manager IS NOT NULL AND manager <> ''
-        GROUP BY manager
+        GROUP BY GROUPING SETS ((), (manager))
       `,
     );
+    let team: number | null = null;
     const byName = new Map<string, number>();
     for (const row of result.rows) {
       const t = Number(row.total_calls);
       const u = Number(row.unique_leads);
-      if (u > 0) byName.set(row.manager, Math.round((t / u) * 10) / 10);
+      if (u <= 0) continue;
+      const avg = Math.round((t / u) * 10) / 10;
+      if (row.is_total === 1) {
+        team = avg;
+      } else if (row.manager) {
+        byName.set(row.manager, avg);
+      }
     }
-    return resolveByAlias(managers, byName);
+    return { team, perManager: resolveByAlias(managers, byName) };
   } catch {
-    return new Map();
-  }
-}
-
-/** Per-manager SLA/TLT for a pipeline. Keyed by master_managers.id via the
- *  same name-alias map analytics-calls uses. */
-async function getSlaFactsByManager(
-  managers: Array<{ id: string; name: string }>,
-  pipelineId: number,
-  fromDate: Date,
-  toDate: Date,
-): Promise<Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>> {
-  try {
-    const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
-      manager: string;
-      avg_sla: number | null;
-      avg_sla_shift: number | null;
-      avg_tlt: number | null;
-    }>(
-      drizzleSql`
-        SELECT
-          manager,
-          round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
-          round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
-          round(avg(business_hours_since_last_contact) / 60.0)::int AS avg_tlt
-        FROM analytics.sla
-        WHERE pipeline_id = ${pipelineId}
-          AND lead_created_at >= ${fromDate}
-          AND lead_created_at <= ${toDate}
-          AND sla_first_call_seconds IS NOT NULL
-          AND manager IS NOT NULL AND manager <> ''
-        GROUP BY manager
-      `,
-    );
-    const byName = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
-    for (const row of result.rows) {
-      byName.set(row.manager, {
-        slaMinutes: row.avg_sla != null ? Number(row.avg_sla) : null,
-        slaShiftMinutes: row.avg_sla_shift != null ? Number(row.avg_sla_shift) : null,
-        tltMinutes: row.avg_tlt != null ? Number(row.avg_tlt) : null,
-      });
-    }
-    return resolveByAlias(managers, byName);
-  } catch {
-    return new Map();
+    return { team: null, perManager: new Map() };
   }
 }
 
@@ -681,15 +701,33 @@ export async function buildDailyResponse(department: string, period: string, dat
   const safeTermAACount = termAACount ?? 0;
   const safeClosedAfterDate = closedAfterDate ?? [];
 
-  // Flag: snapshot metrics unavailable for historical dates without stored snapshots
-  const hasSnapshotData = !isHistorical;
+  // Historical snapshot reconstruction — fixes the "A2/B1/Бератер воронка
+  // пустые на прошлые дни" bug. For today's date the live leads_cohort
+  // snapshot is correct; for past dates we reconstruct from
+  // analytics.lead_status_changes (see historical-snapshot.ts).
+  let historicalSnapshot: HistoricalSnapshot | null = null;
+  if (isHistorical) {
+    try {
+      historicalSnapshot = await reconstructSnapshotAt(to, allPipelineIds);
+    } catch (e) {
+      console.error("[Daily] historical snapshot reconstruction failed:", e instanceof Error ? e.message : e);
+    }
+  }
+  // Once we have a reconstructed snapshot, SNAPSHOT_ONLY_METRICS can be
+  // computed for historical dates too. Without it we stay in the old
+  // "return null" behaviour (no data loss, just empty cells).
+  const hasSnapshotData = !isHistorical || (historicalSnapshot != null && historicalSnapshot.leads.length > 0);
 
   // ── Reconstruct historical activeDeals ──
-  // For past dates: combine current active leads (created before date) +
-  // leads closed after date (they were alive on this date but got closed since)
+  // When historicalSnapshot is available we already have the accurate count
+  // from its leads array. The old closed_after fallback stays as a belt-and
+  // -braces path in case lead_status_changes misses some entries.
   let reconstructedActiveDeals: number | null = null;
   let reconstructedActiveDealsPerUser: Map<number, number> | null = null;
-  if (isHistorical && safeSnapshotActiveLeads.length > 0) {
+  if (isHistorical && historicalSnapshot) {
+    reconstructedActiveDeals = historicalSnapshot.leads.length;
+    reconstructedActiveDealsPerUser = historicalSnapshot.perUser;
+  } else if (isHistorical && safeSnapshotActiveLeads.length > 0) {
     const endOfDay = to; // end of this day in unix seconds
 
     // Current active leads that existed on this date
@@ -720,17 +758,25 @@ export async function buildDailyResponse(department: string, period: string, dat
     `[Daily API] ${department}/${period}/${dateStr}: allLeads=${safeSnapshotActiveLeads.length} active=${activeOnly.length} byPipeline=${JSON.stringify(byPipeline)} won=${safeWonLeads.length} lost=${safeLostLeads.length} callMetrics=${analyticsCallMap.size} terms=${safeTermsWonLeads.length} managers=${managers.length} line1=${managers.filter((m) => m.line === "1").length}`
   );
 
-  // NOTE: since getAnalyticsLeads() maps updated_at to created_at (analytics.*
-  // doesn't mirror updated_at), this filter now equates to "created in period"
-  // rather than "touched in period". For funnel flow metrics (a2/b1/b2plus)
-  // this under-reports reassignments/status-changes on older leads. When the
-  // analytics ETL grows an updated_at column, swap getAnalyticsLeads to expose
-  // it and this approximation goes away.
-  const flowActiveLeads = safeSnapshotActiveLeads.filter(
+  // For historical dates with a reconstructed snapshot we swap the live
+  // active-leads feed for the historical one. The snapshot-keyed funnel
+  // filters (pipeline_id, status_id, non_qual_enum_id, etc.) then work
+  // unchanged because each lead carries its HISTORICAL status. Won/lost
+  // are appended from analytics.leads_cohort with closed_at in period —
+  // same source as today's view, no reconstruction needed there.
+  const effectiveActiveLeads = (isHistorical && historicalSnapshot)
+    ? historicalSnapshot.leads
+    : safeSnapshotActiveLeads;
+  // Flow-metric filter: leads that were touched in the period. `updated_at`
+  // is unavailable in the analytics mirror (falls back to created_at in
+  // getAnalyticsLeads), so this effectively counts leads created in the
+  // period — sufficient for termsNew/tasksNew/consultNew approximations.
+  // Historical dates feed the filter from the reconstructed snapshot too
+  // so the "new" flow metrics reflect the state at asOf, not live data.
+  const flowActiveLeads = effectiveActiveLeads.filter(
     (lead) => lead.updated_at >= from && lead.updated_at <= to
   );
-
-  const snapshotLeads = [...safeSnapshotActiveLeads, ...safeWonLeads, ...safeLostLeads];
+  const snapshotLeads = [...effectiveActiveLeads, ...safeWonLeads, ...safeLostLeads];
   const flowLeads = [...flowActiveLeads, ...safeWonLeads, ...safeLostLeads];
 
   // Analytics-backed per-master-id call map. Falls back to empty map on failure
@@ -740,16 +786,18 @@ export async function buildDailyResponse(department: string, period: string, dat
   const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
-  // Frozen-lead counts: the single highest-value diagnostic for "which
-  // manager is sitting on new leads without calling?" (recommended by
-  // sales-ops agent, 2026-04-24). Cheap extra query against analytics.sla.
-  const [frozenLeadsMap, frozenLeadsTotal, overdueTasksAnalytics] = await Promise.all([
-    getFrozenLeadsByManager(allManagers, department, from, to).catch(() => new Map<string, number>()),
-    getFrozenLeadsTeam(department, from, to).catch(() => 0),
+  // Frozen-lead counts (team + per-manager in one round-trip via GROUPING SETS)
+  // plus overdue tasks. Frozen = sla_status='frozen' in analytics.sla — the
+  // single highest-value diagnostic for "which manager is sitting on new
+  // leads without calling?" (recommended by sales-ops agent, 2026-04-24).
+  const [frozenLeads, overdueTasksAnalytics] = await Promise.all([
+    getFrozenLeadsCombined(allManagers, department, from, to).catch(() => ({ team: 0, perManager: new Map<string, number>() })),
     // Overdue tasks from analytics.tasks (authoritative mirror). Falls back
     // to the Kommo taskMetricsMap below if empty.
     getOverdueTasksByManager(allManagers, to).catch(() => new Map<string, number>()),
   ]);
+  const frozenLeadsMap = frozenLeads.perManager;
+  const frozenLeadsTotal = frozenLeads.team;
 
   const planLookup = new Map<string, string>();
   for (const p of plans) {
@@ -823,49 +871,44 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Per-manager OKK/roleplay scores: line → Map<managerId, score>
   const okkPerManager = new Map<string, Map<string, number>>();
   const roleplayPerManager = new Map<string, Map<string, number>>();
-  const slaFacts = new Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>();
-  // Per-manager SLA/TLT: line → Map<managerId, {slaMinutes, slaShiftMinutes, tltMinutes}>
-  const slaPerManager = new Map<string, Map<string, { slaMinutes: number | null; slaShiftMinutes: number | null; tltMinutes: number | null }>>();
+  const slaFacts = new Map<string, SlaFacts>();
+  // Per-manager SLA/TLT: line → Map<managerId, SlaFacts>
+  const slaPerManager = new Map<string, Map<string, SlaFacts>>();
   // Refusal reasons: pipeline key ('firstLine' | 'berater') → sorted rows
   const refusalReasons = new Map<string, Array<{ reason: string; count: number; percent: number }>>();
   // Avg calls per lead: line → team avg + per-manager map
   const avgCallsPerLead = new Map<string, number | null>();
   const avgCallsPerLeadPerManager = new Map<string, Map<string, number>>();
   if (department === "b2g") {
-    // Iterate over the same groups as LINE_TO_ROLEPLAY_TYPES so the two maps
-    // stay index-compatible downstream.
+    const fromDate = new Date(from * 1000);
+    const toDate = new Date(to * 1000);
+
+    // OKK: one combined team+per-manager query per line-group (prompts vary).
     const okkPromises = Object.keys(LINE_TO_ROLEPLAY_TYPES).map(async (group) => {
       const prompts = lineToOkkPrompts(group);
       if (prompts.length === 0) return;
-      const [avg, perMgr] = await Promise.all([
-        getOkkAvgScore("b2g", from, to, prompts),
-        getOkkPerManagerScores("b2g", from, to, prompts),
-      ]);
-      if (avg !== null) okkScores.set(group, avg);
-      okkPerManager.set(group, perMgr);
+      const { team, perManager } = await getOkkScores("b2g", from, to, prompts);
+      if (team !== null) okkScores.set(group, team);
+      okkPerManager.set(group, perManager);
     });
+
+    // Roleplay: one combined query per line.
     const rpPromises = Object.entries(LINE_TO_ROLEPLAY_TYPES).map(async ([line, types]) => {
-      const [avg, perMgr] = await Promise.all([
-        getRoleplayAvgScore("b2g", from, to, types),
-        getRoleplayPerManagerScores("b2g", from, to, types),
-      ]);
-      if (avg !== null) roleplayScores.set(line, avg);
-      roleplayPerManager.set(line, perMgr);
+      const { team, perManager } = await getRoleplayScores("b2g", from, to, types);
+      if (team !== null) roleplayScores.set(line, team);
+      roleplayPerManager.set(line, perManager);
     });
-    // SLA / TLT facts from analytics DB (line 1 = first-line pipeline, line 3 = berater pipeline)
+
+    // SLA / TLT — одним round-trip'ом команда + per-manager через GROUPING SETS.
+    // Line 1 = first-line pipeline, line 3 = berater pipeline.
     const B2G_LINE_PIPELINES: Record<string, number> = {
       "1": B2G_PIPELINES.FIRST_LINE,
       "3": B2G_PIPELINES.BERATER,
     };
-    const fromDate = new Date(from * 1000);
-    const toDate = new Date(to * 1000);
     const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineId]) => {
-      const [facts, perMgr] = await Promise.all([
-        getSlaFacts(pipelineId, fromDate, toDate),
-        getSlaFactsByManager(allManagers, pipelineId, fromDate, toDate),
-      ]);
-      slaFacts.set(line, facts);
-      slaPerManager.set(line, perMgr);
+      const { team, perManager } = await getSlaFactsCombined(allManagers, pipelineId, fromDate, toDate);
+      slaFacts.set(line, team);
+      slaPerManager.set(line, perManager);
     });
 
     // Refusal reasons per pipeline — aggregated, two cards in UI
@@ -878,20 +921,23 @@ export async function buildDailyResponse(department: string, period: string, dat
       refusalReasons.set(key, rows);
     });
 
-    // Avg calls per lead — per line (uses same pipelines as SLA; line 2
-    // and 3 share BERATER so they'll report the same team number).
+    // Avg calls per lead per line. Line 2 and 3 share the BERATER pipeline,
+    // so the SQL is fired once per unique pipeline and reused across lines.
     const B2G_LINE_PIPELINES_FOR_CALLS: Record<string, number> = {
       "1": B2G_PIPELINES.FIRST_LINE,
       "2": B2G_PIPELINES.BERATER,
       "3": B2G_PIPELINES.BERATER,
     };
+    const acplByPipeline = new Map<number, Promise<{ team: number | null; perManager: Map<string, number> }>>();
     const acplPromises = Object.entries(B2G_LINE_PIPELINES_FOR_CALLS).map(async ([line, pipelineId]) => {
-      const [team, perMgr] = await Promise.all([
-        getAvgCallsPerLead(pipelineId, fromDate, toDate),
-        getAvgCallsPerLeadByManager(allManagers, pipelineId, fromDate, toDate),
-      ]);
+      let promise = acplByPipeline.get(pipelineId);
+      if (!promise) {
+        promise = getAvgCallsPerLeadCombined(allManagers, pipelineId, fromDate, toDate);
+        acplByPipeline.set(pipelineId, promise);
+      }
+      const { team, perManager } = await promise;
       avgCallsPerLead.set(line, team);
-      avgCallsPerLeadPerManager.set(line, perMgr);
+      avgCallsPerLeadPerManager.set(line, perManager);
     });
 
     await Promise.all([...okkPromises, ...rpPromises, ...slaPromises, ...refusalPromises, ...acplPromises]);
@@ -950,27 +996,32 @@ export async function buildDailyResponse(department: string, period: string, dat
     // OKK for B2B: prompt types are defined in src/lib/config/tenant.ts (LINES.b2b).
     // Each line has its own prompt_type in `okk_evaluations.prompt_type`:
     //   buh1 → r2_commercial, buh2 → r2_decisions, med1 → r2_med_commercial
-    const [avgBuh1, avgBuh2, avgMed, okkPerMgr] = await Promise.all([
-      getOkkAvgScore("b2b", from, to, ["r2_commercial"]),
-      getOkkAvgScore("b2b", from, to, ["r2_decisions"]),
-      getOkkAvgScore("b2b", from, to, ["r2_med_commercial"]),
-      getOkkPerManagerScores("b2b", from, to, ["r2_commercial", "r2_decisions", "r2_med_commercial"]),
+    // Per-line team averages come from 3 separate queries (different prompt sets
+    // → different WHERE clauses, can't collapse into one query); per-manager map
+    // is the combined of all three, pulled once alongside the "all prompts" team
+    // aggregate for efficiency.
+    const [buh1Res, buh2Res, medRes, allPromptsRes] = await Promise.all([
+      getOkkScores("b2b", from, to, ["r2_commercial"]),
+      getOkkScores("b2b", from, to, ["r2_decisions"]),
+      getOkkScores("b2b", from, to, ["r2_med_commercial"]),
+      getOkkScores("b2b", from, to, ["r2_commercial", "r2_decisions", "r2_med_commercial"]),
     ]);
-    okkBuh1 = avgBuh1;
-    okkBuh2 = avgBuh2;
-    okkMed = avgMed;
-    for (const [mgrId, v] of okkPerMgr) okkPerManagerB2B.set(mgrId, v);
+    okkBuh1 = buh1Res.team;
+    okkBuh2 = buh2Res.team;
+    okkMed = medRes.team;
+    for (const [mgrId, v] of allPromptsRes.perManager) okkPerManagerB2B.set(mgrId, v);
 
     // SLA & avg wait — одна воронка в телефонии, используем Бух Комм.
     // Team-level call metrics across ALL managers (fix for undercount where
     // ex-managers get excluded when keyed by master_managers).
     teamCallMetricsB2B = await getAnalyticsTeamCallMetrics("b2b", from, to).catch(() => null);
 
-    const slaFactsB2B = await getSlaFacts(buhPipelineId, fromDate, toDate);
+    const slaFactsB2B = (await getSlaFactsCombined(allManagers, buhPipelineId, fromDate, toDate)).team;
     // Use business-hours SLA (from-shift) per Excel comparison: Excel R76 shows
     // 52.59 мин which matches sla_first_call_from_shift_seconds, not raw
     // sla_first_call_seconds (which includes evenings/nights, gives ~600 min).
-    slaMinutesB2B = slaFactsB2B.slaShiftMinutes ?? slaFactsB2B.slaMinutes;
+    // Emitted as SECONDS — the UI renders HH:MM:SS via DURATION_SEC_KEYS.
+    slaMinutesB2B = slaFactsB2B.slaShiftSeconds ?? slaFactsB2B.slaSeconds;
     // avgWait факт (Excel R72 "Ср. время ожидания ответа (сек)" = ring-to-answer
     // из Callgear/Cloudtalk). У нас только sla_first_call_from_shift_seconds
     // (часы до первого звонка на лиде) — это совсем другой SLA. Пока source не
@@ -1126,17 +1177,21 @@ export async function buildDailyResponse(department: string, period: string, dat
           fact = v !== undefined ? String(v) : (plan != null && plan !== "" ? plan : null);
         }
         if (metric.key === "avgWait_p") fact = "30";
+        // SLA/TLT facts are emitted in SECONDS so the UI can render
+        // HH:MM:SS with true precision — if we emit rounded minutes here the
+        // 30-секундный SLA превращается в "01:00" after *60. See DailyTab's
+        // DURATION_SEC_KEYS (sla_f/sla_shift_f/tlt_f/calls_sla_f live there).
         if (metric.key === "sla_f") {
           const sf = slaFacts.get(section.dbLine);
-          fact = sf?.slaMinutes != null ? String(sf.slaMinutes) : null;
+          fact = sf?.slaSeconds != null ? String(sf.slaSeconds) : null;
         }
         if (metric.key === "sla_shift_f") {
           const sf = slaFacts.get(section.dbLine);
-          fact = sf?.slaShiftMinutes != null ? String(sf.slaShiftMinutes) : null;
+          fact = sf?.slaShiftSeconds != null ? String(sf.slaShiftSeconds) : null;
         }
         if (metric.key === "tlt_f") {
           const sf = slaFacts.get(section.dbLine);
-          fact = sf?.tltMinutes != null ? String(sf.tltMinutes) : null;
+          fact = sf?.tltSeconds != null ? String(sf.tltSeconds) : null;
         }
         if (metric.key === "frozenLeads") {
           fact = String(frozenLeadsTotal);
@@ -1533,9 +1588,10 @@ export async function buildDailyResponse(department: string, period: string, dat
             if (metric.key === "sla_f" || metric.key === "sla_shift_f" || metric.key === "tlt_f") {
               const perMgr = slaPerManager.get(section.dbLine)?.get(mgr.id);
               if (perMgr) {
-                if (metric.key === "sla_f") fact = perMgr.slaMinutes != null ? String(perMgr.slaMinutes) : null;
-                else if (metric.key === "sla_shift_f") fact = perMgr.slaShiftMinutes != null ? String(perMgr.slaShiftMinutes) : null;
-                else if (metric.key === "tlt_f") fact = perMgr.tltMinutes != null ? String(perMgr.tltMinutes) : null;
+                // SECONDS, not minutes — see note at the team-level sla_f branch.
+                if (metric.key === "sla_f") fact = perMgr.slaSeconds != null ? String(perMgr.slaSeconds) : null;
+                else if (metric.key === "sla_shift_f") fact = perMgr.slaShiftSeconds != null ? String(perMgr.slaShiftSeconds) : null;
+                else if (metric.key === "tlt_f") fact = perMgr.tltSeconds != null ? String(perMgr.tltSeconds) : null;
               }
             }
             // Per-manager avg calls per lead
