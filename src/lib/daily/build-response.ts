@@ -597,7 +597,17 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const base = new Date(`${dateStr}T00:00:00Z`);
   const monthPeriodDate = `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, "0")}`;
-  const daysInMonth = new Date(base.getUTCFullYear(), base.getUTCMonth() + 1, 0).getUTCDate();
+  // Off-by-one bug fix (2026-04-24): the old form
+  //   `new Date(year, month+1, 0).getUTCDate()`
+  // constructs a date in *local* time ("April 30 00:00 local"). On a Berlin
+  // (CEST UTC+2) Dokploy host that's "April 29 22:00 UTC", so getUTCDate()
+  // returned 29 instead of 30. This scaled monthly plans by 1/29 instead of
+  // 1/30 → `Выручка Total план 202764 / 29 = 6992` on the daily view, when
+  // the correct split is 202764 / 30 = 6759. Using Date.UTC() forces the
+  // constructor into UTC so the result is timezone-independent.
+  const daysInMonth = new Date(
+    Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0),
+  ).getUTCDate();
 
   const [allManagers, monthlyPlans, scheduleMap] = await Promise.all([
     getManagersWithKommo(department),
