@@ -953,9 +953,16 @@ export async function buildDailyResponse(department: string, period: string, dat
     });
 
     // SLA / TLT — одним round-trip'ом команда + per-manager через GROUPING SETS.
-    // Line 1 = first-line pipeline, line 3 = berater pipeline.
+    // Lines 2 + 3 both live in the BERATER pipeline — Excel splits the
+    // roster visually (2 = Бератер верх воронки, 3 = Доведение) but the
+    // calls / SLA telemetry is one feed. Without line 2 here, the
+    // per-manager secondLine section showed blank sla_f / sla_shift_f /
+    // tlt_f cells on every date (audit finding 2026-04-25). The cached()
+    // wrapper on getSlaFactsCombined dedups the duplicate BERATER fetch
+    // so line 2 and 3 share a single DB round-trip.
     const B2G_LINE_PIPELINES: Record<string, number> = {
       "1": B2G_PIPELINES.FIRST_LINE,
+      "2": B2G_PIPELINES.BERATER,
       "3": B2G_PIPELINES.BERATER,
     };
     const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineId]) => {
