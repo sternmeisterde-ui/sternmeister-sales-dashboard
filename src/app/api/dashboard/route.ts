@@ -368,12 +368,22 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    const cacheKey = `dashboard-response:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v2 cache-key bump: forces immediate invalidation of responses built
+    // before the department-scoped pipelineBreakdown whitelist (any leftover
+    // "Бух Бератер (2я линия)" card in the B2B response was served from the
+    // pre-scoping cache).
+    const cacheKey = `dashboard-response:v2:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
 
-    return NextResponse.json(responseData);
+    return NextResponse.json(responseData, {
+      headers: {
+        // Prevent any CDN / browser proxy from serving a stale response that
+        // was built before the pipeline-breakdown scoping fix.
+        "Cache-Control": "no-store, max-age=0",
+      },
+    });
   } catch (error) {
     console.error("Dashboard API error:", error);
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -521,7 +531,18 @@ async function buildDashboardResponse(
     // Pipeline breakdown reflects current active pipeline state. Kommo has no
     // historical snapshots to reconstruct what the pipeline looked like on a
     // past date, so tying this to from/to would make past-date views empty.
-    const pipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
+    const rawPipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
+
+    // Belt-and-suspenders whitelist: drop any card whose pipelineId isn't in
+    // the active department's pipeline list. Even though buildPipelineBreakdown
+    // is already department-scoped, this guarantees no B2G label (e.g.
+    // "Бух Бератер (2я линия)") can ever appear on the B2B tab, regardless of
+    // upstream bugs or cache drift. Split-cards from the BERATER line-3 split
+    // use pipelineId = B2G_PIPELINES.BERATER, so they're covered too.
+    const allowedPipelineIds = new Set(getPipelineIds(department));
+    const pipelineBreakdown = rawPipelineBreakdown.filter((c) =>
+      allowedPipelineIds.has(c.pipelineId),
+    );
 
     return {
       date: dateStr,
