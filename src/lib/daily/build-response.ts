@@ -1030,14 +1030,12 @@ export async function buildDailyResponse(department: string, period: string, dat
           fact = plan;
         }
       } else if (department === "b2b" && metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
-        // Editable fact (revenue _f рядом с _p): manual entry always wins.
-        fact = plan;
-      } else if (department === "b2b" && metric.hasFact && !metric.hasPlan && plan != null && plan !== "" && dateStr < "2026-04-01") {
-        // Pure-fact backfill: Excel Jan–Mar 2026 values win. April+ always
-        // uses live SQL (analytics.leads_cohort) — даже если строка импорта
-        // есть, SQL побеждает.
+        // Editable fact (revenue _f paired with _p): manual entry always wins.
         fact = plan;
       } else if (department === "b2b") {
+        // Pure-fact metrics (komLeads_f, sales_f, calls_*, SLA, ...) always
+        // come from analytics.* — analytics.leads_cohort / .communications /
+        // .sla have full Jan 2026 → today coverage.
         fact = getB2BFact(metric.key, section.key, {
           summaryCallMetrics,
           managersOnLineCount,
@@ -1170,9 +1168,6 @@ export async function buildDailyResponse(department: string, period: string, dat
               fact = plan;
             } else if (metric.hasPlan && metric.hasFact && plan != null && plan !== "") {
               // Editable revenue per-manager — manual override always wins.
-              fact = plan;
-            } else if (metric.hasFact && !metric.hasPlan && plan != null && plan !== "" && dateStr < "2026-04-01") {
-              // Jan–Mar 2026 Excel backfill; April+ live SQL.
               fact = plan;
             } else if (section.key === "calls") {
               if (metric.key === "calls_managersOnLine_f") fact = "1";
