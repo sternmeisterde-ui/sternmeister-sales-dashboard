@@ -10,7 +10,7 @@ import {
   hasCategoryLetter,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics } from "@/lib/daily/analytics-calls";
+import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsByManager, getFrozenLeadsTeam } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
 import { getDailySections } from "@/lib/daily/metrics-config";
 import {
@@ -724,6 +724,14 @@ export async function buildDailyResponse(department: string, period: string, dat
   const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
+  // Frozen-lead counts: the single highest-value diagnostic for "which
+  // manager is sitting on new leads without calling?" (recommended by
+  // sales-ops agent, 2026-04-24). Cheap extra query against analytics.sla.
+  const [frozenLeadsMap, frozenLeadsTotal] = await Promise.all([
+    getFrozenLeadsByManager(allManagers, department, from, to).catch(() => new Map<string, number>()),
+    getFrozenLeadsTeam(department, from, to).catch(() => 0),
+  ]);
+
   const planLookup = new Map<string, string>();
   for (const p of plans) {
     const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
@@ -1025,6 +1033,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             okkBuh1, okkBuh2, okkMed,
             slaMinutes: slaMinutesB2B,
             avgWaitSeconds: avgWaitSecondsB2B,
+            frozenLeadsTotal,
           });
         } else {
           fact = plan;
@@ -1049,6 +1058,7 @@ export async function buildDailyResponse(department: string, period: string, dat
           okkMed,
           slaMinutes: slaMinutesB2B,
           avgWaitSeconds: avgWaitSecondsB2B,
+          frozenLeadsTotal,
         });
       } else if (section.key === "funnel") {
         fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
@@ -1102,6 +1112,9 @@ export async function buildDailyResponse(department: string, period: string, dat
         if (metric.key === "tlt_f") {
           const sf = slaFacts.get(section.dbLine);
           fact = sf?.tltMinutes != null ? String(sf.tltMinutes) : null;
+        }
+        if (metric.key === "frozenLeads") {
+          fact = String(frozenLeadsTotal);
         }
         if (metric.key === "avgDialogPerEmployee" && sectionManagers.length > 0) {
           fact = String(Math.round(summaryCallMetrics.totalMinutes / sectionManagers.length));
@@ -1183,6 +1196,7 @@ export async function buildDailyResponse(department: string, period: string, dat
               else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(avgWaitSecondsB2B) : null;
               else if (metric.key === "calls_sla_p") fact = "25";
               else if (metric.key === "calls_sla_f") fact = slaMinutesB2B != null ? String(slaMinutesB2B) : null;
+              else if (metric.key === "calls_frozenLeads_f") fact = String(frozenLeadsMap.get(mgr.id) ?? 0);
               // ОКК per-manager — берём из общей окк-выборки (ETL пишет manager_id)
               else if (metric.key === "okk_avg_f") {
                 const v = okkPerManagerB2B.get(mgr.id);
@@ -1500,6 +1514,12 @@ export async function buildDailyResponse(department: string, period: string, dat
               const v = avgCallsPerLeadPerManager.get(section.dbLine)?.get(mgr.id);
               fact = v != null ? String(v) : null;
             }
+            // Per-manager frozen leads count (SLA status 'frozen' in
+            // analytics.sla — leads the manager was assigned but hasn't
+            // called within the expected window).
+            if (metric.key === "frozenLeads") {
+              fact = String(frozenLeadsMap.get(mgr.id) ?? 0);
+            }
             let percent: number | null = null;
             if (plan && fact && Number(plan) > 0) {
               if (metric.unit === "%") {
@@ -1570,6 +1590,7 @@ interface B2BFactContext {
   okkMed: number | null;
   slaMinutes: number | null;
   avgWaitSeconds: number | null;
+  frozenLeadsTotal: number | null;
 }
 
 /** Safe integer percent = Math.round(num/den * 100); 0 when den is 0. */
@@ -1713,6 +1734,7 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(ctx.avgWaitSeconds) : null; // R60
       case "calls_dialPercent_f":    return String(summaryCallMetrics.dialPercent); // R62
       case "calls_sla_f":            return ctx.slaMinutes != null ? String(ctx.slaMinutes) : null; // R64
+      case "calls_frozenLeads_f":    return ctx.frozenLeadsTotal != null ? String(ctx.frozenLeadsTotal) : null;
       // OKK facts: prefer OKK DB; fall back to stored daily_plans for dates
       // before OKK launch (≈ 2026-03-04) where Excel has the only record.
       case "okk_buh1_f":             return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : (ctx.getPlan("calls", null, "okk_buh1_f") ?? null);

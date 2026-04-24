@@ -97,6 +97,7 @@ const qualifierMetrics: MetricDef[] = [
   // --- Качество ---
   { key: "_grp_quality", label: "Качество", hasPlan: false, hasFact: false, unit: "", factSource: "manual", isGroupHeader: true },
   { key: "overdueTasks", label: "Просроченные задачи", hasPlan: false, hasFact: true, unit: "шт", factSource: "kommo_tasks" },
+  { key: "frozenLeads", label: "Замороженные лиды (без первого звонка)", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "regulationPercent", label: "Выполнение регламента, %", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "avgCallsPerLead", label: "Ср. касаний звонком на лид", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },

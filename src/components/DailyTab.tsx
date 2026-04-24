@@ -1529,14 +1529,14 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
                           </td>
                         </tr>
                       )}
-                      <tr className="border-b border-white/5 hover:bg-white/[0.02]">
-                        <td className="px-4 py-2 text-[11px] text-slate-300 sticky left-0 bg-slate-900/90 z-10">
+                      <tr className={`border-b border-white/5 hover:bg-white/[0.02] ${m.rank < 40 ? "daily-primary-row" : ""}`}>
+                        <td className={`px-4 text-slate-300 sticky left-0 bg-slate-900/90 z-10 ${m.rank < 40 ? "py-3 text-[12px] font-semibold" : "py-2 text-[11px]"}`}>
                           {m.metricLabel}
                         </td>
                         {columns.map((c) => {
                           const val = c.getValue(m);
                           return (
-                            <td key={c.key} className={`px-3 py-2 text-center tabular-nums ${getCellColor(val)}`}>
+                            <td key={c.key} className={`px-3 text-center tabular-nums ${m.rank < 40 ? "py-3 text-[13px] font-semibold" : "py-2"} ${getCellColor(val)}`}>
                               {val ?? "—"}
                             </td>
                           );

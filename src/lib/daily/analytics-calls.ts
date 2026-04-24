@@ -181,6 +181,92 @@ export async function getAnalyticsTeamCallMetrics(
   };
 }
 
+/**
+ * Frozen-lead counts per manager for a pipeline window. A "frozen" lead is
+ * one the integrator flagged in `analytics.sla.sla_status = 'frozen'` —
+ * typically: lead created, SLA clock started, no first-call attempt within
+ * the expected window. The single highest-value diagnostic in the per-manager
+ * view when team revenue dips: "whose leads are we sitting on?"
+ *
+ * Returns Map<master_manager.id, count>. Zero for managers with no frozen
+ * leads in the window.
+ */
+export async function getFrozenLeadsByManager(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, number>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return new Map();
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ manager: string; frozen_cnt: string | number }>(sql`
+    SELECT manager, COUNT(*) AS frozen_cnt
+    FROM analytics.sla
+    WHERE sla_status = 'frozen'
+      AND lead_created_at >= ${fromDate}
+      AND lead_created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+      AND manager IS NOT NULL AND manager <> ''
+    GROUP BY manager
+  `);
+
+  const byName = new Map<string, number>();
+  for (const row of result.rows) {
+    byName.set(row.manager, Number(row.frozen_cnt));
+  }
+
+  // Name → master id (with aliases, same pattern as call metrics above).
+  const byMaster = new Map<string, number>();
+  for (const m of managers) {
+    let n = byName.get(m.name) ?? 0;
+    if (!n) {
+      const aliases = NAME_ALIASES[m.name];
+      if (aliases) {
+        for (const alias of aliases) {
+          const v = byName.get(alias);
+          if (v) { n = v; break; }
+        }
+      }
+    }
+    byMaster.set(m.id, n);
+  }
+  return byMaster;
+}
+
+/** Team total of frozen leads across the department's pipelines. */
+export async function getFrozenLeadsTeam(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return 0;
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ cnt: string | number }>(sql`
+    SELECT COUNT(*) AS cnt FROM analytics.sla
+    WHERE sla_status = 'frozen'
+      AND lead_created_at >= ${fromDate}
+      AND lead_created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+  `);
+  return Number(result.rows[0]?.cnt ?? 0);
+}
+
 export interface DailyCallBucket {
   date: string;              // YYYY-MM-DD in Europe/Berlin
   callsTotal: number;        // call_out + call_in
