@@ -397,6 +397,7 @@ export const B2B_QUALIFIED_STATUSES: Set<number> = new Set([
 export const B2G_ALL_PIPELINE_IDS = [
   B2G_PIPELINES.FIRST_LINE,
   B2G_PIPELINES.BERATER,
+  B2G_PIPELINES.MEDICAL_GOV,
 ];
 
 /** All pipeline IDs for B2B */

@@ -10,7 +10,7 @@ import {
   hasCategoryLetter,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsByManager, getFrozenLeadsTeam } from "@/lib/daily/analytics-calls";
+import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsByManager, getFrozenLeadsTeam, getOverdueTasksByManager } from "@/lib/daily/analytics-calls";
 import { getManagersWithKommo, getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
 import { getDailySections } from "@/lib/daily/metrics-config";
 import {
@@ -220,7 +220,7 @@ async function getSlaFacts(
         SELECT
           round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
           round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
-          round(avg(sla_first_contact_seconds) / 60.0)::int         AS avg_tlt
+          round(avg(business_hours_since_last_contact) / 60.0)::int AS avg_tlt
         FROM analytics.sla
         WHERE pipeline_id = ${pipelineId}
           AND lead_created_at >= ${fromDate}
@@ -384,7 +384,7 @@ async function getSlaFactsByManager(
           manager,
           round(avg(sla_first_call_seconds) / 60.0)::int            AS avg_sla,
           round(avg(sla_first_call_from_shift_seconds) / 60.0)::int AS avg_sla_shift,
-          round(avg(sla_first_contact_seconds) / 60.0)::int         AS avg_tlt
+          round(avg(business_hours_since_last_contact) / 60.0)::int AS avg_tlt
         FROM analytics.sla
         WHERE pipeline_id = ${pipelineId}
           AND lead_created_at >= ${fromDate}
@@ -727,9 +727,12 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Frozen-lead counts: the single highest-value diagnostic for "which
   // manager is sitting on new leads without calling?" (recommended by
   // sales-ops agent, 2026-04-24). Cheap extra query against analytics.sla.
-  const [frozenLeadsMap, frozenLeadsTotal] = await Promise.all([
+  const [frozenLeadsMap, frozenLeadsTotal, overdueTasksAnalytics] = await Promise.all([
     getFrozenLeadsByManager(allManagers, department, from, to).catch(() => new Map<string, number>()),
     getFrozenLeadsTeam(department, from, to).catch(() => 0),
+    // Overdue tasks from analytics.tasks (authoritative mirror). Falls back
+    // to the Kommo taskMetricsMap below if empty.
+    getOverdueTasksByManager(allManagers, to).catch(() => new Map<string, number>()),
   ]);
 
   const planLookup = new Map<string, string>();
@@ -976,13 +979,19 @@ export async function buildDailyResponse(department: string, period: string, dat
       ? teamCallMetricsB2B
       : sumCallMetrics(sectionCallMetrics);
 
-    // Tasks still come from Kommo and are keyed by kommo user id.
+    // Overdue tasks: prefer analytics.tasks (continuously-refreshed mirror)
+    // over Kommo API. The analytics map is keyed by master_managers.id.
     const sectionKommoUserIds = sectionManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id !== null);
     let totalOverdue = 0;
-    for (const uid of sectionKommoUserIds) {
-      totalOverdue += taskMetricsMap.get(uid)?.overdueTasks ?? 0;
+    for (const mgr of sectionManagers) {
+      const fromAnalytics = overdueTasksAnalytics.get(mgr.id);
+      if (fromAnalytics != null && fromAnalytics > 0) {
+        totalOverdue += fromAnalytics;
+      } else if (mgr.kommoUserId != null) {
+        totalOverdue += taskMetricsMap.get(mgr.kommoUserId)?.overdueTasks ?? 0;
+      }
     }
 
     const summaryMetrics = section.metrics.map((metric) => {
@@ -1456,7 +1465,11 @@ export async function buildDailyResponse(department: string, period: string, dat
       managerData = sectionManagers.map((mgr) => {
         const kommoId = mgr.kommoUserId;
         const mgrCallMetrics = callMetricsMap.get(mgr.id);
-        const mgrOverdue = kommoId ? (taskMetricsMap.get(kommoId)?.overdueTasks ?? 0) : 0;
+        // Prefer analytics.tasks; fall back to Kommo taskMetricsMap if empty.
+        const mgrOverdueAnalytics = overdueTasksAnalytics.get(mgr.id) ?? 0;
+        const mgrOverdue = mgrOverdueAnalytics > 0
+          ? mgrOverdueAnalytics
+          : (kommoId ? (taskMetricsMap.get(kommoId)?.overdueTasks ?? 0) : 0);
         const mgrFacts = buildUserFacts(mgrCallMetrics, mgrOverdue);
 
         const mgrMetrics = section.metrics

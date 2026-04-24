@@ -241,6 +241,49 @@ export async function getFrozenLeadsByManager(
   return byMaster;
 }
 
+/**
+ * Overdue task counts per manager from analytics.tasks. An overdue task
+ * is one with is_completed=0 AND deadline < NOW() (or the snapshot date,
+ * for historical views). The integrator mirror refreshes continuously so
+ * this is more authoritative than Kommo /api/v4/tasks which is paginated
+ * and eventually-consistent.
+ */
+export async function getOverdueTasksByManager(
+  managers: Array<{ id: string; name: string }>,
+  asOfTs?: number,
+): Promise<Map<string, number>> {
+  const asOf = asOfTs ? new Date(asOfTs * 1000) : new Date();
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ task_manager: string; overdue_cnt: string | number }>(sql`
+    SELECT task_manager, COUNT(*) AS overdue_cnt
+    FROM analytics.tasks
+    WHERE is_completed = 0
+      AND deadline < ${asOf}
+      AND task_manager IS NOT NULL AND task_manager <> ''
+    GROUP BY task_manager
+  `);
+
+  const byName = new Map<string, number>();
+  for (const row of result.rows) byName.set(row.task_manager, Number(row.overdue_cnt));
+
+  const byMaster = new Map<string, number>();
+  for (const m of managers) {
+    let n = byName.get(m.name) ?? 0;
+    if (!n) {
+      const aliases = NAME_ALIASES[m.name];
+      if (aliases) {
+        for (const alias of aliases) {
+          const v = byName.get(alias);
+          if (v) { n = v; break; }
+        }
+      }
+    }
+    byMaster.set(m.id, n);
+  }
+  return byMaster;
+}
+
 /** Team total of frozen leads across the department's pipelines. */
 export async function getFrozenLeadsTeam(
   department: "b2g" | "b2b" | string,

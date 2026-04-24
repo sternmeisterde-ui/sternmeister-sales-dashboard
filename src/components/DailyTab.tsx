@@ -760,7 +760,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   //   B2G: [Показатели] [Менеджеры] [Отказы]
   // Per-manager таблицы и refusal cards вынесены в отдельные табы чтобы
   // Показатели страница не была перегружена.
-  const [subTab, setSubTab] = useState<"metrics" | "managers" | "refusals">("metrics");
+  const [subTab, setSubTab] = useState<"metrics" | "managers" | "refusals" | "rating">("metrics");
 
   useEffect(() => {
     let abort = false;
@@ -1023,6 +1023,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             : ([
                 { id: "metrics" as const, label: "Показатели" },
                 { id: "managers" as const, label: "Менеджеры" },
+                { id: "rating" as const, label: "Рейтинг" },
                 { id: "refusals" as const, label: "Тематики отказов" },
               ])
         ).map((t) => (
@@ -1040,10 +1041,14 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         ))}
       </div>
 
-      {/* ===== SUB-TAB: Менеджеры — transposed compare view ===== */}
-      {subTab === "managers" && data && !loading && (
+      {/* ===== SUB-TAB: Менеджеры ===== */}
+      {/* B2B: one cross-department compare table (sales is team-wide).
+          B2G: three SEPARATE tables per line — each line has its own
+          managers, own metrics, own filter (manager multi-select + date
+          range). Quicker drill-down and matches the 3-line org chart. */}
+      {subTab === "managers" && data && !loading && department === "b2b" && (
         <ManagersCompareView
-          department={department}
+          department="b2b"
           snapshot={selectedDaySnapshot ?? monthlySnapshot}
           comparisonDates={
             mode === "days" && data.days
@@ -1061,8 +1066,46 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           }
         />
       )}
+      {subTab === "managers" && data && !loading && department === "b2g" && (
+        <div className="flex flex-col gap-6">
+          {(["1", "2", "3"] as const).map((lineFilter) => (
+            <div key={lineFilter} className="flex flex-col gap-2">
+              <h3 className="text-[11px] uppercase tracking-widest text-slate-400 font-bold">
+                {LINE_TITLES[lineFilter]}
+              </h3>
+              <ManagersCompareView
+                department="b2g"
+                lineFilter={lineFilter}
+                snapshot={selectedDaySnapshot ?? monthlySnapshot}
+                comparisonDates={
+                  mode === "days" && data.days
+                    ? data.days.map((s) => ({ label: formatDayLabel(s.date), snapshot: s }))
+                    : mode === "weeks" && data.weeks
+                      ? data.weeks.map((s, i) => ({ label: `W${i + 1}`, snapshot: s }))
+                      : mode === "months" && data.months
+                        ? data.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
+                        : undefined
+                }
+                monthlyComparisons={
+                  monthsOfYear?.months
+                    ? monthsOfYear.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
+                    : undefined
+                }
+              />
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ===== SUB-TAB: Тематики отказов (B2G) ===== */}
+      {/* ===== SUB-TAB: Рейтинг первой линии (B2G only) ===== */}
+      {department === "b2g" && subTab === "rating" && data && !loading && (
+        <RatingFirstLineView
+          monthlySnapshot={monthlySnapshot ?? selectedDaySnapshot}
+          monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
+        />
+      )}
+
       {department === "b2g" && subTab === "refusals" && data && !loading && (monthlySnapshot?.refusals || selectedDaySnapshot?.refusals) && (
         <RefusalReasonsCards
           monthly={monthlySnapshot?.refusals}
@@ -1074,8 +1117,8 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
 
       {/* SUB-TAB "Менеджеры" (B2B) рендерится выше в общем блоке subTab === "managers". */}
 
-      {/* ===== SUB-TAB: Показатели — отображается для B2G всегда, для B2B когда subTab=metrics ===== */}
-      {(department === "b2g" || subTab === "metrics") && (
+      {/* ===== SUB-TAB: Показатели (for both depts when subTab==="metrics") ===== */}
+      {subTab === "metrics" && (
         <>
 
       {/* Summary Time Table */}
@@ -1223,9 +1266,13 @@ interface ManagersCompareViewProps {
   department: "b2g" | "b2b";
   /** initial mode */
   defaultMode?: "managers" | "dates";
+  /** Restrict to a single B2G line ("1", "2", "3"). When set, both the
+      manager column list and the metric row list are filtered to that
+      line's section (funnel metrics stay on line-1). B2B ignores this. */
+  lineFilter?: string;
 }
 
-function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, department, defaultMode = "managers" }: ManagersCompareViewProps) {
+function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, department, defaultMode = "managers", lineFilter }: ManagersCompareViewProps) {
   // Combined list of available date options for the "dates" mode dropdown:
   // daily entries first, then monthly entries with an "M:" prefix to distinguish.
   const allDateOptions: CompareDate[] = useMemo(() => {
@@ -1236,7 +1283,12 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
   }, [comparisonDates, monthlyComparisons]);
   void department;
   const [mode, setMode] = useState<"managers" | "dates">(defaultMode);
-  const allManagers = useMemo(() => collectManagers(snapshot), [snapshot]);
+  // Restrict to a single B2G line if lineFilter is set (ROP drill-down).
+  const allManagers = useMemo(() => {
+    const raw = collectManagers(snapshot);
+    if (!lineFilter) return raw;
+    return raw.filter((m) => m.line === lineFilter);
+  }, [snapshot, lineFilter]);
   // "null" = not yet initialised → auto-select-all on first render; once user
   // toggles any box we store an explicit Set (possibly empty).
   const [selectedManagerIds, setSelectedManagerIds] = useState<Set<string> | null>(null);
@@ -1354,6 +1406,15 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
     }> = [];
     for (const sec of snapshot.sections) {
       if (!sec.perManager) continue;
+      // B2G line-scoped view: only this line's section (funnel stays on line 1).
+      if (lineFilter) {
+        if (lineFilter === "1") {
+          // Line 1 gets funnel + qualifier sections. Filter out other lines.
+          if (sec.dbLine !== "1" && sec.key !== "funnel") continue;
+        } else {
+          if (sec.dbLine !== lineFilter) continue;
+        }
+      }
       for (const m of sec.metrics) {
         if (m.isGroupHeader) continue;
         if (DENYLIST.has(m.key)) continue;
@@ -1372,7 +1433,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
     // Stable sort by rank (metrics without ORDER entry fall to the bottom)
     rows.sort((a, b) => a.rank - b.rank);
     return rows;
-  }, [snapshot]);
+  }, [snapshot, lineFilter]);
 
   if (!snapshot || allManagers.length === 0) {
     return (
@@ -1550,6 +1611,93 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ====================== RATING FIRST LINE (B2G) ======================
+// Mirrors the "Рейтинг первой линии" sheet in Excel Госники Daily Weekly
+// Monthly. Line-1 qualifiers ranked by conversion % (terms ÷ leads).
+// RR по записям = (termsTotal ÷ calendar-days-so-far) × days-in-month —
+// forward projection of monthly terms total.
+// Data comes from the monthly snapshot already loaded for the Managers
+// sub-tab; no extra fetch.
+
+function RatingFirstLineView({ monthlySnapshot, monthPeriodDate }: {
+  monthlySnapshot: DailySnapshot | undefined;
+  monthPeriodDate: string;
+}) {
+  const rows = useMemo(() => {
+    if (!monthlySnapshot) return [];
+    const funnelSection = monthlySnapshot.sections.find((s) => s.key === "funnel");
+    if (!funnelSection) return [];
+    const line1Managers = (funnelSection.managers ?? []).filter((mgr: ManagerData) => mgr.line === "1");
+    return line1Managers.map((mgr: ManagerData) => {
+      const byKey = new Map(mgr.metrics.map((m) => [m.key, m.fact]));
+      const leads = Number(byKey.get("totalLeads") ?? 0);
+      const terms = Number(byKey.get("termsTotal") ?? 0);
+      const conv = leads > 0 ? (terms / leads) * 100 : 0;
+      return { id: mgr.id, name: mgr.name, leads, terms, conv };
+    }).sort((a: { conv: number }, b: { conv: number }) => b.conv - a.conv);
+  }, [monthlySnapshot]);
+
+  const [yearStr, monthStr] = monthPeriodDate.slice(0, 7).split("-");
+  const year = Number(yearStr);
+  const monthNum = Number(monthStr);
+  const totalDaysInMonth = new Date(year, monthNum, 0).getDate();
+  const now = new Date();
+  const isCurrentMonth = now.getFullYear() === year && now.getMonth() + 1 === monthNum;
+  const daysSoFar = isCurrentMonth ? now.getDate() : totalDaysInMonth;
+
+  if (rows.length === 0) {
+    return (
+      <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+        Нет данных для рейтинга первой линии за этот месяц
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-3">
+        <h3 className="text-[11px] uppercase tracking-widest text-slate-400 font-bold">Рейтинг первой линии</h3>
+        <span className="text-[10px] text-slate-500">
+          {MONTH_NAMES[monthNum - 1]} {year}
+          {isCurrentMonth ? ` • день ${daysSoFar} / ${totalDaysInMonth}` : ""}
+        </span>
+      </div>
+      <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
+        <table className="w-full text-left border-collapse">
+          <thead className="bg-slate-800/40">
+            <tr className="border-b border-white/10">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold">#</th>
+              <th className="px-4 py-2.5 text-[11px] text-slate-300 font-bold">Менеджер</th>
+              <th className="px-4 py-2.5 text-[11px] text-slate-300 font-bold text-right">Лиды за месяц</th>
+              <th className="px-4 py-2.5 text-[11px] text-slate-300 font-bold text-right">Записи на термин</th>
+              <th className="px-4 py-2.5 text-[11px] text-slate-300 font-bold text-right">Конверсия</th>
+              <th className="px-4 py-2.5 text-[11px] text-slate-300 font-bold text-right">RR по записям</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r: { id: string; name: string; leads: number; terms: number; conv: number }, i: number) => {
+              const rr = daysSoFar > 0 ? Math.round((r.terms / daysSoFar) * totalDaysInMonth) : 0;
+              const convStr = r.conv.toFixed(2).replace(".", ",") + "%";
+              return (
+                <tr key={r.id} className="border-b border-white/5 hover:bg-white/[0.02]">
+                  <td className="px-4 py-2.5 text-[12px] text-slate-500 tabular-nums">{i + 1}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-200 font-semibold">{r.name}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{r.leads}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{r.terms}</td>
+                  <td className={`px-4 py-2.5 text-[13px] text-right tabular-nums font-bold ${
+                    r.conv >= 40 ? "text-emerald-400" : r.conv >= 25 ? "text-yellow-400" : "text-red-400"
+                  }`}>{convStr}</td>
+                  <td className="px-4 py-2.5 text-[13px] text-slate-300 text-right tabular-nums">{rr}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
