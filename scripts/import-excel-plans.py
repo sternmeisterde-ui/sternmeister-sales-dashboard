@@ -61,10 +61,14 @@ def load_env() -> str:
 #   pct_scale: True → Excel stores 0..1 but we want 0..100 (percentages)
 B2B_METRICS: list[tuple[str, str, int | None, int | None, bool]] = [
     # salesTotal section
-    ("total_revenueTotal_p",    "salesTotal", 47,  20, False),
-    ("total_revenueTotal_f",    "salesTotal", 48,  21, False),
-    ("total_newRevenue_p",      "salesTotal", 49,  20, False),   # same as revenueTotal at team level
-    ("total_newRevenue_f",      "salesTotal", 50,  21, False),
+    # Daily: R47=Новые+Продления (revenueTotal), R49=Новая выручка (newRevenue).
+    # Monthly: R20/R21=Выручка Total (revenueTotal only). Monthly Excel has
+    # NO separate row for "Новая выручка Total" — so newRevenue monthly is
+    # not imported (computed at render time via buh.revenue + med.revenue).
+    ("total_revenueTotal_p",    "salesTotal", 47,  20,   False),
+    ("total_revenueTotal_f",    "salesTotal", 48,  21,   False),
+    ("total_newRevenue_p",      "salesTotal", 49,  None, False),
+    ("total_newRevenue_f",      "salesTotal", 50,  None, False),
     ("total_komLeads_p",        "salesTotal", 51,  None, False),
     ("total_komLeads_f",        "salesTotal", 52,  None, False),
     ("total_sales_p",           "salesTotal", 53,  None, False),
@@ -75,8 +79,11 @@ B2B_METRICS: list[tuple[str, str, int | None, int | None, bool]] = [
     ("total_avgCheck_p",        "salesTotal", 58,  None, False),
     ("total_avgCheck_f",        "salesTotal", 59,  None, False),
     # Бух section
-    ("buh_salesPlusRenewals_p", "salesBuh",   63,  22, False),
-    ("buh_salesPlusRenewals_f", "salesBuh",   64,  23, False),
+    # Monthly R22/R23 is "Продажи + Продления Total" (все пайплайны), not
+    # Бух-specific. Daily R63/R64 IS Бух-specific. Skip monthly to avoid
+    # duplicating the total into the Бух row.
+    ("buh_salesPlusRenewals_p", "salesBuh",   63,  None, False),
+    ("buh_salesPlusRenewals_f", "salesBuh",   64,  None, False),
     ("buh_newRevenue_p",        "salesBuh",   65,  25, False),
     ("buh_newRevenue_f",        "salesBuh",   66,  26, False),
     ("buh_komLeads_p",          "salesBuh",   67,  27, False),

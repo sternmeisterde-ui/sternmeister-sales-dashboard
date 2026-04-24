@@ -380,9 +380,14 @@ function SummaryTimeTable({
   }
 
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="w-full overflow-x-auto">
-        <table className="w-full text-left border-collapse">
+    // CANNOT use `glass-panel` here: its backdrop-filter creates a containing
+    // block that anchors sticky thead/TH to the panel's own box (so they
+    // scroll out of view with the panel). Also cannot use `overflow-hidden`
+    // on any ancestor, it clips sticky content. Plain div with border/bg is
+    // the only combination that lets thead stick to viewport on page scroll.
+    <div className="text-slate-200 rounded-2xl border border-white/5 shadow-2xl bg-slate-900/40">
+      <div className="w-full overflow-x-auto rounded-2xl">
+        <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
             <tr className="border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[220px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
@@ -1018,7 +1023,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           department === "b2b"
             ? ([
                 { id: "metrics" as const, label: "Показатели" },
-                { id: "managers" as const, label: "Менеджеры" },
               ])
             : ([
                 { id: "metrics" as const, label: "Показатели" },
@@ -1046,26 +1050,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
           B2G: three SEPARATE tables per line — each line has its own
           managers, own metrics, own filter (manager multi-select + date
           range). Quicker drill-down and matches the 3-line org chart. */}
-      {subTab === "managers" && data && !loading && department === "b2b" && (
-        <ManagersCompareView
-          department="b2b"
-          snapshot={selectedDaySnapshot ?? monthlySnapshot}
-          comparisonDates={
-            mode === "days" && data.days
-              ? data.days.map((s) => ({ label: formatDayLabel(s.date), snapshot: s }))
-              : mode === "weeks" && data.weeks
-                ? data.weeks.map((s, i) => ({ label: `W${i + 1}`, snapshot: s }))
-                : mode === "months" && data.months
-                  ? data.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
-                  : undefined
-          }
-          monthlyComparisons={
-            monthsOfYear?.months
-              ? monthsOfYear.months.map((s, i) => ({ label: MONTH_NAMES_SHORT[i], snapshot: s }))
-              : undefined
-          }
-        />
-      )}
       {subTab === "managers" && data && !loading && department === "b2g" && (
         <div className="flex flex-col gap-6">
           {(["1", "2", "3"] as const).map((lineFilter) => (
@@ -1561,9 +1545,10 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
           Выберите {mode === "managers" ? "менеджеров" : "даты"} для сравнения
         </div>
       ) : (
-        <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-          <div className="w-full overflow-x-auto">
-            <table className="w-full text-left border-collapse">
+        // No glass-panel/overflow-hidden here — both break sticky thead.
+        <div className="rounded-2xl border border-white/5 bg-slate-900/40">
+          <div className="w-full overflow-x-auto rounded-2xl">
+            <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
               <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 <tr className="border-b border-white/10">
                   <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
@@ -1666,8 +1651,8 @@ function RatingFirstLineView({ monthlySnapshot, monthPeriodDate }: {
           {isCurrentMonth ? ` • день ${daysSoFar} / ${totalDaysInMonth}` : ""}
         </span>
       </div>
-      <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-        <table className="w-full text-left border-collapse">
+      <div className="rounded-2xl border border-white/5 bg-slate-900/40 overflow-x-auto">
+        <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
           <thead className="bg-slate-800/40">
             <tr className="border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold">#</th>
