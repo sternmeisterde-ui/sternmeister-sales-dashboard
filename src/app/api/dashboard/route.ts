@@ -23,6 +23,7 @@ import {
   B2G_PIPELINES,
   B2B_PIPELINES,
   COMMERCIAL_STATUSES,
+  MEDICAL_COMM_STATUSES,
 } from "@/lib/kommo/pipeline-config";
 import type { KommoLead } from "@/lib/kommo/types";
 import {
@@ -83,7 +84,7 @@ function getTrendRange(period: string, from: number, to: number): { trendFrom: n
   return { trendFrom: from, trendTo: to, trendDays: days };
 }
 
-/** Build B2B-specific funnel from Бух Комм pipeline */
+/** Build B2B-specific funnel across BOTH Бух Комм + Medical Admin Commercial. */
 function buildB2BFunnel(
   snapshotLeads: KommoLead[],
   wonLeads: KommoLead[],
@@ -91,16 +92,54 @@ function buildB2BFunnel(
 ) {
   const active = snapshotLeads.filter((l) => !l.is_deleted && !l.closed_at);
 
-  // B2B qualification stages
-  const contactMade = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.CONTACT_MADE).length;
-  const interestConfirmed = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.INTEREST_CONFIRMED).length;
-  const invoiceSent = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.INVOICE_SENT).length;
-  const prepayment = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.PREPAYMENT).length;
-  const installment = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.INSTALLMENT).length;
-  const noConsent = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.NO_CONSENT).length;
-  const newLead = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.NEW_LEAD).length;
-  const inProgress = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.IN_PROGRESS).length;
-  const noAnswer = active.filter((l) => l.status_id === COMMERCIAL_STATUSES.NO_ANSWER).length;
+  // Each funnel stage maps to equivalent status_ids in both pipelines —
+  // Бух Комм and Medical use disjoint status_ids for the same stage, so the
+  // count is the union across both. "Новый лид" additionally folds in the
+  // auxiliary NEW_LEAD_2/NEW_LEAD_3 stages so the funnel matches Kommo UI.
+  const inSet = (l: KommoLead, ids: readonly number[]) => ids.includes(l.status_id);
+  const countByStatuses = (ids: readonly number[]) =>
+    active.filter((l) => inSet(l, ids)).length;
+
+  const contactMade = countByStatuses([
+    COMMERCIAL_STATUSES.CONTACT_MADE,
+    MEDICAL_COMM_STATUSES.CONTACT_MADE,
+  ]);
+  const interestConfirmed = countByStatuses([
+    COMMERCIAL_STATUSES.INTEREST_CONFIRMED,
+    MEDICAL_COMM_STATUSES.INTEREST_CONFIRMED,
+  ]);
+  const invoiceSent = countByStatuses([
+    COMMERCIAL_STATUSES.INVOICE_SENT,
+    MEDICAL_COMM_STATUSES.INVOICE_SENT,
+  ]);
+  const prepayment = countByStatuses([
+    COMMERCIAL_STATUSES.PREPAYMENT,
+    MEDICAL_COMM_STATUSES.PREPAYMENT,
+  ]);
+  const installment = countByStatuses([
+    COMMERCIAL_STATUSES.INSTALLMENT,
+    MEDICAL_COMM_STATUSES.INSTALLMENT,
+  ]);
+  const noConsent = countByStatuses([
+    COMMERCIAL_STATUSES.NO_CONSENT,
+    MEDICAL_COMM_STATUSES.NO_CONSENT,
+  ]);
+  const newLead = countByStatuses([
+    COMMERCIAL_STATUSES.NEW_LEAD,
+    COMMERCIAL_STATUSES.NEW_LEAD_2,
+    COMMERCIAL_STATUSES.NEW_LEAD_3,
+    MEDICAL_COMM_STATUSES.NEW_LEAD,
+    MEDICAL_COMM_STATUSES.NEW_LEAD_2,
+    MEDICAL_COMM_STATUSES.NEW_LEAD_3,
+  ]);
+  const inProgress = countByStatuses([
+    COMMERCIAL_STATUSES.IN_PROGRESS,
+    MEDICAL_COMM_STATUSES.IN_PROGRESS,
+  ]);
+  const noAnswer = countByStatuses([
+    COMMERCIAL_STATUSES.NO_ANSWER,
+    MEDICAL_COMM_STATUSES.NO_ANSWER,
+  ]);
 
   // Qualified = contactMade and beyond (excluding noConsent)
   const qualLeads = contactMade + interestConfirmed + invoiceSent + prepayment + installment;
@@ -155,8 +194,8 @@ function buildPipelineBreakdown(
   const pipelineNames: Record<number, string> = {
     [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
     [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
-    [B2B_PIPELINES.COMMERCIAL]: "Бух Комм",
-    [B2B_PIPELINES.MEDICAL_COMM]: "Medical Admin Commercial",
+    [B2B_PIPELINES.COMMERCIAL]: "Бух Комм (Бух 1 + Бух 2)",
+    [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
   };
 
   // Pipeline status names (synced 2026-04-22 from Kommo API)

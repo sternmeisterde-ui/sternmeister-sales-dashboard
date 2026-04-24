@@ -38,6 +38,8 @@ export const COMMERCIAL_STATUSES = {
   INCOMING: 81523499,              // Incoming leads
   TECH: 83364011,                  // Tech
   NEW_LEAD: 81523503,              // Новый лид
+  NEW_LEAD_2: 104076579,           // Новый лид 2
+  NEW_LEAD_3: 104076583,           // Новый лид 3
   IN_PROGRESS: 81523507,           // Взят в работу
   NO_ANSWER: 82883595,             // Недозвон
   CONTACT_MADE: 81523515,          // Контакт установлен
@@ -46,6 +48,29 @@ export const COMMERCIAL_STATUSES = {
   INVOICE_SENT: 82661919,          // Счет выставлен
   PREPAYMENT: 82946495,            // Предоплата получена
   INSTALLMENT: 82946499,           // Рассрочка
+  WON: 142,                        // Closed - won
+  LOST: 143,                       // Closed - lost
+} as const;
+
+// ==================== STATUS IDS — MEDICAL ADMIN COMMERCIAL (Мед 1 / B2B) ====================
+// Medical uses a separate Kommo pipeline (13209983) with its OWN status IDs —
+// they do NOT overlap with COMMERCIAL_STATUSES. Any code that filters/aggregates
+// B2B leads must cover BOTH status sets, or Medical leads silently drop out.
+
+export const MEDICAL_COMM_STATUSES = {
+  INCOMING: 101858011,             // Incoming leads
+  TECH: 101858015,                 // Tech
+  NEW_LEAD: 101858019,             // Новый лид
+  NEW_LEAD_2: 104076587,           // Новый лид 2
+  NEW_LEAD_3: 104076591,           // Новый лид 3
+  IN_PROGRESS: 101858023,          // Взят в работу
+  NO_ANSWER: 101858255,            // Недозвон
+  CONTACT_MADE: 101858259,         // Контакт установлен
+  NO_CONSENT: 101858263,           // Нет предварительного согласия
+  INTEREST_CONFIRMED: 101858267,   // Интерес подтверждён
+  INVOICE_SENT: 101858271,         // Счёт выставлен
+  PREPAYMENT: 101858275,           // Предоплата получена
+  INSTALLMENT: 101858279,          // Рассрочка
   WON: 142,                        // Closed - won
   LOST: 143,                       // Closed - lost
 } as const;
@@ -288,11 +313,19 @@ export const NEW_VARIANTS_MAP: Record<string, string> = {
 
 // ==================== B2B ACTIVE STATUS IDS ====================
 
-/** Active statuses for Бух Комм pipeline (10631243) — also used as default for Medical */
+/**
+ * Active (non-closed) statuses for BOTH B2B pipelines — Бух Комм (10631243)
+ * AND Medical Admin Commercial (13209983). The two pipelines have disjoint
+ * status_id ranges, so we must union them; otherwise Medical leads are
+ * silently filtered out of the Dashboard/Звонки snapshot (bug 2026-04-24).
+ */
 export const B2B_ALL_ACTIVE_STATUS_IDS: number[] = [
+  // Бух Комм
   COMMERCIAL_STATUSES.INCOMING,
   COMMERCIAL_STATUSES.TECH,
   COMMERCIAL_STATUSES.NEW_LEAD,
+  COMMERCIAL_STATUSES.NEW_LEAD_2,
+  COMMERCIAL_STATUSES.NEW_LEAD_3,
   COMMERCIAL_STATUSES.IN_PROGRESS,
   COMMERCIAL_STATUSES.NO_ANSWER,
   COMMERCIAL_STATUSES.CONTACT_MADE,
@@ -301,6 +334,20 @@ export const B2B_ALL_ACTIVE_STATUS_IDS: number[] = [
   COMMERCIAL_STATUSES.INVOICE_SENT,
   COMMERCIAL_STATUSES.PREPAYMENT,
   COMMERCIAL_STATUSES.INSTALLMENT,
+  // Medical Admin Commercial
+  MEDICAL_COMM_STATUSES.INCOMING,
+  MEDICAL_COMM_STATUSES.TECH,
+  MEDICAL_COMM_STATUSES.NEW_LEAD,
+  MEDICAL_COMM_STATUSES.NEW_LEAD_2,
+  MEDICAL_COMM_STATUSES.NEW_LEAD_3,
+  MEDICAL_COMM_STATUSES.IN_PROGRESS,
+  MEDICAL_COMM_STATUSES.NO_ANSWER,
+  MEDICAL_COMM_STATUSES.CONTACT_MADE,
+  MEDICAL_COMM_STATUSES.NO_CONSENT,
+  MEDICAL_COMM_STATUSES.INTEREST_CONFIRMED,
+  MEDICAL_COMM_STATUSES.INVOICE_SENT,
+  MEDICAL_COMM_STATUSES.PREPAYMENT,
+  MEDICAL_COMM_STATUSES.INSTALLMENT,
 ];
 
 /** B2B statuses considered as "предоплата получена" */
@@ -327,14 +374,21 @@ export const B2B_WON_STATUSES_PER_PIPELINE: Record<number, number[]> = {
 // ==================== B2B QUALIFICATION STAGES ====================
 // B2B qualification: "Контакт установлен" and beyond
 
-/** B2B qualified statuses */
+/** B2B qualified statuses — unioned across Бух Комм + Medical Admin Commercial. */
 export const B2B_QUALIFIED_STATUSES: Set<number> = new Set([
+  // Бух Комм
   COMMERCIAL_STATUSES.CONTACT_MADE,
   COMMERCIAL_STATUSES.INTEREST_CONFIRMED,
   COMMERCIAL_STATUSES.INVOICE_SENT,
   COMMERCIAL_STATUSES.PREPAYMENT,
   COMMERCIAL_STATUSES.INSTALLMENT,
   COMMERCIAL_STATUSES.WON,
+  // Medical Admin Commercial
+  MEDICAL_COMM_STATUSES.CONTACT_MADE,
+  MEDICAL_COMM_STATUSES.INTEREST_CONFIRMED,
+  MEDICAL_COMM_STATUSES.INVOICE_SENT,
+  MEDICAL_COMM_STATUSES.PREPAYMENT,
+  MEDICAL_COMM_STATUSES.INSTALLMENT,
 ]);
 
 // ==================== PIPELINE IDS for filtering ====================
