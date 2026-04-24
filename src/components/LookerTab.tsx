@@ -95,9 +95,10 @@ interface CohortsRow {
   total_all_calls: number;
   total_duration_sec: number;
   avg_calls_per_lead: number | null;
-  avg_sla_first_call_sec: number | null;
+  /** calendar seconds from lead creation to first outgoing call (avg). */
+  avg_sla_lead_to_call_sec: number | null;
+  /** calendar seconds from max(lead, shift_start_on_lead_day) to first call (avg). */
   avg_sla_from_shift_sec: number | null;
-  total_sla_first_call_sec: number;
   sla_lead_count: number;
 }
 
@@ -367,16 +368,23 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
   const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
   const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
   const totalDur = safeRows.reduce((s, r) => s + Number(r.total_duration_sec), 0);
-  const totalSlaSum = safeRows.reduce((s, r) => s + Number(r.total_sla_first_call_sec), 0);
   const totalAllCalls = safeRows.reduce((s, r) => s + Number(r.total_all_calls), 0);
   const totalSuccessCalls = safeRows.reduce((s, r) => s + Number(r.success_calls), 0);
   const totalSlaLeads = safeRows.reduce((s, r) => s + Number(r.sla_lead_count ?? 0), 0);
-  const totalSlaShiftSum = safeRows.reduce((s, r) => s + (r.avg_sla_from_shift_sec != null ? Number(r.avg_sla_from_shift_sec) * Number(r.sla_lead_count ?? 0) : 0), 0);
+  // Weighted grand-average = Σ(avg_per_mgr × lead_count_per_mgr) / Σ(lead_count)
+  const totalLeadToCallSum = safeRows.reduce(
+    (s, r) => s + (r.avg_sla_lead_to_call_sec != null ? Number(r.avg_sla_lead_to_call_sec) * Number(r.sla_lead_count ?? 0) : 0),
+    0,
+  );
+  const totalFromShiftSum = safeRows.reduce(
+    (s, r) => s + (r.avg_sla_from_shift_sec != null ? Number(r.avg_sla_from_shift_sec) * Number(r.sla_lead_count ?? 0) : 0),
+    0,
+  );
 
   const totalPct = totalAllCalls > 0 ? Math.round((totalSuccessCalls / totalAllCalls) * 100) : null;
   const avgCallsPerLead = totalLeads > 0 ? Math.round((totalAllCalls / totalLeads) * 100) / 100 : null;
-  const avgSla = totalSlaLeads > 0 ? Math.round(totalSlaSum / totalSlaLeads) : null;
-  const avgSlaShift = totalSlaLeads > 0 ? Math.round(totalSlaShiftSum / totalSlaLeads) : null;
+  const avgLeadToCall = totalSlaLeads > 0 ? Math.round(totalLeadToCallSum / totalSlaLeads) : null;
+  const avgFromShift = totalSlaLeads > 0 ? Math.round(totalFromShiftSum / totalSlaLeads) : null;
 
   return (
     <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
@@ -384,7 +392,7 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
         <table className="w-full text-left border-collapse text-xs">
           <thead>
             <tr className="border-b border-white/10">
-              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA от лида (ср)", "SLA по смене (ср)", "SLA (сумма)"].map((h) => (
+              {["Менеджер", "Лидов", "Исходящие", "Сообщений", "% успеха", "Время на линии", "Звонков/лид", "SLA лид → звонок (ср)", "SLA от начала смены (ср)"].map((h) => (
                 <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
                   {h}
                 </th>
@@ -415,9 +423,8 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                     <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
                     <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? Number(r.avg_calls_per_lead) : "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_first_call_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_lead_to_call_sec)}</td>
                     <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_from_shift_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_sla_first_call_sec)}</td>
                   </tr>
                 ))}
                 <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
@@ -428,9 +435,8 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                   <td className="px-4 py-2.5 text-slate-200">{fmtPct(totalPct)}</td>
                   <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalDur)}</td>
                   <td className="px-4 py-2.5 text-slate-200">{avgCallsPerLead != null ? avgCallsPerLead : "—"}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgSla)}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgSlaShift)}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalSlaSum)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgLeadToCall)}</td>
+                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgFromShift)}</td>
                 </tr>
               </>
             )}

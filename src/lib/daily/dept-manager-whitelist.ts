@@ -20,6 +20,14 @@ export interface DeptManagerWhitelist {
   names: string[];
   /** Alias → canonical master_managers.name, for normalising output. */
   aliasToCanonical: Map<string, string>;
+  /** Canonical master name → shift start hour (0–23). Default 9 if unset. */
+  shiftHourByName: Map<string, number>;
+}
+
+function parseHour(s: string | null | undefined): number | null {
+  if (!s) return null;
+  const h = Number(s.split(":")[0]);
+  return Number.isFinite(h) ? h : null;
 }
 
 export async function getDeptManagerWhitelist(
@@ -30,7 +38,7 @@ export async function getDeptManagerWhitelist(
   // is also a working manager on that line (currently applies to Татьяна
   // Дерикова, b2g, line=2). They must be included in the Looker whitelist.
   const rows = await db
-    .select({ name: masterManagers.name })
+    .select({ name: masterManagers.name, shiftStartTime: masterManagers.shiftStartTime })
     .from(masterManagers)
     .where(
       and(
@@ -45,9 +53,12 @@ export async function getDeptManagerWhitelist(
 
   const names = new Set<string>();
   const aliasToCanonical = new Map<string, string>();
-  for (const { name } of rows) {
+  const shiftHourByName = new Map<string, number>();
+  for (const { name, shiftStartTime } of rows) {
     names.add(name);
     aliasToCanonical.set(name, name);
+    const hour = parseHour(shiftStartTime) ?? 9;
+    shiftHourByName.set(name, hour);
     const aliases = NAME_ALIASES[name];
     if (aliases) {
       for (const a of aliases) {
@@ -56,5 +67,5 @@ export async function getDeptManagerWhitelist(
       }
     }
   }
-  return { names: [...names], aliasToCanonical };
+  return { names: [...names], aliasToCanonical, shiftHourByName };
 }

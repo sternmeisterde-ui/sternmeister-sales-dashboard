@@ -134,7 +134,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // is_active=true) with NAME_ALIASES folded in so integrator-side spellings match.
     // This replaces the old hardcoded EXCLUDED_MANAGERS: it also strips role=rop/admin
     // and cross-department contamination (e.g. a b2b manager attached to a b2g lead).
-    const { names: whitelistNames, aliasToCanonical } = await getDeptManagerWhitelist(dept);
+    const { names: whitelistNames, aliasToCanonical, shiftHourByName } = await getDeptManagerWhitelist(dept);
     if (whitelistNames.length === 0) {
       return NextResponse.json({
         view,
@@ -156,6 +156,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const canonicalManagerExpr = aliasCases.length > 0
       ? `CASE ${aliasCases.join(" ")} ELSE lc.manager END`
       : `lc.manager`;
+
+    // Shift-start hour per manager (canonical name) → used to compute
+    // "SLA по смене" = first_call - max(lead_time, shift_start_of_lead_day).
+    // Default 9 (09:00 Berlin) when the master has no shift configured.
+    const shiftCases: string[] = [];
+    for (const [name, hour] of shiftHourByName) {
+      shiftCases.push(`WHEN fl.manager = '${esc(name)}' THEN ${hour}`);
+    }
+    const shiftHourExpr = shiftCases.length > 0
+      ? `CASE ${shiftCases.join(" ")} ELSE 9 END`
+      : `9`;
 
     // Also canonicalise the manager filter param itself: the UI passes the canonical
     // name from the dropdown (which we already normalise below), but the stored row
@@ -294,6 +305,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       `;
       countQuery = mainQuery;
     } else if (view === "cohorts") {
+      // SLA metrics (both in calendar seconds, using analytics.sla naive Berlin timestamps):
+      //   avg_sla_lead_to_call_sec = AVG(first_call_out_at - sla_start)
+      //     — от момента падения лида до первого исходящего звонка.
+      //   avg_sla_from_shift_sec   = AVG(first_call_out_at - GREATEST(sla_start, shift_start_on_lead_day))
+      //     — если лид упал ДО начала смены, отсчитываем от начала смены;
+      //       если ПОСЛЕ — совпадает с metric A.
+      // Both excluded when no outgoing call exists or call happened before start.
       mainQuery = `
         WITH ${filteredLeadsCte},
         ${commAggCte}
@@ -307,10 +325,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COALESCE(SUM(ca.total_calls), 0) AS total_all_calls,
           COALESCE(SUM(ca.total_duration_sec), 0) AS total_duration_sec,
           ROUND(COALESCE(SUM(ca.total_calls), 0)::numeric / NULLIF(COUNT(fl.lead_id), 0), 2) AS avg_calls_per_lead,
-          ROUND(AVG(s.sla_first_call_seconds)) AS avg_sla_first_call_sec,
-          ROUND(AVG(s.sla_first_call_from_shift_seconds)) AS avg_sla_from_shift_sec,
-          COALESCE(SUM(s.sla_first_call_seconds), 0) AS total_sla_first_call_sec,
-          COUNT(s.sla_first_call_seconds) AS sla_lead_count
+          ROUND(AVG(
+            CASE WHEN s.first_call_out_at IS NOT NULL AND s.first_call_out_at > s.sla_start
+                 THEN EXTRACT(EPOCH FROM (s.first_call_out_at - s.sla_start))
+            END
+          )) AS avg_sla_lead_to_call_sec,
+          ROUND(AVG(
+            CASE WHEN s.first_call_out_at IS NOT NULL
+                 THEN GREATEST(0, EXTRACT(EPOCH FROM (
+                   s.first_call_out_at
+                   - GREATEST(
+                       s.sla_start,
+                       date_trunc('day', s.sla_start) + (${shiftHourExpr}) * INTERVAL '1 hour'
+                     )
+                 )))
+            END
+          )) AS avg_sla_from_shift_sec,
+          COUNT(s.first_call_out_at) AS sla_lead_count
         FROM filtered_leads fl
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
