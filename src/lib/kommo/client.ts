@@ -1164,10 +1164,26 @@ async function fetchBatchPages(
     }
     if (!res.ok) {
       const text = await res.text();
-      // Kommo 400 "Invalid params passed to filter" names the single bad
-      // type in the body — bisect isolates it without blacklisting siblings.
-      // Match without quotes to cover both "filter." and "filter" variants.
-      if (res.status === 400 && text.includes("Invalid params passed to filter")) {
+      // Kommo reports per-type validation failures via two different detail
+      // strings depending on the failure class — both must route to bisect
+      // so tryFetchBatchBisected can narrow the batch down to the single
+      // offending type and blacklist it for this entity:
+      //   • "Invalid params passed to filter" — the type doesn't exist in
+      //     this Kommo account at all (deprecated / never enabled).
+      //   • "Given filter conflict with other params" (nested:
+      //     "Entity doesn't match type filter") — the type's entity scope
+      //     doesn't match filter[entity]. With the per-entity outer loop
+      //     this is the dominant rejection class and MUST be bisected; if
+      //     it falls through to skip, whole 20-type batches get dropped
+      //     and lots of valid-for-this-entity types are lost.
+      // Kommo's text has "does't" (sic) in some responses and "doesn't"
+      // in others — match the shared prefix "Entity does" to cover both.
+      if (
+        res.status === 400 &&
+        (text.includes("Invalid params passed to filter") ||
+          text.includes("Given filter conflict") ||
+          text.includes("Entity does"))
+      ) {
         return { status: "invalid_type", body: text };
       }
       return { status: "skip", reason: `${res.status}: ${text.slice(0, 200)}` };
