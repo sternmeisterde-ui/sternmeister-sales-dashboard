@@ -1214,7 +1214,10 @@ async function fetchBatchPages(
     }
     if (!res.ok) {
       const text = await res.text();
-      if (res.status === 400 && text.includes('"Invalid params passed to filter"')) {
+      // Kommo returns the error detail either with or without a trailing
+      // period depending on the version, and sometimes wraps it in different
+      // quoting. Match the stable prefix without quotes so both variants hit.
+      if (res.status === 400 && text.includes("Invalid params passed to filter")) {
         return { status: "invalid_type", body: text };
       }
       return { status: "skip", reason: `${res.status}: ${text.slice(0, 200)}` };
