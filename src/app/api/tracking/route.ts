@@ -85,11 +85,29 @@ export async function GET(req: NextRequest) {
     let synced = false;
     if (!skipSync) {
       try {
-        // Pull new events if user is looking at today (keeps live bar fresh)
-        if (includesToday) synced = await ensureFreshSync(department, 300);
-        // Pull older events if the user selected a date we haven't backfilled yet
+        // Stale-while-revalidate for "today" view:
+        //   - Don't await ensureFreshSync. Whatever is in the cache renders
+        //     immediately (cache is always populated post-backfill).
+        //   - Sync runs in the background; the next request — or the
+        //     5-min auto-refresh in TrackingTab — picks up the new rows.
+        //   - Awaiting it added 5-15s to every page load on a busy account
+        //     (Kommo rate limit 7 req/sec × ~20 calls per refresh).
+        //   - Failures are logged but don't surface; cache is the source of
+        //     truth. Watermarks stay correct because syncDepartment is
+        //     crash-safe (see sync.ts:301-326).
+        if (includesToday) {
+          void ensureFreshSync(department, 300).catch((err) =>
+            console.warn(`[tracking] async sync (${department}) failed:`, err),
+          );
+        }
+        // Backfill stays synchronous — if user picks a date range we don't
+        // have cached, we can't render their request without the data. In
+        // practice this is a no-op for >99% of opens because the offline
+        // backfill script (or earlier on-demand backfills) already covered
+        // everything back to earliest_event_ts. Worst case: a user picks a
+        // date older than current earliest, gets a one-time long load.
         const didBackfill = await ensureRangeCached(department, rangeStart);
-        synced = synced || didBackfill;
+        synced = didBackfill;
       } catch (err) {
         console.warn("[tracking] sync failed, serving cache:", err);
       }
