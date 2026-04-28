@@ -2,6 +2,12 @@
 
 Next.js admin dashboard for managing OKK (call quality control) and Roleplay (AI training calls) systems across two sales departments.
 
+> **New Claude session — read these first:**
+> - [`docs/SESSION-HANDOFF.md`](docs/SESSION-HANDOFF.md) — current focus, what works, known issues, architecture map
+> - [`docs/TODO.md`](docs/TODO.md) — prioritised actionable tasks
+>
+> Active focus: **call-count accuracy across Daily / Звонки / Looker / Активность**. Recently fixed Kommo `filter[updated_at]` bug; backfill running locally. Next: telephony CDR integration (CallGear + CloudTalk) for 100% dial-attempt coverage.
+
 ## Tech Stack
 
 - **Framework**: Next.js 16 (App Router), React 19, TypeScript

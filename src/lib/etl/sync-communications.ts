@@ -38,41 +38,12 @@ function buildContactMap(cache: LeadCacheEntry[]): Map<number, number[]> {
   return m;
 }
 
-let _uniqueIndexEnsured = false;
-async function ensureCommunicationsUniqueIndex(): Promise<void> {
-  if (_uniqueIndexEnsured) return;
-  // Dedupe any existing rows that would block the unique constraint, then
-  // create the partial unique index. Both statements are idempotent.
-  await analyticsDb.execute(sql`
-    DELETE FROM analytics.communications a
-    WHERE a.communication_id IS NOT NULL
-      AND a.ctid NOT IN (
-        SELECT MIN(b.ctid)
-        FROM analytics.communications b
-        WHERE b.communication_id = a.communication_id
-        GROUP BY b.communication_id
-      )
-  `);
-  await analyticsDb.execute(sql`
-    CREATE UNIQUE INDEX IF NOT EXISTS communications_communication_id_unique
-      ON analytics.communications (communication_id)
-      WHERE communication_id IS NOT NULL
-  `);
-  _uniqueIndexEnsured = true;
-}
-
 export async function syncCommunications(
   fromDate: Date,
   toDate: Date,
   leadCache: LeadCacheEntry[],
   lookups: KommoLookups,
 ): Promise<number> {
-  // Idempotent schema guard — ensures the partial unique index on
-  // communication_id exists before we try to upsert into it. Cheap (NOOP
-  // after the first run), saves us from requiring a manual db:migrate
-  // step on the first deploy with this code path.
-  await ensureCommunicationsUniqueIndex();
-
   const fromTs = Math.floor(fromDate.getTime() / 1000);
   const toTs = Math.floor(toDate.getTime() / 1000);
 
@@ -290,40 +261,20 @@ export async function syncCommunications(
     return 0;
   }
 
-  // ── Phase 5: Upsert by communication_id ──────────────────────────────────
-  // Using DELETE+INSERT keyed on created_at would leak duplicates whenever a
-  // note is edited after creation: the cron at edit time fetches the note
-  // (filter[updated_at] catches it) and inserts a row with the original
-  // created_at — but the DELETE only covers the cron's last-15-min window
-  // by created_at, so the older row stays and we get two rows for the same
-  // physical note. ON CONFLICT (communication_id) DO UPDATE handles both
-  // first-write and re-edit cases idempotently.
+  // ── Phase 5: DELETE existing rows for this date range, then INSERT ────────
+  // (Edited-note duplicate concern handled by manual maintenance — see
+  // drizzle/analytics/0004_communications_unique.sql for the unique index
+  // SQL to apply via Neon SQL editor when convenient.)
+  await analyticsDb.execute(
+    sql`DELETE FROM analytics.communications
+        WHERE created_at >= ${fromDate} AND created_at <= ${toDate}`,
+  );
+
   const CHUNK = 500;
   for (let i = 0; i < allRows.length; i += CHUNK) {
-    const chunk = allRows.slice(i, i + CHUNK);
-    await analyticsDb
-      .insert(communications)
-      .values(chunk)
-      .onConflictDoUpdate({
-        target: communications.communicationId,
-        set: {
-          // Mutable fields — refresh on edit. Identity fields
-          // (communicationId, communicationType) stay stable.
-          duration: sql`EXCLUDED.duration`,
-          callStatus: sql`EXCLUDED.call_status`,
-          manager: sql`EXCLUDED.manager`,
-          leadId: sql`EXCLUDED.lead_id`,
-          pipelineId: sql`EXCLUDED.pipeline_id`,
-          pipelineName: sql`EXCLUDED.pipeline_name`,
-          category: sql`EXCLUDED.category`,
-          statusId: sql`EXCLUDED.status_id`,
-          statusName: sql`EXCLUDED.status_name`,
-          leadCreatedAt: sql`EXCLUDED.lead_created_at`,
-          leadDayStart: sql`EXCLUDED.lead_day_start`,
-        },
-      });
+    await analyticsDb.insert(communications).values(allRows.slice(i, i + CHUNK));
   }
 
-  console.log(`[ETL] sync-communications: upserted ${allRows.length} rows`);
+  console.log(`[ETL] sync-communications: inserted ${allRows.length} rows`);
   return allRows.length;
 }
