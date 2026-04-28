@@ -15,7 +15,9 @@ import {
   smallint,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const analyticsSchema = pgSchema("analytics");
 
@@ -109,6 +111,13 @@ export const communications = analyticsSchema.table(
     // Phase 1 of Daily refactor: see leads_cohort note above.
     index("idx_comm_pipeline_created").on(t.pipelineId, t.createdAt),
     index("idx_comm_manager_pipeline_created").on(t.manager, t.pipelineId, t.createdAt),
+    // Unique on note id so the ETL can upsert. Partial (WHERE NOT NULL) so
+    // legacy orphan rows without an id don't block the constraint. Created
+    // in migration 0004_communications_unique.sql; mirrored here so drizzle
+    // recognises it on schema introspection.
+    uniqueIndex("communications_communication_id_unique")
+      .on(t.communicationId)
+      .where(sql`${t.communicationId} IS NOT NULL`),
   ],
 );
 
