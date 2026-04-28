@@ -1,12 +1,17 @@
-// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD
+// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week
 //
-// Cohort-style aggregation for the Termin dashboard tab. For every day that
-// at least one Бух Бератер deal was created, returns:
+// Cohort-style aggregation for the Termin dashboard tab. For every cohort
+// bucket (day or week, depending on `granularity`) that at least one Бух
+// Бератер deal was created in, returns:
 //   - dcAvgDays: average days from creation → assigned Termin ДЦ
 //   - aaAvgDays: average days to Termin АА. Baseline is creation date,
 //     UNLESS the deal passed through "Термин ДЦ состоялся" — then we measure
 //     from the moment it entered that status (per ТЗ).
 //   - count: number of deals contributing to either average
+//
+// granularity=week: GROUP BY DATE_TRUNC('week', created_at). Postgres weeks
+// are Monday-aligned (ISO 8601), so the returned `date` is the Monday of
+// each week — the UI labels it as "01–07 апр" client-side.
 //
 // Excluded:
 //   - deals without any termin date set
@@ -61,6 +66,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Whitelist — anything other than "week" falls back to per-day. Keeps the
+  // SQL query 100% parameterised (no string interpolation into the query).
+  const granularity =
+    url.searchParams.get("granularity") === "week" ? "week" : "day";
+
   // Inclusive end-of-day for the upper bound — matches how the user picks a
   // calendar range ("through Apr 28" should include all of Apr 28).
   const toDateEnd = new Date(toDate);
@@ -68,6 +78,15 @@ export async function GET(req: NextRequest) {
 
   const pipelineId = B2G_PIPELINES.BERATER;
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;
+
+  // Granularity expression — pre-built SQL fragment so the main query stays
+  // parameter-only. Postgres `DATE_TRUNC('week', x)` returns the Monday of
+  // the ISO week at 00:00; ::date strips the time so the returned value
+  // matches the per-day shape (just a YYYY-MM-DD string).
+  const cohortBucketExpr =
+    granularity === "week"
+      ? sql`DATE_TRUNC('week', lc.created_at)::date`
+      : sql`DATE(lc.created_at)`;
 
   const result = await (
     analyticsDb as {
@@ -88,7 +107,7 @@ export async function GET(req: NextRequest) {
     ),
     deals AS (
       SELECT
-        DATE(lc.created_at) AS cohort_date,
+        ${cohortBucketExpr} AS cohort_date,
         lc.lead_id,
         lc.created_at,
         lc.termin_date,

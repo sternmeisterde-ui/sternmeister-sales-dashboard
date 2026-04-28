@@ -29,6 +29,7 @@ interface TerminApiRow {
 }
 
 type Preset = "today" | "7d" | "30d" | "month" | "custom";
+type Granularity = "day" | "week";
 
 const PRESETS: Array<{ id: Preset; label: string }> = [
   { id: "today", label: "Сегодня" },
@@ -75,26 +76,39 @@ interface TooltipPayload {
   payload: TerminApiRow;
 }
 
+function formatBucketLabel(iso: string, granularity: Granularity): string {
+  const start = new Date(iso);
+  if (Number.isNaN(start.getTime())) return iso;
+  if (granularity === "day") {
+    return start.toLocaleDateString("ru-RU", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  }
+  // ISO week: bucket key is Monday → end is Sunday (+6 days).
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+  const fmtShort = (d: Date) =>
+    d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
+  return `Неделя ${fmtShort(start)} — ${fmtShort(end)}`;
+}
+
 function ChartTooltip({
   active,
   payload,
   label,
+  granularity,
 }: {
   active?: boolean;
   payload?: TooltipPayload[];
   label?: string;
+  granularity: Granularity;
 }) {
   if (!active || !payload || payload.length === 0 || !label) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
-  const labelDate = new Date(label);
-  const display = Number.isNaN(labelDate.getTime())
-    ? label
-    : labelDate.toLocaleDateString("ru-RU", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      });
+  const display = formatBucketLabel(label, granularity);
   return (
     <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
       <div className="mb-1 font-semibold text-slate-200">{display}</div>
@@ -124,6 +138,7 @@ export default function TerminTab() {
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     rangeForPreset("30d"),
   );
+  const [granularity, setGranularity] = useState<Granularity>("day");
   const [data, setData] = useState<TerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -137,7 +152,7 @@ export default function TerminTab() {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
         const res = await fetch(
-          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}`,
+          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}`,
           { signal },
         );
         if (!res.ok) {
@@ -155,7 +170,7 @@ export default function TerminTab() {
         setLoading(false);
       }
     },
-    [range.start, range.end],
+    [range.start, range.end, granularity],
   );
 
   useEffect(() => {
@@ -246,7 +261,27 @@ export default function TerminTab() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Day / Week granularity toggle — Recharts re-renders on data
+              change so flipping between modes feels instant once both
+              responses are cached. */}
+          <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
+            {(["day", "week"] as const).map((g) => (
+              <button
+                key={g}
+                type="button"
+                onClick={() => setGranularity(g)}
+                className={`text-[10px] uppercase tracking-wider px-3 py-1 rounded-md transition-colors ${
+                  granularity === g
+                    ? "bg-blue-500/20 text-blue-300"
+                    : "text-slate-400 hover:text-white"
+                }`}
+                aria-pressed={granularity === g}
+              >
+                {g === "day" ? "День" : "Неделя"}
+              </button>
+            ))}
+          </div>
           <CalendarPicker
             mode="range"
             value={{ start: range.start, end: range.end }}
@@ -302,7 +337,7 @@ export default function TerminTab() {
             Среднее время до термина (Бух Бератер)
           </h3>
           <span className="text-[10px] text-slate-500 hidden sm:inline">
-            ось X — дата создания сделки
+            ось X — {granularity === "day" ? "дата создания сделки" : "неделя создания (с понедельника)"}
           </span>
         </div>
         {hasData ? (
@@ -320,12 +355,18 @@ export default function TerminTab() {
                   tickLine={false}
                   tickFormatter={(v: string) => {
                     const d = new Date(v);
-                    return Number.isNaN(d.getTime())
-                      ? v
-                      : d.toLocaleDateString("ru-RU", {
-                          day: "2-digit",
-                          month: "2-digit",
-                        });
+                    if (Number.isNaN(d.getTime())) return v;
+                    if (granularity === "week") {
+                      // ISO-week starts Monday; show week-start as DD.MM.
+                      return d.toLocaleDateString("ru-RU", {
+                        day: "2-digit",
+                        month: "2-digit",
+                      });
+                    }
+                    return d.toLocaleDateString("ru-RU", {
+                      day: "2-digit",
+                      month: "2-digit",
+                    });
                   }}
                 />
                 <YAxis
@@ -335,7 +376,7 @@ export default function TerminTab() {
                   allowDecimals
                   unit=" дн"
                 />
-                <RTooltip content={<ChartTooltip />} />
+                <RTooltip content={<ChartTooltip granularity={granularity} />} />
                 <Legend
                   wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
                   iconType="circle"
