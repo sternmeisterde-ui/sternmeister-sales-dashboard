@@ -29,6 +29,8 @@ import type { KommoLead } from "@/lib/kommo/types";
 import {
   getAnalyticsCallMetricsByMaster,
   getAnalyticsDailyTrend,
+  getAnalyticsDailyTrendByLine,
+  type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
 
 import { cached } from "@/lib/kommo/cache";
@@ -352,6 +354,118 @@ function buildPipelineBreakdown(
   return result;
 }
 
+// ==================== Cohort status breakdown ====================
+//
+// Same idea as buildPipelineBreakdown but: (a) keeps closed leads (won/lost)
+// since the cohort is "leads created in this period" and we want the full
+// lifecycle, not just current active state; (b) emits a flat row-per-status
+// shape with a derived `line` column for B2G; (c) labels match what the new
+// dashboard cohort table renders.
+
+interface CohortStatusRow {
+  pipelineId: number;
+  pipelineName: string;
+  line: string | null;
+  statusId: number;
+  statusName: string;
+  count: number;
+}
+
+// Universal status name fallbacks for closed states across all pipelines —
+// status_id 142 = Won, 143 = Lost are Kommo-platform-wide constants.
+const KOMMO_TERMINAL_STATUS_NAMES: Record<number, string> = {
+  142: "Успешно реализовано",
+  143: "Закрыто и не реализовано",
+};
+
+function buildCohortStatusBreakdown(
+  leads: KommoLead[],
+  department: string,
+  allowedPipelineIds: Set<number>,
+): CohortStatusRow[] {
+  // Pipeline labels for the cohort table — neutral names without line suffix
+  // since the line column carries that info. BERATER stays "Бух Бератер" for
+  // both Line 2 and Line 3 rows; the line column distinguishes them.
+  const pipelineNames: Record<number, string> =
+    department === "b2b"
+      ? {
+          [B2B_PIPELINES.COMMERCIAL]: "Бух Комм",
+          [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
+        }
+      : {
+          [B2G_PIPELINES.FIRST_LINE]: "Бух Гос",
+          [B2G_PIPELINES.BERATER]: "Бух Бератер",
+        };
+
+  // Reuses same id→name mapping as buildPipelineBreakdown (synced 2026-04-22
+  // from Kommo API). Kept inline to avoid a refactor — buildPipelineBreakdown
+  // owns the canonical copy. If new statuses appear, add to both maps.
+  const statusNames: Record<number, string> = {
+    83873487: "Incoming leads", 93485479: "База", 83873491: "Новый лид",
+    90367079: "Взято в работу", 90367083: "Недозвон", 90367087: "Контакт установлен",
+    104211575: "Принимает решение", 95514983: "Консультация проведена",
+    101935919: "Док-ты отправлены в ДЦ", 95514987: "Отложенный старт",
+    93860327: "Incoming leads", 93860331: "Принято от 1й линии",
+    93860335: "Взято в работу", 93860339: "Недозвон", 93860863: "Контакт установлен",
+    93860879: "Термин АА", 102183931: "Доведение",
+    102183935: "Консультация перед термином ДЦ", 102183939: "Конс. перед ДЦ проведена",
+    93860875: "Термин ДЦ отмен./перенес.", 93886075: "Термин ДЦ состоялся",
+    102183943: "Консультация перед термином АА", 102183947: "Конс. перед АА проведена",
+    93860883: "Термин АА отмен./перенес.", 93860887: "На рассмотрении бератера",
+    95515895: "Отложенный старт", 93860891: "Апелляция",
+    81523499: "Incoming leads", 83364011: "Tech", 81523503: "Новый лид",
+    104076579: "Новый лид 2", 104076583: "Новый лид 3", 81523507: "Взят в работу",
+    82883595: "Недозвон", 81523515: "Контакт установлен",
+    88519479: "Нет предв. согласия", 82661915: "Интерес подтверждён",
+    82661919: "Счёт выставлен", 82946495: "Предоплата получена",
+    82946499: "Рассрочка",
+    101858011: "Incoming leads", 101858015: "Tech", 101858019: "Новый лид",
+    104076587: "Новый лид 2", 104076591: "Новый лид 3", 101858023: "Взят в работу",
+    101858255: "Недозвон", 101858259: "Контакт установлен",
+    101858263: "Нет предв. согласия", 101858267: "Интерес подтверждён",
+    101858271: "Счёт выставлен", 101858275: "Предоплата получена",
+    101858279: "Рассрочка",
+  };
+
+  // key = `${pipelineId}|${line ?? ""}|${statusId}`. Bucket by line so the
+  // BERATER split shows as two separate rows in the table.
+  const groups = new Map<string, CohortStatusRow>();
+
+  for (const lead of leads) {
+    if (lead.is_deleted) continue;
+    if (!allowedPipelineIds.has(lead.pipeline_id)) continue;
+
+    let line: string | null = null;
+    if (department === "b2g") {
+      if (lead.pipeline_id === B2G_PIPELINES.FIRST_LINE) line = "1";
+      else if (lead.pipeline_id === B2G_PIPELINES.BERATER) {
+        line = BERATER_LINE_3_STATUS_IDS.has(lead.status_id) ? "3" : "2";
+      }
+    }
+
+    const key = `${lead.pipeline_id}|${line ?? ""}|${lead.status_id}`;
+    let entry = groups.get(key);
+    if (!entry) {
+      const statusName =
+        statusNames[lead.status_id] ??
+        KOMMO_TERMINAL_STATUS_NAMES[lead.status_id] ??
+        `Status ${lead.status_id}`;
+      entry = {
+        pipelineId: lead.pipeline_id,
+        pipelineName: pipelineNames[lead.pipeline_id] ?? `Pipeline ${lead.pipeline_id}`,
+        line,
+        statusId: lead.status_id,
+        statusName,
+        count: 0,
+      };
+      groups.set(key, entry);
+    }
+    entry.count += 1;
+  }
+
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count);
+}
+
 // ==================== MAIN HANDLER ====================
 
 const RESPONSE_CACHE_TTL = 5 * 60 * 1000;
@@ -368,11 +482,10 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v2 cache-key bump: forces immediate invalidation of responses built
-    // before the department-scoped pipelineBreakdown whitelist (any leftover
-    // "Бух Бератер (2я линия)" card in the B2B response was served from the
-    // pre-scoping cache).
-    const cacheKey = `dashboard-response:v2:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v3 cache-key bump: response now includes trendByLine + statusBreakdown
+    // (added 2026-04-28 for the Звонки section refactor — 3-line KPI tiles,
+    // trend chart line filter, and the cohort-style status table).
+    const cacheKey = `dashboard-response:v3:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -424,14 +537,33 @@ async function buildDashboardResponse(
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id != null);
 
+    // Manager → line lookup for the per-line trend SQL. Pulls names from
+    // master_managers (filtered to the active department by getManagersWithKommo)
+    // grouped by `line` field. ROPs and managers without a line don't get
+    // bucketed — their calls fall under "x" in the trend SQL and are dropped.
+    const managersByLine = {
+      line1: allManagers.filter((m) => m.line === "1").map((m) => m.name),
+      line2: allManagers.filter((m) => m.line === "2").map((m) => m.name),
+      line3: allManagers.filter((m) => m.line === "3").map((m) => m.name),
+    };
+
     // All external calls in parallel. Calls (and trend) come from the analytics
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets] = await Promise.all([
+    // Cohort = every lead created within the period, regardless of status —
+    // including closed (won/lost). Drives the filterable status table on the
+    // dashboard, where the user wants to see "of leads created in this window,
+    // where are they now". Distinct from `snapshotLeads` (current active
+    // state) which still drives the legacy pipelineBreakdown field.
+    const createdDateFilter = { field: "created_at" as const, from, to };
+    const [snapshotLeads, cohortLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
+      // Cohort fetch: every lead created in [from, to] in this dept's pipelines,
+      // any status. Used by the cohort-style status breakdown table.
+      getAnalyticsLeads({ pipelineIds, dateFilter: createdDateFilter }).catch(() => [] as KommoLead[]),
       // Tasks are filtered server-side by responsible_user_id so we pull only
       // our 16-or-so managers' open tasks instead of every task in the
       // account. Big win on department switch latency — the prior account-
@@ -448,6 +580,16 @@ async function buildDashboardResponse(
         console.error("[Dashboard] analytics trend failed:", e);
         return [];
       }),
+      // Per-line trend only meaningful for B2G (3-line org). For B2B we still
+      // run the query (cheap, returns empty maps when no managers in lines)
+      // so the response shape is uniform — client decides whether to show
+      // the line dropdown.
+      department === "b2g"
+        ? getAnalyticsDailyTrendByLine(department, trendFrom, trendTo, managersByLine).catch((e) => {
+            console.error("[Dashboard] per-line trend failed:", e);
+            return null;
+          })
+        : Promise.resolve(null),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -552,6 +694,24 @@ async function buildDashboardResponse(
       allowedPipelineIds.has(c.pipelineId),
     );
 
+    // Flat status rows for the cohort table — leads created in [from, to]
+    // regardless of status (active OR closed = won/lost). Lifecycle view
+    // of the cohort. For B2G, tagged with derived line.
+    const statusBreakdown = buildCohortStatusBreakdown(
+      cohortLeads,
+      department,
+      allowedPipelineIds,
+    );
+
+    // Empty per-line trends for B2B (or when query failed) — keeps the
+    // response shape uniform so the client doesn't need null guards.
+    const emptyTrend: DailyCallBucket[] = [];
+    const trendByLine = trendByLineRaw ?? {
+      line1: emptyTrend,
+      line2: emptyTrend,
+      line3: emptyTrend,
+    };
+
     return {
       date: dateStr,
       period,
@@ -573,6 +733,8 @@ async function buildDashboardResponse(
       missedBreakdown,
       perManager,
       trend,
+      trendByLine,
       pipelineBreakdown,
+      statusBreakdown,
     };
 }

@@ -467,3 +467,140 @@ export async function getAnalyticsDailyTrend(
   }
   return out;
 }
+
+/**
+ * Per-line per-day call buckets — same shape as getAnalyticsDailyTrend but
+ * each day is split across the three sales lines based on which manager
+ * received/placed the call. Unmatched managers (ROPs, ex-staff, drift in
+ * names) land under `none`. Returns padded continuous date series for each
+ * line so the chart renders cleanly even on days with zero activity in
+ * some lines.
+ *
+ * managersByLine — name lists already filtered to the department (caller
+ * builds them from master_managers + NAME_ALIASES). Empty list for a line
+ * means that line gets all-zero buckets.
+ */
+export async function getAnalyticsDailyTrendByLine(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+  managersByLine: { line1: string[]; line2: string[]; line3: string[] },
+): Promise<{ line1: DailyCallBucket[]; line2: DailyCallBucket[]; line3: DailyCallBucket[] }> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  const empty = padDailyTrend([], fromTs, toTs);
+  if (pipelineIds.length === 0) {
+    return { line1: empty, line2: empty, line3: empty };
+  }
+
+  const allNames = [
+    ...managersByLine.line1,
+    ...managersByLine.line2,
+    ...managersByLine.line3,
+  ];
+  if (allNames.length === 0) {
+    return { line1: empty, line2: empty, line3: empty };
+  }
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const nameList = sql.join(allNames.map((n) => sql`${n}`), sql`, `);
+  const line1List = managersByLine.line1.length > 0
+    ? sql.join(managersByLine.line1.map((n) => sql`${n}`), sql`, `)
+    : sql`NULL`;
+  const line2List = managersByLine.line2.length > 0
+    ? sql.join(managersByLine.line2.map((n) => sql`${n}`), sql`, `)
+    : sql`NULL`;
+  const line3List = managersByLine.line3.length > 0
+    ? sql.join(managersByLine.line3.map((n) => sql`${n}`), sql`, `)
+    : sql`NULL`;
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    day: string;
+    line: string;
+    calls_total: string | number;
+    calls_connected: string | number;
+    outgoing_total: string | number;
+    incoming_total: string | number;
+    missed_incoming: string | number;
+    total_duration_s: string | number;
+  }>(sql`
+    SELECT
+      to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day,
+      CASE
+        WHEN manager IN (${line1List}) THEN '1'
+        WHEN manager IN (${line2List}) THEN '2'
+        WHEN manager IN (${line3List}) THEN '3'
+        ELSE 'x'
+      END AS line,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                          AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
+      COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      AND manager IN (${nameList})
+    GROUP BY day, line
+    ORDER BY day
+  `);
+
+  const byLineDay = {
+    line1: new Map<string, DailyCallBucket>(),
+    line2: new Map<string, DailyCallBucket>(),
+    line3: new Map<string, DailyCallBucket>(),
+  };
+  for (const row of result.rows) {
+    const secs = Number(row.total_duration_s);
+    const bucket: DailyCallBucket = {
+      date: row.day,
+      callsTotal: Number(row.calls_total),
+      callsConnected: Number(row.calls_connected),
+      totalMinutes: Math.round(secs / 60),
+      missedIncoming: Number(row.missed_incoming),
+      incomingTotal: Number(row.incoming_total),
+      outgoingTotal: Number(row.outgoing_total),
+    };
+    if (row.line === "1") byLineDay.line1.set(row.day, bucket);
+    else if (row.line === "2") byLineDay.line2.set(row.day, bucket);
+    else if (row.line === "3") byLineDay.line3.set(row.day, bucket);
+  }
+  return {
+    line1: padDailyTrend(Array.from(byLineDay.line1.values()), fromTs, toTs),
+    line2: padDailyTrend(Array.from(byLineDay.line2.values()), fromTs, toTs),
+    line3: padDailyTrend(Array.from(byLineDay.line3.values()), fromTs, toTs),
+  };
+}
+
+function padDailyTrend(
+  buckets: DailyCallBucket[],
+  fromTs: number,
+  toTs: number,
+): DailyCallBucket[] {
+  const byDay = new Map<string, DailyCallBucket>();
+  for (const b of buckets) byDay.set(b.date, b);
+  const berlinKey = (tsSec: number) =>
+    new Date(tsSec * 1000).toLocaleDateString("sv", { timeZone: "Europe/Berlin" });
+  const out: DailyCallBucket[] = [];
+  for (let t = fromTs; t <= toTs; t += 86400) {
+    const key = berlinKey(t);
+    out.push(
+      byDay.get(key) ?? {
+        date: key,
+        callsTotal: 0,
+        callsConnected: 0,
+        totalMinutes: 0,
+        missedIncoming: 0,
+        incomingTotal: 0,
+        outgoingTotal: 0,
+      },
+    );
+  }
+  return out;
+}
