@@ -165,6 +165,90 @@ export async function getAnalyticsTeamCallMetrics(
   return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(pipelineIds, fromTs, toTs));
 }
 
+/**
+ * Per-pipeline team call aggregate. Used for the B2B departmental tiles
+ * which are split into Бух Комм + Мед Комм columns instead of the B2G
+ * Линия 1/2/3 split. Returns one UserCallMetrics per pipelineId — all
+ * pipelines are queried in a single SQL grouped by pipeline_id (cheaper
+ * than running getAnalyticsTeamCallMetrics N times).
+ *
+ * Pipelines without any matching call rows in the window get an all-zero
+ * UserCallMetrics so the consumer can render empty buckets without null
+ * checks.
+ */
+export async function getAnalyticsTeamCallMetricsByPipeline(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<Map<number, UserCallMetrics>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return new Map();
+  const cacheKey = `team-calls-by-pipeline:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetricsByPipeline(pipelineIds, fromTs, toTs));
+}
+
+async function fetchTeamCallMetricsByPipeline(
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<Map<number, UserCallMetrics>> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    pipeline_id: string | number;
+    calls_total: string | number;
+    calls_connected: string | number;
+    outgoing_total: string | number;
+    incoming_total: string | number;
+    missed_incoming: string | number;
+    total_duration_s: string | number;
+  }>(sql`
+    SELECT
+      pipeline_id,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                        AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1))  AS missed_incoming,
+      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      -- Per-pipeline split needs an explicit pipeline_id, so NULL telephony
+      -- rows (sync-telephony writes calls without lead context) are dropped
+      -- here. The unscoped totals tile elsewhere keeps the NULL fallback.
+      AND pipeline_id IN (${pipelineList})
+    GROUP BY pipeline_id
+  `);
+
+  const out = new Map<number, UserCallMetrics>();
+  for (const pid of pipelineIds) {
+    out.set(pid, { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 });
+  }
+  for (const row of result.rows) {
+    const callsTotal = Number(row.calls_total);
+    const callsConnected = Number(row.calls_connected);
+    const totalSeconds = Number(row.total_duration_s);
+    out.set(Number(row.pipeline_id), {
+      kommoUserId: 0,
+      callsTotal,
+      callsConnected,
+      totalMinutes: Math.round(totalSeconds / 60),
+      avgDialogMinutes: callsConnected > 0 ? Math.round(totalSeconds / 60 / callsConnected) : 0,
+      dialPercent: callsTotal > 0 ? Math.round((callsConnected / callsTotal) * 100) : 0,
+      missedIncoming: Number(row.missed_incoming),
+      incomingTotal: Number(row.incoming_total),
+      outgoingTotal: Number(row.outgoing_total),
+    });
+  }
+  return out;
+}
+
 async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
@@ -576,6 +660,80 @@ export async function getAnalyticsDailyTrendByLine(
     line2: padDailyTrend(Array.from(byLineDay.line2.values()), fromTs, toTs),
     line3: padDailyTrend(Array.from(byLineDay.line3.values()), fromTs, toTs),
   };
+}
+
+/**
+ * Per-pipeline daily trend — the B2B mirror of getAnalyticsDailyTrendByLine.
+ * Splits each day's call activity across the department's pipelines (Бух
+ * Комм / Мед Комм for B2B). Returns a Map<pipelineId, padded series>. NULL
+ * pipeline_id rows (telephony without lead context) are dropped here since
+ * they can't be attributed to a specific funnel.
+ */
+export async function getAnalyticsDailyTrendByPipeline(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<Map<number, DailyCallBucket[]>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return new Map();
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    day: string;
+    pipeline_id: string | number;
+    calls_total: string | number;
+    calls_connected: string | number;
+    outgoing_total: string | number;
+    incoming_total: string | number;
+    missed_incoming: string | number;
+    total_duration_s: string | number;
+  }>(sql`
+    SELECT
+      to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day,
+      pipeline_id,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                          AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
+      COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+    GROUP BY day, pipeline_id
+    ORDER BY day
+  `);
+
+  const byPipelineDay = new Map<number, Map<string, DailyCallBucket>>();
+  for (const pid of pipelineIds) byPipelineDay.set(pid, new Map());
+  for (const row of result.rows) {
+    const pid = Number(row.pipeline_id);
+    const inner = byPipelineDay.get(pid);
+    if (!inner) continue;
+    const secs = Number(row.total_duration_s);
+    inner.set(row.day, {
+      date: row.day,
+      callsTotal: Number(row.calls_total),
+      callsConnected: Number(row.calls_connected),
+      totalMinutes: Math.round(secs / 60),
+      missedIncoming: Number(row.missed_incoming),
+      incomingTotal: Number(row.incoming_total),
+      outgoingTotal: Number(row.outgoing_total),
+    });
+  }
+
+  const out = new Map<number, DailyCallBucket[]>();
+  for (const pid of pipelineIds) {
+    out.set(pid, padDailyTrend(Array.from(byPipelineDay.get(pid)?.values() ?? []), fromTs, toTs));
+  }
+  return out;
 }
 
 function padDailyTrend(

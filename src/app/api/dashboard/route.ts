@@ -30,8 +30,11 @@ import {
   getAnalyticsCallMetricsByMaster,
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
+  getAnalyticsDailyTrendByPipeline,
+  getAnalyticsTeamCallMetricsByPipeline,
   type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
+import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
 
 import { cached } from "@/lib/kommo/cache";
 
@@ -447,11 +450,10 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v5 cache-key bump: liveStatusNames is now keyed by pipelineId:statusId
-    // (was just statusId in v4) — fixes Kommo's global IDs 142/143 silently
-    // collapsing across pipelines so leads in B2G "Гутшайн одобрен" weren't
-    // showing as "Closed - won" anymore.
-    const cacheKey = `dashboard-response:v5:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v6 cache-key bump: response now carries todayMetricsByPipeline +
+    // trendByPipeline for B2B (Бух Комм / Мед Комм split — same idea as
+    // B2G's L1/L2/L3 line split, but split by pipeline instead).
+    const cacheKey = `dashboard-response:v6:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -523,7 +525,7 @@ async function buildDashboardResponse(
     // where are they now". Distinct from `snapshotLeads` (current active
     // state) which still drives the legacy pipelineBreakdown field.
     const createdDateFilter = { field: "created_at" as const, from, to };
-    const [snapshotLeads, cohortLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, pipelinesRaw] = await Promise.all([
+    const [snapshotLeads, cohortLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, pipelinesRaw, byPipelineRaw, trendByPipelineRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -564,6 +566,23 @@ async function buildDashboardResponse(
         console.error("[Dashboard] getPipelines failed:", e);
         return [];
       }),
+      // Per-pipeline call metrics — drives the B2B KPI tile split
+      // (Бух Комм / Мед Комм). For B2G we still use perManager.line for
+      // tile breakdown since lines are managers, not pipelines.
+      department === "b2b"
+        ? getAnalyticsTeamCallMetricsByPipeline(department, from, to).catch((e) => {
+            console.error("[Dashboard] per-pipeline metrics failed:", e);
+            return null;
+          })
+        : Promise.resolve(null),
+      // Per-pipeline daily trend — same B2B-only deal. The trend chart's
+      // funnel dropdown switches between these series.
+      department === "b2b"
+        ? getAnalyticsDailyTrendByPipeline(department, trendFrom, trendTo).catch((e) => {
+            console.error("[Dashboard] per-pipeline trend failed:", e);
+            return null;
+          })
+        : Promise.resolve(null),
     ]);
 
     // Pipeline.statuses → name map keyed by `${pipelineId}:${statusId}`.
@@ -700,6 +719,14 @@ async function buildDashboardResponse(
       line3: emptyTrend,
     };
 
+    // Convert Map → plain object for JSON. Drop empty maps for B2G.
+    const todayMetricsByPipeline: Record<string, UCMType> | null = byPipelineRaw
+      ? Object.fromEntries(Array.from(byPipelineRaw.entries()).map(([k, v]) => [String(k), v]))
+      : null;
+    const trendByPipeline: Record<string, DailyCallBucket[]> | null = trendByPipelineRaw
+      ? Object.fromEntries(Array.from(trendByPipelineRaw.entries()).map(([k, v]) => [String(k), v]))
+      : null;
+
     return {
       date: dateStr,
       period,
@@ -722,6 +749,8 @@ async function buildDashboardResponse(
       perManager,
       trend,
       trendByLine,
+      todayMetricsByPipeline,
+      trendByPipeline,
       pipelineBreakdown,
       statusBreakdown,
     };

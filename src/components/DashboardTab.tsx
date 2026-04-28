@@ -78,10 +78,24 @@ interface DashboardData {
   perManager: PerManagerRow[];
   trend: DailyBucket[];
   trendByLine: { line1: DailyBucket[]; line2: DailyBucket[]; line3: DailyBucket[] };
+  // B2B-only: pipeline_id (string) → metrics / daily buckets. Drives the
+  // Бух Комм / Мед Комм split in tiles + trend on the commerce side.
+  todayMetricsByPipeline?: Record<string, {
+    callsTotal: number; callsConnected: number; dialPercent: number;
+    totalMinutes: number; avgDialogMinutes: number; missedIncoming: number;
+    incomingTotal: number; outgoingTotal: number;
+  }> | null;
+  trendByPipeline?: Record<string, DailyBucket[]> | null;
   statusBreakdown: StatusBreakdownRow[];
 }
 
 type LineFilter = "all" | "1" | "2" | "3";
+
+// B2B pipeline IDs + display labels — match server-side B2B_PIPELINES.
+const B2B_PIPELINE_LABEL: Record<string, { full: string; colorClass: string }> = {
+  "10631243": { full: "Бух Комм", colorClass: "text-emerald-400" },
+  "13209983": { full: "Мед Комм", colorClass: "text-purple-400" },
+};
 
 const LINE_LABEL: Record<LineFilter, string> = {
   all: "Все линии",
@@ -91,7 +105,7 @@ const LINE_LABEL: Record<LineFilter, string> = {
 };
 
 const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
-  "1": "Квалификатор",
+  "1": "Квалификация",
   "2": "Бератер",
   "3": "Доведение",
 };
@@ -113,10 +127,23 @@ export default function DashboardTab({ department }: { department: string }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [trendLine, setTrendLine] = useState<LineFilter>("all");
+  // For B2G this holds "all"|"1"|"2"|"3" (LineFilter); for B2B it holds
+  // "all" or a pipelineId string (e.g. "10631243"). Single piece of state
+  // since the dashboard switches modes when the user toggles department,
+  // and the new value is reset to "all" on every department change.
+  const [trendLine, setTrendLine] = useState<string>("all");
+  // Tracks whether we already have data so subsequent refetches don't
+  // re-trigger the full-screen DinoLoader (background-refresh UX). Held
+  // in a ref because we DON'T want this flag in the fetchData deps —
+  // otherwise every setData → ref-change → useCallback recreates →
+  // useEffect refires, producing an infinite refetch loop. The bug
+  // surfaced as "table data doesn't update on date change" because the
+  // loop spammed identical cached responses faster than the user could
+  // interact.
+  const hasDataRef = useRef(false);
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
-    if (!data) setLoading(true);
+    if (!hasDataRef.current) setLoading(true);
     setError(null);
     try {
       const fromStr = formatDate(range.start);
@@ -131,6 +158,7 @@ export default function DashboardTab({ department }: { department: string }) {
       }
       const json = await res.json();
       setData(json);
+      hasDataRef.current = true;
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       if (e instanceof TypeError && e.message === "Failed to fetch") return;
@@ -139,7 +167,7 @@ export default function DashboardTab({ department }: { department: string }) {
     } finally {
       setLoading(false);
     }
-  }, [department, range.start, range.end, data]);
+  }, [department, range.start, range.end]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -222,6 +250,41 @@ export default function DashboardTab({ department }: { department: string }) {
     ? { "1": sumByLine("1"), "2": sumByLine("2"), "3": sumByLine("3") }
     : null;
 
+  // For B2B: per-pipeline tile breakdown comes from the server (separate
+  // SQL aggregation since pipeline_id is on each call row, but managers
+  // aren't 1:1 with pipelines so client-side rollup over perManager doesn't
+  // work the way it does for B2G lines).
+  const byPipeline = !isB2G && data.todayMetricsByPipeline ? data.todayMetricsByPipeline : null;
+
+  // Build TileRow[] arrays once per metric for both modes. Returns null
+  // when neither breakdown is available (e.g. B2B before tile data lands).
+  type Metric = "calls" | "dial" | "minutes" | "missed";
+  const tileRows = (metric: Metric): TileRow[] | null => {
+    if (byLine) {
+      return (["1", "2", "3"] as const).map((ln) => {
+        const v = byLine[ln];
+        const value =
+          metric === "calls" ? v.callsTotal
+            : metric === "dial" ? `${v.dialPercent}%`
+              : metric === "minutes" ? `${v.totalMinutes}м`
+                : v.missedIncoming;
+        return { key: ln, label: LINE_SHORT[ln], colorClass: LINE_COLOR_CLASS[ln], value };
+      });
+    }
+    if (byPipeline) {
+      return Object.entries(byPipeline).map(([pid, v]) => {
+        const meta = B2B_PIPELINE_LABEL[pid] ?? { full: `Pipeline ${pid}`, colorClass: "text-blue-400" };
+        const value =
+          metric === "calls" ? v.callsTotal
+            : metric === "dial" ? `${v.dialPercent}%`
+              : metric === "minutes" ? `${v.totalMinutes}м`
+                : v.missedIncoming;
+        return { key: pid, label: meta.full, colorClass: meta.colorClass, value };
+      });
+    }
+    return null;
+  };
+
   return (
     <div className="flex flex-col gap-4 fade-in">
       {/* ── Filters: single calendar drives the whole view ─────────── */}
@@ -291,10 +354,7 @@ export default function DashboardTab({ department }: { department: string }) {
           color="blue"
           totalValue={m.callsTotal}
           totalCaption={`${m.outgoingTotal}↑ ${m.incomingTotal}↓`}
-          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
-            line: ln,
-            value: byLine[ln].callsTotal,
-          }))}
+          rows={tileRows("calls")}
         />
         <CallMetricTile
           icon={Target}
@@ -302,10 +362,7 @@ export default function DashboardTab({ department }: { department: string }) {
           color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
           totalValue={`${m.dialPercent}%`}
           totalCaption={`${m.callsConnected}/${m.callsTotal}`}
-          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
-            line: ln,
-            value: `${byLine[ln].dialPercent}%`,
-          }))}
+          rows={tileRows("dial")}
         />
         <CallMetricTile
           icon={Clock}
@@ -313,10 +370,7 @@ export default function DashboardTab({ department }: { department: string }) {
           color="blue"
           totalValue={`${m.totalMinutes}м`}
           totalCaption={`ср. ${m.avgDialogMinutes}м`}
-          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
-            line: ln,
-            value: `${byLine[ln].totalMinutes}м`,
-          }))}
+          rows={tileRows("minutes")}
         />
         <CallMetricTile
           icon={PhoneMissed}
@@ -324,10 +378,7 @@ export default function DashboardTab({ department }: { department: string }) {
           color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
           totalValue={m.missedIncoming}
           totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal}`}
-          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
-            line: ln,
-            value: byLine[ln].missedIncoming,
-          }))}
+          rows={tileRows("missed")}
         />
       </div>
 
@@ -412,13 +463,14 @@ export default function DashboardTab({ department }: { department: string }) {
         );
       })}
 
-      {/* ============ TREND CHART with line filter ============ */}
+      {/* ============ TREND CHART — line filter for B2G, pipeline filter for B2B ============ */}
       <TrendChart
         trend={data.trend}
         trendByLine={data.trendByLine}
-        line={trendLine}
-        onLineChange={setTrendLine}
-        showLineFilter={isB2G}
+        trendByPipeline={data.trendByPipeline ?? null}
+        filter={trendLine}
+        onFilterChange={setTrendLine}
+        mode={isB2G ? "b2g" : "b2b"}
       />
 
       {/* ============ STATUS COHORT TABLE with filters ============ */}
@@ -429,8 +481,13 @@ export default function DashboardTab({ department }: { department: string }) {
 
 // ==================== KPI tile — compact, fits 4-in-a-row ====================
 
+// Generic row for the tile breakdown — works for B2G lines (Л1/Л2/Л3) and
+// for B2B pipelines (БК/МК) without the component caring which dimension
+// it's slicing.
 interface TileRow {
-  line: "1" | "2" | "3";
+  key: string;
+  label: string;
+  colorClass: string;
   value: string | number;
 }
 
@@ -493,11 +550,11 @@ function CallMetricTile({
 
       <div className="flex flex-col gap-1 pt-1.5 border-t border-white/5">
         {rows.map((r) => (
-          <div key={r.line} className="flex items-center justify-between gap-2">
-            <span className={`text-[10px] font-semibold uppercase tracking-wider ${LINE_COLOR_CLASS[r.line]} shrink-0`}>
-              Л{r.line}
+          <div key={r.key} className="flex items-center justify-between gap-2">
+            <span className={`text-[10px] font-semibold uppercase tracking-wider ${r.colorClass} shrink-0`}>
+              {r.label}
             </span>
-            <span className={`text-base font-bold tabular-nums ${LINE_COLOR_CLASS[r.line]} tracking-tight truncate`}>
+            <span className={`text-base font-bold tabular-nums ${r.colorClass} tracking-tight truncate`}>
               {r.value}
             </span>
           </div>
@@ -507,29 +564,42 @@ function CallMetricTile({
   );
 }
 
-// ==================== Trend chart with line filter ====================
+// ==================== Trend chart with funnel filter ====================
+// B2G: line dropdown (Все / 1 / 2 / 3 — Квалификация / Бератер / Доведение)
+// B2B: pipeline dropdown (Все / Бух Комм / Мед Комм)
 
 function TrendChart({
   trend,
   trendByLine,
-  line,
-  onLineChange,
-  showLineFilter,
+  trendByPipeline,
+  filter,
+  onFilterChange,
+  mode,
 }: {
   trend: DailyBucket[];
   trendByLine: { line1: DailyBucket[]; line2: DailyBucket[]; line3: DailyBucket[] };
-  line: LineFilter;
-  onLineChange: (l: LineFilter) => void;
-  showLineFilter: boolean;
+  trendByPipeline: Record<string, DailyBucket[]> | null;
+  filter: string;
+  onFilterChange: (l: string) => void;
+  mode: "b2g" | "b2b";
 }) {
-  const source =
-    line === "1"
-      ? trendByLine.line1
-      : line === "2"
-        ? trendByLine.line2
-        : line === "3"
-          ? trendByLine.line3
-          : trend;
+  let source: DailyBucket[];
+  let activeLabel = "";
+  if (mode === "b2g") {
+    source =
+      filter === "1" ? trendByLine.line1
+        : filter === "2" ? trendByLine.line2
+          : filter === "3" ? trendByLine.line3
+            : trend;
+    if (filter !== "all") activeLabel = LINE_LABEL[filter as LineFilter] ?? "";
+  } else {
+    if (filter !== "all" && trendByPipeline?.[filter]) {
+      source = trendByPipeline[filter];
+      activeLabel = B2B_PIPELINE_LABEL[filter]?.full ?? `Pipeline ${filter}`;
+    } else {
+      source = trend;
+    }
+  }
 
   const data = (source || []).map((d) => ({
     date: d.date.slice(5).replace("-", "."),
@@ -539,27 +609,43 @@ function TrendChart({
   }));
   if (data.length === 0) return null;
 
+  const dropdown =
+    mode === "b2g" ? (
+      <select
+        value={filter}
+        onChange={(e) => onFilterChange(e.target.value)}
+        className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
+      >
+        <option value="all">Все линии</option>
+        <option value="1">Квалификация</option>
+        <option value="2">Бератер</option>
+        <option value="3">Доведение</option>
+      </select>
+    ) : trendByPipeline ? (
+      <select
+        value={filter}
+        onChange={(e) => onFilterChange(e.target.value)}
+        className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
+      >
+        <option value="all">Все воронки</option>
+        {Object.keys(trendByPipeline).map((pid) => (
+          <option key={pid} value={pid}>
+            {B2B_PIPELINE_LABEL[pid]?.full ?? `Pipeline ${pid}`}
+          </option>
+        ))}
+      </select>
+    ) : null;
+
   return (
     <div className="glass-panel rounded-2xl p-5 border border-white/5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
           Динамика звонков по дням
-          {line !== "all" && (
-            <span className="text-slate-500 ml-2 font-normal normal-case">— {LINE_LABEL[line]}</span>
+          {activeLabel && (
+            <span className="text-slate-500 ml-2 font-normal normal-case">— {activeLabel}</span>
           )}
         </h3>
-        {showLineFilter && (
-          <select
-            value={line}
-            onChange={(e) => onLineChange(e.target.value as LineFilter)}
-            className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
-          >
-            <option value="all">Все линии</option>
-            <option value="1">Линия 1</option>
-            <option value="2">Линия 2</option>
-            <option value="3">Линия 3</option>
-          </select>
-        )}
+        {dropdown}
       </div>
       <ResponsiveContainer width="100%" height={240}>
         <LineChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
