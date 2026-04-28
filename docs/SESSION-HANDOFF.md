@@ -1,6 +1,6 @@
 # Session Handoff — Calls / Daily / Dashboard / Tracking / Looker / Термин
 
-Last updated: 2026-04-28 (post phone-enrichment + Termin tab landing)
+Last updated: 2026-04-28 (post Активность audit + 41-type trim + perf fix)
 
 This doc is for the next Claude Code session. Read it first.
 
@@ -10,12 +10,22 @@ This doc is for the next Claude Code session. Read it first.
 
 - [`DASHBOARD-ZVONKI.md`](./DASHBOARD-ZVONKI.md) — Звонки tab
 - [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) — Термин tab (added 2026-04-28)
+- [`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) — Активность tab (added 2026-04-28)
 - [`daily-commerce-spec.md`](./daily-commerce-spec.md) — Daily commerce metrics
 - [`mysql-analytics.md`](./mysql-analytics.md) — analytics.* schema reference
 
 ---
 
 ## TL;DR — what's the current focus
+
+**Активность tab fully audited and corrected 2026-04-28.** End-to-end
+review found and fixed 11 issues across event-type names, attribution,
+duration math, performance, and UI. EVENT_TYPES trimmed from 81 to 41
+verified-firing types. Full backfill 2026-01-01→2026-04-28 landed
+379k events. Render is now stale-while-revalidate (~50-200ms cache hit).
+Manager dropdown filter added. Дерикова (rop+line) included via the
+double-status convention. See
+[`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) for full detail.
 
 **Termin dashboard tab shipped 2026-04-28.** New section in admin sidebar
 (between «Активность» and «Looker»). Cohort line chart of avg days from
@@ -225,7 +235,10 @@ Bumped any time the Kommo fetch logic changes in a way that invalidates past tra
 | v5 | Force re-backfill after upsertSyncState bug fix |
 | v6 | Drop `customer` entity |
 | v7 | Calls via `/notes` instead of `/events` (created_by gap) |
-| **v8** | `filter[updated_at]` instead of `filter[created_at]` ← current |
+| v8 | `filter[updated_at]` instead of `filter[created_at]` on /notes |
+| v9 | Corrected 19 wrong type-keys against Kommo /events/types catalogue |
+| v10 | Capture full Kommo call params (uniq, pbx_source, link, phone, call_status, call_result) in `raw` JSONB |
+| **v11** | Include `role='rop' AND line IS NOT NULL` in manager attribution (Татьяна Дерикова) ← current |
 
 ---
 

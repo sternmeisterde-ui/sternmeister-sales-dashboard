@@ -127,7 +127,7 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
   Old `note:N` call rows that landed before this change get wiped by the next overlapping Kommo backfill (the prefix-scoped DELETE catches them). PID 12795 is currently doing this for Jan-Apr 2026.
 
-- [ ] **Bump `CURRENT_FILTER_VERSION` to 9** in `src/lib/tracking/sync.ts` if tracking timeline should also start using telephony as the primary call source.
+- [x] **Bumped `CURRENT_FILTER_VERSION` to 9 → 10 → 11** in `src/lib/tracking/sync.ts` (2026-04-28). v9 = corrected wrong type-keys, v10 = full call params in raw, v11 = rop+line attribution. Tracking still uses Kommo /notes as primary; CDR cross-ref via `raw.uniq` is now possible but not active.
 
 - [ ] **Phone → lead enrichment in `sync-telephony.ts`.** Every CDR row currently lands with `pipeline_id=NULL` because PBX writes the call before any Kommo lead exists. Verified 2026-04-28: 100% of cg-leg + ct rows have NULL pipeline_id (11,186 rows / last 7d). This blocks:
   1. **B2B per-pipeline tile/trend split** (Бух Комм / Мед Комм) — currently disabled in `/api/dashboard/route.ts`, see comment `v7 cache-key`.
@@ -207,6 +207,20 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 - [x] Wider telephony backfill — 4 months, 129k rows (cg 106516 + ct 22557), 0 kommo orphans, 14m51s wall time. (2026-04-28)
 - [x] syncTelephony DELETE extended to wipe stale pre-split `note:N` call rows in same window — auto-cleanup on every backfill. (2026-04-28)
 - [x] avg-calls-per-lead widget marked as known regression post-split (returns null) — needs phone→lead enrichment to work properly. (2026-04-28)
+- [x] **Активность tab end-to-end audit** (2026-04-28). 11 fixes across event-types, attribution, perf, UI:
+  - v9: corrected 19 wrong type-keys against Kommo `/events/types` catalogue (`incoming_email`→`incoming_mail`, `entities_merged`→`entity_merged`, `segment_added`→`entity_segment_attached`, etc.)
+  - v10: capture full Kommo call params (uniq, pbx_source, link, phone, call_status, call_result) in `raw` JSONB
+  - v11: include rop+line in attribution (Татьяна Дерикова case via `project_double_status` convention)
+  - Trim EVENT_TYPES from 81 to 41 verified-firing types (commit `c858103`); restoration path documented in file header
+  - Per-id `custom_field_<ID>_value_changed` collapsed via `normalizeEventType` regex; 30/30 IDs verified against Kommo catalogue
+  - Entity-specific link filter: `lead_linked`/`contact_linked`/etc. expand to `entity_linked WHERE entity_type='lead'`/etc. at render time (Kommo emits one generic per scope)
+  - Accurate idle/call math: `callMin = round(sum(durationSec)/60)` instead of minute-grid count → no over-count of short calls
+  - Manager dropdown filter (multi-select grouped by line, server-side filtered)
+  - Stale-while-revalidate render: cache renders ~50-200ms, sync runs fire-and-forget in background
+  - Offline `scripts/backfill-tracking.ts` chunked + post-run coverage report
+  - Wiped + re-backfilled 2026-01-01..2026-04-28 = **379k rows** across both depts; 41/41 declared types observed
+  - Юля Смирнова documented as roleplay-only (kommo_user_id=NULL is correct, not a bug); see `memory/project_yulia_smirnova_roleplay_only.md`
+  - Doc: `docs/DASHBOARD-AKTIVNOST.md`
 - [x] `maxDuration=30` cap on /api/managers route — prevents 504s under provider rate-limit storms. (2026-04-28)
 - [x] Hard-split: `sync-communications.ts` drops call-note fetch, telephony owns calls. (2026-04-28)
 - [x] Auto-resolve CG/CT IDs in `/api/managers` POST + GET. `scripts/link-managers-telephony.ts` for one-shot backfill. 7 managers linked on first run. (2026-04-28)
