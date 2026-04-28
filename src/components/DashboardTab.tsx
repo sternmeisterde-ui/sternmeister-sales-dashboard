@@ -283,18 +283,17 @@ export default function DashboardTab({ department }: { department: string }) {
         </div>
       )}
 
-      {/* ============ KPI: 4 tiles, each split by line for B2G ============ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+      {/* ============ KPI: 4 tiles in one row, compact, responsive width ============ */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <CallMetricTile
           icon={Phone}
           label="Звонки"
           color="blue"
           totalValue={m.callsTotal}
-          totalCaption={`${m.outgoingTotal} исх. / ${m.incomingTotal} вх.`}
+          totalCaption={`${m.outgoingTotal}↑ ${m.incomingTotal}↓`}
           rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
             line: ln,
             value: byLine[ln].callsTotal,
-            caption: `${byLine[ln].outgoingTotal} исх. / ${byLine[ln].incomingTotal} вх.`,
           }))}
         />
         <CallMetricTile
@@ -302,23 +301,21 @@ export default function DashboardTab({ department }: { department: string }) {
           label="Дозвон"
           color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
           totalValue={`${m.dialPercent}%`}
-          totalCaption={`${m.callsConnected} из ${m.callsTotal} звонков`}
+          totalCaption={`${m.callsConnected}/${m.callsTotal}`}
           rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
             line: ln,
             value: `${byLine[ln].dialPercent}%`,
-            caption: `${byLine[ln].callsConnected} из ${byLine[ln].callsTotal}`,
           }))}
         />
         <CallMetricTile
           icon={Clock}
           label="На линии"
           color="blue"
-          totalValue={`${m.totalMinutes} мин`}
-          totalCaption={`Ср. диалог ${m.avgDialogMinutes} мин`}
+          totalValue={`${m.totalMinutes}м`}
+          totalCaption={`ср. ${m.avgDialogMinutes}м`}
           rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
             line: ln,
-            value: `${byLine[ln].totalMinutes} мин`,
-            caption: undefined,
+            value: `${byLine[ln].totalMinutes}м`,
           }))}
         />
         <CallMetricTile
@@ -326,11 +323,10 @@ export default function DashboardTab({ department }: { department: string }) {
           label="Пропущенные"
           color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
           totalValue={m.missedIncoming}
-          totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal} входящих`}
+          totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal}`}
           rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
             line: ln,
             value: byLine[ln].missedIncoming,
-            caption: `${byLine[ln].missedPercent}% от ${byLine[ln].incomingTotal} вх.`,
           }))}
         />
       </div>
@@ -431,12 +427,11 @@ export default function DashboardTab({ department }: { department: string }) {
   );
 }
 
-// ==================== KPI tile — vertical layout with line rows ====================
+// ==================== KPI tile — compact, fits 4-in-a-row ====================
 
 interface TileRow {
   line: "1" | "2" | "3";
   value: string | number;
-  caption?: string;
 }
 
 function CallMetricTile({
@@ -462,53 +457,47 @@ function CallMetricTile({
   };
   const c = colorMap[color];
 
-  // ── B2B (no line breakdown) — single big number ─────────────────────
+  // ── B2B — single big number (no line concept) ──────────────────────
   if (!rows) {
     return (
-      <div className="glass-panel rounded-2xl p-5 border border-white/5 hover:border-blue-500/20 transition-all">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-slate-400 font-semibold tracking-wider text-xs uppercase">{label}</span>
-          <div className={`p-2 ${c.bg} rounded-lg ${c.text}`}>
-            <Icon className="w-4 h-4" />
+      <div className="glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-slate-400 font-semibold tracking-wider text-[10px] uppercase truncate">{label}</span>
+          <div className={`p-1 ${c.bg} rounded ${c.text} shrink-0`}>
+            <Icon className="w-3 h-3" />
           </div>
         </div>
-        <div className={`text-4xl font-bold ${c.text} tracking-tight mt-2`}>{totalValue}</div>
-        {totalCaption && <div className="text-xs text-slate-500 mt-1">{totalCaption}</div>}
+        <div className={`text-2xl font-bold ${c.text} tracking-tight`}>{totalValue}</div>
+        {totalCaption && <div className="text-[10px] text-slate-500 mt-0.5 truncate">{totalCaption}</div>}
       </div>
     );
   }
 
-  // ── B2G — small total header + 3 big line rows below ────────────────
+  // ── B2G — compact tile: header + 3 line rows. Each row: tiny line tag
+  //    on the left, large number on the right. Captions dropped to keep
+  //    width minimal so 4 tiles fit in a row from sm breakpoint onward. ─
   return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5 hover:border-blue-500/20 transition-all flex flex-col">
-      {/* Compact header: label + small total + icon */}
-      <div className="flex items-start justify-between mb-3">
-        <div>
-          <div className="text-slate-400 font-semibold tracking-wider text-xs uppercase mb-1">{label}</div>
-          <div className="flex items-baseline gap-2">
-            <span className={`text-lg font-bold ${c.text} tracking-tight`}>{totalValue}</span>
-            <span className="text-[10px] text-slate-500">всего</span>
+    <div className="glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0 flex flex-col">
+      <div className="flex items-center justify-between mb-1.5 gap-1.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-slate-400 font-semibold tracking-wider text-[10px] uppercase truncate">{label}</div>
+          <div className="flex items-baseline gap-1 mt-0.5">
+            <span className={`text-base font-bold ${c.text} tracking-tight tabular-nums`}>{totalValue}</span>
+            {totalCaption && <span className="text-[9px] text-slate-500 truncate">{totalCaption}</span>}
           </div>
-          {totalCaption && <div className="text-[10px] text-slate-500 mt-0.5">{totalCaption}</div>}
         </div>
-        <div className={`p-2 ${c.bg} rounded-lg ${c.text} shrink-0`}>
-          <Icon className="w-4 h-4" />
+        <div className={`p-1 ${c.bg} rounded ${c.text} shrink-0`}>
+          <Icon className="w-3 h-3" />
         </div>
       </div>
 
-      {/* Per-line rows: big number, full label, optional caption */}
-      <div className="flex flex-col gap-2 mt-1 pt-3 border-t border-white/5">
+      <div className="flex flex-col gap-1 pt-1.5 border-t border-white/5">
         {rows.map((r) => (
-          <div key={r.line} className="flex items-baseline justify-between gap-3">
-            <div className="flex flex-col min-w-0">
-              <span className={`text-[10px] uppercase tracking-wider font-semibold ${LINE_COLOR_CLASS[r.line]}`}>
-                Л{r.line} · {LINE_SHORT[r.line]}
-              </span>
-              {r.caption && (
-                <span className="text-[10px] text-slate-500 truncate">{r.caption}</span>
-              )}
-            </div>
-            <span className={`text-2xl font-bold tabular-nums ${LINE_COLOR_CLASS[r.line]} tracking-tight shrink-0`}>
+          <div key={r.line} className="flex items-center justify-between gap-2">
+            <span className={`text-[10px] font-semibold uppercase tracking-wider ${LINE_COLOR_CLASS[r.line]} shrink-0`}>
+              Л{r.line}
+            </span>
+            <span className={`text-base font-bold tabular-nums ${LINE_COLOR_CLASS[r.line]} tracking-tight truncate`}>
               {r.value}
             </span>
           </div>
@@ -604,39 +593,59 @@ function TrendChart({
 // B2B variant: no line filter (no line concept); pipeline filter shows up
 // because Бух Комм vs Мед Admin are real distinct funnels worth slicing.
 
+// Display names for B2G pipelines in the cohort filter. The "Бератер" funnel
+// covers both Line 2 and Line 3 in Kommo (single pipeline split by status_id);
+// "Квалификатор" is the FIRST_LINE pipeline. Falls back to whatever
+// pipelineName the server emits.
+const B2G_FUNNEL_LABEL: Record<number, string> = {
+  10935879: "Квалификатор",  // B2G_PIPELINES.FIRST_LINE
+  12154099: "Бератер",        // B2G_PIPELINES.BERATER (L2 + L3)
+};
+
 function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G: boolean }) {
-  const [lineFilter, setLineFilter] = useState<LineFilter>("all");
-  const [pipelineFilter, setPipelineFilter] = useState<string>("all"); // B2B only
-  // null = "all selected" sentinel. Switches to a Set on first user interaction.
-  // Using a sentinel avoids the bug where new statuses arriving in `rows`
-  // wouldn't be auto-included if we tracked "selected" explicitly from the start.
+  // Funnel multi-select. null sentinel = "all selected" (keeps newly-arriving
+  // pipelines auto-included when the date range expands).
+  const [funnelSelection, setFunnelSelection] = useState<Set<number> | null>(null);
   const [statusSelection, setStatusSelection] = useState<Set<number> | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Distinct pipelines available — drives the B2B pipeline dropdown. For B2G
-  // we never show this dropdown; pipeline and line are redundant there.
-  const pipelines = useMemo(() => {
+  // Available funnels = distinct pipelineIds in the current rows. For B2G
+  // remap labels to the user's preferred names (Квалификатор / Бератер).
+  // Bератер still surfaces every L2 + L3 lead — the row filter is by
+  // pipelineId, not by line, so nothing is dropped at this stage.
+  const funnels = useMemo(() => {
     const map = new Map<number, string>();
-    for (const r of rows) map.set(r.pipelineId, r.pipelineName);
+    for (const r of rows) {
+      const name = isB2G
+        ? (B2G_FUNNEL_LABEL[r.pipelineId] ?? r.pipelineName)
+        : r.pipelineName;
+      map.set(r.pipelineId, name);
+    }
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [rows]);
+  }, [rows, isB2G]);
 
-  // Apply line / pipeline pre-filters before the status dropdown sees the rows.
-  // For B2G: filter by line. For B2B: filter by pipeline. Both can also be "all".
+  // Resolve funnel selection from the sentinel.
+  const selectedFunnels = useMemo(() => {
+    if (funnelSelection === null) return new Set(funnels.map((f) => f.id));
+    return new Set(Array.from(funnelSelection).filter((id) => funnels.some((f) => f.id === id)));
+  }, [funnelSelection, funnels]);
+
   const scopedRows = useMemo(() => {
-    return rows.filter((r) => {
-      if (isB2G) {
-        if (lineFilter !== "all" && r.line !== lineFilter) return false;
-      } else {
-        if (pipelineFilter !== "all" && String(r.pipelineId) !== pipelineFilter) return false;
-      }
-      return true;
-    });
-  }, [rows, isB2G, lineFilter, pipelineFilter]);
+    return rows.filter((r) => selectedFunnels.has(r.pipelineId));
+  }, [rows, selectedFunnels]);
 
-  // Alias kept for the rest of the component — was `lineFilteredRows`, now
-  // covers both B2G (line) and B2B (pipeline) pre-filters.
+  const toggleFunnel = (id: number) => {
+    setFunnelSelection((prev) => {
+      const base = prev ?? new Set(funnels.map((f) => f.id));
+      const next = new Set(base);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Alias for the rest of the component.
   const lineFilteredRows = scopedRows;
 
   const availableStatuses = useMemo(() => {
@@ -711,34 +720,32 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
           </span>
         </h3>
         <div className="flex items-center gap-2 flex-wrap">
-          {isB2G ? (
-            <select
-              value={lineFilter}
-              onChange={(e) => setLineFilter(e.target.value as LineFilter)}
-              className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
-            >
-              <option value="all">Все линии</option>
-              <option value="1">Линия 1 — Квалификатор</option>
-              <option value="2">Линия 2 — Бератер</option>
-              <option value="3">Линия 3 — Доведение</option>
-            </select>
-          ) : (
-            // B2B has 2 distinct funnels (Бух Комм + Мед Admin Commercial)
-            // and no line concept — so a pipeline dropdown is the
-            // meaningful slice here.
-            pipelines.length > 1 && (
-              <select
-                value={pipelineFilter}
-                onChange={(e) => setPipelineFilter(e.target.value)}
-                className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors max-w-[260px]"
+          {/* Funnel multi-select as inline checkbox pills. Both B2G and B2B
+              have exactly 2 funnels in scope — checkbox pills read better than
+              a dropdown for that count. Default both checked; user clicks to
+              toggle. Бератер covers L2 + L3 in one funnel. */}
+          {funnels.map((f) => {
+            const checked = selectedFunnels.has(f.id);
+            return (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => toggleFunnel(f.id)}
+                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                  checked
+                    ? "bg-blue-500/15 border-blue-500/40 text-blue-200"
+                    : "bg-slate-900/40 border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200"
+                }`}
               >
-                <option value="all">Все воронки</option>
-                {pipelines.map((p) => (
-                  <option key={p.id} value={String(p.id)}>{p.name}</option>
-                ))}
-              </select>
-            )
-          )}
+                <span className={`inline-block w-3.5 h-3.5 rounded border ${
+                  checked ? "bg-blue-500 border-blue-500" : "border-slate-500"
+                } flex items-center justify-center text-[10px] text-white`}>
+                  {checked ? "✓" : ""}
+                </span>
+                <span>{f.name}</span>
+              </button>
+            );
+          })}
 
           {/* Status multi-select dropdown */}
           <div ref={dropdownRef} className="relative">
@@ -802,10 +809,8 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
             <thead>
               <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
                 <th className="text-left py-2 px-2 font-medium">Статус</th>
-                {isB2G ? (
-                  <th className="text-left py-2 px-2 font-medium">Линия</th>
-                ) : (
-                  pipelines.length > 1 && <th className="text-left py-2 px-2 font-medium">Воронка</th>
+                {selectedFunnels.size > 1 && (
+                  <th className="text-left py-2 px-2 font-medium">Воронка</th>
                 )}
                 <th className="text-right py-2 px-2 font-medium">Сделок</th>
                 <th className="text-right py-2 px-2 font-medium w-1/3">Доля</th>
@@ -814,25 +819,15 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
             <tbody>
               {sorted.map((r) => {
                 const pct = total > 0 ? (r.count / total) * 100 : 0;
+                const funnelName =
+                  funnels.find((f) => f.id === r.pipelineId)?.name ?? r.pipelineName;
                 return (
-                  <tr key={`${r.pipelineId}-${r.line ?? "x"}-${r.statusId}`} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                  <tr key={`${r.pipelineId}-${r.statusId}`} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
                     <td className="py-2 px-2 text-slate-200 truncate max-w-[320px]">{r.statusName}</td>
-                    {isB2G ? (
-                      <td className="py-2 px-2 text-xs">
-                        {r.line ? (
-                          <span className={LINE_COLOR_CLASS[r.line as Exclude<LineFilter, "all">]}>
-                            Л{r.line} · {LINE_SHORT[r.line as Exclude<LineFilter, "all">]}
-                          </span>
-                        ) : (
-                          <span className="text-slate-600">—</span>
-                        )}
+                    {selectedFunnels.size > 1 && (
+                      <td className="py-2 px-2 text-xs text-slate-400 truncate max-w-[160px]">
+                        {funnelName}
                       </td>
-                    ) : (
-                      pipelines.length > 1 && (
-                        <td className="py-2 px-2 text-xs text-slate-400 truncate max-w-[200px]">
-                          {r.pipelineName}
-                        </td>
-                      )
                     )}
                     <td className="py-2 px-2 text-right text-slate-200 tabular-nums font-medium">{r.count.toLocaleString("ru-RU")}</td>
                     <td className="py-2 px-2 w-1/3">
