@@ -57,11 +57,10 @@ interface TrackingTabProps {
 
 // ==================== Helpers ====================
 
-// Dashboard runs in Moscow time (matches the server-side GET route). The date
-// the user picks in the calendar is interpreted as a Moscow-local calendar
-// date — see moscowToday() below for why the "today" default can't use the
+// Dashboard runs in Berlin time (matches server-side GET route). The date
+// the user picks in the calendar is interpreted as a Berlin-local calendar
+// date — see berlinToday() below for why the "today" default can't use the
 // browser's clock directly.
-const DASHBOARD_TZ_OFFSET_MIN = 180;
 
 function toLocalISO(d: Date): string {
   const y = d.getFullYear();
@@ -71,17 +70,26 @@ function toLocalISO(d: Date): string {
 }
 
 /**
- * Browser-local midnight Date whose calendar parts match Moscow's CURRENT
- * calendar date. Without this, a user in UTC+1 opening the tab at 23:30 local
- * sees "today" = their own date while Moscow is already on the next day; the
- * server's `includesToday` check then misses and auto-refresh goes silent.
+ * Browser-local midnight Date whose calendar parts match Berlin's CURRENT
+ * calendar date. Without this, a user in a different timezone opening the
+ * tab near midnight sees "today" = their own date while Berlin is already
+ * on the next day (or vice versa); the server's `includesToday` check then
+ * misses and auto-refresh goes silent. Uses Intl so DST flips are correct.
  */
-function moscowToday(): Date {
-  const moscowNow = new Date(Date.now() + DASHBOARD_TZ_OFFSET_MIN * 60_000);
+function berlinToday(): Date {
+  const partsByType: Record<string, string> = {};
+  for (const p of new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date())) {
+    if (p.type !== "literal") partsByType[p.type] = p.value;
+  }
   return new Date(
-    moscowNow.getUTCFullYear(),
-    moscowNow.getUTCMonth(),
-    moscowNow.getUTCDate(),
+    Number(partsByType.year),
+    Number(partsByType.month) - 1,
+    Number(partsByType.day),
   );
 }
 
@@ -104,7 +112,7 @@ function formatLastSynced(ts: string | null): string {
 
 export default function TrackingTab({ department }: TrackingTabProps) {
   // Date range (default today only — Moscow's today, not the browser's)
-  const today = useMemo(() => moscowToday(), []);
+  const today = useMemo(() => berlinToday(), []);
   const [range, setRange] = useState<DateRange>({ start: today, end: today });
 
   // Event-type filter
@@ -180,7 +188,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   // Auto refresh every 5 min when viewing a range including today
   useEffect(() => {
     if (!queryKey.to) return;
-    const todayIso = toLocalISO(moscowToday());
+    const todayIso = toLocalISO(berlinToday());
     if (queryKey.to !== todayIso && (queryKey.from ?? "") <= todayIso && todayIso <= queryKey.to) {
       // range includes today
     } else if (queryKey.from !== todayIso && queryKey.to !== todayIso) {

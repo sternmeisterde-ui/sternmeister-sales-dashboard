@@ -10,11 +10,16 @@ import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
+import { tzOffsetMinutes } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
-// Dashboard renders everything in Europe/Moscow — same TZ used by Daily.
-const DASHBOARD_TZ_OFFSET_MIN = 180;
+// Tracking renders in Europe/Berlin (matches Daily / Looker / business hours
+// modules — single source of truth). Offset is recomputed per-Date so the
+// CET↔CEST DST transition doesn't shift "start of day" by ±1h.
+function berlinOffsetMin(d: Date): number {
+  return tzOffsetMinutes(d, "Europe/Berlin");
+}
 
 function parseDateStr(s: string): Date | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
@@ -58,19 +63,22 @@ export async function GET(req: NextRequest) {
     // open past dates (which skips sync) and we still SELECT from the cache.
     await ensureTrackingSchema();
 
-    // "today" in the dashboard TZ (not UTC) — dashboard operates in Moscow
-    // time and client sends local ISO dates, so UTC-today would be off by
-    // up to 3 hours and miss the "includes today" branch near midnight UTC.
-    const nowMs = Date.now();
-    const todayMoscow = new Date(nowMs + DASHBOARD_TZ_OFFSET_MIN * 60_000)
+    // "today" in Europe/Berlin (not UTC) — client sends local calendar
+    // dates and a UTC comparison would miss the "includes today" branch
+    // around midnight Berlin time.
+    const now = new Date();
+    const nowBerlinOffset = berlinOffsetMin(now);
+    const todayBerlin = new Date(now.getTime() + nowBerlinOffset * 60_000)
       .toISOString()
       .slice(0, 10);
-    const includesToday = todayMoscow >= fromISO && todayMoscow <= toISO;
+    const includesToday = todayBerlin >= fromISO && todayBerlin <= toISO;
 
-    // fromISO / toISO are Moscow-local calendar dates. Convert to UTC bounds
-    // for querying the cache AND for deciding whether a backfill is needed.
+    // fromISO / toISO are Berlin-local calendar dates. Convert to UTC
+    // bounds; offset computed against each boundary's instant so DST flips
+    // mid-window stay correct.
+    const fromUtc = new Date(`${fromISO}T00:00:00Z`);
     const rangeStart = new Date(
-      new Date(`${fromISO}T00:00:00Z`).getTime() - DASHBOARD_TZ_OFFSET_MIN * 60_000,
+      fromUtc.getTime() - berlinOffsetMin(fromUtc) * 60_000,
     );
 
     let synced = false;
@@ -140,9 +148,12 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Upper bound for events (lower was already computed as rangeStart above).
+    // Upper bound for events. Berlin end-of-day = next-day 00:00 in Berlin
+    // local, converted to UTC. Compute offset against the to-bound's
+    // instant so DST handles correctly.
+    const toUtc = new Date(`${toISO}T00:00:00Z`);
     const rangeEnd = new Date(
-      new Date(`${toISO}T00:00:00Z`).getTime() + (24 * 60 - DASHBOARD_TZ_OFFSET_MIN) * 60_000,
+      toUtc.getTime() + (24 * 60 - berlinOffsetMin(toUtc)) * 60_000,
     );
 
     const events = await trackingDb
@@ -163,12 +174,11 @@ export async function GET(req: NextRequest) {
         ),
       );
 
-    // Group events by manager + local date
+    // Group events by manager + local Berlin calendar date.
     const evByManagerDate = new Map<string, TimelineEvent[]>();
     for (const e of events) {
-      const localDate = new Date(
-        new Date(e.createdAt).getTime() + DASHBOARD_TZ_OFFSET_MIN * 60_000,
-      )
+      const evDate = new Date(e.createdAt);
+      const localDate = new Date(evDate.getTime() + berlinOffsetMin(evDate) * 60_000)
         .toISOString()
         .slice(0, 10);
       const key = `${e.managerId}|${localDate}`;
@@ -202,10 +212,14 @@ export async function GET(req: NextRequest) {
           }
           : null);
         const eventsForDay = evByManagerDate.get(`${m.id}|${date}`) ?? [];
+        // tzOffsetMinutes for the rendered day's local 00:00 — Berlin can
+        // be CET (60) or CEST (120) depending on the date.
+        const dayUtc = new Date(`${date}T00:00:00Z`);
+        const dayOffset = berlinOffsetMin(dayUtc);
         const tl = buildTimeline({
           scheduleRow: effectiveSched,
           dateISO: date,
-          tzOffsetMinutes: DASHBOARD_TZ_OFFSET_MIN,
+          tzOffsetMinutes: dayOffset,
           events: eventsForDay,
           selectedCrmTypes,
         });

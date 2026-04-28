@@ -140,6 +140,24 @@ export async function syncCommunications(
     }
 
     const lead = canonicalLeadId != null ? leadMap.get(canonicalLeadId) : undefined;
+
+    // Manager attribution: the note's `created_by` is the user who clicked,
+    // which for PBX-routed calls is often a service account — name lookup
+    // misses, manager string ends up empty, and analytics-calls SQL filter
+    // (`WHERE manager IS NOT NULL AND manager <> ''`) drops the row → call
+    // disappears from dashboard. Fall back to:
+    //   1. note.responsible_user_id (note's own responsible field)
+    //   2. canonical lead's responsibleUserId (lead-owner attribution)
+    // — both resolve via the same lookups.users map. Same fallback chain
+    //   that tracking-sync.ts uses (single source of truth for attribution).
+    let manager = ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "";
+    if (!manager && ev.responsibleUserId) {
+      manager = lookups.users.get(ev.responsibleUserId) ?? "";
+    }
+    if (!manager && lead?.responsibleUserId) {
+      manager = lookups.users.get(lead.responsibleUserId) ?? "";
+    }
+
     addRow({
       communicationId: String(ev.noteId),
       communicationType: ev.type,
@@ -155,7 +173,7 @@ export async function syncCommunications(
         : null,
       callStatus: ev.callStatus ?? null,
       duration: ev.duration,
-      manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",
+      manager,
       statusId: lead?.statusId ?? null,
       statusName: lead?.statusName ?? null,
       utmSource: null,

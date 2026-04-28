@@ -732,38 +732,40 @@ export async function getContactsWithLeads(
  * More complete than getCallEvents (Events API misses ~18% of calls that lack event entries).
  * Returns unified shape identical to what getCallEvents used to return.
  */
-export async function getAllCallNotesByDate(
-  dateFrom: number,
-  dateTo: number,
-  maxPages = 500,
-): Promise<Array<{
+export interface CallNoteRow {
   type: "call_in" | "call_out";
   noteId: number;
   entityType: string;
   entityId: number;
+  /** User who created the note. For PBX-integrated calls this can be a
+   *  service user, not the manager who actually picked up. */
   createdBy: number;
+  /** Note's responsible_user — typically the lead/contact's owner. Use as
+   *  fallback attribution when createdBy is a service account that isn't in
+   *  master_managers. */
+  responsibleUserId: number;
   createdAt: number;
   duration: number;
   callStatus: number | undefined;
-}>> {
+}
+
+export async function getAllCallNotesByDate(
+  dateFrom: number,
+  dateTo: number,
+  maxPages = 500,
+): Promise<CallNoteRow[]> {
   const baseUrl = await getBaseUrl();
   const headers = await getAuthHeaders();
 
-  const result: Array<{
-    type: "call_in" | "call_out";
-    noteId: number;
-    entityType: string;
-    entityId: number;
-    createdBy: number;
-    createdAt: number;
-    duration: number;
-    callStatus: number | undefined;
-  }> = [];
+  const result: CallNoteRow[] = [];
 
   // Track seen note IDs to deduplicate across entity endpoints
   const seen = new Set<number>();
 
-  for (const entityType of ["contacts", "leads"] as const) {
+  // Iterate every entity type Kommo's /notes accepts. Missing `companies`
+  // would silently undercount calls logged on company entities (B2B
+  // accounts can have a meaningful share of these).
+  for (const entityType of ["contacts", "leads", "companies"] as const) {
     let page = 1;
     while (page <= maxPages) {
       const url = new URL(`${baseUrl}/${entityType}/notes`);
@@ -790,9 +792,15 @@ export async function getAllCallNotesByDate(
         result.push({
           type: n.note_type,
           noteId: n.id,
-          entityType: entityType === "contacts" ? "contact" : "lead",
+          entityType:
+            entityType === "contacts"
+              ? "contact"
+              : entityType === "companies"
+                ? "company"
+                : "lead",
           entityId: n.entity_id,
           createdBy: n.created_by,
+          responsibleUserId: n.responsible_user_id,
           createdAt: n.created_at,
           duration: Number(n.params?.duration) || 0,
           callStatus: n.params?.call_status,

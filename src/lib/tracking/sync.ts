@@ -2,16 +2,18 @@ import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
-import { eq, and } from "drizzle-orm";
-import { fetchRawEvents, getCallNotes } from "@/lib/kommo/client";
+import { eq, and, sql } from "drizzle-orm";
+import { fetchRawEvents, getAllCallNotesByDate } from "@/lib/kommo/client";
 import { ensureTrackingSchema } from "./init";
 import { CALL_TYPES, EVENT_TYPES } from "./event-types";
 
-// All event type keys we care about. Passed explicitly to Kommo `/events` via
-// `filter[type][]` — without it, Kommo returns a mixed page dominated by
-// system/robot events that fail our created_by → manager check, leaving
-// almost no CRM activity in the cache (only calls pass through).
-const ALL_TRACKED_EVENT_TYPES = EVENT_TYPES.map((t) => t.key);
+// CRM event types only — calls go through getAllCallNotesByDate (/notes
+// endpoint) which catches calls created by PBX integrations under a service
+// user. Querying `incoming_call`/`outgoing_call` via /events with
+// filter[created_by]=manager_ids was missing those system-created calls.
+const NON_CALL_EVENT_TYPES = EVENT_TYPES
+  .filter((t) => !CALL_TYPES.has(t.key))
+  .map((t) => t.key);
 import type { DepartmentId } from "@/lib/config/tenant";
 
 export type Dept = DepartmentId;
@@ -55,7 +57,15 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        the failing customer iteration, wasting ~1/4 of rate-limit budget
 //        per sync). Re-backfill so prior runs' poisoned blacklists clear.
 //        (2026-04-28)
-const CURRENT_FILTER_VERSION = 6;
+//   v7 — call events now sourced from /{entity}/notes via getAllCallNotes-
+//        ByDate instead of /events. The /events path requires filter[
+//        created_by] which silently dropped any call created by a PBX
+//        integration's service user, even when the manager who actually
+//        handled the call was the lead's responsible_user. /notes has no
+//        such filter — we get every call and attribute via createdBy with
+//        responsibleUserId fallback. Same fix as ETL commit f70e8f5.
+//        (2026-04-28)
+const CURRENT_FILTER_VERSION = 7;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
@@ -167,47 +177,98 @@ export async function syncDepartment(
   let minEventTs: Date | null = state?.earliestEventTs ? new Date(state.earliestEventTs) : null;
   let fatalError: unknown = null;
 
-  try {
-    // Call notes first — needed for duration enrichment inside the events
-    // callback. Soft-fails to empty map (calls get duration=0) so a /notes
-    // outage doesn't block the much more important event capture.
-    const callNotes = await getCallNotes(dateFromSec, dateToSec, kommoUserIds).catch((err) => {
-      console.warn(`[tracking-sync] getCallNotes failed: ${err?.message}; calls will have 0 duration`);
-      return [] as Awaited<ReturnType<typeof getCallNotes>>;
-    });
-    const durationByNoteId = new Map<number, number>();
-    for (const note of callNotes) {
-      const dur = Number(note.params?.duration) || 0;
-      if (dur > 0) durationByNoteId.set(note.id, dur);
+  // Helper: chunked insert + watermark advance, shared between calls and
+  // CRM-events paths. Insert before watermark mutation so a mid-chunk
+  // failure leaves the DB and watermark consistent.
+  const persistRows = async (
+    rows: Array<typeof trackingEvents.$inferInsert>,
+  ) => {
+    const CHUNK = 500;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const chunk = rows.slice(i, i + CHUNK);
+      const result = await trackingDb
+        .insert(trackingEvents)
+        .values(chunk)
+        .onConflictDoNothing({ target: [trackingEvents.department, trackingEvents.eventId] })
+        .returning({ id: trackingEvents.id });
+      inserted += result.length;
+      for (const row of chunk) {
+        if (row.createdAt > maxEventTs) maxEventTs = row.createdAt;
+        if (!minEventTs || row.createdAt < minEventTs) minEventTs = row.createdAt;
+      }
     }
+  };
 
-    // Stream: fetchRawEvents invokes this for every successful (user × type)
-    // batch. We insert immediately so partial sync failures still leave the
-    // already-fetched events in the DB — the next run's delta window picks up
-    // where this one stopped. Watermark counters are updated here so the
-    // `finally` block can persist the real maximum even if we throw later.
+  // Manager attribution: try the event's createdBy first (manager actually
+  // clicked / picked up). Fall back to the entity's responsibleUserId for
+  // PBX-routed calls where createdBy is a service user. Returns null if no
+  // master_managers row matches either — such events skip the cache (still
+  // in Kommo, just not on this dashboard's manager-centric timeline).
+  const attribute = (createdBy: number, responsibleUserId: number | null) => {
+    let managerId = kommoIdToManager.get(createdBy);
+    let kommoUserId = createdBy;
+    if (!managerId && responsibleUserId != null) {
+      managerId = kommoIdToManager.get(responsibleUserId);
+      if (managerId) kommoUserId = responsibleUserId;
+    }
+    return managerId ? { managerId, kommoUserId } : null;
+  };
+
+  try {
+    // 1) Calls via /{entity}/notes. Returns ALL calls with duration inline,
+    //    no filter[created_by] gap. Costs ~1-2 paginated requests per
+    //    entity (contacts + leads), independent of manager count.
+    const callNotes = await getAllCallNotesByDate(dateFromSec, dateToSec).catch((err) => {
+      console.error(
+        `[tracking-sync] getAllCallNotesByDate failed; falling back to empty calls list:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return [] as Awaited<ReturnType<typeof getAllCallNotesByDate>>;
+    });
+    const callRows = callNotes
+      .map((n) => {
+        const attr = attribute(n.createdBy, n.responsibleUserId);
+        if (!attr) return null;
+        return {
+          department,
+          managerId: attr.managerId,
+          kommoUserId: attr.kommoUserId,
+          // /notes' note id can collide with /events' event id (different
+          // ID spaces in Kommo). Prefix to avoid the dedup unique index
+          // (department, event_id) treating a note 12345 as the same row
+          // as an event 12345.
+          eventId: `note:${n.noteId}`,
+          eventType: n.type === "call_in" ? "incoming_call" : "outgoing_call",
+          createdAt: new Date(n.createdAt * 1000),
+          durationSec: n.duration,
+          entityType: n.entityType,
+          entityId: n.entityId,
+          noteId: n.noteId,
+          raw: { source: "notes", call_status: n.callStatus } as Record<string, unknown>,
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+    if (callRows.length > 0) await persistRows(callRows);
+
+    // 2) Non-call CRM events via /events with the per-entity loop +
+    //    blacklist (fetchRawEvents). Streamed so partial failures leave
+    //    already-fetched events durable.
     await fetchRawEvents(dateFromSec, dateToSec, {
       kommoUserIds,
-      types: ALL_TRACKED_EVENT_TYPES,
+      types: NON_CALL_EVENT_TYPES,
       onBatch: async (batchEvents) => {
-        // Phase 1: build rows. Do NOT mutate maxEventTs/minEventTs yet — if the
-        // insert fails mid-chunk and the watermark has already advanced past an
-        // event that's not in the DB, the next delta window skips it forever.
-        const rowsToInsert = batchEvents
+        const rows = batchEvents
           .map((ev) => {
-            const managerId = kommoIdToManager.get(ev.createdBy);
-            if (!managerId) return null; // event created by user not in our manager set — skip
-            const evTs = new Date(ev.createdAt * 1000);
-            const isCall = CALL_TYPES.has(ev.type);
-            const duration = isCall && ev.noteId ? (durationByNoteId.get(ev.noteId) ?? 0) : 0;
+            const attr = attribute(ev.createdBy, null);
+            if (!attr) return null;
             return {
               department,
-              managerId,
-              kommoUserId: ev.createdBy,
+              managerId: attr.managerId,
+              kommoUserId: attr.kommoUserId,
               eventId: String(ev.id),
               eventType: ev.type,
-              createdAt: evTs,
-              durationSec: duration,
+              createdAt: new Date(ev.createdAt * 1000),
+              durationSec: 0, // CRM events are instantaneous
               entityType: ev.entityType,
               entityId: ev.entityId,
               noteId: ev.noteId,
@@ -215,28 +276,8 @@ export async function syncDepartment(
             };
           })
           .filter((r): r is NonNullable<typeof r> => r !== null);
-        if (rowsToInsert.length === 0) return;
-
-        // Phase 2: chunked insert. ON CONFLICT DO NOTHING absorbs cross-batch
-        // and cross-sync duplicates (1h overlap window). After each chunk
-        // succeeds, advance watermarks only for rows in that chunk — if a
-        // later chunk throws, the watermark reflects exactly what's durable.
-        const CHUNK = 500;
-        for (let i = 0; i < rowsToInsert.length; i += CHUNK) {
-          const chunk = rowsToInsert.slice(i, i + CHUNK);
-          const result = await trackingDb
-            .insert(trackingEvents)
-            .values(chunk)
-            .onConflictDoNothing({ target: [trackingEvents.department, trackingEvents.eventId] })
-            .returning({ id: trackingEvents.id });
-          inserted += result.length;
-          // Chunk persisted. Advance watermarks over the rows we just wrote
-          // (even duplicates count — they prove we've already seen the ts).
-          for (const row of chunk) {
-            if (row.createdAt > maxEventTs) maxEventTs = row.createdAt;
-            if (!minEventTs || row.createdAt < minEventTs) minEventTs = row.createdAt;
-          }
-        }
+        if (rows.length === 0) return;
+        await persistRows(rows);
       },
     });
   } catch (err) {
@@ -415,6 +456,28 @@ export async function ensureRangeCached(
     console.info(
       `[tracking-sync] ${department}: filter_version ${state.filterVersion ?? 0} < ${CURRENT_FILTER_VERSION}, forcing full ${MAX_BACKFILL_DAYS}d re-backfill`,
     );
+
+    // v7 cleanup: pre-v7 call rows were keyed by /events' event_id (numeric
+    // string like "12345"). v7 sources calls from /notes and prefixes the
+    // key with "note:" — so a pre-v7 row and the v7 re-backfill's row for
+    // the SAME physical call have different event_ids and both pass the
+    // (department, event_id) unique constraint, double-counting in
+    // timeline math. Drop the pre-v7 numeric-keyed call rows once before
+    // we re-backfill so the result is single-sourced.
+    if ((state.filterVersion ?? 0) < 7 && CURRENT_FILTER_VERSION >= 7) {
+      const deleted = await trackingDb.execute(
+        sql`DELETE FROM tracking_events
+            WHERE department = ${department}
+              AND event_type IN ('incoming_call', 'outgoing_call')
+              AND event_id NOT LIKE 'note:%'`,
+      );
+      console.info(
+        `[tracking-sync] ${department}: cleaned ${
+          (deleted as { rowCount?: number }).rowCount ?? "?"
+        } pre-v7 numeric-keyed call rows before re-backfill`,
+      );
+    }
+
     await syncDepartment(department, {
       windowFrom: fullBackfillFrom,
       windowTo: now,

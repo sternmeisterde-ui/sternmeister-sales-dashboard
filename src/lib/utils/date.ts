@@ -56,7 +56,7 @@ export function formatCallDate(date: Date | null | undefined): string {
  * Works correctly through DST transitions because it asks Intl for the
  * wall-clock breakdown of that instant.
  */
-function tzOffsetMinutes(instant: Date, tz: string): number {
+export function tzOffsetMinutes(instant: Date, tz: string = APP_TZ): number {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     hourCycle: "h23",

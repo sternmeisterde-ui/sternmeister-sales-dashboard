@@ -7,13 +7,16 @@
 // delta sync won't re-cover already-watermarked days).
 import { NextRequest, NextResponse } from "next/server";
 import { syncDepartment } from "@/lib/tracking/sync";
+import { tzOffsetMinutes } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
-// Dates in the URL are Moscow calendar dates (same convention as the Dashboard
-// GET route). Convert to UTC bounds using the same offset so backfills cover
-// the full Moscow day, not the UTC day that happens to share the ISO prefix.
-const DASHBOARD_TZ_OFFSET_MIN = 180;
+// Dates in the URL are Berlin calendar dates (same convention as Dashboard
+// GET route). Convert to UTC bounds using a per-instant offset so DST flips
+// stay correct.
+function berlinOffsetMin(d: Date): number {
+  return tzOffsetMinutes(d, "Europe/Berlin");
+}
 
 function parseDateParam(s: string | null): Date | null {
   if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
@@ -43,14 +46,13 @@ export async function POST(req: NextRequest) {
 
     const syncOpts: Parameters<typeof syncDepartment>[1] = { force };
     if (fromParam && toParam) {
-      // Moscow-local calendar dates → UTC bounds. Moscow midnight = UTC 21:00,
-      // so the Moscow day ends 3h BEFORE the UTC day with the same ISO prefix.
-      // Using plain +24h would miss events from 21:00-23:59 MSK.
+      // Berlin-local calendar dates → UTC bounds. Offset computed per
+      // boundary instant so DST mid-window doesn't drop events from one end.
       const windowFrom = new Date(
-        fromParam.getTime() - DASHBOARD_TZ_OFFSET_MIN * 60_000,
+        fromParam.getTime() - berlinOffsetMin(fromParam) * 60_000,
       );
       const windowTo = new Date(
-        toParam.getTime() + (24 * 60 - DASHBOARD_TZ_OFFSET_MIN) * 60_000,
+        toParam.getTime() + (24 * 60 - berlinOffsetMin(toParam)) * 60_000,
       );
       syncOpts.windowFrom = windowFrom;
       syncOpts.windowTo = windowTo;

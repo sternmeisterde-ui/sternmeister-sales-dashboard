@@ -58,8 +58,12 @@ export interface ScheduleRow {
   shiftEndTime: string | null;        // "HH:MM"
 }
 
-const SHIFT_DEFAULT_START = "09:00";
-const SHIFT_DEFAULT_END = "18:00";
+// Per user spec 2026-04-28: tracking timeline always renders 09:00–20:00
+// Berlin time on working days, regardless of per-manager shift hours stored
+// in master_managers / manager_schedule. Late activity (after 18:00) was
+// being clipped under the old defaults, hiding real working time.
+const TIMELINE_START = "09:00";
+const TIMELINE_END = "20:00";
 const CRM_CLUSTER_GAP_MIN = 2;
 
 function parseHm(hm: string): { h: number; m: number } {
@@ -68,8 +72,14 @@ function parseHm(hm: string): { h: number; m: number } {
 }
 
 /**
- * Derive the working window for a given schedule row.
- * Returns null if manager doesn't work that day.
+ * Derive the timeline window for a schedule row.
+ * Returns null if the manager doesn't work that day (отпуск / выходной).
+ *
+ * For working days the window is fixed at 09:00–20:00 — schedule values
+ * like "4" or "6" no longer shorten the bar, only "-" / "о" turn it off.
+ * Activity outside 09–20 is still clipped (Kommo events with createdAt
+ * after 20:00 don't render); raise TIMELINE_END here if that becomes a
+ * complaint.
  */
 function deriveShiftWindow(sched: ScheduleRow | null): {
   startLocal: { h: number; m: number };
@@ -77,47 +87,12 @@ function deriveShiftWindow(sched: ScheduleRow | null): {
   totalMinutes: number;
 } | null {
   const val = (sched?.scheduleValue ?? "").trim();
-
-  // Off states
   if (val === "-" || val === "о") return null;
 
-  const startHm = sched?.shiftStartTime || SHIFT_DEFAULT_START;
-  const start = parseHm(startHm);
-
-  if (val === "8" || val === "") {
-    // Full shift → use explicit end if present, else default
-    const endHm = sched?.shiftEndTime || SHIFT_DEFAULT_END;
-    const end = parseHm(endHm);
-    const total = end.h * 60 + end.m - (start.h * 60 + start.m);
-    if (total <= 0) return null;
-    return { startLocal: start, endLocal: end, totalMinutes: total };
-  }
-
-  if (val === "4") {
-    // Half shift: 4h from start
-    const startMin = start.h * 60 + start.m;
-    const endMin = startMin + 4 * 60;
-    return {
-      startLocal: start,
-      endLocal: { h: Math.floor(endMin / 60), m: endMin % 60 },
-      totalMinutes: 4 * 60,
-    };
-  }
-
-  // Numeric scheduleValue like "2", "6", etc. Treat as hours from start.
-  const asNum = Number(val);
-  if (Number.isFinite(asNum) && asNum > 0 && asNum <= 24) {
-    const startMin = start.h * 60 + start.m;
-    const endMin = startMin + asNum * 60;
-    return {
-      startLocal: start,
-      endLocal: { h: Math.floor(endMin / 60), m: endMin % 60 },
-      totalMinutes: asNum * 60,
-    };
-  }
-
-  // Unknown value — treat as off
-  return null;
+  const start = parseHm(TIMELINE_START);
+  const end = parseHm(TIMELINE_END);
+  const total = end.h * 60 + end.m - (start.h * 60 + start.m);
+  return { startLocal: start, endLocal: end, totalMinutes: total };
 }
 
 function offReasonFor(sched: ScheduleRow | null): string {
