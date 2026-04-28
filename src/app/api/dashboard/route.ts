@@ -415,7 +415,7 @@ function buildCohortStatusBreakdown(
     if (!entry) {
       // Per-pipeline lookup avoids collisions on Kommo's global terminal IDs
       // (142 Won, 143 Lost) which carry a different label in each funnel.
-      const statusName =
+      const rawStatusName =
         statusNames[`${lead.pipeline_id}:${lead.status_id}`] ??
         `Status ${lead.status_id}`;
       entry = {
@@ -423,7 +423,7 @@ function buildCohortStatusBreakdown(
         pipelineName: pipelineNames[lead.pipeline_id] ?? `Pipeline ${lead.pipeline_id}`,
         line,
         statusId: lead.status_id,
-        statusName,
+        statusName: normalizeStatusName(rawStatusName),
         count: 0,
       };
       groups.set(key, entry);
@@ -432,6 +432,35 @@ function buildCohortStatusBreakdown(
   }
 
   return Array.from(groups.values()).sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Clean up status names emitted by Kommo before showing them in the UI.
+ *
+ * Real anomalies observed live (B2B/Коммерция, 2026-04-28):
+ *  • "Cчет выставлен" — first character is Latin "C" U+0043 (looks identical
+ *    to Cyrillic "С" U+0421, but breaks string compare). Both Бух Комм
+ *    (status 82661919) and Мед Комм (status 101858271) are affected.
+ *    We restore Cyrillic "С" and add the "ё" so the canonical spelling
+ *    "Счёт выставлен" is shown.
+ *  • "ИНТЕРЕС ПОДТВЕРЖДЕН " — trailing space on Бух Комм (status 82661915)
+ *    while Мед Комм has the trimmed form. Causes filter dedupe to treat
+ *    the two as different keys.
+ * The data lives in Kommo and ops can't easily fix it there — this is the
+ * presentation-layer scrub.
+ */
+function normalizeStatusName(raw: string): string {
+  let name = raw.trim();
+  // Replace Latin "C" at the start of the word "Cчет" / "Cчёт".
+  if (/^C(?=ч[её]?т)/i.test(name)) {
+    name = `С${name.slice(1)}`;
+  }
+  // Canonicalise "Счет выставлен" → "Счёт выставлен" (same status, two
+  // spellings in Kommo across pipelines — pick the one with ё).
+  if (/^Счет(?=\b| )/i.test(name)) {
+    name = name.replace(/^Счет/, "Счёт");
+  }
+  return name;
 }
 
 // ==================== MAIN HANDLER ====================
@@ -450,11 +479,11 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v9 cache-key bump (2026-04-28): B2G cohort breakdown drops Medical
-    // Gov (13209991) from the funnel filter — it had no human label and
-    // duplicated lines that already exist in BERATER. Without the bump,
-    // clients would still see a stale "Pipeline 13209991" row from v8.
-    const cacheKey = `dashboard-response:v9:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v10 cache-key bump (2026-04-28): cohort status names are now
+    // server-normalized (Latin C → Cyrillic С, "Счет" → "Счёт", trailing
+    // whitespace stripped). Without the bump, clients see stale
+    // pre-fix names for up to RESPONSE_CACHE_TTL.
+    const cacheKey = `dashboard-response:v10:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );

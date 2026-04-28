@@ -672,11 +672,28 @@ const B2G_FUNNEL_LABEL: Record<number, string> = {
   12154099: "Бератер",        // B2G_PIPELINES.BERATER (L2 + L3)
 };
 
+/**
+ * Dedup key for cohort statuses. Two pipelines (e.g. Бух Комм vs Мед Комм)
+ * have the SAME logical status under different status_ids — "Контакт
+ * установлен" sits at 81523515 in Бух Комм and 101858259 in Мед Комм.
+ * Filtering by status_id forces the user to tick both boxes; keying by
+ * normalized name lets one tick include all matching rows.
+ *
+ * Server already trims and fixes the Latin-C / "Счёт" anomaly, so this
+ * helper just lowercases for case-insensitive equality (e.g. "НЕДОЗВОН"
+ * vs "Недозвон" if Kommo names ever drift on the same word).
+ */
+function statusKey(name: string): string {
+  return name.toLowerCase().trim();
+}
+
 function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G: boolean }) {
   // Funnel multi-select. null sentinel = "all selected" (keeps newly-arriving
   // pipelines auto-included when the date range expands).
   const [funnelSelection, setFunnelSelection] = useState<Set<number> | null>(null);
-  const [statusSelection, setStatusSelection] = useState<Set<number> | null>(null);
+  // Status selection keyed by normalized status name (see statusKey above) so
+  // duplicates across pipelines collapse into one filter checkbox.
+  const [statusSelection, setStatusSelection] = useState<Set<string> | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -719,28 +736,34 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
   const lineFilteredRows = scopedRows;
 
   const availableStatuses = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const r of lineFilteredRows) map.set(r.statusId, r.statusName);
+    // Dedupe by normalized name — collapses Бух Комм + Мед Комм same-name
+    // statuses into a single dropdown row. First-seen display name wins
+    // (server already canonicalises spellings, so this is mostly cosmetic).
+    const map = new Map<string, string>();
+    for (const r of lineFilteredRows) {
+      const key = statusKey(r.statusName);
+      if (!map.has(key)) map.set(key, r.statusName);
+    }
     return Array.from(map.entries())
-      .map(([id, name]) => ({ id, name }))
+      .map(([key, name]) => ({ key, name }))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
   }, [lineFilteredRows]);
 
   // Resolve "selected statuses" from the sentinel: null = everything available.
   const selectedSet = useMemo(() => {
     if (statusSelection === null) {
-      return new Set(availableStatuses.map((s) => s.id));
+      return new Set(availableStatuses.map((s) => s.key));
     }
     // Filter selection to only statuses still available in current line scope.
     return new Set(
-      Array.from(statusSelection).filter((id) =>
-        availableStatuses.some((s) => s.id === id),
+      Array.from(statusSelection).filter((key) =>
+        availableStatuses.some((s) => s.key === key),
       ),
     );
   }, [statusSelection, availableStatuses]);
 
   const filtered = useMemo(() => {
-    return lineFilteredRows.filter((r) => selectedSet.has(r.statusId));
+    return lineFilteredRows.filter((r) => selectedSet.has(statusKey(r.statusName)));
   }, [lineFilteredRows, selectedSet]);
 
   const total = filtered.reduce((s, r) => s + r.count, 0);
@@ -760,12 +783,12 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
 
   if (rows.length === 0) return null;
 
-  const toggleStatus = (id: number) => {
+  const toggleStatus = (key: string) => {
     setStatusSelection((prev) => {
-      const base = prev ?? new Set(availableStatuses.map((s) => s.id));
+      const base = prev ?? new Set(availableStatuses.map((s) => s.key));
       const next = new Set(base);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
@@ -848,14 +871,14 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
                 ) : (
                   <ul className="py-1">
                     {availableStatuses.map((s) => {
-                      const checked = selectedSet.has(s.id);
+                      const checked = selectedSet.has(s.key);
                       return (
-                        <li key={s.id}>
+                        <li key={s.key}>
                           <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 cursor-pointer text-xs text-slate-300">
                             <input
                               type="checkbox"
                               checked={checked}
-                              onChange={() => toggleStatus(s.id)}
+                              onChange={() => toggleStatus(s.key)}
                               className="w-3.5 h-3.5 rounded border-white/20 bg-slate-900 text-blue-500 focus:ring-blue-500/40 focus:ring-1"
                             />
                             <span className="truncate">{s.name}</span>
