@@ -371,18 +371,11 @@ interface CohortStatusRow {
   count: number;
 }
 
-// Universal status name fallbacks for closed states across all pipelines —
-// status_id 142 = Won, 143 = Lost are Kommo-platform-wide constants.
-const KOMMO_TERMINAL_STATUS_NAMES: Record<number, string> = {
-  142: "Успешно реализовано",
-  143: "Закрыто и не реализовано",
-};
-
 function buildCohortStatusBreakdown(
   leads: KommoLead[],
   department: string,
   allowedPipelineIds: Set<number>,
-  statusNames: Record<number, string>,
+  statusNames: Record<string, string>,
 ): CohortStatusRow[] {
   // Pipeline labels for the cohort table — neutral names without line suffix
   // since the line column carries that info. BERATER stays "Бух Бератер" for
@@ -417,9 +410,10 @@ function buildCohortStatusBreakdown(
     const key = `${lead.pipeline_id}|${line ?? ""}|${lead.status_id}`;
     let entry = groups.get(key);
     if (!entry) {
+      // Per-pipeline lookup avoids collisions on Kommo's global terminal IDs
+      // (142 Won, 143 Lost) which carry a different label in each funnel.
       const statusName =
-        statusNames[lead.status_id] ??
-        KOMMO_TERMINAL_STATUS_NAMES[lead.status_id] ??
+        statusNames[`${lead.pipeline_id}:${lead.status_id}`] ??
         `Status ${lead.status_id}`;
       entry = {
         pipelineId: lead.pipeline_id,
@@ -453,11 +447,11 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v4 cache-key bump: cohort statusBreakdown now uses live status names
-    // from Kommo's /leads/pipelines instead of the hardcoded map (the old
-    // map was missing custom-field-based statuses, surfacing "Status 12345"
-    // in the UI).
-    const cacheKey = `dashboard-response:v4:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v5 cache-key bump: liveStatusNames is now keyed by pipelineId:statusId
+    // (was just statusId in v4) — fixes Kommo's global IDs 142/143 silently
+    // collapsing across pipelines so leads in B2G "Гутшайн одобрен" weren't
+    // showing as "Closed - won" anymore.
+    const cacheKey = `dashboard-response:v5:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -572,13 +566,16 @@ async function buildDashboardResponse(
       }),
     ]);
 
-    // Flatten pipeline.statuses → { statusId: statusName }. Used by the
-    // cohort breakdown so every status row carries its real Kommo label,
-    // even brand-new ones added after this code was written.
-    const liveStatusNames: Record<number, string> = {};
+    // Pipeline.statuses → name map keyed by `${pipelineId}:${statusId}`.
+    // Status IDs 142 (Won) and 143 (Lost) are GLOBAL across every pipeline
+    // but each pipeline gives them a distinct human label
+    // ("Гутшайн одобрен" vs "Closed - won" vs "Успешно реализовано" …),
+    // so a flat status-id map collapses them. Compound key keeps each
+    // pipeline's wording intact.
+    const liveStatusNames: Record<string, string> = {};
     for (const p of pipelinesRaw) {
       for (const s of p._embedded?.statuses ?? []) {
-        liveStatusNames[s.id] = s.name;
+        liveStatusNames[`${p.id}:${s.id}`] = s.name;
       }
     }
 
