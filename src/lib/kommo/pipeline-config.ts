@@ -85,6 +85,7 @@ export const FIRST_LINE_STATUSES = {
   NO_ANSWER: 90367083,       // Недозвон
   CONTACT_MADE: 90367087,    // Контакт установлен
   CONSULT_DONE: 95514983,    // Консультация проведена
+  DECISION_MAKING: 104211575, // Принимает решение (post-consult holding state)
   DOCS_SENT_DC: 101935919,   // Документы отправлены в ДЦ
   DELAYED_START: 95514987,   // Отложенный старт
   WON: 142,                  // Термин ДЦ (closed won)
@@ -140,6 +141,7 @@ export const B1_STATUSES: Set<number> = new Set([
 
 /** Status IDs that count as "B2+" (docs sent or further) */
 export const B2_PLUS_STATUSES: Set<number> = new Set([
+  FIRST_LINE_STATUSES.DECISION_MAKING,
   FIRST_LINE_STATUSES.DOCS_SENT_DC,
   FIRST_LINE_STATUSES.DELAYED_START,
   // Also berater pipeline active statuses (transferred from first line)
@@ -183,6 +185,7 @@ export const ALL_ACTIVE_STATUS_IDS: number[] = [
   FIRST_LINE_STATUSES.NO_ANSWER,
   FIRST_LINE_STATUSES.CONTACT_MADE,
   FIRST_LINE_STATUSES.CONSULT_DONE,
+  FIRST_LINE_STATUSES.DECISION_MAKING,
   FIRST_LINE_STATUSES.DOCS_SENT_DC,
   FIRST_LINE_STATUSES.DELAYED_START,
   // Berater
