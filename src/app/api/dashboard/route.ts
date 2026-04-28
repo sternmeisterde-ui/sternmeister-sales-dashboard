@@ -30,10 +30,12 @@ import {
   getAnalyticsCallMetricsByMaster,
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
-  getAnalyticsDailyTrendByPipeline,
-  getAnalyticsTeamCallMetricsByPipeline,
   type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
+// Per-pipeline B2B helpers (getAnalyticsTeamCallMetricsByPipeline,
+// getAnalyticsDailyTrendByPipeline) intentionally unused here while
+// telephony rows have pipeline_id=NULL — see comment in the parallel
+// fetch block. Kept exported for when phone→lead enrichment lands.
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
 
 import { cached } from "@/lib/kommo/cache";
@@ -450,10 +452,10 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v6 cache-key bump: response now carries todayMetricsByPipeline +
-    // trendByPipeline for B2B (Бух Комм / Мед Комм split — same idea as
-    // B2G's L1/L2/L3 line split, but split by pipeline instead).
-    const cacheKey = `dashboard-response:v6:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v7 cache-key bump: B2B per-pipeline tile + trend split disabled
+    // (telephony rows lack pipeline_id, so the split rendered zeros).
+    // Kept the response fields so the client null-checks are stable.
+    const cacheKey = `dashboard-response:v7:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -566,23 +568,18 @@ async function buildDashboardResponse(
         console.error("[Dashboard] getPipelines failed:", e);
         return [];
       }),
-      // Per-pipeline call metrics — drives the B2B KPI tile split
-      // (Бух Комм / Мед Комм). For B2G we still use perManager.line for
-      // tile breakdown since lines are managers, not pipelines.
-      department === "b2b"
-        ? getAnalyticsTeamCallMetricsByPipeline(department, from, to).catch((e) => {
-            console.error("[Dashboard] per-pipeline metrics failed:", e);
-            return null;
-          })
-        : Promise.resolve(null),
-      // Per-pipeline daily trend — same B2B-only deal. The trend chart's
-      // funnel dropdown switches between these series.
-      department === "b2b"
-        ? getAnalyticsDailyTrendByPipeline(department, trendFrom, trendTo).catch((e) => {
-            console.error("[Dashboard] per-pipeline trend failed:", e);
-            return null;
-          })
-        : Promise.resolve(null),
+      // Per-pipeline metrics + trend disabled until phone→lead enrichment
+      // lands. After the 2026-04-28 hard-split every CDR row has
+      // pipeline_id=NULL (PBX writes calls before any Kommo lead exists),
+      // so SELECT ... GROUP BY pipeline_id returns zeros for both B2B
+      // funnels. The Map<number, …> SQL helpers still exist (called
+      // directly from Daily/Looker where lead-attributed calls work) but
+      // we skip them here so the client doesn't render "0/0/0" tiles.
+      // To re-enable: implement phone→lead enrichment in sync-telephony.ts
+      // (see docs/SESSION-HANDOFF.md) and replace these with the actual
+      // calls again.
+      Promise.resolve(null),
+      Promise.resolve(null),
     ]);
 
     // Pipeline.statuses → name map keyed by `${pipelineId}:${statusId}`.
@@ -719,13 +716,14 @@ async function buildDashboardResponse(
       line3: emptyTrend,
     };
 
-    // Convert Map → plain object for JSON. Drop empty maps for B2G.
-    const todayMetricsByPipeline: Record<string, UCMType> | null = byPipelineRaw
-      ? Object.fromEntries(Array.from(byPipelineRaw.entries()).map(([k, v]) => [String(k), v]))
-      : null;
-    const trendByPipeline: Record<string, DailyCallBucket[]> | null = trendByPipelineRaw
-      ? Object.fromEntries(Array.from(trendByPipelineRaw.entries()).map(([k, v]) => [String(k), v]))
-      : null;
+    // Per-pipeline tile + trend currently disabled — see comment at the
+    // parallel fetch above. byPipelineRaw / trendByPipelineRaw are always
+    // null right now; keeping the response fields lets the client null-check
+    // remain stable. Re-enable by restoring the actual fetcher calls.
+    void byPipelineRaw;
+    void trendByPipelineRaw;
+    const todayMetricsByPipeline: Record<string, UCMType> | null = null;
+    const trendByPipeline: Record<string, DailyCallBucket[]> | null = null;
 
     return {
       date: dateStr,
