@@ -48,6 +48,13 @@ services:
       # sites; retained for compatibility with existing Dokploy configs.
       - KOMMO_API_DOMAIN=${KOMMO_API_DOMAIN}
 
+      # Telephony — direct CDR pull (CallGear + CloudTalk). Without these,
+      # sync-telephony silently skips, dashboard call counts go stale within
+      # ~15 min of the last manual backfill.
+      - CALLGEAR_ACCESS_TOKEN=${CALLGEAR_ACCESS_TOKEN}
+      - CLOUDTALK_API_ID=${CLOUDTALK_API_ID}
+      - CLOUDTALK_API_SECRET=${CLOUDTALK_API_SECRET}
+
       # AI / transcription providers
       - XAI_API_KEY=${XAI_API_KEY}
       - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY}

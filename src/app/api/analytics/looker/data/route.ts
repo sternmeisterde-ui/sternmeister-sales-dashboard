@@ -286,6 +286,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
+    // Looker cohort views aggregate calls PER LEAD. Telephony rows
+    // (sync-telephony, post hard-split 2026-04-28) have lead_id=NULL because
+    // CDR happens outside any Kommo lead context. They're correctly excluded
+    // here — Looker numbers will differ from Daily/Звонки (which count ALL
+    // calls per manager regardless of lead attribution). To make telephony
+    // calls participate in Looker, sync-telephony needs phone→lead_id
+    // enrichment at write time. Tracked as TODO post-split. Until then,
+    // Looker shows lead-attributed message activity only (chat/email/SMS
+    // from Kommo) plus any lead-attributed Kommo call notes that may still
+    // exist as legacy rows pre-split.
     const commAggCte = `
       comm_agg AS (
         SELECT

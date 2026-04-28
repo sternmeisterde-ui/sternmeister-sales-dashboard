@@ -201,40 +201,59 @@ export async function syncTelephony(
     };
   }
 
-  // ── Persist: idempotent re-run + post-hard-split cleanup ──────────────
-  // 1) Wipe our own prior writes in this window (cg-leg:* / ct:*) so the
-  //    re-insert below is a true upsert.
-  // 2) Wipe any stale Kommo-sourced CALL rows (`call_in` / `call_out`
-  //    without a telephony prefix). Pre-2026-04-28 sync-communications
-  //    wrote these; post hard-split it doesn't, so they're orphans
-  //    inflating dashboard counts. Telephony rows REPLACE them with
-  //    higher-fidelity per-leg/per-CDR data. Message rows (chat / email /
-  //    SMS) stay untouched — they have non-call communication_type.
+  // ── Persist: legacy cleanup + per-id upsert ──────────────────────────
+  // The partial unique index on communication_id makes the per-row upsert
+  // idempotent — no need to DELETE our own prior `cg-leg:*`/`ct:*` writes
+  // first. We still run a scoped DELETE for the legacy cleanup case:
+  // stale Kommo-sourced call rows from before 2026-04-28 hard-split that
+  // have call_in/call_out type but no telephony prefix. Message rows
+  // (chat/email/SMS) stay untouched — they have non-call types.
   await analyticsDb.execute(
     sql`DELETE FROM analytics.communications
         WHERE created_at >= ${fromDate}
           AND created_at <= ${toDate}
+          AND communication_type IN ('call_in', 'call_out')
           AND (
-            communication_id LIKE 'cg-leg:%'
-            OR communication_id LIKE 'ct:%'
+            communication_id IS NULL
             OR (
-              communication_type IN ('call_in', 'call_out')
-              AND (
-                communication_id IS NULL
-                OR (
-                  communication_id NOT LIKE 'cg-leg:%'
-                  AND communication_id NOT LIKE 'ct:%'
-                )
-              )
+              communication_id NOT LIKE 'cg-leg:%'
+              AND communication_id NOT LIKE 'ct:%'
             )
           )`,
   );
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb.insert(communications).values(rows.slice(i, i + CHUNK));
+    await analyticsDb
+      .insert(communications)
+      .values(rows.slice(i, i + CHUNK))
+      .onConflictDoUpdate({
+        target: communications.communicationId,
+        targetWhere: sql`${communications.communicationId} IS NOT NULL`,
+        set: {
+          communicationType: sql`excluded.communication_type`,
+          entityId: sql`excluded.entity_id`,
+          leadId: sql`excluded.lead_id`,
+          pipelineId: sql`excluded.pipeline_id`,
+          pipelineName: sql`excluded.pipeline_name`,
+          category: sql`excluded.category`,
+          leadCreatedAt: sql`excluded.lead_created_at`,
+          leadDayStart: sql`excluded.lead_day_start`,
+          callStatus: sql`excluded.call_status`,
+          duration: sql`excluded.duration`,
+          manager: sql`excluded.manager`,
+          statusId: sql`excluded.status_id`,
+          statusName: sql`excluded.status_name`,
+          utmSource: sql`excluded.utm_source`,
+          firstContactFlg: sql`excluded.first_contact_flg`,
+          lastContactFlg: sql`excluded.last_contact_flg`,
+          firstCallAt: sql`excluded.first_call_at`,
+          businessHoursSla: sql`excluded.business_hours_sla`,
+          businessHoursSinceCommunication: sql`excluded.business_hours_since_communication`,
+        },
+      });
   }
-  console.log(`[ETL telephony] inserted ${rows.length} rows`);
+  console.log(`[ETL telephony] upserted ${rows.length} rows`);
 
   return {
     callgearLegs: cgCalls.length,

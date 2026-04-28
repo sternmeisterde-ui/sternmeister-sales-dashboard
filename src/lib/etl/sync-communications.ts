@@ -119,20 +119,17 @@ export async function syncCommunications(
 
   for (const row of orphanRows) allRows.push(row);
 
-  // ── DELETE existing rows for this date range, then INSERT ────────────
-  // Scoped to leave telephony rows alone — sync-telephony writes `cg-leg:*`
-  // and `ct:*` ids and owns its own DELETE. The earlier wide DELETE here
-  // silently zeroed out PBX coverage on every Kommo backfill (fixed
-  // 2026-04-28 alongside the hard-split that stopped this writer from
-  // emitting call rows in the first place).
-  //
-  // Even with zero rows to insert we still run the DELETE — that's how
-  // we drop stale call rows left over from before the hard-split. Without
-  // a clean-up pass, the old `note:N` call rows would haunt the dashboard
-  // until the next overlapping backfill.
+  // ── Legacy pre-hard-split cleanup (transitional) ─────────────────────
+  // Wipe orphan call rows that landed before 2026-04-28 hard-split — they
+  // have `communication_type` ∈ {call_in, call_out} but no telephony
+  // prefix in `communication_id` (or NULL). sync-telephony does the same
+  // sweep when it runs, but that one only fires when telephony tokens
+  // are configured; this duplicate keeps cleanup running even without
+  // them. Safe to remove a few weeks after the hard-split lands in prod.
   await analyticsDb.execute(
     sql`DELETE FROM analytics.communications
         WHERE created_at >= ${fromDate} AND created_at <= ${toDate}
+          AND communication_type IN ('call_in', 'call_out')
           AND (
             communication_id IS NULL
             OR (
@@ -143,15 +140,46 @@ export async function syncCommunications(
   );
 
   if (allRows.length === 0) {
-    console.log("[ETL] sync-communications: 0 rows (only DELETE ran)");
+    console.log("[ETL] sync-communications: 0 rows (only legacy cleanup ran)");
     return 0;
   }
 
+  // ── Upsert messages by communication_id ──────────────────────────────
+  // Backed by the partial unique index `communications_communication_id_unique`
+  // (where communication_id IS NOT NULL). Eliminates the DELETE-ordering
+  // fragility the parallel writer (sync-telephony) used to depend on.
   const CHUNK = 500;
   for (let i = 0; i < allRows.length; i += CHUNK) {
-    await analyticsDb.insert(communications).values(allRows.slice(i, i + CHUNK));
+    await analyticsDb
+      .insert(communications)
+      .values(allRows.slice(i, i + CHUNK))
+      .onConflictDoUpdate({
+        target: communications.communicationId,
+        targetWhere: sql`${communications.communicationId} IS NOT NULL`,
+        set: {
+          communicationType: sql`excluded.communication_type`,
+          entityId: sql`excluded.entity_id`,
+          leadId: sql`excluded.lead_id`,
+          pipelineId: sql`excluded.pipeline_id`,
+          pipelineName: sql`excluded.pipeline_name`,
+          category: sql`excluded.category`,
+          leadCreatedAt: sql`excluded.lead_created_at`,
+          leadDayStart: sql`excluded.lead_day_start`,
+          callStatus: sql`excluded.call_status`,
+          duration: sql`excluded.duration`,
+          manager: sql`excluded.manager`,
+          statusId: sql`excluded.status_id`,
+          statusName: sql`excluded.status_name`,
+          utmSource: sql`excluded.utm_source`,
+          firstContactFlg: sql`excluded.first_contact_flg`,
+          lastContactFlg: sql`excluded.last_contact_flg`,
+          firstCallAt: sql`excluded.first_call_at`,
+          businessHoursSla: sql`excluded.business_hours_sla`,
+          businessHoursSinceCommunication: sql`excluded.business_hours_since_communication`,
+        },
+      });
   }
 
-  console.log(`[ETL] sync-communications: inserted ${allRows.length} rows`);
+  console.log(`[ETL] sync-communications: upserted ${allRows.length} rows`);
   return allRows.length;
 }
