@@ -1050,10 +1050,14 @@ export interface RawKommoEventRow {
 const TYPE_BATCH = 20;
 const USER_BATCH = 10;
 
-// Kommo /events requires filter[entity] to be a single value (not comma-list
-// or []). To cover call/CRM events across all entity types, we loop through
-// these five in fetchRawEvents. Same account-wide list for B2G and B2B.
-const KOMMO_ENTITIES = ["lead", "contact", "company", "customer", "task"] as const;
+// Kommo /events requires filter[entity] to be a single value. Per docs the
+// only valid values are: lead, contact, company, task, catalog_{LIST_ID}.
+// `customer` IS a Kommo entity type elsewhere in the API, but the /events
+// filter rejects it — every request was 400ing, every customer_* type got
+// blacklisted under it, and customer events were never available anyway.
+// `catalog_{LIST_ID}` is omitted because we don't track per-account list IDs;
+// catalog/customer events would need a separate fetch path if surfaced later.
+const KOMMO_ENTITIES = ["lead", "contact", "company", "task"] as const;
 type KommoEntity = (typeof KOMMO_ENTITIES)[number];
 
 // Per-entity blacklist: (entity, type) pairs Kommo rejected for that entity.

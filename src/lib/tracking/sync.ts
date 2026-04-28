@@ -50,7 +50,12 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        tracking_events with gaps on non-lead entities. v5 re-triggers
 //        the 90d backfill on next tab open so partial-fail data is
 //        completed. (2026-04-25)
-const CURRENT_FILTER_VERSION = 5;
+//   v6 — dropped `customer` from KOMMO_ENTITIES (Kommo /events docs don't
+//        accept it as filter[entity]; v4/v5 blacklisted everything under
+//        the failing customer iteration, wasting ~1/4 of rate-limit budget
+//        per sync). Re-backfill so prior runs' poisoned blacklists clear.
+//        (2026-04-28)
+const CURRENT_FILTER_VERSION = 6;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
