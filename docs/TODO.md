@@ -51,6 +51,19 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 - [ ] **Bump `CURRENT_FILTER_VERSION` to 9** in `src/lib/tracking/sync.ts` if tracking timeline should also start using telephony as the primary call source.
 
+- [ ] **Phone → lead enrichment in `sync-telephony.ts`.** Every CDR row currently lands with `pipeline_id=NULL` because PBX writes the call before any Kommo lead exists. Verified 2026-04-28: 100% of cg-leg + ct rows have NULL pipeline_id (11,186 rows / last 7d). This blocks:
+  1. **B2B per-pipeline tile/trend split** (Бух Комм / Мед Комм) — currently disabled in `/api/dashboard/route.ts`, see comment `v7 cache-key`.
+  2. **`avg-calls-per-lead` widget** — returns null post-split.
+  3. **Looker cohort views aggregating calls per lead** — telephony rows are correctly excluded but numbers diverge from Daily/Звонки (intentional, but fixable).
+
+  **Implementation sketch:**
+  - At write time in `src/lib/etl/sync-telephony.ts`, batch-resolve phones via Kommo `/api/v4/leads?filter[query]=<phone>` (or analytics.leads_cohort if phone column added).
+  - Add `phone` column to `analytics.communications` first (migration). Currently sync writes the phone but doesn't persist it.
+  - Or alternative: add `phone` column to `analytics.leads_cohort`, then JOIN at query time without an enrichment pass — simpler but slower.
+  - Verified rejection: manager → primary-pipeline heuristic. Top B2B managers split 60/40 across BK/MK (Rose 149/123, Метальникова 178/7, Пуховская 122/53). ~40% attribution error.
+
+  **Once landed:** uncomment the two parallel fetches in `/api/dashboard/route.ts` (`getAnalyticsTeamCallMetricsByPipeline` + `getAnalyticsDailyTrendByPipeline`) — helpers stay exported in `src/lib/daily/analytics-calls.ts`. Also unblocks proper per-pipeline B2B trend chart dropdown.
+
 ---
 
 ## P2 — data integrity hardening
@@ -90,6 +103,20 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 ## DONE recently (for grep'ability when reviewing what changed)
 
+- [x] **Звонки tab refactor** — full per-section rework. (2026-04-28, commits cbd6355 → 6737362)
+  - 4 KPI tiles compact, 1-row responsive (`grid-cols-2 sm:grid-cols-4`), with full funnel labels («Квалификация / Бератер / Доведение» for B2G).
+  - Removed obsolete tiles: «Просрочено задач», «Выручка», «Менеджеров», «Воронка лидов».
+  - Per-manager call tables moved up directly after KPI tiles (detail bound to top filter).
+  - Trend chart with line dropdown for B2G (server: `getAnalyticsDailyTrendByLine`).
+  - Cohort status table — replaces old per-pipeline cards with single filterable table.
+    Filters: 2 funnel checkboxes (Квалификатор/Бератер for B2G; Бух Комм/Мед Комм for B2B) + status multi-select dropdown with «Выбрать все / Снять все».
+    Cohort = leads created in [from, to] across all statuses (active + closed = lifecycle).
+    Percent base = sum of currently shown rows.
+  - Live status names from Kommo `/leads/pipelines` keyed by `pipelineId:statusId` — kills "Status 12345" and the 142/143 collision (Won/Lost are global IDs with per-pipeline labels).
+  - Bug fix: `data` in `fetchData` useCallback deps caused infinite refetch loop on every setData. Replaced with `hasDataRef`. This was the source of "data doesn't refresh on date change" report.
+  - B2B per-pipeline tile/trend split *intentionally disabled* — see new P1 phone→lead enrichment task. Cohort table still splits per-pipeline because LEADS have pipeline_id (calls don't).
+  - Migration `0004_communications_unique.sql` applied via Neon MCP — 3,913 dupes deleted, partial unique index created. `sync-communications.ts` + `sync-telephony.ts` Phase-5 flipped to `ON CONFLICT DO UPDATE` (commit 8e4be3d).
+  - `docker-compose.yml` whitelist: added `CALLGEAR_ACCESS_TOKEN` + `CLOUDTALK_API_ID` + `CLOUDTALK_API_SECRET` (was the actual blocker for prod telephony — env was in Dokploy UI but not piped into the container).
 - [x] Wider telephony backfill — 4 months, 129k rows (cg 106516 + ct 22557), 0 kommo orphans, 14m51s wall time. (2026-04-28)
 - [x] syncTelephony DELETE extended to wipe stale pre-split `note:N` call rows in same window — auto-cleanup on every backfill. (2026-04-28)
 - [x] avg-calls-per-lead widget marked as known regression post-split (returns null) — needs phone→lead enrichment to work properly. (2026-04-28)

@@ -268,5 +268,6 @@ scripts/backfill-analytics.ts       ← LOCAL month-by-month backfill (legacy)
 drizzle/analytics/0004_communications_unique.sql ← unique-index migration (pending manual apply)
 
 docs/SESSION-HANDOFF.md             ← this file
+docs/DASHBOARD-ZVONKI.md            ← per-section architecture for the Звонки tab
 docs/mysql-analytics.md             ← reference for the integrator's MySQL we're replacing
 ```
