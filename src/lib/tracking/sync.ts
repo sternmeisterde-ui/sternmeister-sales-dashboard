@@ -2,7 +2,7 @@ import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, or, isNotNull, sql } from "drizzle-orm";
 import { fetchRawEvents, getAllCallNotesByDate } from "@/lib/kommo/client";
 import { ensureTrackingSchema } from "./init";
 import { CALL_TYPES, EVENT_TYPES } from "./event-types";
@@ -100,12 +100,31 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        stale partials, the user TRUNCATEd the table along with this bump.
 //        Re-backfill repopulates with full raw + corrected v9 type-keys.
 //        (2026-04-28)
-const CURRENT_FILTER_VERSION = 10;
+//   v11 — getManagersForDept now includes role='rop' WITH non-null line
+//        (the "double-status" convention — Татьяна Дерикова line=2 takes
+//        calls and runs the team simultaneously). v10 sync filtered her
+//        out via role='manager' alone, so her calls landed under no
+//        attribution and were dropped. Re-backfill picks them up.
+//        (2026-04-28)
+const CURRENT_FILTER_VERSION = 11;
 
-/** Load Kommo-linked managers for a department. Only role='manager' — the
- *  Tracking tab is about individual manager performance; ROPs/admins have
- *  different cadence and would skew timelines, so we keep them out of the
- *  cache entirely. */
+/** Load Kommo-linked managers for a department.
+ *
+ * Includes:
+ *   • role='manager' — the canonical case
+ *   • role='rop' WITH non-null line — the "double-status" convention
+ *     documented in memory/project_double_status.md. Татьяна Дерикова is
+ *     role='rop', line='2' — she takes line-2 calls AND runs the team, and
+ *     her per-day activity belongs in the timeline. ROPs without a line
+ *     (e.g. Дмитрий, line=null) stay excluded — they coordinate, don't
+ *     sit on the dialler.
+ *
+ * Inactive managers are dropped via isActive=true, so a re-pull from
+ * 2026-01-01 won't pollute the cache with people who already left — the
+ * attribution map only contains current staff. New hires naturally appear
+ * only from their first Kommo activity since their kommoUserId didn't
+ * exist (or wasn't in master_managers) before that.
+ */
 async function getManagersForDept(department: Dept) {
   const rows = await d1Db
     .select({
@@ -117,7 +136,10 @@ async function getManagersForDept(department: Dept) {
       and(
         eq(masterManagers.department, department),
         eq(masterManagers.isActive, true),
-        eq(masterManagers.role, "manager"),
+        or(
+          eq(masterManagers.role, "manager"),
+          and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
+        ),
       ),
     );
   return rows.filter((r): r is { id: string; kommoUserId: number } => r.kommoUserId !== null);

@@ -1,7 +1,7 @@
 // GET /api/tracking?department=b2g&from=2026-04-24&to=2026-04-24&types=a,b,c
 // Returns per-manager timelines for a department over the given date range.
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, gte, lt, inArray, asc } from "drizzle-orm";
+import { and, eq, gte, lt, inArray, asc, or, isNotNull } from "drizzle-orm";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
@@ -95,9 +95,13 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Load managers for this department. Tracking is about individual
-    // manager performance — ROPs and admins are excluded even if they're
-    // active. A person promoted from manager→rop falls out of this view.
+    // Load managers for this department. Tracking is about per-person call
+    // activity — admins are excluded, but the "double-status" convention
+    // (project_double_status.md) brings in ROPs who still take calls,
+    // signaled by a non-null line. Right now: Татьяна Дерикова, b2g, line='2'.
+    // ROPs without a line (e.g. Дмитрий) coordinate, don't dial — stay out.
+    // Inactive managers are dropped, so a long-window backfill won't pollute
+    // the cache with people who already left.
     const allManagers = await d1Db
       .select({
         id: masterManagers.id,
@@ -111,7 +115,10 @@ export async function GET(req: NextRequest) {
         and(
           eq(masterManagers.department, department),
           eq(masterManagers.isActive, true),
-          eq(masterManagers.role, "manager"),
+          or(
+            eq(masterManagers.role, "manager"),
+            and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
+          ),
         ),
       )
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));
