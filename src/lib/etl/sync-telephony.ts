@@ -113,6 +113,10 @@ function callToCommRow(
     firstCallAt: null,
     businessHoursSla: null,
     businessHoursSinceCommunication: null,
+    // Phone is the linkage key for enrich-telephony-leads. Stored on every
+    // row (raw + fanned-out enriched copies) so the enrichment scan can find
+    // un-enriched rows by `WHERE lead_id IS NULL AND phone IS NOT NULL`.
+    phone: call.phone ?? null,
   };
 }
 
@@ -201,59 +205,32 @@ export async function syncTelephony(
     };
   }
 
-  // ── Persist: legacy cleanup + per-id upsert ──────────────────────────
-  // The partial unique index on communication_id makes the per-row upsert
-  // idempotent — no need to DELETE our own prior `cg-leg:*`/`ct:*` writes
-  // first. We still run a scoped DELETE for the legacy cleanup case:
-  // stale Kommo-sourced call rows from before 2026-04-28 hard-split that
-  // have call_in/call_out type but no telephony prefix. Message rows
-  // (chat/email/SMS) stay untouched — they have non-call types.
+  // ── Persist: full call-row replacement in window ────────────────────
+  // Wipe EVERY call row (call_in/call_out) in the window — both legacy
+  // Kommo-sourced rows and our own prior cg-leg:*/ct:* writes including
+  // any enriched fan-out copies from enrich-telephony-leads. Then INSERT
+  // fresh raw rows. Enrich step (downstream in runSync) will re-fan-out
+  // them to per-lead copies.
+  //
+  // Why DELETE-then-INSERT instead of ON CONFLICT: post-0005 the unique key
+  // is (communication_id, COALESCE(lead_id, 0)), which Drizzle can't
+  // express in a `target` array (the COALESCE is part of the index
+  // expression, not a column). DELETE+INSERT is just as idempotent and
+  // simpler — we control the full window's contents.
+  //
+  // Message rows (chat/email/SMS) stay untouched — they have non-call types.
   await analyticsDb.execute(
     sql`DELETE FROM analytics.communications
         WHERE created_at >= ${fromDate}
           AND created_at <= ${toDate}
-          AND communication_type IN ('call_in', 'call_out')
-          AND (
-            communication_id IS NULL
-            OR (
-              communication_id NOT LIKE 'cg-leg:%'
-              AND communication_id NOT LIKE 'ct:%'
-            )
-          )`,
+          AND communication_type IN ('call_in', 'call_out')`,
   );
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb
-      .insert(communications)
-      .values(rows.slice(i, i + CHUNK))
-      .onConflictDoUpdate({
-        target: communications.communicationId,
-        targetWhere: sql`${communications.communicationId} IS NOT NULL`,
-        set: {
-          communicationType: sql`excluded.communication_type`,
-          entityId: sql`excluded.entity_id`,
-          leadId: sql`excluded.lead_id`,
-          pipelineId: sql`excluded.pipeline_id`,
-          pipelineName: sql`excluded.pipeline_name`,
-          category: sql`excluded.category`,
-          leadCreatedAt: sql`excluded.lead_created_at`,
-          leadDayStart: sql`excluded.lead_day_start`,
-          callStatus: sql`excluded.call_status`,
-          duration: sql`excluded.duration`,
-          manager: sql`excluded.manager`,
-          statusId: sql`excluded.status_id`,
-          statusName: sql`excluded.status_name`,
-          utmSource: sql`excluded.utm_source`,
-          firstContactFlg: sql`excluded.first_contact_flg`,
-          lastContactFlg: sql`excluded.last_contact_flg`,
-          firstCallAt: sql`excluded.first_call_at`,
-          businessHoursSla: sql`excluded.business_hours_sla`,
-          businessHoursSinceCommunication: sql`excluded.business_hours_since_communication`,
-        },
-      });
+    await analyticsDb.insert(communications).values(rows.slice(i, i + CHUNK));
   }
-  console.log(`[ETL telephony] upserted ${rows.length} rows`);
+  console.log(`[ETL telephony] inserted ${rows.length} raw rows (lead_id=NULL — enrichment to follow)`);
 
   return {
     callgearLegs: cgCalls.length,

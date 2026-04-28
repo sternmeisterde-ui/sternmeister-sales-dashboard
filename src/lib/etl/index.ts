@@ -1,15 +1,21 @@
 // ETL orchestrator — syncs Kommo data into analytics.* tables
 //
 // Run order:
-//   1. fetchLookups      — pipelines, users, loss reasons from Kommo
-//   2. syncLeads         — analytics.leads_cohort (creates leadCache)
-//   3. syncCommunications — analytics.communications (uses contactIds from leadCache)
-//   4. syncStatusChanges — analytics.lead_status_changes
-//   5. syncTasks         — analytics.tasks
-//   6. updateContactDates — back-fills leads_cohort.contact_date
-//   7. computeSla        — analytics.sla (from leads_cohort + communications)
-//   8. syncTelephony     — analytics.communications dial-attempt rows from
-//                          CallGear/CloudTalk (auto-skipped if CALLGEAR_ACCESS_TOKEN absent)
+//   1. fetchLookups        — pipelines, users, loss reasons from Kommo
+//   2. syncLeads           — analytics.leads_cohort (creates leadCache)
+//   3. syncCommunications  — analytics.communications (Kommo-source rows)
+//   4. syncStatusChanges   — analytics.lead_status_changes
+//   5. syncTasks           — analytics.tasks
+//   6. updateContactDates  — back-fills leads_cohort.contact_date
+//   7. syncTelephony       — analytics.communications dial-attempt rows from
+//                            CallGear/CloudTalk (auto-skipped if CALLGEAR_ACCESS_TOKEN absent)
+//   8. enrichTelephonyLeads — phone→lead resolution, fan-out raw telephony
+//                            rows into per-lead copies (Pattern A from
+//                            docs/mysql-analytics.md). Skipped if no
+//                            KOMMO_ACCESS_TOKEN OR no telephony in step 7.
+//   9. computeSla          — analytics.sla (from leads_cohort + enriched
+//                            communications). Last so it sees both Kommo
+//                            and telephony rows with real lead_ids.
 
 import { fetchLookups } from "./lookups";
 import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads";
@@ -18,9 +24,10 @@ import { syncStatusChanges } from "./sync-status-changes";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncTelephony } from "./sync-telephony";
+import { enrichTelephonyLeads } from "./enrich-telephony-leads";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
-import { and, gte, lte } from "drizzle-orm";
+import { and, gte, lte, sql } from "drizzle-orm";
 
 /**
  * Load leadCache from analytics.leads_cohort — used when leads-sync is
@@ -72,6 +79,10 @@ export interface SyncResult {
   tasks: number;
   slaRows: number;
   telephonyLegs: number;
+  /** Telephony rows that received a real lead_id during this run */
+  telephonyRowsLinked: number;
+  /** Additional rows INSERTed by enrichment fan-out (one per extra lead) */
+  telephonyRowsFannedOut: number;
   durationMs: number;
 }
 
@@ -125,22 +136,10 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await updateContactDates(leadCache.map((e) => e.leadId));
   }
 
-  // Incremental: recompute SLA only for leads touched in this window (by ID, not by created_at).
-  // Full: recompute SLA for all leads created in the date range.
-  // Incremental: recompute SLA only for leads touched in this window (by ID, not by created_at).
-  // Full: recompute SLA for all leads created in the date range.
-  const filterLeadIds = incremental && leadCache.length > 0
-    ? leadCache.map((e) => e.leadId)
-    : undefined;
-
-  const slaRows = skip.has("sla")
-    ? 0
-    : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
-
-  // Telephony runs last so its prefix-scoped DELETE can't race against the
-  // Kommo-source DELETE in syncCommunications above. Auto-skipped when no
-  // provider creds are present. CallGear and CloudTalk are independent —
-  // either presence is enough to enable the step (each provider fetcher
+  // Telephony first — its DELETE-then-INSERT wipes both legacy non-prefix
+  // call rows and prior cg-leg/ct rows in the window so re-runs are clean.
+  // Auto-skipped when no provider creds. CallGear and CloudTalk are
+  // independent — either presence enables the step (each provider fetcher
   // self-skips when its own creds are missing).
   let telephonyLegs = 0;
   const hasTelephonyCreds =
@@ -162,6 +161,53 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     );
   }
 
+  // Enrichment turns raw telephony rows (lead_id=NULL) into per-lead rows
+  // by resolving phone → contact → leads via Kommo and fanning out one row
+  // per matched lead (Pattern A — docs/mysql-analytics.md). Runs only when
+  // telephony was attempted in this window AND a Kommo token is available.
+  // Non-fatal on error: SLA + the raw rows still ship.
+  let telephonyRowsLinked = 0;
+  let telephonyRowsFannedOut = 0;
+  const enrichmentLeadIds: number[] = [];
+  if (!skip.has("telephony") && hasTelephonyCreds) {
+    try {
+      const enrichRes = await enrichTelephonyLeads(opts.fromDate, opts.toDate);
+      telephonyRowsLinked = enrichRes.rowsLinked;
+      telephonyRowsFannedOut = enrichRes.rowsFannedOut;
+      // Capture the leads that just got linked so the SLA step picks them up
+      // even if their lead_created_at is outside this window.
+      if (enrichRes.rowsLinked > 0 || enrichRes.rowsFannedOut > 0) {
+        const linked = await analyticsDb.execute<{ lead_id: number | string }>(sql`
+          SELECT DISTINCT lead_id
+          FROM analytics.communications
+          WHERE communication_type LIKE 'call%'
+            AND lead_id IS NOT NULL
+            AND created_at >= ${opts.fromDate}
+            AND created_at <= ${opts.toDate}
+        `);
+        for (const r of linked.rows) enrichmentLeadIds.push(Number(r.lead_id));
+      }
+    } catch (err) {
+      console.error(
+        `[ETL] enrich-telephony-leads failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  // SLA last — sees both Kommo-source rows AND newly enriched telephony
+  // rows. Incremental mode unions leadCache (created in window) with the
+  // leads that just received a telephony call so SLA recomputes for both.
+  let filterLeadIds: number[] | undefined;
+  if (incremental) {
+    const ids = new Set<number>(leadCache.map((e) => e.leadId));
+    for (const id of enrichmentLeadIds) ids.add(id);
+    filterLeadIds = ids.size > 0 ? Array.from(ids) : undefined;
+  }
+
+  const slaRows = skip.has("sla")
+    ? 0
+    : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
+
   const result: SyncResult = {
     leads: leadsCount,
     communications: commsCount,
@@ -169,6 +215,8 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     tasks: tasksCount,
     slaRows,
     telephonyLegs,
+    telephonyRowsLinked,
+    telephonyRowsFannedOut,
     durationMs: Date.now() - t0,
   };
 
@@ -178,8 +226,10 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `comms=${result.communications}`,
     `status_changes=${result.statusChanges}`,
     `tasks=${result.tasks}`,
-    `sla=${result.slaRows}`,
     `telephony=${result.telephonyLegs}`,
+    `linked=${result.telephonyRowsLinked}`,
+    `fannedOut=${result.telephonyRowsFannedOut}`,
+    `sla=${result.slaRows}`,
   );
 
   return result;

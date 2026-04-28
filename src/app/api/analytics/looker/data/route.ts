@@ -38,7 +38,16 @@ const VALID_STATUSES = new Set([
 ]);
 
 const VALID_CATEGORIES = new Set(["A", "B", "C", "D", "E"]);
-const VALID_VIEWS = new Set(["all_calls", "cohorts", "detail", "tlt_summary", "tlt_detail", "conversions", "meta"]);
+const VALID_VIEWS = new Set([
+  "all_calls",
+  "cohorts",
+  "cohorts_detail", // per-lead drill-down for one manager (SLA worst-deals)
+  "detail",
+  "tlt_summary",
+  "tlt_detail",
+  "conversions",
+  "meta",
+]);
 const VALID_SLA = new Set(["0-9", "10-29", "30+"]);
 const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category"]);
 
@@ -286,16 +295,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
-    // Looker cohort views aggregate calls PER LEAD. Telephony rows
-    // (sync-telephony, post hard-split 2026-04-28) have lead_id=NULL because
-    // CDR happens outside any Kommo lead context. They're correctly excluded
-    // here — Looker numbers will differ from Daily/Звонки (which count ALL
-    // calls per manager regardless of lead attribution). To make telephony
-    // calls participate in Looker, sync-telephony needs phone→lead_id
-    // enrichment at write time. Tracked as TODO post-split. Until then,
-    // Looker shows lead-attributed message activity only (chat/email/SMS
-    // from Kommo) plus any lead-attributed Kommo call notes that may still
-    // exist as legacy rows pre-split.
+    // Looker cohort views aggregate calls PER LEAD via JOIN on lead_id.
+    // Post enrich-telephony-leads (2026-04-28) telephony rows are fanned out
+    // to one row per linked lead via Kommo phone→contact resolution, so they
+    // participate in this aggregation just like Kommo-source rows do. Phones
+    // Kommo couldn't resolve stay lead_id=NULL and are correctly excluded —
+    // they show up only in Daily/Звонки's dept-totals (which include
+    // pipeline_id=NULL fallback).
     const commAggCte = `
       comm_agg AS (
         SELECT
@@ -439,6 +445,52 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ORDER BY lead_count DESC
       `;
       countQuery = mainQuery;
+    } else if (view === "cohorts_detail") {
+      // Per-lead drill-down for ONE manager — surfaces every lead in their
+      // cohort with its SLA, call counts, and a Kommo deep-link so the user
+      // can click on the worst-SLA row and inspect the actual deal. Used by
+      // the inline expand on the Cohorts table.
+      //
+      // The manager param is REQUIRED — without it the query would return
+      // every lead in the dept and the UI would render an unbounded list.
+      // Status name comes from leads_cohort directly (already canonicalised
+      // by the integrator's mirror).
+      if (!normalisedManagerParam) {
+        return NextResponse.json(
+          { error: "manager param required for cohorts_detail view" },
+          { status: 400 },
+        );
+      }
+      mainQuery = `
+        WITH ${filteredLeadsCte},
+        ${commAggCte}
+        SELECT
+          fl.lead_id,
+          fl.created_at AS lead_created_at,
+          (SELECT lc.status FROM analytics.leads_cohort lc WHERE lc.lead_id = fl.lead_id LIMIT 1) AS current_status,
+          (SELECT lc.pipeline FROM analytics.leads_cohort lc WHERE lc.lead_id = fl.lead_id LIMIT 1) AS pipeline,
+          s.first_call_out_at,
+          s.sla_first_call_seconds,
+          s.sla_first_call_calendar_seconds,
+          s.sla_first_call_from_shift_seconds,
+          COALESCE(ca.total_calls, 0) AS total_calls,
+          COALESCE(ca.success_calls, 0) AS success_calls,
+          COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
+          COALESCE(ca.messages_sent, 0) AS messages_sent,
+          ca.avg_duration_sec
+        FROM filtered_leads fl
+        LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
+        LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        ORDER BY
+          -- worst SLA first (NULL = no call yet, also worth showing — push to bottom)
+          s.sla_first_call_seconds DESC NULLS LAST,
+          ca.total_calls DESC NULLS LAST
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      countQuery = `
+        WITH ${filteredLeadsCte}
+        SELECT COUNT(*) AS count FROM filtered_leads
+      `;
     } else if (view === "tlt_detail") {
       // tlt_detail — per-lead, paginated
       mainQuery = `
@@ -498,7 +550,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     ]);
 
     let total = 0;
-    if (view === "detail" || view === "tlt_detail") {
+    if (view === "detail" || view === "tlt_detail" || view === "cohorts_detail") {
       const countResult = await analyticsDb.execute<{ count: string }>(sql.raw(countQuery));
       total = Number(countResult.rows[0]?.count ?? 0);
     } else {

@@ -84,9 +84,31 @@ async function fetchCallMetricsByMaster(
   // Missed incoming mirrors the same threshold: anything under 1s (or NULL)
   // counts as a miss. total_duration_s sums across every call row to stay
   // consistent with Looker's total_duration_sec.
+  //
+  // DISTINCT ON (communication_id) collapses Pattern-A enrichment fan-out:
+  // a single CDR call may have N rows (one per lead the contact has) after
+  // enrich-telephony-leads runs. Each row carries the same manager/duration/
+  // call_status/created_at, so picking one is consistent. We dedup INSIDE the
+  // dept filter so cross-dept rows of the same call don't accidentally count
+  // toward both depts.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<AnalyticsRow>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, manager, duration, call_status
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        -- pipeline_id IS NULL covers calls made before a lead enters a pipeline
+        -- (или после удаления лида). Такие коммуникации всё равно принадлежат
+        -- менеджеру — без NULL теряли ~60% звонков линии 2. Проверено 2026-04-24:
+        -- ни один мастер-менеджер не числится одновременно в b2g и b2b, поэтому
+        -- "double count" между департаментами невозможен.
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IS NOT NULL AND manager <> ''
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
     SELECT
       manager,
       COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                       AS calls_total,
@@ -95,16 +117,7 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
       COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s
-    FROM analytics.communications
-    WHERE created_at >= ${fromDate}
-      AND created_at <= ${toDate}
-      -- pipeline_id IS NULL covers calls made before a lead enters a pipeline
-      -- (или после удаления лида). Такие коммуникации всё равно принадлежат
-      -- менеджеру — без NULL теряли ~60% звонков линии 2. Проверено 2026-04-24:
-      -- ни один мастер-менеджер не числится одновременно в b2g и b2b, поэтому
-      -- "double count" между департаментами невозможен.
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
-      AND manager IS NOT NULL AND manager <> ''
+    FROM deduped
     GROUP BY manager
   `);
 
@@ -197,6 +210,15 @@ async function fetchTeamCallMetricsByPipeline(
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
 
+  // Per-pipeline view INTENTIONALLY double-counts a CDR call across the
+  // pipelines whose leads the contact is in. Pattern A (docs/mysql-analytics.md):
+  // "A single communication_id can appear on multiple leads and pipelines
+  // simultaneously" — sum of pipeline tiles ≥ dept total. Used for the B2B
+  // BK/MK split. NO DISTINCT ON here.
+  //
+  // Unenriched telephony rows (pipeline_id=NULL) are dropped on purpose —
+  // they have no pipeline to attribute to. They surface in the unscoped
+  // totals tile via fetchTeamCallMetrics's NULL-fallback.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{
@@ -219,9 +241,6 @@ async function fetchTeamCallMetricsByPipeline(
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
-      -- Per-pipeline split needs an explicit pipeline_id, so NULL telephony
-      -- rows (sync-telephony writes calls without lead context) are dropped
-      -- here. The unscoped totals tile elsewhere keeps the NULL fallback.
       AND pipeline_id IN (${pipelineList})
     GROUP BY pipeline_id
   `);
@@ -254,9 +273,24 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
 
+  // DISTINCT ON inside the dept filter — Pattern A enrichment fans one CDR
+  // into N rows; we want one count per CDR for the dept-wide tile.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<AnalyticsRow>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, duration, call_status
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        -- pipeline_id IS NULL is required for telephony-sourced rows that
+        -- enrich-telephony-leads couldn't resolve (phone not in any Kommo
+        -- contact). They still belong to the dept by manager attribution.
+        -- Mirrors getAnalyticsCallMetricsByMaster.
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
     SELECT
       '' AS manager,
       COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                        AS calls_total,
@@ -265,13 +299,7 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1))  AS missed_incoming,
       COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
-    FROM analytics.communications
-    WHERE created_at >= ${fromDate}
-      AND created_at <= ${toDate}
-      -- pipeline_id IS NULL is required for telephony-sourced rows
-      -- (sync-telephony writes calls without a pipeline because the call
-      -- predates lead creation). Mirrors getAnalyticsCallMetricsByMaster.
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+    FROM deduped
   `);
 
   const row = result.rows[0];
@@ -489,6 +517,8 @@ export async function getAnalyticsDailyTrend(
     sql`, `,
   );
 
+  // Dept-wide trend → one count per CDR per day. DISTINCT ON collapses
+  // Pattern-A fan-out (telephony rows linked to multiple leads share a comm_id).
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{
@@ -500,19 +530,27 @@ export async function getAnalyticsDailyTrend(
     missed_incoming: string | number;
     total_duration_s: string | number;
   }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, duration, call_status,
+        to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        -- pipeline_id IS NULL covers telephony-sourced rows that enrichment
+        -- couldn't resolve to a lead.
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
     SELECT
-      to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day,
+      day,
       COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                          AS calls_total,
       COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)      AS calls_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
       COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
-    FROM analytics.communications
-    WHERE created_at >= ${fromDate}
-      AND created_at <= ${toDate}
-      -- pipeline_id IS NULL covers telephony-sourced rows (sync-telephony).
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+    FROM deduped
     GROUP BY day
     ORDER BY day
   `);
@@ -600,6 +638,9 @@ export async function getAnalyticsDailyTrendByLine(
     ? sql.join(managersByLine.line3.map((n) => sql`${n}`), sql`, `)
     : sql`NULL`;
 
+  // DISTINCT ON inside the dept+manager filter so Pattern-A fan-out doesn't
+  // multiply per-line counts. Each fanned row of the same CDR shares the
+  // operator's manager, so line bucketing is unchanged after dedup.
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{
@@ -612,8 +653,19 @@ export async function getAnalyticsDailyTrendByLine(
     missed_incoming: string | number;
     total_duration_s: string | number;
   }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, manager, duration, call_status,
+        to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IN (${nameList})
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
     SELECT
-      to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day,
+      day,
       CASE
         WHEN manager IN (${line1List}) THEN '1'
         WHEN manager IN (${line2List}) THEN '2'
@@ -626,11 +678,7 @@ export async function getAnalyticsDailyTrendByLine(
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
       COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
-    FROM analytics.communications
-    WHERE created_at >= ${fromDate}
-      AND created_at <= ${toDate}
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
-      AND manager IN (${nameList})
+    FROM deduped
     GROUP BY day, line
     ORDER BY day
   `);

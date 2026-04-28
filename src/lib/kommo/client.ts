@@ -727,6 +727,86 @@ export async function getContactsWithLeads(
 }
 
 /**
+ * Resolve a phone number to its Kommo contact + linked leads. Used by the
+ * telephony enrichment ETL: CDR rows arrive without lead context (PBX writes
+ * the call before any Kommo lead exists for the phone), so this lookup
+ * fans them out to one row per linked lead.
+ *
+ * Strategy: Kommo's `?filter[query]=<phone>` is fuzzy-matched across all
+ * contact fields (name, email, phone, custom). Phone digits are the most
+ * specific signal so we pass them in three normalized variants (E.164 with
+ * +, digits-only, last-9-digits) and union the results. `with=leads` returns
+ * each contact's linked leads inline — no second round-trip.
+ *
+ * Returns Map<inputPhone, leadIds[]> ordered by Kommo's relevance ranking
+ * (most-related contact first). Phones with zero matches map to empty array.
+ *
+ * Rate cost: 1 request per phone (Kommo's relevance limits how usefully we
+ * can batch — different phones share no caching). Use sparingly; the ETL
+ * caches results in-process.
+ */
+export async function searchContactsByPhone(
+  phones: string[],
+): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  if (phones.length === 0) return out;
+
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+
+  // De-dup before issuing requests; same phone may appear on multiple CDR rows.
+  const uniqPhones = Array.from(new Set(phones.filter((p) => p && p.trim() !== "")));
+
+  for (const phone of uniqPhones) {
+    // Pick the most specific normalization that Kommo's fuzzy matcher
+    // tolerates. Try digits-only first — that hits both +491234… and
+    // 491234… and 0049… stored variants. If 0 hits, fall back to last-9
+    // (handles country-code drift where contact stored without +49).
+    const digits = phone.replace(/[^0-9]/g, "");
+    const variants = [digits];
+    if (digits.length >= 9) variants.push(digits.slice(-9));
+
+    const seenLeadIds = new Set<number>();
+    let foundAny = false;
+
+    for (const variant of variants) {
+      if (foundAny) break;
+      const url = new URL(`${baseUrl}/contacts`);
+      url.searchParams.set("filter[query]", variant);
+      url.searchParams.set("with", "leads");
+      url.searchParams.set("limit", "10");
+
+      const res = await rateLimitedFetch(url.toString(), { headers });
+      if (res.status === 204) continue;
+      if (!res.ok) {
+        console.warn(`[searchContactsByPhone] ${phone} (${variant}): ${res.status} — skipping`);
+        continue;
+      }
+      const data = (await res.json()) as {
+        _embedded?: {
+          contacts?: Array<{
+            id: number;
+            _embedded?: { leads?: Array<{ id: number }> };
+          }>;
+        };
+      };
+      for (const c of data._embedded?.contacts ?? []) {
+        for (const lead of c._embedded?.leads ?? []) {
+          if (!seenLeadIds.has(lead.id)) {
+            seenLeadIds.add(lead.id);
+            foundAny = true;
+          }
+        }
+      }
+    }
+
+    out.set(phone, Array.from(seenLeadIds));
+  }
+
+  return out;
+}
+
+/**
  * Fetch all call events (outgoing_call + incoming_call) for a date range.
  * No user filter — returns all events for all managers.
  * Includes note_id for Phase 2 resolution.

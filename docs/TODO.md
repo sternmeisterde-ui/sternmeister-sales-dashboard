@@ -6,6 +6,84 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 ---
 
+## P0 — Looker phone→lead enrichment (in progress 2026-04-28)
+
+**Goal:** make Looker show real call counts (currently ~2% — 60 of 3105 calls in 4-day window). Root cause: 100% of telephony rows post-hard-split have `lead_id=NULL`, so `comm_agg ON ca.lead_id = fl.lead_id` excludes them. Verified live via Neon MCP.
+
+**Architecture:** Pattern A (matches integrator MySQL semantics). Each CDR call → N rows in `analytics.communications`, one per lead the contact has, with `pipeline_id` per lead. `communication_id` (`cg-leg:N` / `ct:N`) collides intentionally across rows. Daily/Звонки use `COUNT(DISTINCT communication_id)` to keep one-call-counted-once semantics; Looker uses lead-level JOIN.
+
+**Substeps (track each):**
+
+- [x] Migration `0005_phone_enrichment.sql` (apply via Neon SQL editor — HTTP timed out on 0004):
+  - Backup branch `pre-migration-0005-20260428` first.
+  - `ALTER TABLE analytics.communications ADD COLUMN phone TEXT`.
+  - `CREATE INDEX idx_comms_phone_unenriched ON analytics.communications(phone) WHERE lead_id IS NULL AND phone IS NOT NULL`.
+  - DROP old `communications_communication_id_unique`, REPLACE with `(communication_id, COALESCE(lead_id, 0))` partial unique.
+
+- [x] Update `schema-analytics.ts` — add `phone` field on `communications` table + replace uniqueIndex declaration to mirror new DDL.
+
+- [x] `sync-telephony.ts` — write `phone` from `TelephonyCall.phone` into the new column. Drop old `.onConflictDoUpdate` (composite key with COALESCE expression isn't expressible in Drizzle target list — use DELETE-then-INSERT in window). DELETE wipes BOTH legacy non-prefix call rows AND cg-leg/ct prefix rows in the window so re-runs are clean.
+
+- [x] `kommo/client.ts` — add `searchContactsByPhone(phones: string[]) → Map<phone, contactId[]>` and `getLeadsByIds(ids: number[]) → Map<leadId, {pipelineId,statusId,...}>`. Reuse existing rate limiter / pagination helpers.
+
+- [x] `etl/enrich-telephony-leads.ts` — new file:
+  - `SELECT DISTINCT phone FROM analytics.communications WHERE lead_id IS NULL AND phone IS NOT NULL AND communication_type LIKE 'call%' AND created_at IN [from, to]`.
+  - Batch-resolve via Kommo `/api/v4/contacts?filter[query]=<phone>&with=leads`.
+  - For each phone with N matched leads: UPDATE the first unenriched row with lead 1's metadata, INSERT N-1 additional rows for leads 2..N.
+  - Pull lead metadata (pipeline_id, status_id, status_name, category, lead_created_at) from `analytics.leads_cohort` where possible — Kommo lookup only for phones not yet resolved.
+  - Skip leads not in `leads_cohort` for our department's pipelines (foreign).
+  - Return `{ phonesProcessed, leadsLinked, rowsInserted, unresolved: [phone] }` for logging.
+
+- [x] `etl/index.ts` — wire `enrichTelephonyLeads` AFTER `syncTelephony` and BEFORE `computeSla` so SLA picks up enriched lead_ids. Make non-fatal on error.
+
+- [x] `daily/analytics-calls.ts` — refactor every call-count aggregation:
+  - `COUNT(*) FILTER (WHERE communication_type LIKE 'call%')` → `COUNT(DISTINCT communication_id) FILTER (WHERE …)`.
+  - `SUM(duration) FILTER (…)` → wrap in CTE that DISTINCTs by communication_id first (same comm_id has same duration on every fanned-out row, so SUM-DISTINCT is a no-op per call but prevents N× inflation).
+  - Files: `getAnalyticsCallMetricsByMaster`, `fetchTeamCallMetricsByPipeline`, `fetchTeamCallMetrics`, `getAnalyticsDailyTrend`, `getAnalyticsDailyTrendByLine`, `getAnalyticsDailyTrendByPipeline`.
+
+- [x] `app/api/dashboard/route.ts` — re-enable B2B per-pipeline split:
+  - Restore `getAnalyticsTeamCallMetricsByPipeline` + `getAnalyticsDailyTrendByPipeline` calls (replace `Promise.resolve(null)` blocks).
+  - Re-import the helpers.
+  - Bump `RESPONSE_CACHE_TTL` cache key from `v7` → `v8`.
+  - Restore client-side rendering of `todayMetricsByPipeline` + `trendByPipeline`.
+
+- [x] `app/api/analytics/looker/data/route.ts`:
+  - Drop the "intentional gap" comment block in `commAggCte` (no longer applies after enrichment).
+  - Add new view `cohorts_detail` — query: per-lead detail for one manager. Inputs: `manager` (required), `from`, `to`, `dept` already there. Returns: `lead_id, lead_created_at, current_status, sla_first_call_seconds, total_calls, success_calls, first_call_out_at, avg_gap_sec` ordered by `sla_first_call_seconds DESC NULLS LAST`. Add `cohorts_detail` to `VALID_VIEWS`.
+
+- [x] `components/LookerTab.tsx` — SLA cohort drill-down feature:
+  - Cohorts table rows become clickable.
+  - Track `expandedManager: string | null` state.
+  - On click: toggle expansion. When expanded, fetch `view=cohorts_detail&manager=<name>&from=&to=` and render an inline detail table BELOW the cohort table (or as an inline expanded `<tr>` with `colSpan`).
+  - Detail table columns: Лид (с ссылкой `https://sternmeister.kommo.com/leads/detail/{id}` like TLT), Создан, SLA лид→звонок, Звонки (success/total), Первый звонок, Текущий статус. Sort by SLA desc.
+  - Loading state, error state, empty state.
+
+- [x] `scripts/enrich-telephony-leads.ts` — chunked CLI: `--from --to --chunk` (days). Wraps `enrichTelephonyLeads`. Logs per-chunk: phones processed, leads linked, unresolved count.
+
+- [x] `scripts/recompute-sla.ts` — chunked CLI: `--from --to --chunk` (days). Wraps `computeSla` with date filter. Run after enrichment so SLA reflects new lead_ids.
+
+- [ ] **Run full backfill** for 2026-01-01..2026-04-28 (sequence):
+  1. `npx tsx scripts/backfill-from-telephony.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (rewrites raw rows now with `phone` column; ~15 min).
+  2. `npx tsx scripts/enrich-telephony-leads.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (Kommo phone→lead resolution; ~25 min @ 7 req/s).
+  3. `npx tsx scripts/recompute-sla.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (SLA pickup; ~2 min).
+
+- [ ] **Post-backfill verification (audit anchor):**
+  1. `GET /api/analytics/debug?dept=b2g&from=2026-04-25&to=2026-04-28` — `callsCounted` per day unchanged.
+  2. Open Looker → All Calls → 2026-04-25..04-28 → totals should match Звонки/Daily within 5%. **Currently 60 vs 3105 (1.9%); target ~3000 vs 3105 (~95%).**
+  3. Open Looker → Cohorts → check per-manager `SLA лид → звонок` — should be non-NULL for ~70-90% of managers (vs 2.6%/0% pre-fix).
+  4. Click highest-SLA row → drill-down opens, shows ordered lead list with Kommo links. Click a lead, verify it opens correct deal.
+  5. Open Dashboard → Звонки → switch to B2B → verify Бух Комм / Мед Комм tile + trend split shows real numbers (not zeros).
+  6. Compare Daily/Звонки call totals before/after — should be ~unchanged (DISTINCT comm_id keeps semantics).
+  7. Check cron logs at next 15-min tick — `[ETL] enrich-telephony-leads: processed N phones, linked M leads` log should appear.
+
+- [ ] Provision Dokploy etl-cron sidecar with `KOMMO_ACCESS_TOKEN` (already there) + new behaviour just kicks in. No new env needed.
+
+- [ ] Update `docs/SESSION-HANDOFF.md` — mark "Known limitations #1" partially resolved (CDR coverage still depends on telephony tokens being live; phone→lead enrichment now closes the lead-attribution gap).
+
+- [ ] Update `docs/DASHBOARD-ZVONKI.md` — remove "Why B2B has no per-pipeline split" section; update KPI tiles description to note `COUNT(DISTINCT communication_id)` semantics.
+
+---
+
 ## P0 — call accuracy (blocking user-facing issue)
 
 - [ ] **Confirm local backfill finished cleanly.**

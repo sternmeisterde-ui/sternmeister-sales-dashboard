@@ -102,6 +102,10 @@ export const communications = analyticsSchema.table(
     businessHoursSinceCommunication: doublePrecision(
       "business_hours_since_communication",
     ),
+    // Caller phone for telephony-sourced rows (sync-telephony writes it; ETL
+    // enrichTelephonyLeads consumes it to resolve phone→lead via Kommo
+    // contacts). NULL on Kommo-sourced and message rows. Added in 0005.
+    phone: text("phone"),
   },
   (t) => [
     index().on(t.leadId),
@@ -111,13 +115,21 @@ export const communications = analyticsSchema.table(
     // Phase 1 of Daily refactor: see leads_cohort note above.
     index("idx_comm_pipeline_created").on(t.pipelineId, t.createdAt),
     index("idx_comm_manager_pipeline_created").on(t.manager, t.pipelineId, t.createdAt),
-    // Unique on note id so the ETL can upsert. Partial (WHERE NOT NULL) so
-    // legacy orphan rows without an id don't block the constraint. Created
-    // in migration 0004_communications_unique.sql; mirrored here so drizzle
-    // recognises it on schema introspection.
-    uniqueIndex("communications_communication_id_unique")
-      .on(t.communicationId)
+    // Composite unique on (communication_id, COALESCE(lead_id, 0)) — supports
+    // Pattern A row fanout from enrich-telephony-leads where one CDR call
+    // becomes N rows (one per matched lead). NULL lead_id is treated as 0
+    // inside the index expression so the raw not-yet-enriched row counts as
+    // unique too. Partial (WHERE NOT NULL) so legacy orphan rows without a
+    // comm_id don't block the constraint. Created in 0005; replaces the old
+    // single-column communications_communication_id_unique from 0004.
+    uniqueIndex("communications_comm_lead_unique")
+      .on(t.communicationId, sql`COALESCE(${t.leadId}, 0)`)
       .where(sql`${t.communicationId} IS NOT NULL`),
+    // Helper index for enrich-telephony-leads phone-scan. Partial keeps it
+    // small — only rows still needing resolution participate.
+    index("idx_comms_phone_unenriched")
+      .on(t.phone)
+      .where(sql`${t.leadId} IS NULL AND ${t.phone} IS NOT NULL`),
   ],
 );
 

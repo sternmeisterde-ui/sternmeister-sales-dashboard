@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { Loader2, ExternalLink, ChevronDown } from "lucide-react";
+import { Fragment, useState, useEffect, useRef, useCallback } from "react";
+import { Loader2, ExternalLink, ChevronDown, ChevronRight } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // ─── Department config ──────────────────────────────────────────────────────
@@ -132,6 +132,26 @@ interface TltDetailRow {
   messages_sent: number;
   total_comms: number;
   avg_gap_sec: number | null;
+}
+
+/** Per-lead drill-down row for the Cohorts table inline expansion. */
+interface CohortDetailRow {
+  lead_id: number;
+  lead_created_at: string | null;
+  current_status: string | null;
+  pipeline: string | null;
+  first_call_out_at: string | null;
+  /** business-hours seconds — the headline SLA the cohort table averages on */
+  sla_first_call_seconds: number | null;
+  /** calendar seconds (raw clock time lead→call) */
+  sla_first_call_calendar_seconds: number | null;
+  /** business-hours from manager's shift-start, ignoring lead-arrived-after-shift */
+  sla_first_call_from_shift_seconds: number | null;
+  total_calls: number;
+  success_calls: number;
+  outgoing_calls: number;
+  messages_sent: number;
+  avg_duration_sec: number | null;
 }
 
 interface ApiResponse {
@@ -360,7 +380,23 @@ function AllCallsTable({ rows, loading }: { rows: AllCallsRow[]; loading: boolea
   );
 }
 
-function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean }) {
+function CohortsTable({
+  rows,
+  loading,
+  expandedManager,
+  onToggleManager,
+  detailRows,
+  detailLoading,
+  detailError,
+}: {
+  rows: CohortsRow[];
+  loading: boolean;
+  expandedManager: string | null;
+  onToggleManager: (manager: string) => void;
+  detailRows: CohortDetailRow[];
+  detailLoading: boolean;
+  detailError: string | null;
+}) {
   const colCount = 9;
   const safeRows = rows ?? [];
 
@@ -414,19 +450,49 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
               </tr>
             ) : (
               <>
-                {safeRows.map((r, i) => (
-                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_lead_to_call_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_from_shift_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? Number(r.avg_calls_per_lead) : "—"}</td>
-                  </tr>
-                ))}
+                {safeRows.map((r, i) => {
+                  const isExpanded = expandedManager === r.manager;
+                  return (
+                    <Fragment key={i}>
+                      <tr
+                        className={`border-t border-white/5 cursor-pointer transition-colors ${
+                          isExpanded ? "bg-blue-500/[0.06]" : "hover:bg-white/[0.03]"
+                        }`}
+                        onClick={() => onToggleManager(r.manager)}
+                        title="Нажмите, чтобы посмотреть звонки этого менеджера за период"
+                      >
+                        <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1.5">
+                            {isExpanded
+                              ? <ChevronDown className="w-3.5 h-3.5 text-blue-400" />
+                              : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
+                            {r.manager}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_lead_to_call_sec)}</td>
+                        <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_sla_from_shift_sec)}</td>
+                        <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
+                        <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
+                        <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
+                        <td className="px-4 py-2.5 text-slate-200">{fmtPct(r.success_pct)}</td>
+                        <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.total_duration_sec)}</td>
+                        <td className="px-4 py-2.5 text-slate-200">{r.avg_calls_per_lead != null ? Number(r.avg_calls_per_lead) : "—"}</td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="bg-slate-950/40">
+                          <td colSpan={colCount} className="px-4 py-3">
+                            <CohortDetailInline
+                              manager={r.manager}
+                              loading={detailLoading}
+                              error={detailError}
+                              rows={detailRows}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
                 <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
                   <td className="px-4 py-2.5 text-slate-200">Итого</td>
                   <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(avgLeadToCall)}</td>
@@ -440,6 +506,125 @@ function CohortsTable({ rows, loading }: { rows: CohortsRow[]; loading: boolean 
                 </tr>
               </>
             )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Inline per-lead detail rendered below an expanded Cohorts row. Shows every
+ * lead in the manager's cohort with its SLA, call counts, and a Kommo
+ * deep-link, sorted by worst-SLA-first so the user can drill straight into
+ * the problem deals.
+ */
+function CohortDetailInline({
+  manager,
+  loading,
+  error,
+  rows,
+}: {
+  manager: string;
+  loading: boolean;
+  error: string | null;
+  rows: CohortDetailRow[];
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+        <span className="ml-2 text-[11px] text-slate-400">Грузим звонки {manager}…</span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="text-[11px] text-rose-400 py-4 text-center">
+        Не удалось загрузить детализацию: {error}
+      </div>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="text-[11px] text-slate-500 py-4 text-center">
+        Нет лидов у менеджера {manager} за выбранный период.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-white/5 bg-slate-900/40 overflow-hidden">
+      <div className="px-3 py-2 border-b border-white/5 flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold">
+          {manager} — лиды по убыванию SLA
+        </span>
+        <span className="text-[10px] text-slate-500 ml-auto">
+          {rows.length} лид{rows.length === 1 ? "" : rows.length < 5 ? "а" : "ов"}
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse text-[11px]">
+          <thead>
+            <tr className="border-b border-white/5 bg-slate-900/60">
+              {["Лид", "Создан", "Воронка / Текущий статус", "SLA лид→звонок", "SLA рабочие часы", "SLA от смены", "Звонки", "Первый звонок"].map((h) => (
+                <th key={h} className="px-3 py-2 text-[9px] uppercase tracking-widest text-slate-500 font-semibold whitespace-nowrap">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              // Primary SLA = calendar seconds, matches parent table's
+              // "SLA лид → звонок (ср)" column (AVG(first_call_out - sla_start)).
+              // Highlight rows ≥ 30 min — that's the worst bucket in the SLA
+              // dropdown filter and the obvious "needs attention" line.
+              const primarySla = r.sla_first_call_calendar_seconds;
+              const isCritical = primarySla != null && primarySla >= 1800;
+              return (
+                <tr
+                  key={r.lead_id}
+                  className={`border-t border-white/5 hover:bg-white/[0.03] transition-colors ${
+                    isCritical ? "bg-rose-500/[0.05]" : ""
+                  }`}
+                >
+                  <td className="px-3 py-2">
+                    <a
+                      href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
+                    >
+                      {r.lead_id}
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </td>
+                  <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{fmtDate(r.lead_created_at)}</td>
+                  <td className="px-3 py-2 text-slate-300 max-w-[260px]">
+                    <span className="text-slate-500">{r.pipeline ?? "—"}</span>
+                    {r.pipeline && r.current_status ? <span className="text-slate-600 mx-1">/</span> : null}
+                    <span className="text-slate-300">{r.current_status ?? "—"}</span>
+                  </td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${isCritical ? "text-rose-300 font-medium" : "text-slate-200"}`}>
+                    {fmtHMS(r.sla_first_call_calendar_seconds)}
+                  </td>
+                  <td className="px-3 py-2 text-slate-300 whitespace-nowrap">
+                    {fmtHMS(r.sla_first_call_seconds)}
+                  </td>
+                  <td className="px-3 py-2 text-slate-300 whitespace-nowrap">
+                    {fmtHMS(r.sla_first_call_from_shift_seconds)}
+                  </td>
+                  <td className="px-3 py-2 text-slate-300 whitespace-nowrap">
+                    {fmtNum(r.success_calls)}<span className="text-slate-500"> / {fmtNum(r.total_calls)}</span>
+                  </td>
+                  <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+                    {r.first_call_out_at ? new Date(r.first_call_out_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -812,6 +997,13 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [minDate, setMinDate] = useState<Date | null>(null);
   const [maxDate, setMaxDate] = useState<Date | null>(null);
 
+  // Cohorts drill-down — null = collapsed; manager name = expanded.
+  const [expandedManager, setExpandedManager] = useState<string | null>(null);
+  const [cohortDetailRows, setCohortDetailRows] = useState<CohortDetailRow[]>([]);
+  const [cohortDetailLoading, setCohortDetailLoading] = useState(false);
+  const [cohortDetailError, setCohortDetailError] = useState<string | null>(null);
+  const detailAbortRef = useRef<AbortController | null>(null);
+
   const [statusOpen, setStatusOpen] = useState(false);
   const [slaOpen, setSlaOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
@@ -833,7 +1025,19 @@ export default function LookerTab({ department }: LookerTabProps) {
     setTltSummaryRows([]);
     setTltDetailRows([]);
     setConvRows([]);
+    setExpandedManager(null);
+    setCohortDetailRows([]);
+    setCohortDetailError(null);
   }, [department]);
+
+  // Collapse the drill-down whenever the underlying data context shifts —
+  // a stale lead list under a different date/filter set would mislead the
+  // user into clicking on leads that aren't in the new period at all.
+  useEffect(() => {
+    setExpandedManager(null);
+    setCohortDetailRows([]);
+    setCohortDetailError(null);
+  }, [view, dateRange, manager, selectedStatuses, category, slaRange, pipeline]);
 
   // Fetch available date bounds for the calendar
   useEffect(() => {
@@ -947,6 +1151,54 @@ export default function LookerTab({ department }: LookerTabProps) {
     fetchData();
     return () => controller.abort();
   }, [department, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, tltPage, slice1, slice2, slice3, config.hasPipeline]);
+
+  // Fetch per-lead detail when a Cohorts row is expanded. Honours the same
+  // active filters (date / status / category / sla / pipeline) so the
+  // drilled-down list matches the parent row's cohort exactly.
+  useEffect(() => {
+    if (view !== "cohorts" || !expandedManager) {
+      detailAbortRef.current?.abort();
+      return;
+    }
+    if (detailAbortRef.current) detailAbortRef.current.abort();
+    const controller = new AbortController();
+    detailAbortRef.current = controller;
+
+    const params = new URLSearchParams({ dept: department, view: "cohorts_detail", manager: expandedManager });
+    if (dateRange.start) params.set("from", toISODate(dateRange.start));
+    if (dateRange.end) params.set("to", toISODate(dateRange.end));
+    if (selectedStatuses.length > 0) params.set("statuses", selectedStatuses.join(","));
+    if (category) params.set("category", category);
+    if (slaRange) params.set("sla", slaRange);
+    if (pipeline && config.hasPipeline) params.set("pipeline", pipeline);
+    params.set("limit", "200");
+
+    setCohortDetailLoading(true);
+    setCohortDetailError(null);
+
+    fetch(`/api/analytics/looker/data?${params}`, { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((json: { rows?: CohortDetailRow[] }) => {
+        setCohortDetailRows(json.rows ?? []);
+      })
+      .catch((err) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setCohortDetailError(err instanceof Error ? err.message : String(err));
+        setCohortDetailRows([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCohortDetailLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [view, expandedManager, department, dateRange, selectedStatuses, category, slaRange, pipeline, config.hasPipeline]);
+
+  const handleToggleManager = useCallback((m: string) => {
+    setExpandedManager((prev) => (prev === m ? null : m));
+  }, []);
 
   const setQuickRange = useCallback((days: number) => {
     const end = new Date();
@@ -1166,7 +1418,17 @@ export default function LookerTab({ department }: LookerTabProps) {
 
       {/* Tables */}
       {view === "all_calls" && <AllCallsTable rows={allCallsRows} loading={loading} />}
-      {view === "cohorts" && <CohortsTable rows={cohortsRows} loading={loading} />}
+      {view === "cohorts" && (
+        <CohortsTable
+          rows={cohortsRows}
+          loading={loading}
+          expandedManager={expandedManager}
+          onToggleManager={handleToggleManager}
+          detailRows={cohortDetailRows}
+          detailLoading={cohortDetailLoading}
+          detailError={cohortDetailError}
+        />
+      )}
       {view === "conversions" && <ConversionsSection rows={convRows} loading={loading} />}
       {view === "tlt" && (
         <div className="flex flex-col gap-6">
