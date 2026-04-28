@@ -55,6 +55,11 @@ export const leadsCohort = analyticsSchema.table(
     // B2G non-qual categorisation (Kommo custom field 879824 enum_id).
     // enum_ids: 744486 Неправильный номер, 744876/747530/747532/747534/747536 Неквал.*
     nonQualEnumId: bigint("non_qual_enum_id", { mode: "number" }),
+    // Termin dashboard (Бух Бератер pipeline). Looked up by field NAME in
+    // sync-leads — see B2G_CUSTOM_FIELD_NAMES.terminDate / aaTerminDate.
+    // Added in migration 0006_termin_dates.sql.
+    terminDate: timestamp("termin_date"),
+    aaTerminDate: timestamp("aa_termin_date"),
   },
   (t) => [
     index().on(t.leadId),
@@ -73,6 +78,12 @@ export const leadsCohort = analyticsSchema.table(
     index("idx_lc_pipeline_status").on(t.pipelineId, t.statusId),
     index("idx_lc_responsible").on(t.responsibleUserId),
     index("idx_lc_non_qual").on(t.nonQualEnumId),
+    // Termin dashboard cohort scan — partial keeps it small.
+    index("idx_lc_termin_cohort")
+      .on(t.pipelineId, t.createdAt)
+      .where(
+        sql`termin_date IS NOT NULL OR aa_termin_date IS NOT NULL`,
+      ),
   ],
 );
 

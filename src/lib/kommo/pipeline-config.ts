@@ -452,6 +452,35 @@ export const B2B_CUSTOM_FIELD_NAMES = {
   ],
 } as const;
 
+// ==================== B2G CUSTOM FIELDS (Бух Бератер leads) ====================
+// Resolved by field NAME (case-insensitive, trimmed) — same approach as B2B
+// payment fields, since Kommo field IDs differ between accounts/pipelines.
+//
+// Termin dates power /api/dashboard/termins (cohort chart of avg days from
+// deal creation → assigned termin).
+//
+// Verified live (2026-04-28) on Бух Бератер leads via inspect-one-lead.ts:
+//   ┌─ field_id ─┬─ field_name ─────────┬─ when populated ─────────────────┐
+//   │ 885996     │ "Дата термина"       │ generic (almost every termin lead)
+//   │ 887026     │ "Дата термина ДЦ"    │ newer/specific — sometimes only this
+//   │ 887028     │ "Дата термина АА"    │ AA-specific
+//   └────────────┴──────────────────────┴──────────────────────────────────┘
+// findByName takes the FIRST match in the lead's custom_fields_values, so
+// "Дата термина ДЦ" goes first (specific), "Дата термина" is the fallback.
+export const B2G_CUSTOM_FIELD_NAMES = {
+  terminDate: [
+    "Дата термина ДЦ",
+    "Дата Термина ДЦ",
+    "Дата термина",
+    "Дата Термина",
+  ],
+  aaTerminDate: [
+    "Дата термина АА",
+    "Дата Термина АА",
+    "Дата АА термина",
+  ],
+} as const;
+
 /** B2B lead is excluded from "Квал Бух лидов факт" if it sits in these statuses. */
 export const B2B_BUH_KOMLEADS_EXCLUDED_STATUSES: Set<number> = new Set([
   COMMERCIAL_STATUSES.INCOMING,

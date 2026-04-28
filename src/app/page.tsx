@@ -4,7 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug
+  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
+  CalendarClock,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -18,6 +19,7 @@ import CriteriaTab from "@/components/CriteriaTab";
 import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
+import TerminTab from "@/components/TerminTab";
 import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
 import { fmtLocalDate, parseDisplayDate } from "@/lib/utils/date";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
@@ -80,7 +82,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins">("dashboard");
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -589,6 +591,7 @@ export default function Dashboard() {
             { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
             { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
             { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
+            { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true },
             { id: "looker", icon: Database, label: "Looker", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
@@ -737,6 +740,8 @@ export default function Dashboard() {
         )}
 
         {activeTab === "looker" && <LookerTab department={activeDepartment} />}
+
+        {activeTab === "termins" && <TerminTab />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
         {(activeTab === "real_calls" || activeTab === "ai_calls") && (

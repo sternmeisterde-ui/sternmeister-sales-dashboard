@@ -6,7 +6,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { sql } from "drizzle-orm";
 import type { KommoLookups } from "./lookups";
-import { B2B_CUSTOM_FIELD_NAMES } from "@/lib/kommo/pipeline-config";
+import { B2B_CUSTOM_FIELD_NAMES, B2G_CUSTOM_FIELD_NAMES } from "@/lib/kommo/pipeline-config";
 
 // Custom field IDs in Kommo for this account
 const CF = {
@@ -162,6 +162,11 @@ export async function syncLeads(
       lead.custom_fields_values as Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
       CF.NON_QUAL_REASON,
     );
+    // Termin dashboard fields — Бух Бератер pipeline (12154099). Other
+    // pipelines simply don't have these fields, so findByName returns
+    // undefined and parseDate yields NULL — no extra guard needed.
+    const terminDate = parseDate(findByName(cf, B2G_CUSTOM_FIELD_NAMES.terminDate));
+    const aaTerminDate = parseDate(findByName(cf, B2G_CUSTOM_FIELD_NAMES.aaTerminDate));
 
     rows.push({
       leadId: lead.id,
@@ -191,6 +196,8 @@ export async function syncLeads(
       prepaymentDate,
       prepaymentAmount,
       nonQualEnumId,
+      terminDate,
+      aaTerminDate,
     });
   }
 

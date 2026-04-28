@@ -181,6 +181,15 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 ## DONE recently (for grep'ability when reviewing what changed)
 
+- [x] **Termin dashboard tab** — new admin-only section showing cohort line chart of avg days from deal creation → assigned «Дата термина» / «Дата термина АА» for Бух Бератер pipeline. (2026-04-28)
+  - Migration `drizzle/analytics/0006_termin_dates.sql` — adds `termin_date` + `aa_termin_date` columns + partial index `idx_lc_termin_cohort` on `leads_cohort`. Applied via Neon MCP.
+  - Custom-field name resolution in `B2G_CUSTOM_FIELD_NAMES` (`pipeline-config.ts`): "Дата термина ДЦ" / "Дата термина" (fallback) / "Дата термина АА". Looked up by NAME — Kommo IDs differ across leads (verified live: 885996 generic vs 887026 specific).
+  - ETL: `sync-leads.ts` extracts both fields via existing `findByName` + `parseDate` path (same as B2B payment fields). 15-min cron auto-picks-up via `incremental` mode.
+  - API: `GET /api/dashboard/termins?dateFrom&dateTo` — single-SQL CTE join `leads_cohort` × `lead_status_changes`. AA baseline switches to `MIN(event_at) WHERE status_id = TERM_DC_DONE` (93886075) when present, falls back to `created_at` otherwise. Excludes negatives + NULL terminы. Round to 1 decimal.
+  - UI: `TerminTab.tsx` — Recharts LineChart, period chips (Сегодня/7д/30д/Месяц/Произвольный) + CalendarPicker, summary tiles, custom tooltip (date / DC / AA / count), mobile-responsive, `connectNulls`.
+  - Backfill: `scripts/backfill-termins.ts` runs only `syncLeads + syncStatusChanges` chunked, ~30s/7d. Resumable on chunk failure.
+  - Doc: `docs/DASHBOARD-TERMIN.md`.
+
 - [x] **Звонки tab refactor** — full per-section rework. (2026-04-28, commits cbd6355 → 6737362)
   - 4 KPI tiles compact, 1-row responsive (`grid-cols-2 sm:grid-cols-4`), with full funnel labels («Квалификация / Бератер / Доведение» for B2G).
   - Removed obsolete tiles: «Просрочено задач», «Выручка», «Менеджеров», «Воронка лидов».

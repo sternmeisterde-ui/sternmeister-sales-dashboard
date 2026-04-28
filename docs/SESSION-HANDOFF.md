@@ -1,12 +1,29 @@
-# Session Handoff — Calls / Daily / Dashboard / Tracking / Looker
+# Session Handoff — Calls / Daily / Dashboard / Tracking / Looker / Термин
 
-Last updated: 2026-04-28 (post phone-enrichment landing)
+Last updated: 2026-04-28 (post phone-enrichment + Termin tab landing)
 
 This doc is for the next Claude Code session. Read it first.
 
 ---
 
+## Per-tab architecture docs
+
+- [`DASHBOARD-ZVONKI.md`](./DASHBOARD-ZVONKI.md) — Звонки tab
+- [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) — Термин tab (added 2026-04-28)
+- [`daily-commerce-spec.md`](./daily-commerce-spec.md) — Daily commerce metrics
+- [`mysql-analytics.md`](./mysql-analytics.md) — analytics.* schema reference
+
+---
+
 ## TL;DR — what's the current focus
+
+**Termin dashboard tab shipped 2026-04-28.** New section in admin sidebar
+(between «Активность» and «Looker»). Cohort line chart of avg days from
+Бух Бератер deal creation → assigned «Дата термина» / «Дата термина АА»,
+with TERM_DC_DONE-aware AA baseline. Migration `0006_termin_dates.sql`
+added two custom-field columns to `analytics.leads_cohort`. Backfill
+script `scripts/backfill-termins.ts` populates them from 2026-01-01.
+See [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) for full detail.
 
 **Looker phone→lead enrichment landed today** (commit `59d5f9f` + ctid fix `ffdc712`). Pre-fix Looker was showing ~2% of real calls (60 of 3105 in a 4-day B2G window) because every telephony row had `lead_id=NULL` after the 2026-04-28 hard-split. Migration 0005 + Pattern A row fanout now resolves this.
 
