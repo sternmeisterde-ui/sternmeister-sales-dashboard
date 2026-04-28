@@ -250,39 +250,23 @@ export default function DashboardTab({ department }: { department: string }) {
     ? { "1": sumByLine("1"), "2": sumByLine("2"), "3": sumByLine("3") }
     : null;
 
-  // For B2B: per-pipeline tile breakdown comes from the server (separate
-  // SQL aggregation since pipeline_id is on each call row, but managers
-  // aren't 1:1 with pipelines so client-side rollup over perManager doesn't
-  // work the way it does for B2G lines).
-  const byPipeline = !isB2G && data.todayMetricsByPipeline ? data.todayMetricsByPipeline : null;
-
-  // Build TileRow[] arrays once per metric for both modes. Returns null
-  // when neither breakdown is available (e.g. B2B before tile data lands).
+  // Top-tile breakdown rows. B2G splits by line (Квалификация/Бератер/
+  // Доведение). B2B intentionally renders only the total — per-pipeline
+  // (Бух Комм / Мед Комм) split was removed at the user's request because
+  // the trend chart already exposes that breakdown via dropdown, and the
+  // duplicated split made the tiles visually noisy.
   type Metric = "calls" | "dial" | "minutes" | "missed";
   const tileRows = (metric: Metric): TileRow[] | null => {
-    if (byLine) {
-      return (["1", "2", "3"] as const).map((ln) => {
-        const v = byLine[ln];
-        const value =
-          metric === "calls" ? v.callsTotal
-            : metric === "dial" ? `${v.dialPercent}%`
-              : metric === "minutes" ? `${v.totalMinutes}м`
-                : v.missedIncoming;
-        return { key: ln, label: LINE_SHORT[ln], colorClass: LINE_COLOR_CLASS[ln], value };
-      });
-    }
-    if (byPipeline) {
-      return Object.entries(byPipeline).map(([pid, v]) => {
-        const meta = B2B_PIPELINE_LABEL[pid] ?? { full: `Pipeline ${pid}`, colorClass: "text-blue-400" };
-        const value =
-          metric === "calls" ? v.callsTotal
-            : metric === "dial" ? `${v.dialPercent}%`
-              : metric === "minutes" ? `${v.totalMinutes}м`
-                : v.missedIncoming;
-        return { key: pid, label: meta.full, colorClass: meta.colorClass, value };
-      });
-    }
-    return null;
+    if (!byLine) return null;
+    return (["1", "2", "3"] as const).map((ln) => {
+      const v = byLine[ln];
+      const value =
+        metric === "calls" ? v.callsTotal
+          : metric === "dial" ? `${v.dialPercent}%`
+            : metric === "minutes" ? `${v.totalMinutes}м`
+              : v.missedIncoming;
+      return { key: ln, label: LINE_SHORT[ln], colorClass: LINE_COLOR_CLASS[ln], value };
+    });
   };
 
   return (

@@ -450,11 +450,11 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v8 cache-key bump (2026-04-28): B2B per-pipeline tile + trend split
-    // re-enabled now that enrich-telephony-leads populates pipeline_id on
-    // telephony rows post-Kommo phone→lead resolution. Old v7 cache had
-    // null per-pipeline blocks; v8 has real numbers.
-    const cacheKey = `dashboard-response:v8:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v9 cache-key bump (2026-04-28): B2G cohort breakdown drops Medical
+    // Gov (13209991) from the funnel filter — it had no human label and
+    // duplicated lines that already exist in BERATER. Without the bump,
+    // clients would still see a stale "Pipeline 13209991" row from v8.
+    const cacheKey = `dashboard-response:v9:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -706,10 +706,20 @@ async function buildDashboardResponse(
     // Flat status rows for the cohort table — leads created in [from, to]
     // regardless of status (active OR closed = won/lost). Lifecycle view
     // of the cohort. For B2G, tagged with derived line.
+    //
+    // B2G uses a tighter pipeline allowlist than the rest of the dashboard:
+    // only FIRST_LINE (Квалификатор) + BERATER (lines 2 + 3) participate.
+    // Medical Gov (13209991) has its own funnel that ops doesn't manage in
+    // the cohort view — it only generated a "Pipeline 13209991" row with no
+    // human label, which the user asked to remove.
+    const cohortPipelineIds =
+      department === "b2g"
+        ? new Set<number>([B2G_PIPELINES.FIRST_LINE, B2G_PIPELINES.BERATER])
+        : allowedPipelineIds;
     const statusBreakdown = buildCohortStatusBreakdown(
       cohortLeads,
       department,
-      allowedPipelineIds,
+      cohortPipelineIds,
       liveStatusNames,
     );
 
