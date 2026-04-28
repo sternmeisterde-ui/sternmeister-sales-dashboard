@@ -90,10 +90,16 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const t0 = Date.now();
   const incremental = opts.incremental ?? false;
 
-  // In incremental mode: skip tasks (slow), use updated_at for leads
+  // In incremental mode: skip tasks (slow — pulls all open tasks per lead).
+  // Status_changes USED to be skipped here too, but the Termin dashboard
+  // depends on TERM_DC_DONE event timestamps for its AA-baseline formula —
+  // without per-tick syncing the AA average drifts upward (falls back to
+  // created_at instead of dt(TERM_DC_DONE)). The Kommo /events endpoint
+  // supports filter[created_at][from/to], so a 15-min window pulls ~25
+  // events on average — negligible cost. (2026-04-28)
   const skip = new Set([
     ...(opts.skip ?? []),
-    ...(incremental ? (["tasks", "status_changes"] as const) : []),
+    ...(incremental ? (["tasks"] as const) : []),
   ]);
 
   console.log(
