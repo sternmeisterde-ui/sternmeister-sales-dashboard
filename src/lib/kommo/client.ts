@@ -328,22 +328,19 @@ export async function getTasks(
     }
 
     // Filter by responsible_user_id — Kommo caps this filter at 10 IDs per
-    // call, so batch and dedup by task id.
+    // call, so batch and dedup by task id. Comma-separated form is what
+    // works in practice on this Kommo account; an indexed-array attempt
+    // (filter[responsible_user_id][0]=…) appeared to cause "период не
+    // прогружается" — likely the Kommo parser was treating "0" as a
+    // string key and the filter was effectively dropped, so we either
+    // got an unfiltered fetch (slow) or empty results.
     const USER_BATCH = 10;
     const seen = new Map<number, KommoTask>();
     for (let i = 0; i < kommoUserIds.length; i += USER_BATCH) {
       const batch = kommoUserIds.slice(i, i + USER_BATCH);
       const params: Record<string, string> = {};
       if (!isCompleted) params["filter[is_completed]"] = "0";
-      // Kommo /tasks docs explicitly type filter[responsible_user_id] as
-      // an `array of int32s`. Use indexed-array keys (PHP-style) — works
-      // with kommoGetAll's Record<string,string> param shape and matches
-      // the same syntax getLeads uses for filter[pipeline_id]. A prior
-      // `responsible_user_id=1,2,3` comma form did work in practice but
-      // diverged from the docs and was at risk of a parser tightening.
-      batch.forEach((id, idx) => {
-        params[`filter[responsible_user_id][${idx}]`] = String(id);
-      });
+      params["filter[responsible_user_id]"] = batch.join(",");
       const batchTasks = await kommoGetAll<KommoTask>("/tasks", "tasks", params, maxPages);
       for (const t of batchTasks) {
         if (!seen.has(t.id)) seen.set(t.id, t);
