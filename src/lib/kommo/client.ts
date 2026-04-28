@@ -335,11 +335,15 @@ export async function getTasks(
       const batch = kommoUserIds.slice(i, i + USER_BATCH);
       const params: Record<string, string> = {};
       if (!isCompleted) params["filter[is_completed]"] = "0";
-      // kommoGetAll only supports `Record<string, string>`, so encode the
-      // multi-value filter as a comma-separated string. Kommo accepts both
-      // PHP `[]` array form and comma-list for filter[responsible_user_id]
-      // — comma-list is shorter and works.
-      params["filter[responsible_user_id]"] = batch.join(",");
+      // Kommo /tasks docs explicitly type filter[responsible_user_id] as
+      // an `array of int32s`. Use indexed-array keys (PHP-style) — works
+      // with kommoGetAll's Record<string,string> param shape and matches
+      // the same syntax getLeads uses for filter[pipeline_id]. A prior
+      // `responsible_user_id=1,2,3` comma form did work in practice but
+      // diverged from the docs and was at risk of a parser tightening.
+      batch.forEach((id, idx) => {
+        params[`filter[responsible_user_id][${idx}]`] = String(id);
+      });
       const batchTasks = await kommoGetAll<KommoTask>("/tasks", "tasks", params, maxPages);
       for (const t of batchTasks) {
         if (!seen.has(t.id)) seen.set(t.id, t);
@@ -530,10 +534,13 @@ export async function getStatusChangeCount(
 
     while (page <= maxPages) {
       const url = new URL(`${baseUrl}/events`);
-      url.searchParams.append("filter[type][]", "lead_status_changed");
+      // /events filter[type] per docs is comma-separated string. With a
+      // single value it doesn't matter but this aligns with the rest of
+      // the file. Limit raised 100 → 250 (Kommo max) to halve page count.
+      url.searchParams.set("filter[type]", "lead_status_changed");
       url.searchParams.set("filter[created_at][from]", String(dateFrom));
       url.searchParams.set("filter[created_at][to]", String(dateTo));
-      url.searchParams.set("limit", "100");
+      url.searchParams.set("limit", "250");
       url.searchParams.set("page", String(page));
 
       const res = await rateLimitedFetch(url.toString(), { headers });
@@ -938,7 +945,9 @@ export async function getStatusChangeEvents(
   let page = 1;
   while (page <= maxPages) {
     const url = new URL(`${baseUrl}/events`);
-    url.searchParams.append("filter[type][]", "lead_status_changed");
+    // /events filter[type] is comma-sep per Kommo docs. Single value here
+    // so the form doesn't matter; keeping .set() for consistency.
+    url.searchParams.set("filter[type]", "lead_status_changed");
     url.searchParams.set("filter[created_at][from]", String(dateFrom));
     url.searchParams.set("filter[created_at][to]", String(dateTo));
     url.searchParams.set("limit", "250");
