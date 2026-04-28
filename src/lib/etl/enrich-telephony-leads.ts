@@ -220,31 +220,19 @@ export async function enrichTelephonyLeads(
     // For each unenriched row of this phone, write the same lead set.
     // Different rows of the same phone are different CDR records (different
     // calls) — each gets its own fan-out.
+    //
+    // ORDER MATTERS: INSERT secondary copies FIRST (while the source row's
+    // ctid still resolves), THEN UPDATE the primary. UPDATE in PostgreSQL
+    // creates a new MVCC tuple version at a fresh ctid, so a subsequent
+    // INSERT...SELECT WHERE ctid = original would silently match 0 rows.
+    // Bug discovered 2026-04-28 smoke: 264 fan-out INSERTs executed but
+    // 0 rows landed. The conflict target is fine; ctid was the issue.
     for (const row of rows) {
       const [primary, ...secondary] = matchingLeads;
 
-      // 4a. UPDATE the raw row in place with the primary lead's metadata.
-      // We use ctid for targeting since analytics.communications has no PK.
-      // The UNIQUE INDEX (communication_id, COALESCE(lead_id, 0)) tolerates
-      // the change because no other row has (this comm_id, primary.leadId).
-      await analyticsDb.execute(sql`
-        UPDATE analytics.communications
-        SET
-          lead_id          = ${primary.leadId},
-          pipeline_id      = ${primary.pipelineId},
-          pipeline_name    = ${primary.pipelineName},
-          status_id        = ${primary.statusId},
-          status_name      = ${primary.statusName},
-          category         = ${primary.category},
-          utm_source       = COALESCE(communications.utm_source, ${primary.utmSource}),
-          lead_created_at  = ${primary.leadCreatedAt}
-        WHERE ctid = ${row.rowCtid}::tid
-      `);
-      rowsLinked++;
-
-      // 4b. INSERT additional rows for leads 2..N. ON CONFLICT DO NOTHING
-      //     handles the rare race where another concurrent run already
-      //     wrote the same (comm_id, lead_id) tuple.
+      // 4a. INSERT additional rows for leads 2..N — must happen before the
+      // UPDATE so ctid is still valid. ON CONFLICT DO NOTHING handles the
+      // rare race where a concurrent run already wrote (comm_id, lead_id).
       for (const extra of secondary) {
         await analyticsDb.execute(sql`
           INSERT INTO analytics.communications (
@@ -276,6 +264,23 @@ export async function enrichTelephonyLeads(
         `);
         rowsFannedOut++;
       }
+
+      // 4b. UPDATE the raw row in place with the primary lead's metadata.
+      // After this UPDATE the ctid is invalidated — must run last.
+      await analyticsDb.execute(sql`
+        UPDATE analytics.communications
+        SET
+          lead_id          = ${primary.leadId},
+          pipeline_id      = ${primary.pipelineId},
+          pipeline_name    = ${primary.pipelineName},
+          status_id        = ${primary.statusId},
+          status_name      = ${primary.statusName},
+          category         = ${primary.category},
+          utm_source       = COALESCE(communications.utm_source, ${primary.utmSource}),
+          lead_created_at  = ${primary.leadCreatedAt}
+        WHERE ctid = ${row.rowCtid}::tid
+      `);
+      rowsLinked++;
     }
   }
 
