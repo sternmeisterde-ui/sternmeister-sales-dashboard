@@ -1,6 +1,6 @@
-# Session Handoff — Calls / Daily / Dashboard / Tracking
+# Session Handoff — Calls / Daily / Dashboard / Tracking / Looker
 
-Last updated: 2026-04-28
+Last updated: 2026-04-28 (post phone-enrichment landing)
 
 This doc is for the next Claude Code session. Read it first.
 
@@ -8,13 +8,25 @@ This doc is for the next Claude Code session. Read it first.
 
 ## TL;DR — what's the current focus
 
-We're fixing **call-count accuracy** across Daily, Звонки (Dashboard tab), Looker, and Активность (Tracking tab). User reported that call counts are 2-3× lower than what's shown in Simple Sales / their PBX panels, especially for "набор" (dial attempts) and short ≥1-second calls.
+**Looker phone→lead enrichment landed today** (commit `59d5f9f` + ctid fix `ffdc712`). Pre-fix Looker was showing ~2% of real calls (60 of 3105 in a 4-day B2G window) because every telephony row had `lead_id=NULL` after the 2026-04-28 hard-split. Migration 0005 + Pattern A row fanout now resolves this.
 
-**Root cause found and fixed today:** Kommo's `/api/v4/{entity}/notes` endpoint **silently ignored** our `filter[created_at]` parameter (it's not a documented filter — only `filter[updated_at]` is). Result: ETL was returning the most recent 250 notes overall (dominated by chat messages on busy accounts), almost zero call rows. See commit `f4bd662`.
+**Done:**
+- Migration 0005 applied: `phone` column + composite unique `(communication_id, COALESCE(lead_id, 0))` + helper index. Backup branch `pre-migration-0005-20260428` (`br-curly-river-andpk4mr`).
+- `sync-telephony.ts` writes phone now; switched to DELETE-then-INSERT idempotency.
+- `enrich-telephony-leads.ts` ETL step: scan unenriched rows, resolve via Kommo `/api/v4/contacts?filter[query]=phone&with=leads`, fan out one row per matched lead. Wired into `runSync` between telephony and SLA.
+- `analytics-calls.ts`: `COUNT(DISTINCT communication_id)` via `DISTINCT ON` CTE for Daily/Звонки/per-line/dept-totals (Pattern A intentional double-count kept on per-pipeline helpers).
+- Dashboard B2B per-pipeline split re-enabled (cache key v7→v8).
+- Looker `cohorts_detail` view + `LookerTab.tsx` row-click drill-down: clicking a manager row in Cohorts inline-expands per-lead detail (lead_id with Kommo deep-link, calendar/business/from-shift SLA columns, ≥30min rows highlighted rose). User can find worst deal per highest-SLA manager.
+- Backfill scripts: `scripts/enrich-telephony-leads.ts` + rewrote `scripts/recompute-sla.ts` with chunked CLI.
 
-**Currently running:** local script `scripts/backfill-by-day.ts` is rebuilding `analytics.communications` for **2026-01-01 → 2026-04-28** with the corrected filter. PID 12795. Log at `/tmp/backfill.log`. ETA ~1.5–3h. As of last check: chunk 30/118.
+**Smoke 2026-04-28 (after ctid fix):** in progress at write time. First smoke (before fix) reported 433/437 phones resolved (99%) and 264 fanout copies, but the INSERTs no-op'd because UPDATE before INSERT invalidated ctid. Fix: swap order. Re-run pending verification.
 
-**Next pending task:** CallGear + CloudTalk **direct CDR integration** to capture ALL dial attempts (including ones that never wrote a Kommo note — instant hangups, connection failures). User authorized reading creds from `/Users/user/okk/.env` — but that requires a Claude Code restart to apply the new permissions.
+**Next:** full backfill for 2026-01-01..04-27 once smoke is green:
+1. `npx tsx scripts/backfill-from-telephony.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (~15 min, populates phone column on all rows).
+2. `npx tsx scripts/enrich-telephony-leads.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (~30-60 min, Kommo lookups at 7 req/s).
+3. `npx tsx scripts/recompute-sla.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (~2 min, picks up new lead links).
+
+**Earlier focus (background, less urgent):** call-count accuracy across Daily/Звонки/Активность was already good after the `filter[updated_at]` fix (commit `f4bd662` earlier this week). Telephony CDR integration done 2026-04-28 (CallGear + CloudTalk live; 129k rows for Jan-Apr).
 
 ---
 
@@ -66,15 +78,14 @@ PBX integrations (CallGear, CloudTalk) write a Kommo note for most call attempts
 4. **3 ROPs + 1 manager** still without telephony links (no API match — they don't have CG/CT accounts at all): Рузанна, Дмитрий, Юлия Смирнова, Кристина Аладко (ct only), Екатерина Маслий (ct only). Fine; their calls don't surface on dashboard.
 5. **Hard-split DONE 2026-04-28.** `sync-communications.ts` no longer fetches call notes. Auto-resolve cg+ct IDs at manager save time wired in `/api/managers` POST (Step 3.6). One-shot `scripts/link-managers-telephony.ts` available for backfilling existing rows.
 
-### 2. `analytics.communications` lacks unique constraint (MEDIUM)
+### 2. `analytics.communications` unique key (RESOLVED 2026-04-28)
 
-**Status:** known, accepted for now.
+Migration 0004 (single-column `communication_id` partial unique) was applied earlier; superseded by **Migration 0005** today which:
+- Drops the single-column unique.
+- Creates `communications_comm_lead_unique` ON `(communication_id, COALESCE(lead_id, 0)) WHERE communication_id IS NOT NULL` to support Pattern A row fanout (one CDR → N rows, one per matched lead).
+- Adds `idx_comms_phone_unenriched` for the enrichment scan.
 
-Migration `drizzle/analytics/0004_communications_unique.sql` exists with `CREATE UNIQUE INDEX ... ON communication_id WHERE NOT NULL`. We tried auto-applying via `ensureCommunicationsUniqueIndex()` in `sync-communications.ts` — Neon HTTP timed out on the dedup query (`DELETE ... NOT IN (SELECT MIN(ctid) ...)`). Reverted to plain DELETE-by-date + INSERT.
-
-**Symptom:** when a note is edited after creation, the cron at edit time fetches it (caught by `filter[updated_at]`) and inserts a row with the original `created_at`. The DELETE only covers the cron's last-15-min window by `created_at`, so the older row stays. Duplicate row leaks. Dashboard `COUNT(*)` overcounts by a few percent over months on edited notes.
-
-**Plan:** apply the migration manually via Neon SQL editor when convenient. The `USING self-join` form `DELETE a USING comms b WHERE a.communication_id = b.communication_id AND a.ctid > b.ctid` works on plain Postgres but Neon HTTP timed out. Try via Neon's web SQL console or a direct `psql` connection (NOT serverless HTTP). Then change `sync-communications.ts` Phase-5 to ON CONFLICT DO UPDATE.
+`sync-telephony.ts` switched to DELETE-then-INSERT in window (Drizzle `target` array can't express the COALESCE-in-expression unique). `sync-communications.ts` still ON CONFLICT-by-comm_id-only — works because Kommo notes have unique IDs (verified empirically: 0 duplicates across 209k rows since Jan 1).
 
 ### 3. Tracking blacklist is in-process only (LOW)
 

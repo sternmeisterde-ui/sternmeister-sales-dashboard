@@ -160,43 +160,32 @@ via `useMemo` chain: `lineFilteredRows → filtered → total → pct`.
 
 ---
 
-## Why B2B has no per-pipeline split
+## B2B per-pipeline split (re-enabled 2026-04-28)
 
-Verified live 2026-04-28:
+Earlier in 2026-04-28 the B2B tile + trend chart showed dept-wide totals
+only because every telephony row had `pipeline_id=NULL` (PBX writes CDR
+before any Kommo lead exists for the phone). Fixed today via Migration
+0005 + `enrich-telephony-leads.ts`:
 
-```sql
-SELECT
-  CASE WHEN pipeline_id IS NULL THEN 'NULL (telephony)' ELSE 'matched' END AS bucket,
-  COUNT(*)
-FROM analytics.communications
-WHERE created_at >= NOW() - INTERVAL '7 days'
-  AND communication_type LIKE 'call%'
-GROUP BY bucket
-```
+1. CDR row arrives at `analytics.communications` with `lead_id=NULL`,
+   `pipeline_id=NULL`, **`phone` populated**.
+2. `enrich-telephony-leads` (runs after `sync-telephony` in `runSync`):
+   - Resolves phone → contact → leads via Kommo `/api/v4/contacts?filter[query]=`.
+   - For each call, fans the row out to one row per matched lead with
+     real `pipeline_id` + `status_id` + `lead_created_at` from
+     `analytics.leads_cohort` (Pattern A, see `docs/mysql-analytics.md`).
+3. Daily/Звонки helpers use `COUNT(DISTINCT communication_id)` to keep
+   "1 call counts once" semantics (DISTINCT ON CTE in `analytics-calls.ts`).
+4. Per-pipeline helpers (`fetchTeamCallMetricsByPipeline`,
+   `getAnalyticsDailyTrendByPipeline`) intentionally double-count across
+   pipelines a contact has leads in — matches integrator's Looker.
 
-→ 11,186 rows NULL (cg-leg + ct), 5 rows matched (legacy `note:N` stragglers).
+For phones Kommo can't resolve (deleted contacts, typos): row stays
+`lead_id=NULL`, `pipeline_id=NULL`. They surface only in dept-total tile
+(via `OR pipeline_id IS NULL` fallback), not in per-pipeline split.
 
-**Root cause:** PBX (CallGear / CloudTalk) writes the CDR row BEFORE any
-Kommo lead exists for the call. There's no pipeline context at write time.
-The hard-split (2026-04-28) made telephony the sole call source, so 100%
-of new call rows have `pipeline_id=NULL`.
-
-For B2G this isn't a problem — line attribution is via `manager` name (which
-the CDR has) → `master_managers.line`. Calls bucket cleanly into L1/L2/L3.
-
-For B2B managers handle BOTH pipelines (verified 2026-04-28: top 7 by lead
-volume — Rose 149/123, Метальникова 178/7, Пуховская 122/53, etc.). No
-clean manager → pipeline mapping exists. Without phone→lead enrichment,
-B2B per-pipeline call attribution is ~60% accurate at best.
-
-**Decision:** B2B tile + trend chart show single big totals. The cohort
-table below DOES split per-pipeline correctly because LEADS have
-`pipeline_id` (only calls lack it).
-
-**Fix path:** see the P1 task in `TODO.md` — phone→lead enrichment in
-`sync-telephony.ts`. Once `analytics.communications.lead_id` is populated
-on telephony rows, uncomment the parallel fetches in `/api/dashboard/route.ts`
-and B2B will split correctly.
+`/api/dashboard/route.ts` cache key bumped `v7→v8`. Re-enabled fetchers:
+`getAnalyticsTeamCallMetricsByPipeline` + `getAnalyticsDailyTrendByPipeline`.
 
 ---
 
