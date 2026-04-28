@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
@@ -90,10 +90,16 @@ const LINE_LABEL: Record<LineFilter, string> = {
   "3": "Линия 3 — Доведение",
 };
 
-const LINE_COLOR: Record<Exclude<LineFilter, "all">, string> = {
-  "1": "emerald",
-  "2": "purple",
-  "3": "sky",
+const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
+  "1": "Квалификатор",
+  "2": "Бератер",
+  "3": "Доведение",
+};
+
+const LINE_COLOR_CLASS: Record<Exclude<LineFilter, "all">, string> = {
+  "1": "text-emerald-400",
+  "2": "text-purple-400",
+  "3": "text-sky-400",
 };
 
 // ==================== Component ====================
@@ -278,54 +284,54 @@ export default function DashboardTab({ department }: { department: string }) {
       )}
 
       {/* ============ KPI: 4 tiles, each split by line for B2G ============ */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <CallMetricTile
           icon={Phone}
           label="Звонки"
           color="blue"
-          total={m.callsTotal}
-          totalSub={`${m.outgoingTotal} исх. / ${m.incomingTotal} вх.`}
-          byLine={byLine && {
-            "1": { value: byLine["1"].callsTotal, sub: `${byLine["1"].outgoingTotal}/${byLine["1"].incomingTotal}` },
-            "2": { value: byLine["2"].callsTotal, sub: `${byLine["2"].outgoingTotal}/${byLine["2"].incomingTotal}` },
-            "3": { value: byLine["3"].callsTotal, sub: `${byLine["3"].outgoingTotal}/${byLine["3"].incomingTotal}` },
-          }}
+          totalValue={m.callsTotal}
+          totalCaption={`${m.outgoingTotal} исх. / ${m.incomingTotal} вх.`}
+          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
+            line: ln,
+            value: byLine[ln].callsTotal,
+            caption: `${byLine[ln].outgoingTotal} исх. / ${byLine[ln].incomingTotal} вх.`,
+          }))}
         />
         <CallMetricTile
           icon={Target}
           label="Дозвон"
           color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
-          total={`${m.dialPercent}%`}
-          totalSub={`${m.callsConnected} из ${m.callsTotal}`}
-          byLine={byLine && {
-            "1": { value: `${byLine["1"].dialPercent}%`, sub: `${byLine["1"].callsConnected}/${byLine["1"].callsTotal}` },
-            "2": { value: `${byLine["2"].dialPercent}%`, sub: `${byLine["2"].callsConnected}/${byLine["2"].callsTotal}` },
-            "3": { value: `${byLine["3"].dialPercent}%`, sub: `${byLine["3"].callsConnected}/${byLine["3"].callsTotal}` },
-          }}
+          totalValue={`${m.dialPercent}%`}
+          totalCaption={`${m.callsConnected} из ${m.callsTotal} звонков`}
+          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
+            line: ln,
+            value: `${byLine[ln].dialPercent}%`,
+            caption: `${byLine[ln].callsConnected} из ${byLine[ln].callsTotal}`,
+          }))}
         />
         <CallMetricTile
           icon={Clock}
           label="На линии"
           color="blue"
-          total={`${m.totalMinutes} мин`}
-          totalSub={`Ср. диалог ${m.avgDialogMinutes} мин`}
-          byLine={byLine && {
-            "1": { value: `${byLine["1"].totalMinutes} мин`, sub: undefined },
-            "2": { value: `${byLine["2"].totalMinutes} мин`, sub: undefined },
-            "3": { value: `${byLine["3"].totalMinutes} мин`, sub: undefined },
-          }}
+          totalValue={`${m.totalMinutes} мин`}
+          totalCaption={`Ср. диалог ${m.avgDialogMinutes} мин`}
+          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
+            line: ln,
+            value: `${byLine[ln].totalMinutes} мин`,
+            caption: undefined,
+          }))}
         />
         <CallMetricTile
           icon={PhoneMissed}
           label="Пропущенные"
           color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
-          total={m.missedIncoming}
-          totalSub={`${missed.missedPercent}% от входящих`}
-          byLine={byLine && {
-            "1": { value: byLine["1"].missedIncoming, sub: `${byLine["1"].missedPercent}%` },
-            "2": { value: byLine["2"].missedIncoming, sub: `${byLine["2"].missedPercent}%` },
-            "3": { value: byLine["3"].missedIncoming, sub: `${byLine["3"].missedPercent}%` },
-          }}
+          totalValue={m.missedIncoming}
+          totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal} входящих`}
+          rows={byLine && (["1", "2", "3"] as const).map((ln) => ({
+            line: ln,
+            value: byLine[ln].missedIncoming,
+            caption: `${byLine[ln].missedPercent}% от ${byLine[ln].incomingTotal} вх.`,
+          }))}
         />
       </div>
 
@@ -425,22 +431,28 @@ export default function DashboardTab({ department }: { department: string }) {
   );
 }
 
-// ==================== KPI tile with optional line breakdown ====================
+// ==================== KPI tile — vertical layout with line rows ====================
+
+interface TileRow {
+  line: "1" | "2" | "3";
+  value: string | number;
+  caption?: string;
+}
 
 function CallMetricTile({
   icon: Icon,
   label,
-  total,
-  totalSub,
+  totalValue,
+  totalCaption,
   color,
-  byLine,
+  rows,
 }: {
   icon: LucideIcon;
   label: string;
-  total: string | number;
-  totalSub?: string;
+  totalValue: string | number;
+  totalCaption?: string;
   color: "blue" | "emerald" | "amber" | "rose";
-  byLine: { "1": { value: string | number; sub?: string }; "2": { value: string | number; sub?: string }; "3": { value: string | number; sub?: string } } | null;
+  rows: TileRow[] | null;
 }) {
   const colorMap = {
     blue: { bg: "bg-blue-500/10", text: "text-blue-400" },
@@ -450,36 +462,58 @@ function CallMetricTile({
   };
   const c = colorMap[color];
 
+  // ── B2B (no line breakdown) — single big number ─────────────────────
+  if (!rows) {
+    return (
+      <div className="glass-panel rounded-2xl p-5 border border-white/5 hover:border-blue-500/20 transition-all">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-slate-400 font-semibold tracking-wider text-xs uppercase">{label}</span>
+          <div className={`p-2 ${c.bg} rounded-lg ${c.text}`}>
+            <Icon className="w-4 h-4" />
+          </div>
+        </div>
+        <div className={`text-4xl font-bold ${c.text} tracking-tight mt-2`}>{totalValue}</div>
+        {totalCaption && <div className="text-xs text-slate-500 mt-1">{totalCaption}</div>}
+      </div>
+    );
+  }
+
+  // ── B2G — small total header + 3 big line rows below ────────────────
   return (
-    <div className="glass-panel rounded-2xl p-4 border border-white/5 hover:border-blue-500/20 transition-all">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-slate-500 font-medium tracking-wider text-[10px] uppercase">{label}</span>
-        <div className={`p-1.5 ${c.bg} rounded-md ${c.text}`}>
-          <Icon className="w-3.5 h-3.5" />
+    <div className="glass-panel rounded-2xl p-5 border border-white/5 hover:border-blue-500/20 transition-all flex flex-col">
+      {/* Compact header: label + small total + icon */}
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <div className="text-slate-400 font-semibold tracking-wider text-xs uppercase mb-1">{label}</div>
+          <div className="flex items-baseline gap-2">
+            <span className={`text-lg font-bold ${c.text} tracking-tight`}>{totalValue}</span>
+            <span className="text-[10px] text-slate-500">всего</span>
+          </div>
+          {totalCaption && <div className="text-[10px] text-slate-500 mt-0.5">{totalCaption}</div>}
+        </div>
+        <div className={`p-2 ${c.bg} rounded-lg ${c.text} shrink-0`}>
+          <Icon className="w-4 h-4" />
         </div>
       </div>
-      <div className={`text-2xl font-bold ${c.text} tracking-tight`}>{total}</div>
-      {totalSub && <div className="text-[10px] text-slate-500 mt-0.5">{totalSub}</div>}
-      {byLine && (
-        <div className="mt-3 pt-3 border-t border-white/5 grid grid-cols-3 gap-2">
-          {(["1", "2", "3"] as const).map((ln) => {
-            const lineColor = LINE_COLOR[ln];
-            const colorClass =
-              lineColor === "emerald"
-                ? "text-emerald-400"
-                : lineColor === "purple"
-                  ? "text-purple-400"
-                  : "text-sky-400";
-            return (
-              <div key={ln} className="text-center">
-                <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">L{ln}</div>
-                <div className={`text-sm font-semibold ${colorClass}`}>{byLine[ln].value}</div>
-                {byLine[ln].sub && <div className="text-[9px] text-slate-500 mt-0.5">{byLine[ln].sub}</div>}
-              </div>
-            );
-          })}
-        </div>
-      )}
+
+      {/* Per-line rows: big number, full label, optional caption */}
+      <div className="flex flex-col gap-2 mt-1 pt-3 border-t border-white/5">
+        {rows.map((r) => (
+          <div key={r.line} className="flex items-baseline justify-between gap-3">
+            <div className="flex flex-col min-w-0">
+              <span className={`text-[10px] uppercase tracking-wider font-semibold ${LINE_COLOR_CLASS[r.line]}`}>
+                Л{r.line} · {LINE_SHORT[r.line]}
+              </span>
+              {r.caption && (
+                <span className="text-[10px] text-slate-500 truncate">{r.caption}</span>
+              )}
+            </div>
+            <span className={`text-2xl font-bold tabular-nums ${LINE_COLOR_CLASS[r.line]} tracking-tight shrink-0`}>
+              {r.value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -555,53 +589,117 @@ function TrendChart({
 }
 
 // ==================== Status cohort table with filters ====================
+//
+// Filters:
+//   • Линия (B2G only): all / 1 / 2 / 3 — same dropdown style as the trend chart.
+//     Pipeline filter dropped — Line 2 and Line 3 share the BERATER pipeline,
+//     so a separate "воронка" filter would just duplicate the line filter.
+//   • Статусы: multi-select dropdown with checkboxes, "select all" / "clear"
+//     toggles. Default = all checked. Newly-appearing statuses (e.g. after a
+//     date-range expansion) are auto-selected so the user doesn't lose visibility.
+//
+// Percent base: each row's count / sum(currently shown rows). When the user
+// narrows by line or unchecks statuses, percentages re-base to that subset.
+//
+// B2B variant: no line filter (no line concept); pipeline filter shows up
+// because Бух Комм vs Мед Admin are real distinct funnels worth slicing.
 
 function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G: boolean }) {
   const [lineFilter, setLineFilter] = useState<LineFilter>("all");
-  const [pipelineFilter, setPipelineFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<Set<number>>(new Set());
+  const [pipelineFilter, setPipelineFilter] = useState<string>("all"); // B2B only
+  // null = "all selected" sentinel. Switches to a Set on first user interaction.
+  // Using a sentinel avoids the bug where new statuses arriving in `rows`
+  // wouldn't be auto-included if we tracked "selected" explicitly from the start.
+  const [statusSelection, setStatusSelection] = useState<Set<number> | null>(null);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Distinct pipelines available — drives the B2B pipeline dropdown. For B2G
+  // we never show this dropdown; pipeline and line are redundant there.
   const pipelines = useMemo(() => {
     const map = new Map<number, string>();
     for (const r of rows) map.set(r.pipelineId, r.pipelineName);
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [rows]);
 
-  const allStatuses = useMemo(() => {
+  // Apply line / pipeline pre-filters before the status dropdown sees the rows.
+  // For B2G: filter by line. For B2B: filter by pipeline. Both can also be "all".
+  const scopedRows = useMemo(() => {
+    return rows.filter((r) => {
+      if (isB2G) {
+        if (lineFilter !== "all" && r.line !== lineFilter) return false;
+      } else {
+        if (pipelineFilter !== "all" && String(r.pipelineId) !== pipelineFilter) return false;
+      }
+      return true;
+    });
+  }, [rows, isB2G, lineFilter, pipelineFilter]);
+
+  // Alias kept for the rest of the component — was `lineFilteredRows`, now
+  // covers both B2G (line) and B2B (pipeline) pre-filters.
+  const lineFilteredRows = scopedRows;
+
+  const availableStatuses = useMemo(() => {
     const map = new Map<number, string>();
-    for (const r of rows) map.set(r.statusId, r.statusName);
+    for (const r of lineFilteredRows) map.set(r.statusId, r.statusName);
     return Array.from(map.entries())
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name, "ru"));
-  }, [rows]);
+  }, [lineFilteredRows]);
+
+  // Resolve "selected statuses" from the sentinel: null = everything available.
+  const selectedSet = useMemo(() => {
+    if (statusSelection === null) {
+      return new Set(availableStatuses.map((s) => s.id));
+    }
+    // Filter selection to only statuses still available in current line scope.
+    return new Set(
+      Array.from(statusSelection).filter((id) =>
+        availableStatuses.some((s) => s.id === id),
+      ),
+    );
+  }, [statusSelection, availableStatuses]);
 
   const filtered = useMemo(() => {
-    return rows.filter((r) => {
-      if (isB2G && lineFilter !== "all" && r.line !== lineFilter) return false;
-      if (pipelineFilter !== "all" && String(r.pipelineId) !== pipelineFilter) return false;
-      if (statusFilter.size > 0 && !statusFilter.has(r.statusId)) return false;
-      return true;
-    });
-  }, [rows, isB2G, lineFilter, pipelineFilter, statusFilter]);
+    return lineFilteredRows.filter((r) => selectedSet.has(r.statusId));
+  }, [lineFilteredRows, selectedSet]);
 
   const total = filtered.reduce((s, r) => s + r.count, 0);
+  const sorted = useMemo(() => [...filtered].sort((a, b) => b.count - a.count), [filtered]);
 
-  const sorted = useMemo(() => {
-    return [...filtered].sort((a, b) => b.count - a.count);
-  }, [filtered]);
+  // Close dropdown on outside click.
+  useEffect(() => {
+    if (!statusOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setStatusOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [statusOpen]);
 
   if (rows.length === 0) return null;
 
   const toggleStatus = (id: number) => {
-    setStatusFilter((prev) => {
-      const next = new Set(prev);
+    setStatusSelection((prev) => {
+      const base = prev ?? new Set(availableStatuses.map((s) => s.id));
+      const next = new Set(base);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
   };
+  const selectAllStatuses = () => setStatusSelection(null);
+  const clearAllStatuses = () => setStatusSelection(new Set());
 
-  const clearStatusFilter = () => setStatusFilter(new Set());
+  const allChecked = selectedSet.size === availableStatuses.length && availableStatuses.length > 0;
+  const noneChecked = selectedSet.size === 0;
+  const buttonLabel = allChecked
+    ? `Все статусы (${availableStatuses.length})`
+    : noneChecked
+      ? "Не выбрано"
+      : `Выбрано: ${selectedSet.size} из ${availableStatuses.length}`;
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-white/5">
@@ -609,62 +707,91 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
         <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
           Статусы сделок — когортный срез
           <span className="text-slate-500 ml-2 font-normal normal-case">
-            (всего {total} {total === 1 ? "сделка" : total < 5 ? "сделки" : "сделок"})
+            (всего {total.toLocaleString("ru-RU")} {total === 1 ? "сделка" : total % 10 >= 2 && total % 10 <= 4 && (total % 100 < 10 || total % 100 >= 20) ? "сделки" : "сделок"})
           </span>
         </h3>
         <div className="flex items-center gap-2 flex-wrap">
-          {isB2G && (
+          {isB2G ? (
             <select
               value={lineFilter}
               onChange={(e) => setLineFilter(e.target.value as LineFilter)}
               className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
             >
               <option value="all">Все линии</option>
-              <option value="1">Линия 1</option>
-              <option value="2">Линия 2</option>
-              <option value="3">Линия 3</option>
+              <option value="1">Линия 1 — Квалификатор</option>
+              <option value="2">Линия 2 — Бератер</option>
+              <option value="3">Линия 3 — Доведение</option>
             </select>
+          ) : (
+            // B2B has 2 distinct funnels (Бух Комм + Мед Admin Commercial)
+            // and no line concept — so a pipeline dropdown is the
+            // meaningful slice here.
+            pipelines.length > 1 && (
+              <select
+                value={pipelineFilter}
+                onChange={(e) => setPipelineFilter(e.target.value)}
+                className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors max-w-[260px]"
+              >
+                <option value="all">Все воронки</option>
+                {pipelines.map((p) => (
+                  <option key={p.id} value={String(p.id)}>{p.name}</option>
+                ))}
+              </select>
+            )
           )}
-          <select
-            value={pipelineFilter}
-            onChange={(e) => setPipelineFilter(e.target.value)}
-            className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors max-w-[260px]"
-          >
-            <option value="all">Все воронки</option>
-            {pipelines.map((p) => (
-              <option key={p.id} value={String(p.id)}>{p.name}</option>
-            ))}
-          </select>
-        </div>
-      </div>
 
-      {/* Status multi-select pills */}
-      <div className="mb-4 flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] text-slate-500 uppercase tracking-wider">Статусы:</span>
-        {allStatuses.map((s) => {
-          const active = statusFilter.has(s.id);
-          return (
+          {/* Status multi-select dropdown */}
+          <div ref={dropdownRef} className="relative">
             <button
-              key={s.id}
-              onClick={() => toggleStatus(s.id)}
-              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
-                active
-                  ? "bg-blue-500/20 border-blue-500/40 text-blue-300"
-                  : "bg-slate-900/40 border-white/5 text-slate-400 hover:border-white/15 hover:text-slate-200"
-              }`}
+              type="button"
+              onClick={() => setStatusOpen((s) => !s)}
+              className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors flex items-center gap-2 min-w-[200px] justify-between"
             >
-              {s.name}
+              <span>{buttonLabel}</span>
+              <span className="text-slate-500 text-[10px]">{statusOpen ? "▲" : "▼"}</span>
             </button>
-          );
-        })}
-        {statusFilter.size > 0 && (
-          <button
-            onClick={clearStatusFilter}
-            className="text-[10px] uppercase tracking-wider text-slate-500 hover:text-slate-300 ml-1"
-          >
-            Сбросить
-          </button>
-        )}
+            {statusOpen && (
+              <div className="absolute right-0 top-full mt-1 z-30 w-72 max-h-80 overflow-auto rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur-md shadow-xl">
+                <div className="sticky top-0 bg-slate-900/95 backdrop-blur-md border-b border-white/5 px-3 py-2 flex items-center justify-between">
+                  <button
+                    onClick={selectAllStatuses}
+                    className="text-[10px] uppercase tracking-wider text-blue-400 hover:text-blue-300"
+                  >
+                    Выбрать все
+                  </button>
+                  <button
+                    onClick={clearAllStatuses}
+                    className="text-[10px] uppercase tracking-wider text-slate-500 hover:text-slate-300"
+                  >
+                    Снять все
+                  </button>
+                </div>
+                {availableStatuses.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-slate-500">Нет статусов</div>
+                ) : (
+                  <ul className="py-1">
+                    {availableStatuses.map((s) => {
+                      const checked = selectedSet.has(s.id);
+                      return (
+                        <li key={s.id}>
+                          <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 cursor-pointer text-xs text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleStatus(s.id)}
+                              className="w-3.5 h-3.5 rounded border-white/20 bg-slate-900 text-blue-500 focus:ring-blue-500/40 focus:ring-1"
+                            />
+                            <span className="truncate">{s.name}</span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {sorted.length === 0 ? (
@@ -675,8 +802,11 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
             <thead>
               <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
                 <th className="text-left py-2 px-2 font-medium">Статус</th>
-                <th className="text-left py-2 px-2 font-medium">Воронка</th>
-                {isB2G && <th className="text-left py-2 px-2 font-medium">Линия</th>}
+                {isB2G ? (
+                  <th className="text-left py-2 px-2 font-medium">Линия</th>
+                ) : (
+                  pipelines.length > 1 && <th className="text-left py-2 px-2 font-medium">Воронка</th>
+                )}
                 <th className="text-right py-2 px-2 font-medium">Сделок</th>
                 <th className="text-right py-2 px-2 font-medium w-1/3">Доля</th>
               </tr>
@@ -686,32 +816,31 @@ function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G:
                 const pct = total > 0 ? (r.count / total) * 100 : 0;
                 return (
                   <tr key={`${r.pipelineId}-${r.line ?? "x"}-${r.statusId}`} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                    <td className="py-2 px-2 text-slate-200 truncate max-w-[260px]">{r.statusName}</td>
-                    <td className="py-2 px-2 text-slate-400 text-xs truncate max-w-[200px]">{r.pipelineName}</td>
-                    {isB2G && (
+                    <td className="py-2 px-2 text-slate-200 truncate max-w-[320px]">{r.statusName}</td>
+                    {isB2G ? (
                       <td className="py-2 px-2 text-xs">
                         {r.line ? (
-                          <span className={
-                            r.line === "1"
-                              ? "text-emerald-400"
-                              : r.line === "2"
-                                ? "text-purple-400"
-                                : "text-sky-400"
-                          }>
-                            L{r.line}
+                          <span className={LINE_COLOR_CLASS[r.line as Exclude<LineFilter, "all">]}>
+                            Л{r.line} · {LINE_SHORT[r.line as Exclude<LineFilter, "all">]}
                           </span>
                         ) : (
                           <span className="text-slate-600">—</span>
                         )}
                       </td>
+                    ) : (
+                      pipelines.length > 1 && (
+                        <td className="py-2 px-2 text-xs text-slate-400 truncate max-w-[200px]">
+                          {r.pipelineName}
+                        </td>
+                      )
                     )}
-                    <td className="py-2 px-2 text-right text-slate-200 tabular-nums font-medium">{r.count}</td>
+                    <td className="py-2 px-2 text-right text-slate-200 tabular-nums font-medium">{r.count.toLocaleString("ru-RU")}</td>
                     <td className="py-2 px-2 w-1/3">
                       <div className="flex items-center gap-2">
                         <div className="flex-1 h-1.5 bg-slate-800/60 rounded-full overflow-hidden">
                           <div className="h-full bg-blue-500/70" style={{ width: `${pct}%` }} />
                         </div>
-                        <span className="text-[11px] text-slate-500 min-w-[40px] text-right tabular-nums">
+                        <span className="text-[11px] text-slate-500 min-w-[44px] text-right tabular-nums">
                           {pct.toFixed(1)}%
                         </span>
                       </div>

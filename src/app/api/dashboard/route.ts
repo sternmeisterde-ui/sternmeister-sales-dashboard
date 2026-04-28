@@ -8,7 +8,7 @@
 //   - pipelineBreakdown: per-pipeline lead distribution (for B2G: Бух Гос + Бух Бератер)
 
 import { NextRequest, NextResponse } from "next/server";
-import { getTasks } from "@/lib/kommo/client";
+import { getTasks, getPipelines } from "@/lib/kommo/client";
 import { getAnalyticsLeads } from "@/lib/daily/analytics-leads";
 import {
   aggregateLeadFunnelMetrics,
@@ -382,6 +382,7 @@ function buildCohortStatusBreakdown(
   leads: KommoLead[],
   department: string,
   allowedPipelineIds: Set<number>,
+  statusNames: Record<number, string>,
 ): CohortStatusRow[] {
   // Pipeline labels for the cohort table — neutral names without line suffix
   // since the line column carries that info. BERATER stays "Бух Бератер" for
@@ -396,36 +397,6 @@ function buildCohortStatusBreakdown(
           [B2G_PIPELINES.FIRST_LINE]: "Бух Гос",
           [B2G_PIPELINES.BERATER]: "Бух Бератер",
         };
-
-  // Reuses same id→name mapping as buildPipelineBreakdown (synced 2026-04-22
-  // from Kommo API). Kept inline to avoid a refactor — buildPipelineBreakdown
-  // owns the canonical copy. If new statuses appear, add to both maps.
-  const statusNames: Record<number, string> = {
-    83873487: "Incoming leads", 93485479: "База", 83873491: "Новый лид",
-    90367079: "Взято в работу", 90367083: "Недозвон", 90367087: "Контакт установлен",
-    104211575: "Принимает решение", 95514983: "Консультация проведена",
-    101935919: "Док-ты отправлены в ДЦ", 95514987: "Отложенный старт",
-    93860327: "Incoming leads", 93860331: "Принято от 1й линии",
-    93860335: "Взято в работу", 93860339: "Недозвон", 93860863: "Контакт установлен",
-    93860879: "Термин АА", 102183931: "Доведение",
-    102183935: "Консультация перед термином ДЦ", 102183939: "Конс. перед ДЦ проведена",
-    93860875: "Термин ДЦ отмен./перенес.", 93886075: "Термин ДЦ состоялся",
-    102183943: "Консультация перед термином АА", 102183947: "Конс. перед АА проведена",
-    93860883: "Термин АА отмен./перенес.", 93860887: "На рассмотрении бератера",
-    95515895: "Отложенный старт", 93860891: "Апелляция",
-    81523499: "Incoming leads", 83364011: "Tech", 81523503: "Новый лид",
-    104076579: "Новый лид 2", 104076583: "Новый лид 3", 81523507: "Взят в работу",
-    82883595: "Недозвон", 81523515: "Контакт установлен",
-    88519479: "Нет предв. согласия", 82661915: "Интерес подтверждён",
-    82661919: "Счёт выставлен", 82946495: "Предоплата получена",
-    82946499: "Рассрочка",
-    101858011: "Incoming leads", 101858015: "Tech", 101858019: "Новый лид",
-    104076587: "Новый лид 2", 104076591: "Новый лид 3", 101858023: "Взят в работу",
-    101858255: "Недозвон", 101858259: "Контакт установлен",
-    101858263: "Нет предв. согласия", 101858267: "Интерес подтверждён",
-    101858271: "Счёт выставлен", 101858275: "Предоплата получена",
-    101858279: "Рассрочка",
-  };
 
   // key = `${pipelineId}|${line ?? ""}|${statusId}`. Bucket by line so the
   // BERATER split shows as two separate rows in the table.
@@ -482,10 +453,11 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v3 cache-key bump: response now includes trendByLine + statusBreakdown
-    // (added 2026-04-28 for the Звонки section refactor — 3-line KPI tiles,
-    // trend chart line filter, and the cohort-style status table).
-    const cacheKey = `dashboard-response:v3:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v4 cache-key bump: cohort statusBreakdown now uses live status names
+    // from Kommo's /leads/pipelines instead of the hardcoded map (the old
+    // map was missing custom-field-based statuses, surfacing "Status 12345"
+    // in the UI).
+    const cacheKey = `dashboard-response:v4:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -557,7 +529,7 @@ async function buildDashboardResponse(
     // where are they now". Distinct from `snapshotLeads` (current active
     // state) which still drives the legacy pipelineBreakdown field.
     const createdDateFilter = { field: "created_at" as const, from, to };
-    const [snapshotLeads, cohortLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw] = await Promise.all([
+    const [snapshotLeads, cohortLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, pipelinesRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -590,7 +562,25 @@ async function buildDashboardResponse(
             return null;
           })
         : Promise.resolve(null),
+      // Live pipeline + status names from Kommo. Replaces the hardcoded
+      // statusNames map that used to drift on every Kommo workflow rename
+      // (and showed "Status 12345" for any custom-field-based status it
+      // didn't know about). Cached upstream by Kommo client; cheap.
+      getPipelines().catch((e) => {
+        console.error("[Dashboard] getPipelines failed:", e);
+        return [];
+      }),
     ]);
+
+    // Flatten pipeline.statuses → { statusId: statusName }. Used by the
+    // cohort breakdown so every status row carries its real Kommo label,
+    // even brand-new ones added after this code was written.
+    const liveStatusNames: Record<number, string> = {};
+    for (const p of pipelinesRaw) {
+      for (const s of p._embedded?.statuses ?? []) {
+        liveStatusNames[s.id] = s.name;
+      }
+    }
 
     // Summary = sum of all per-manager metrics for the period
     const todaySummary = sumCallMetrics(Array.from(todayCallMap.values()));
@@ -701,6 +691,7 @@ async function buildDashboardResponse(
       cohortLeads,
       department,
       allowedPipelineIds,
+      liveStatusNames,
     );
 
     // Empty per-line trends for B2B (or when query failed) — keeps the
