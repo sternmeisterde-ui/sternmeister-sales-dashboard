@@ -11,16 +11,26 @@
 // Idempotent: safe to re-run on the same window. Already-enriched rows have
 // lead_id IS NOT NULL so they don't appear in the scan.
 //
-// Pattern:
-//   1. SELECT comm_id, phone for unenriched call rows in window.
+// Pattern (bulk-optimised 2026-04-28):
+//   1. Scan: pull EVERY column needed for INSERT, not just ctid+phone, so
+//      we can build full INSERT records in JS without re-reading the row.
 //   2. searchContactsByPhone(phones) → Map<phone, leadId[]>.
-//   3. For each unenriched comm_id, look up its phone's leads.
-//      - 0 matches: leave lead_id=NULL (next pass picks it up if Kommo
-//        eventually registers a lead).
-//      - N matches: UPDATE the first row with lead 1's metadata, INSERT
-//        N-1 additional rows for leads 2..N. Lead metadata pulled from
-//        analytics.leads_cohort (free; foreign-pipeline leads are skipped).
-//   4. Log unresolved phones for diagnostics.
+//   3. Look up lead metadata (pipeline_id, status, etc.) from leads_cohort
+//      in one round-trip.
+//   4. Build two arrays in JS:
+//        - updateRecs[] — one entry per row, sets primary lead's metadata.
+//        - insertRecs[] — N-1 entries per row with ≥2 leads (fan-out copies).
+//      Then issue:
+//        - ONE bulk INSERT per 500-row batch via jsonb_to_recordset.
+//        - ONE bulk UPDATE per 500-row batch via jsonb_to_recordset.
+//      Order matters: INSERT first while ctids still resolve. UPDATE last
+//      because UPDATE invalidates ctid (PostgreSQL MVCC creates a new tuple
+//      version, so any subsequent INSERT...SELECT FROM ctid would no-op).
+//
+// Throughput: 1 SELECT + N Kommo lookups + 2 bulk SQL per 500-batch. Was
+// previously 1 SELECT + N Kommo lookups + ≥1 INSERT + 1 UPDATE PER ROW.
+// 100k+ Neon HTTP roundtrips collapsed to ~50, eliminating the retry storm
+// observed during the parallel-worker attempt.
 
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
@@ -42,14 +52,23 @@ export interface EnrichResult {
   unresolvedPhones: string[];
 }
 
+/** Carries every column we need to either UPDATE in place or copy into a fan-out INSERT. */
 interface UnenrichedRow {
-  rowCtid: string; // PostgreSQL physical tuple id — used as primary identifier
-                   // since analytics.communications has no PK and rows can
-                   // share communication_id once we start fanning out.
-  communicationId: string;
-  phone: string;
-  createdAt: Date;
+  rowCtid: string;
+  communicationId: string | null;
+  communicationType: string | null;
+  entityId: number | null;
+  createdAt: string | null;          // raw timestamp string from PG (no-tz)
   manager: string | null;
+  phone: string;
+  callStatus: number | null;
+  duration: number | null;
+  leadDayStart: string | null;
+  firstContactFlg: number | null;
+  lastContactFlg: number | null;
+  firstCallAt: string | null;
+  businessHoursSla: number | null;
+  businessHoursSinceCommunication: number | null;
 }
 
 interface LeadMeta {
@@ -60,8 +79,48 @@ interface LeadMeta {
   statusName: string;
   category: string | null;
   utmSource: string | null;
-  leadCreatedAt: Date;
+  leadCreatedAt: string;             // ISO string
 }
+
+interface UpdateRecord {
+  ctid: string;
+  lead_id: number;
+  pipeline_id: number;
+  pipeline_name: string;
+  status_id: number;
+  status_name: string;
+  category: string | null;
+  utm_source: string | null;
+  lead_created_at: string;
+}
+
+interface InsertRecord {
+  communication_id: string | null;
+  communication_type: string | null;
+  entity_id: number | null;
+  created_at: string | null;
+  lead_id: number;
+  pipeline_id: number;
+  pipeline_name: string;
+  category: string | null;
+  lead_created_at: string;
+  lead_day_start: string | null;
+  call_status: number | null;
+  duration: number | null;
+  manager: string | null;
+  status_id: number;
+  status_name: string;
+  utm_source: string | null;
+  first_contact_flg: number | null;
+  last_contact_flg: number | null;
+  first_call_at: string | null;
+  business_hours_sla: number | null;
+  business_hours_since_communication: number | null;
+  phone: string;
+}
+
+/** Batch size for bulk SQL — keep JSON payload under ~1MB to stay well below Neon's HTTP body cap. */
+const BULK_BATCH_SIZE = 500;
 
 /**
  * Run phone→lead enrichment for the [fromDate, toDate] window. Department-
@@ -82,29 +141,46 @@ export async function enrichTelephonyLeads(
     unresolvedPhones: [],
   };
 
-  // Allowed pipelines: union of b2g + b2b. Foreign-pipeline leads from a
-  // contact's lead list (webinars, test, аппеляции, etc.) are silently
-  // dropped — the dashboards filter by these same pipeline ids, so linking
-  // foreign leads would create dead rows.
   const allowedPipelines = new Set<number>([
     ...getPipelineIds("b2g"),
     ...getPipelineIds("b2b"),
   ]);
 
-  // 1. Scan unenriched rows in window.
+  // 1. Scan unenriched rows in window — pull EVERY column we'll need to
+  // either UPDATE in place or replicate into fan-out INSERTs.
   const scanRes = await analyticsDb.execute<{
     ctid: string;
-    communication_id: string;
-    phone: string;
-    created_at: string;
+    communication_id: string | null;
+    communication_type: string | null;
+    entity_id: string | number | null;
+    created_at: string | null;
     manager: string | null;
+    phone: string;
+    call_status: number | null;
+    duration: number | null;
+    lead_day_start: string | null;
+    first_contact_flg: number | null;
+    last_contact_flg: number | null;
+    first_call_at: string | null;
+    business_hours_sla: string | number | null;
+    business_hours_since_communication: number | null;
   }>(sql`
     SELECT
-      ctid::text   AS ctid,
+      ctid::text                                       AS ctid,
       communication_id,
+      communication_type,
+      entity_id,
+      created_at::text                                 AS created_at,
+      manager,
       phone,
-      created_at,
-      manager
+      call_status,
+      duration,
+      lead_day_start::text                             AS lead_day_start,
+      first_contact_flg,
+      last_contact_flg,
+      first_call_at::text                              AS first_call_at,
+      business_hours_sla,
+      business_hours_since_communication
     FROM analytics.communications
     WHERE lead_id IS NULL
       AND phone IS NOT NULL
@@ -117,11 +193,19 @@ export async function enrichTelephonyLeads(
   const unenriched: UnenrichedRow[] = scanRes.rows.map((r) => ({
     rowCtid: r.ctid,
     communicationId: r.communication_id,
-    phone: r.phone,
-    createdAt: typeof r.created_at === "string"
-      ? new Date(`${r.created_at.replace(" ", "T")}Z`)
-      : new Date(r.created_at),
+    communicationType: r.communication_type,
+    entityId: r.entity_id != null ? Number(r.entity_id) : null,
+    createdAt: r.created_at,
     manager: r.manager,
+    phone: r.phone,
+    callStatus: r.call_status,
+    duration: r.duration,
+    leadDayStart: r.lead_day_start,
+    firstContactFlg: r.first_contact_flg,
+    lastContactFlg: r.last_contact_flg,
+    firstCallAt: r.first_call_at,
+    businessHoursSla: r.business_hours_sla != null ? Number(r.business_hours_sla) : null,
+    businessHoursSinceCommunication: r.business_hours_since_communication,
   }));
   result.scannedRows = unenriched.length;
   if (unenriched.length === 0) {
@@ -138,14 +222,13 @@ export async function enrichTelephonyLeads(
 
   const phoneToLeadIds = await searchContactsByPhone(distinctPhones);
 
-  // 3. Collect every lead id we need metadata for, then bulk-fetch from
-  //    analytics.leads_cohort. One round-trip even for 10k rows.
+  // 3. Bulk-fetch lead metadata from leads_cohort.
   const allLeadIds = new Set<number>();
   for (const ids of phoneToLeadIds.values()) {
     for (const id of ids) allLeadIds.add(id);
   }
 
-  let leadMetaById = new Map<number, LeadMeta>();
+  const leadMetaById = new Map<number, LeadMeta>();
   if (allLeadIds.size > 0) {
     const leadIdList = Array.from(allLeadIds);
     const leadRes = await analyticsDb.execute<{
@@ -158,14 +241,22 @@ export async function enrichTelephonyLeads(
       utm_source: string | null;
       created_at: string | null;
     }>(sql`
-      SELECT lead_id, pipeline_id, pipeline, status_id, status, category, utm_source, created_at
+      SELECT
+        lead_id,
+        pipeline_id,
+        pipeline,
+        status_id,
+        status,
+        category,
+        utm_source,
+        created_at::text AS created_at
       FROM analytics.leads_cohort
       WHERE lead_id IN (${sql.raw(leadIdList.join(","))})
     `);
 
     for (const row of leadRes.rows) {
       const pid = row.pipeline_id != null ? Number(row.pipeline_id) : 0;
-      if (!allowedPipelines.has(pid)) continue; // skip foreign-pipeline leads
+      if (!allowedPipelines.has(pid)) continue;
       leadMetaById.set(Number(row.lead_id), {
         leadId: Number(row.lead_id),
         pipelineId: pid,
@@ -174,15 +265,13 @@ export async function enrichTelephonyLeads(
         statusName: row.status ?? "",
         category: row.category,
         utmSource: row.utm_source,
-        leadCreatedAt: row.created_at
-          ? new Date(`${String(row.created_at).replace(" ", "T")}Z`)
-          : new Date(0),
+        leadCreatedAt: row.created_at ?? "1970-01-01 00:00:00",
       });
     }
   }
 
-  // 4. Apply enrichment. Group by phone to know how to map first-row UPDATE
-  //    vs additional INSERTs. Group rows already at scan time.
+  // 4. Build update + insert records. Group rows by phone so the lead set is
+  //    resolved once per phone, not per row.
   const rowsByPhone = new Map<string, UnenrichedRow[]>();
   for (const r of unenriched) {
     let bucket = rowsByPhone.get(r.phone);
@@ -193,15 +282,11 @@ export async function enrichTelephonyLeads(
     bucket.push(r);
   }
 
-  // Counter for tracking fan-out across phones.
+  const updateRecs: UpdateRecord[] = [];
+  const insertRecs: InsertRecord[] = [];
   const unresolvedSet = new Set<string>();
   let phonesResolved = 0;
-  let rowsLinked = 0;
-  let rowsFannedOut = 0;
 
-  // Iterate phones; do all DB writes per phone in one transaction batch
-  // through analyticsDb.execute (Neon HTTP — no transactions, but each
-  // statement is atomic and we don't depend on cross-statement consistency).
   for (const [phone, rows] of rowsByPhone) {
     const linkedLeadIds = phoneToLeadIds.get(phone) ?? [];
     const matchingLeads: LeadMeta[] = [];
@@ -209,84 +294,77 @@ export async function enrichTelephonyLeads(
       const meta = leadMetaById.get(lid);
       if (meta) matchingLeads.push(meta);
     }
-
     if (matchingLeads.length === 0) {
       unresolvedSet.add(phone);
       continue;
     }
-
     phonesResolved++;
 
-    // For each unenriched row of this phone, write the same lead set.
-    // Different rows of the same phone are different CDR records (different
-    // calls) — each gets its own fan-out.
-    //
-    // ORDER MATTERS: INSERT secondary copies FIRST (while the source row's
-    // ctid still resolves), THEN UPDATE the primary. UPDATE in PostgreSQL
-    // creates a new MVCC tuple version at a fresh ctid, so a subsequent
-    // INSERT...SELECT WHERE ctid = original would silently match 0 rows.
-    // Bug discovered 2026-04-28 smoke: 264 fan-out INSERTs executed but
-    // 0 rows landed. The conflict target is fine; ctid was the issue.
     for (const row of rows) {
       const [primary, ...secondary] = matchingLeads;
 
-      // 4a. INSERT additional rows for leads 2..N — must happen before the
-      // UPDATE so ctid is still valid. ON CONFLICT DO NOTHING handles the
-      // rare race where a concurrent run already wrote (comm_id, lead_id).
-      for (const extra of secondary) {
-        await analyticsDb.execute(sql`
-          INSERT INTO analytics.communications (
-            communication_id, communication_type, entity_id, created_at,
-            lead_id, pipeline_id, pipeline_name, category, lead_created_at,
-            lead_day_start, call_status, duration, manager,
-            status_id, status_name, utm_source,
-            first_contact_flg, last_contact_flg, first_call_at,
-            business_hours_sla, business_hours_since_communication, phone
-          )
-          SELECT
-            communication_id, communication_type, entity_id, created_at,
-            ${extra.leadId} AS lead_id,
-            ${extra.pipelineId} AS pipeline_id,
-            ${extra.pipelineName} AS pipeline_name,
-            ${extra.category} AS category,
-            ${extra.leadCreatedAt} AS lead_created_at,
-            lead_day_start, call_status, duration, manager,
-            ${extra.statusId} AS status_id,
-            ${extra.statusName} AS status_name,
-            COALESCE(utm_source, ${extra.utmSource}) AS utm_source,
-            first_contact_flg, last_contact_flg, first_call_at,
-            business_hours_sla, business_hours_since_communication, phone
-          FROM analytics.communications
-          WHERE ctid = ${row.rowCtid}::tid
-          ON CONFLICT (communication_id, COALESCE(lead_id, 0))
-            WHERE communication_id IS NOT NULL
-            DO NOTHING
-        `);
-        rowsFannedOut++;
-      }
+      // UPDATE the original row with primary lead's metadata.
+      updateRecs.push({
+        ctid: row.rowCtid,
+        lead_id: primary.leadId,
+        pipeline_id: primary.pipelineId,
+        pipeline_name: primary.pipelineName,
+        status_id: primary.statusId,
+        status_name: primary.statusName,
+        category: primary.category,
+        utm_source: primary.utmSource,
+        lead_created_at: primary.leadCreatedAt,
+      });
 
-      // 4b. UPDATE the raw row in place with the primary lead's metadata.
-      // After this UPDATE the ctid is invalidated — must run last.
-      await analyticsDb.execute(sql`
-        UPDATE analytics.communications
-        SET
-          lead_id          = ${primary.leadId},
-          pipeline_id      = ${primary.pipelineId},
-          pipeline_name    = ${primary.pipelineName},
-          status_id        = ${primary.statusId},
-          status_name      = ${primary.statusName},
-          category         = ${primary.category},
-          utm_source       = COALESCE(communications.utm_source, ${primary.utmSource}),
-          lead_created_at  = ${primary.leadCreatedAt}
-        WHERE ctid = ${row.rowCtid}::tid
-      `);
-      rowsLinked++;
+      // INSERT a fan-out copy for each additional lead.
+      for (const extra of secondary) {
+        insertRecs.push({
+          communication_id: row.communicationId,
+          communication_type: row.communicationType,
+          entity_id: row.entityId,
+          created_at: row.createdAt,
+          lead_id: extra.leadId,
+          pipeline_id: extra.pipelineId,
+          pipeline_name: extra.pipelineName,
+          category: extra.category,
+          lead_created_at: extra.leadCreatedAt,
+          lead_day_start: row.leadDayStart,
+          call_status: row.callStatus,
+          duration: row.duration,
+          manager: row.manager,
+          status_id: extra.statusId,
+          status_name: extra.statusName,
+          utm_source: extra.utmSource,
+          first_contact_flg: row.firstContactFlg,
+          last_contact_flg: row.lastContactFlg,
+          first_call_at: row.firstCallAt,
+          business_hours_sla: row.businessHoursSla,
+          business_hours_since_communication: row.businessHoursSinceCommunication,
+          phone: row.phone,
+        });
+      }
+    }
+  }
+
+  // 5. Apply in bulk. INSERTs first (rely on stable ctids), UPDATEs second.
+  // Both use jsonb_to_recordset so a 500-row batch is one Neon HTTP call.
+  if (insertRecs.length > 0) {
+    for (let i = 0; i < insertRecs.length; i += BULK_BATCH_SIZE) {
+      const batch = insertRecs.slice(i, i + BULK_BATCH_SIZE);
+      await bulkInsertFanouts(batch);
+    }
+  }
+
+  if (updateRecs.length > 0) {
+    for (let i = 0; i < updateRecs.length; i += BULK_BATCH_SIZE) {
+      const batch = updateRecs.slice(i, i + BULK_BATCH_SIZE);
+      await bulkUpdatePrimaries(batch);
     }
   }
 
   result.phonesResolved = phonesResolved;
-  result.rowsLinked = rowsLinked;
-  result.rowsFannedOut = rowsFannedOut;
+  result.rowsLinked = updateRecs.length;
+  result.rowsFannedOut = insertRecs.length;
   result.unresolvedPhones = Array.from(unresolvedSet);
 
   console.log(
@@ -299,4 +377,90 @@ export async function enrichTelephonyLeads(
   }
 
   return result;
+}
+
+/**
+ * Bulk UPDATE: one statement, N rows. The records are passed as a single
+ * jsonb parameter (jsonb_to_recordset parses it server-side). Saves N×
+ * Neon HTTP roundtrips.
+ */
+async function bulkUpdatePrimaries(batch: UpdateRecord[]): Promise<void> {
+  const json = JSON.stringify(batch);
+  await analyticsDb.execute(sql`
+    UPDATE analytics.communications c
+    SET
+      lead_id          = u.lead_id,
+      pipeline_id      = u.pipeline_id,
+      pipeline_name    = u.pipeline_name,
+      status_id        = u.status_id,
+      status_name      = u.status_name,
+      category         = u.category,
+      utm_source       = COALESCE(c.utm_source, u.utm_source),
+      lead_created_at  = u.lead_created_at::timestamp
+    FROM jsonb_to_recordset(${json}::jsonb) AS u(
+      ctid              text,
+      lead_id           bigint,
+      pipeline_id       bigint,
+      pipeline_name     text,
+      status_id         bigint,
+      status_name       text,
+      category          text,
+      utm_source        text,
+      lead_created_at   text
+    )
+    WHERE c.ctid = u.ctid::tid
+  `);
+}
+
+/**
+ * Bulk INSERT: one statement, N rows. ON CONFLICT DO NOTHING handles re-run
+ * idempotency — if the (comm_id, lead_id) pair already exists from a prior
+ * run, we silently skip it.
+ */
+async function bulkInsertFanouts(batch: InsertRecord[]): Promise<void> {
+  const json = JSON.stringify(batch);
+  await analyticsDb.execute(sql`
+    INSERT INTO analytics.communications (
+      communication_id, communication_type, entity_id, created_at,
+      lead_id, pipeline_id, pipeline_name, category, lead_created_at,
+      lead_day_start, call_status, duration, manager,
+      status_id, status_name, utm_source,
+      first_contact_flg, last_contact_flg, first_call_at,
+      business_hours_sla, business_hours_since_communication, phone
+    )
+    SELECT
+      i.communication_id, i.communication_type, i.entity_id, i.created_at::timestamp,
+      i.lead_id, i.pipeline_id, i.pipeline_name, i.category, i.lead_created_at::timestamp,
+      i.lead_day_start::timestamp, i.call_status, i.duration, i.manager,
+      i.status_id, i.status_name, i.utm_source,
+      i.first_contact_flg, i.last_contact_flg, i.first_call_at::timestamp,
+      i.business_hours_sla, i.business_hours_since_communication, i.phone
+    FROM jsonb_to_recordset(${json}::jsonb) AS i(
+      communication_id                 text,
+      communication_type               text,
+      entity_id                        bigint,
+      created_at                       text,
+      lead_id                          bigint,
+      pipeline_id                      bigint,
+      pipeline_name                    text,
+      category                         text,
+      lead_created_at                  text,
+      lead_day_start                   text,
+      call_status                      smallint,
+      duration                         integer,
+      manager                          text,
+      status_id                        bigint,
+      status_name                      text,
+      utm_source                       text,
+      first_contact_flg                smallint,
+      last_contact_flg                 smallint,
+      first_call_at                    text,
+      business_hours_sla               bigint,
+      business_hours_since_communication double precision,
+      phone                            text
+    )
+    ON CONFLICT (communication_id, COALESCE(lead_id, 0))
+      WHERE communication_id IS NOT NULL
+      DO NOTHING
+  `);
 }
