@@ -184,7 +184,10 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
-      AND pipeline_id IN (${pipelineList})
+      -- pipeline_id IS NULL is required for telephony-sourced rows
+      -- (sync-telephony writes calls without a pipeline because the call
+      -- predates lead creation). Mirrors getAnalyticsCallMetricsByMaster.
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
   `);
 
   const row = result.rows[0];
@@ -424,7 +427,8 @@ export async function getAnalyticsDailyTrend(
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
-      AND pipeline_id IN (${pipelineList})
+      -- pipeline_id IS NULL covers telephony-sourced rows (sync-telephony).
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
     GROUP BY day
     ORDER BY day
   `);

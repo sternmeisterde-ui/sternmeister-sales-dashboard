@@ -8,6 +8,8 @@
 //   5. syncTasks         — analytics.tasks
 //   6. updateContactDates — back-fills leads_cohort.contact_date
 //   7. computeSla        — analytics.sla (from leads_cohort + communications)
+//   8. syncTelephony     — analytics.communications dial-attempt rows from
+//                          CallGear/CloudTalk (auto-skipped if CALLGEAR_ACCESS_TOKEN absent)
 
 import { fetchLookups } from "./lookups";
 import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads";
@@ -15,6 +17,7 @@ import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
+import { syncTelephony } from "./sync-telephony";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, gte, lte } from "drizzle-orm";
@@ -53,7 +56,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "communications" | "status_changes" | "tasks" | "sla")[];
+  skip?: ("leads" | "communications" | "status_changes" | "tasks" | "sla" | "telephony")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -68,6 +71,7 @@ export interface SyncResult {
   statusChanges: number;
   tasks: number;
   slaRows: number;
+  telephonyLegs: number;
   durationMs: number;
 }
 
@@ -133,12 +137,38 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     ? 0
     : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
 
+  // Telephony runs last so its prefix-scoped DELETE can't race against the
+  // Kommo-source DELETE in syncCommunications above. Auto-skipped when no
+  // provider creds are present. CallGear and CloudTalk are independent —
+  // either presence is enough to enable the step (each provider fetcher
+  // self-skips when its own creds are missing).
+  let telephonyLegs = 0;
+  const hasTelephonyCreds =
+    !!process.env.CALLGEAR_ACCESS_TOKEN || !!process.env.CLOUDTALK_API_ID;
+  if (!skip.has("telephony") && hasTelephonyCreds) {
+    try {
+      const telRes = await syncTelephony(opts.fromDate, opts.toDate);
+      telephonyLegs = telRes.inserted;
+    } catch (err) {
+      // Don't fail the whole ETL — telephony is additive coverage; on error
+      // we still ship the Kommo-sourced rows that already landed.
+      console.error(
+        `[ETL] sync-telephony failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  } else if (!skip.has("telephony")) {
+    console.log(
+      "[ETL] sync-telephony: skipped (no CALLGEAR_ACCESS_TOKEN nor CLOUDTALK_API_ID set)",
+    );
+  }
+
   const result: SyncResult = {
     leads: leadsCount,
     communications: commsCount,
     statusChanges: statusChangesCount,
     tasks: tasksCount,
     slaRows,
+    telephonyLegs,
     durationMs: Date.now() - t0,
   };
 
@@ -149,6 +179,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `status_changes=${result.statusChanges}`,
     `tasks=${result.tasks}`,
     `sla=${result.slaRows}`,
+    `telephony=${result.telephonyLegs}`,
   );
 
   return result;

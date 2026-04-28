@@ -40,18 +40,31 @@ We're fixing **call-count accuracy** across Daily, Звонки (Dashboard tab),
 
 ### 1. `/notes` ≠ CDR-level call capture (HIGH)
 
-**Status:** outstanding. **Owner:** next session, after Claude restart.
+**Status:** CallGear DONE 2026-04-28; CloudTalk blocked on creds.
 
 PBX integrations (CallGear, CloudTalk) write a Kommo note for most call attempts but NOT necessarily for every dial. Instant hangups, connection failures, and immediately-cancelled outbound dials may never produce a Kommo note. The MySQL integrator at `45.156.25.84` reads "Kommo event log + CDR" — they capture more than we do.
 
-**User explicitly wants ALL attempts including unrecorded ones.**
+**Smoke test 2026-04-27 single-day:**
+- CallGear: **1070 operator legs** (677 out, 393 in; 301 connected)
+- CloudTalk: **1089 calls** (1057 out, 32 in; 809 connected)
+- Combined telephony: **2159 rows** vs 7 Kommo notes (Kommo backfill hasn't reached this date yet)
+- OKK D2/R2 stored only ~543 connected calls. Confirms the gap.
 
-**Plan:**
-1. After Claude restart, read CallGear + CloudTalk creds from `/Users/user/okk/.env`. Settings already updated (`~/.claude/settings.json` has `Read(/Users/user/okk/**)` + `additionalDirectories: ["/Users/user/okk"]`).
-2. Write `src/lib/telephony/callgear.ts` — client for CallGear's CDR-list endpoint with pagination.
-3. Write `src/lib/telephony/cloudtalk.ts` — same. Note: user mentioned CloudTalk may currently only have a POST-webhook setup; if their account doesn't have read-API enabled, we either ask them to enable it (Settings → Account → API) or extend the OKK webhook handler to forward ALL raw call attempts (not just recordings).
-4. Write `scripts/backfill-from-telephony.ts` — sources from both APIs, maps via `master_managers.callgearEmployeeId` / `cloudtalkAgentId`, writes to `analytics.communications`.
-5. Dedup against existing rows by phone+timestamp (or external_call_id).
+**What's wired:**
+- `src/lib/telephony/types.ts` — unified `TelephonyCall` shape.
+- `src/lib/telephony/callgear.ts` — JSON-RPC 2.0 client (`get.calls_report` + `get.call_legs_report`, joined per-leg).
+- `src/lib/telephony/cloudtalk.ts` — Basic-auth client (`/api/calls/index.json`, paginated by date).
+- `src/lib/etl/sync-telephony.ts` — fetches both providers in parallel, joins agent_id → master_managers, writes to `analytics.communications` with `cg-leg:N` / `ct:N` prefixes (idempotent: prefix-scoped DELETE-by-date). pipeline_id NULL; call_status=4 for answered.
+- `scripts/backfill-from-telephony.ts` — chunked CLI backfill (both providers).
+- `runSync` in `src/lib/etl/index.ts` — auto-runs telephony when `CALLGEAR_ACCESS_TOKEN` OR `CLOUDTALK_API_ID` is set; per-provider failure is non-fatal.
+- `CALLGEAR_ACCESS_TOKEN` + `CLOUDTALK_API_ID` + `CLOUDTALK_API_SECRET` added to local `.env.local`. **Need to be set in Dokploy etl-cron sidecar env for production.**
+
+**Open items:**
+1. **Wider backfill DONE 2026-04-28.** Ran `scripts/backfill-from-telephony.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` in 14m51s. Result: **CallGear 106,516 + CloudTalk 22,557 = 129,073 rows**. CloudTalk account was only activated 2026-03-18, so earlier dates are CallGear-only — that's the integrator's reality, not missing data. Verify with `npx tsx scripts/check-call-coverage.ts --from 2026-01-01 --to 2026-04-28`.
+2. **0 kommo orphan rows** across the entire 4-month window — the syncTelephony cleanup pass wiped pre-split `note:N` call rows simultaneously with the wider backfill.
+3. **Provision telephony tokens in Dokploy** etl-cron sidecar: `CALLGEAR_ACCESS_TOKEN`, `CLOUDTALK_API_ID`, `CLOUDTALK_API_SECRET`. Until done, prod cron skips telephony silently (logged but no rows added → counts stale until next manual backfill).
+4. **3 ROPs + 1 manager** still without telephony links (no API match — they don't have CG/CT accounts at all): Рузанна, Дмитрий, Юлия Смирнова, Кристина Аладко (ct only), Екатерина Маслий (ct only). Fine; their calls don't surface on dashboard.
+5. **Hard-split DONE 2026-04-28.** `sync-communications.ts` no longer fetches call notes. Auto-resolve cg+ct IDs at manager save time wired in `/api/managers` POST (Step 3.6). One-shot `scripts/link-managers-telephony.ts` available for backfilling existing rows.
 
 ### 2. `analytics.communications` lacks unique constraint (MEDIUM)
 

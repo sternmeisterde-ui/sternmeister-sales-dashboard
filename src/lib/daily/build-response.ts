@@ -399,6 +399,14 @@ async function fetchAvgCallsPerLeadCombined(
   toDate: Date,
 ): Promise<{ team: number | null; perManager: Map<string, number> }> {
   try {
+    // Post-hard-split (2026-04-28) telephony rows have lead_id=NULL — the
+    // CDR call happens before/outside any Kommo lead context. The
+    // `lead_id IS NOT NULL` guard below excludes them, so this metric
+    // currently only counts the (now-empty) Kommo call-note set and
+    // returns zero. Permanent fix: enrich telephony rows with lead_id via
+    // phone-match in sync-telephony, OR replace this metric with
+    // (calls_with_phone_in_lead_set) / (active_leads). For now: known
+    // degradation, returns null and the widget renders "—".
     const result = await (analyticsDb as { execute: <T>(sql: unknown) => Promise<{ rows: T[] }> }).execute<{
       manager: string | null;
       is_total: number;

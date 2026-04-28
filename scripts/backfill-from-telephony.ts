@@ -1,25 +1,21 @@
-// Day-by-day backfill of analytics.* — uses small chunks so each chunk
-// fits comfortably inside Kommo's rate budget and Neon's connection
-// timeout. Designed for re-running after a fetch-logic bugfix where the
-// month-by-month script's first chunk would otherwise stall for 20+ min
-// on busy windows.
+// Backfill analytics.communications with rows pulled directly from
+// telephony providers (CallGear today; CloudTalk pending creds).
 //
 // Run from repo root:
-//   npx tsx scripts/backfill-by-day.ts                       # last 90 days
-//   npx tsx scripts/backfill-by-day.ts --days 30             # last 30
-//   npx tsx scripts/backfill-by-day.ts --from 2026-01-28 --to 2026-04-28
-//   npx tsx scripts/backfill-by-day.ts --chunk 2             # 2-day chunks
-//   npx tsx scripts/backfill-by-day.ts --skip-status         # skip status_changes
+//   npx tsx scripts/backfill-from-telephony.ts                           # last 30 days
+//   npx tsx scripts/backfill-from-telephony.ts --days 90
+//   npx tsx scripts/backfill-from-telephony.ts --from 2026-04-01 --to 2026-04-28
+//   npx tsx scripts/backfill-from-telephony.ts --chunk 7                 # 7-day chunks
 //
 // Requires .env.local with: DATABASE_URL, ANALYTICS_DATABASE_URL,
-//   KOMMO_ACCESS_TOKEN (or kommo_tokens row in D1), TELEGRAM_*.
+//   CALLGEAR_ACCESS_TOKEN.
 
 import { config } from "dotenv";
 import { resolve } from "node:path";
 
 config({ path: resolve(process.cwd(), ".env.local") });
 
-import { runSync } from "../src/lib/etl/index";
+import { syncTelephony } from "../src/lib/etl/sync-telephony";
 
 function arg(name: string, def: string | null = null): string | null {
   const args = process.argv.slice(2);
@@ -44,10 +40,8 @@ function fmt(d: Date): string {
 async function main() {
   const fromArg = arg("from");
   const toArg = arg("to");
-  const daysArg = arg("days", "90");
-  const chunkArg = arg("chunk", "1");
-  const skipTasks = arg("skip-tasks") === "true";
-  const skipStatus = arg("skip-status") === "true";
+  const daysArg = arg("days", "30");
+  const chunkArg = arg("chunk", "7");
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -69,29 +63,21 @@ async function main() {
   to.setUTCHours(23, 59, 59, 999);
 
   const chunkDays = Math.max(1, Number(chunkArg));
-  const skip: Parameters<typeof runSync>[0]["skip"] = [];
-  if (skipStatus) skip.push("status_changes");
-  if (skipTasks) skip.push("tasks");
-
   const totalChunks = Math.ceil(
     (to.getTime() - from.getTime()) / (chunkDays * 86_400_000),
   );
 
-  console.log("=== Day-by-day Analytics Backfill ===");
+  console.log("=== Telephony Backfill ===");
   console.log(`Range:   ${fmt(from)} → ${fmt(to)}`);
   console.log(`Chunks:  ${totalChunks} × ${chunkDays}d`);
-  console.log(`Skip:    ${skip.length > 0 ? skip.join(",") : "(none)"}`);
   console.log("");
 
   let cur = new Date(from);
   let n = 0;
-  let totalLeads = 0;
-  let totalComms = 0;
-  let totalStatus = 0;
-  let totalTasks = 0;
-  let totalSla = 0;
-  let totalTelephony = 0;
-  const failures: Array<{ from: string; to: string; error: string }> = [];
+  let totalLegs = 0;
+  let totalInserted = 0;
+  const allUnmatched = new Map<string, { count: number; name: string; source: string }>();
+  const failures: { from: string; to: string; error: string }[] = [];
 
   const overallStart = Date.now();
   while (cur <= to) {
@@ -109,20 +95,18 @@ async function main() {
     process.stdout.write(`[${n}/${totalChunks}] ${fromStr} → ${toStr} ... `);
 
     try {
-      const res = await runSync({
-        fromDate: cur,
-        toDate: chunkEnd,
-        skip,
-      });
+      const res = await syncTelephony(cur, chunkEnd);
       const dt = ((Date.now() - t0) / 1000).toFixed(1);
-      totalLeads += res.leads;
-      totalComms += res.communications;
-      totalStatus += res.statusChanges;
-      totalTasks += res.tasks;
-      totalSla += res.slaRows;
-      totalTelephony += res.telephonyLegs;
+      totalLegs += res.callgearLegs;
+      totalInserted += res.inserted;
+      for (const u of res.unmatchedAgents) {
+        const key = `${u.source}:${u.agentId}`;
+        const existing = allUnmatched.get(key);
+        if (existing) existing.count += u.count;
+        else allUnmatched.set(key, { count: u.count, name: u.name, source: u.source });
+      }
       console.log(
-        `ok ${dt}s | leads=${res.leads} comms=${res.communications} sla=${res.slaRows} status=${res.statusChanges} tasks=${res.tasks} telephony=${res.telephonyLegs}`,
+        `ok ${dt}s | cg_legs=${res.callgearLegs} inserted=${res.inserted} unmatched=${res.unmatchedAgents.length}`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -138,10 +122,23 @@ async function main() {
   console.log("");
   console.log("=== DONE ===");
   console.log(`Wall: ${total}s`);
-  console.log(
-    `Totals: leads=${totalLeads} comms=${totalComms} sla=${totalSla} status=${totalStatus} tasks=${totalTasks} telephony=${totalTelephony}`,
-  );
+  console.log(`Totals: cg_legs=${totalLegs} inserted=${totalInserted}`);
+
+  if (allUnmatched.size > 0) {
+    console.log("");
+    console.log(`Unmatched agents (${allUnmatched.size} unique):`);
+    const sorted = [...allUnmatched.entries()].sort((a, b) => b[1].count - a[1].count);
+    for (const [key, info] of sorted) {
+      console.log(`  ${key.padEnd(20)} ${info.name.padEnd(40)} ${info.count} legs`);
+    }
+    console.log("");
+    console.log(
+      "Fix attribution: set master_managers.callgear_employee_id (or cloudtalk_agent_id) for each name above, then re-run.",
+    );
+  }
+
   if (failures.length > 0) {
+    console.log("");
     console.log(`Failures: ${failures.length}`);
     for (const f of failures) console.log(`  ${f.from} → ${f.to}: ${f.error}`);
   }

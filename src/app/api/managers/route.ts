@@ -8,6 +8,16 @@ import { okkManagers } from "@/lib/db/schema-okk";
 import { eq, and, notInArray, desc, sql } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
 import { getUsers as getKommoUsers } from "@/lib/kommo/client";
+import { getEmployees as getCallGearEmployees } from "@/lib/telephony/callgear";
+import { getAgents as getCloudTalkAgents } from "@/lib/telephony/cloudtalk";
+
+// Cap save latency: a save runs Telegram MTProto resolve + Kommo getUsers +
+// CallGear get.employees + CloudTalk /agents/index.json sequentially in the
+// worst case. Each provider can rate-limit and retry up to 3× with backoff,
+// pushing total time toward 20s under contention. Past 30s the runtime
+// kills the request and the admin sees a confusing 504 instead of a
+// best-effort save with warnings.
+export const maxDuration = 30;
 
 // ─── GET: fetch managers for department ───────────────────────
 
@@ -295,6 +305,75 @@ export async function POST(request: NextRequest) {
       return null;
     };
 
+    // ── Step 3.6: Auto-resolve CallGear + CloudTalk IDs by name ──
+    // Same pattern as Kommo, except CloudTalk also matches by email since the
+    // CT agent records carry it reliably (CallGear sometimes does too but the
+    // suffix "(amoCRM)" / "(CloudTalk)" gets stripped by normalizeName).
+    // Failures are non-fatal — the OKK webhook still has the legacy auto-link
+    // path as fallback for managers that haven't placed a call yet.
+    const cgByName = new Map<string, string>();   // normalised name → cg id
+    const ctByName = new Map<string, string>();
+    const ctByEmail = new Map<string, string>();  // lowercase email → ct id
+    const TELEPHONY_NAME_ALIASES: Record<string, string[]> = {
+      ...KOMMO_NAME_ALIASES,
+      // Add telephony-specific drifts here if any surface — CallGear and
+      // CloudTalk both already strip the (amoCRM) suffix in our clients.
+    };
+
+    const normTel = (s: string): string =>
+      s.replace(/\(amoCRM\)/gi, "")
+        .replace(/[()]/g, "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
+
+    try {
+      const cgEmployees = await getCallGearEmployees();
+      for (const e of cgEmployees) {
+        if (!e.id) continue;
+        const idStr = String(e.id);
+        if (e.full_name) cgByName.set(normTel(e.full_name), idStr);
+        if (e.first_name && e.last_name) {
+          cgByName.set(normTel(`${e.first_name} ${e.last_name}`), idStr);
+        }
+      }
+      console.log(`[Managers API] Loaded ${cgByName.size} CallGear employees for auto-matching`);
+    } catch (err) {
+      warnings.push(`Не удалось загрузить сотрудников CallGear: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
+      const ctAgents = await getCloudTalkAgents();
+      for (const a of ctAgents) {
+        if (!a.id) continue;
+        const idStr = String(a.id);
+        const fullname = [a.firstname, a.lastname].filter(Boolean).join(" ").trim();
+        if (fullname) ctByName.set(normTel(fullname), idStr);
+        if (a.email) ctByEmail.set(a.email.toLowerCase().trim(), idStr);
+      }
+      console.log(
+        `[Managers API] Loaded ${ctByName.size} CloudTalk agents for auto-matching (${ctByEmail.size} with email)`,
+      );
+    } catch (err) {
+      warnings.push(`Не удалось загрузить агентов CloudTalk: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const lookupTelephonyId = (
+      map: Map<string, string>,
+      name: string,
+    ): string | null => {
+      const direct = map.get(normTel(name));
+      if (direct) return direct;
+      const aliases = TELEPHONY_NAME_ALIASES[name.trim()];
+      if (aliases) {
+        for (const alias of aliases) {
+          const hit = map.get(normTel(alias));
+          if (hit) return hit;
+        }
+      }
+      return null;
+    };
+
     // ── Step 4: Upsert each manager ──
     const results: (typeof masterManagers.$inferSelect)[] = [];
 
@@ -316,6 +395,26 @@ export async function POST(request: NextRequest) {
         warnings.push(`Kommo ID не найден для «${mgr.name}» — заполните вручную или проверьте имя в Kommo.`);
       }
 
+      // Telephony id precedence (same shape as Kommo above): explicit form
+      // input → existing saved value → auto-match by name against CallGear
+      // get.employees / CloudTalk /agents/index.json → null. Auto-match runs
+      // on EVERY save (not just first-time) so a manager renamed in CG/CT
+      // gets re-linked rather than silently losing call attribution.
+      const autoCg =
+        cgByName.size > 0 ? lookupTelephonyId(cgByName, mgr.name) : null;
+      const autoCt =
+        ctByName.size > 0 ? lookupTelephonyId(ctByName, mgr.name) : null;
+      const callgearEmployeeId =
+        mgr.callgearEmployeeId ?? existing?.callgearEmployeeId ?? autoCg ?? null;
+      const cloudtalkAgentId =
+        mgr.cloudtalkAgentId ?? existing?.cloudtalkAgentId ?? autoCt ?? null;
+      if (!mgr.callgearEmployeeId && !existing?.callgearEmployeeId && autoCg) {
+        console.log(`[Managers API] auto-matched CallGear id ${autoCg} for ${mgr.name}`);
+      }
+      if (!mgr.cloudtalkAgentId && !existing?.cloudtalkAgentId && autoCt) {
+        console.log(`[Managers API] auto-matched CloudTalk id ${autoCt} for ${mgr.name}`);
+      }
+
       const values = {
         name: mgr.name.trim(),
         telegramUsername: mgr.telegramUsername?.replace(/^@/, "").trim() || null,
@@ -325,10 +424,8 @@ export async function POST(request: NextRequest) {
         role: mgr.role || "manager",
         line: mgr.line || null,
         kommoUserId,
-        // Preserve existing cg_id/ct_id — these get auto-filled by webhooks and
-        // must survive Dashboard edits that don't explicitly set them.
-        callgearEmployeeId: mgr.callgearEmployeeId ?? existing?.callgearEmployeeId ?? null,
-        cloudtalkAgentId: mgr.cloudtalkAgentId ?? existing?.cloudtalkAgentId ?? null,
+        callgearEmployeeId,
+        cloudtalkAgentId,
         shiftStartTime: mgr.shiftStartTime ?? existing?.shiftStartTime ?? null,
         inOkk: mgr.inOkk,
         inRolevki: mgr.inRolevki,
