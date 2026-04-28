@@ -43,6 +43,7 @@ export async function GET(req: NextRequest) {
     const fromISO = url.searchParams.get("from");
     const toISO = url.searchParams.get("to") ?? fromISO;
     const typesParam = url.searchParams.get("types"); // comma-separated; omit = defaults
+    const managersParam = url.searchParams.get("managers"); // comma-separated manager ids; omit = all
     const skipSync = url.searchParams.get("skipSync") === "1";
 
     if (department !== "b2g" && department !== "b2b") {
@@ -97,7 +98,7 @@ export async function GET(req: NextRequest) {
     // Load managers for this department. Tracking is about individual
     // manager performance — ROPs and admins are excluded even if they're
     // active. A person promoted from manager→rop falls out of this view.
-    const managers = await d1Db
+    const allManagers = await d1Db
       .select({
         id: masterManagers.id,
         name: masterManagers.name,
@@ -115,8 +116,30 @@ export async function GET(req: NextRequest) {
       )
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));
 
+    if (allManagers.length === 0) {
+      return NextResponse.json({
+        department, dates: [], managers: [], allManagers: [], synced,
+      });
+    }
+
+    // Apply manager filter — `managers=` selects a subset; absence = all.
+    // We always echo back `allManagers` so the UI dropdown can render the
+    // full list regardless of the current filter selection.
+    const selectedManagerIds = managersParam
+      ? new Set(managersParam.split(",").filter(Boolean))
+      : null;
+    const managers = selectedManagerIds
+      ? allManagers.filter((m) => selectedManagerIds.has(m.id))
+      : allManagers;
+
     if (managers.length === 0) {
-      return NextResponse.json({ department, dates: [], managers: [], synced });
+      return NextResponse.json({
+        department,
+        dates: [],
+        managers: [],
+        allManagers: allManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
+        synced,
+      });
     }
 
     const managerIds = managers.map((m) => m.id);
@@ -238,6 +261,10 @@ export async function GET(req: NextRequest) {
       department,
       dates,
       managers: result,
+      // Full list (id+name+line) so the dropdown can render every active
+      // manager for this dept regardless of which subset is currently in the
+      // `managers=` filter. Stripped of timeline data to keep payload small.
+      allManagers: allManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
       synced,
       lastSyncedAt: syncState?.lastSyncedAt ?? null,
       lastError: syncState?.lastError ?? null,

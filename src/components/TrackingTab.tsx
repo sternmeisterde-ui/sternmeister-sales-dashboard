@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw, Loader2, Filter, ChevronDown, Check } from "lucide-react";
+import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import {
   EVENT_TYPES,
@@ -42,10 +42,17 @@ interface ManagerTimeline {
   days: DayTimeline[];
 }
 
+interface ManagerOption {
+  id: string;
+  name: string;
+  line: string | null;
+}
+
 interface TrackingResponse {
   department: string;
   dates: string[];
   managers: ManagerTimeline[];
+  allManagers: ManagerOption[];
   synced: boolean;
   lastSyncedAt: string | null;
   lastError: string | null;
@@ -121,11 +128,22 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   );
   const [filterOpen, setFilterOpen] = useState(false);
 
+  // Manager filter — null = "all" (no `managers=` param sent). Becomes a Set
+  // when the user opens the dropdown and toggles. Reset on department switch.
+  const [selectedManagerIds, setSelectedManagerIds] = useState<Set<string> | null>(null);
+  const [managerFilterOpen, setManagerFilterOpen] = useState(false);
+
   const [data, setData] = useState<TrackingResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [revalidating, setRevalidating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+
+  // Reset manager filter when switching department — the manager IDs from
+  // b2g aren't valid for b2b and would just show "no data" until cleared.
+  useEffect(() => {
+    setSelectedManagerIds(null);
+  }, [department]);
 
   // Client-side cache: keyed by department+from+to+types. Switching between
   // departments or flipping filters shows cached data instantly while a fresh
@@ -140,10 +158,16 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   }, [range.start, range.end, department]);
 
   const typesParam = useMemo(() => Array.from(selectedKeys).sort().join(","), [selectedKeys]);
+  // Stable string for the manager filter so cache key & fetch URL are
+  // deterministic. null → empty string → omit from query → "all" semantics.
+  const managersParam = useMemo(
+    () => (selectedManagerIds ? Array.from(selectedManagerIds).sort().join(",") : ""),
+    [selectedManagerIds],
+  );
 
   const cacheKey = useMemo(
-    () => `${queryKey.department}|${queryKey.from ?? ""}|${queryKey.to ?? ""}|${typesParam}`,
-    [queryKey.department, queryKey.from, queryKey.to, typesParam],
+    () => `${queryKey.department}|${queryKey.from ?? ""}|${queryKey.to ?? ""}|${typesParam}|${managersParam}`,
+    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam],
   );
 
   const fetchData = useCallback(
@@ -153,8 +177,14 @@ export default function TrackingTab({ department }: TrackingTabProps) {
       else setLoading(true);
       setErr(null);
       try {
-        const url = `/api/tracking?department=${queryKey.department}&from=${queryKey.from}&to=${queryKey.to}&types=${encodeURIComponent(typesParam)}`;
-        const res = await fetch(url, { cache: "no-store" });
+        const params = new URLSearchParams({
+          department: queryKey.department,
+          from: queryKey.from,
+          to: queryKey.to,
+          types: typesParam,
+        });
+        if (managersParam) params.set("managers", managersParam);
+        const res = await fetch(`/api/tracking?${params.toString()}`, { cache: "no-store" });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API ${res.status}: ${text}`);
@@ -169,7 +199,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
         setRevalidating(false);
       }
     },
-    [queryKey.department, queryKey.from, queryKey.to, typesParam, cacheKey],
+    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam, cacheKey],
   );
 
   // When inputs change: serve cached immediately if present (skeleton-free
@@ -229,6 +259,14 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           setOpen={setFilterOpen}
           selected={selectedKeys}
           onChange={setSelectedKeys}
+        />
+
+        <ManagersFilter
+          open={managerFilterOpen}
+          setOpen={setManagerFilterOpen}
+          allManagers={data?.allManagers ?? []}
+          selected={selectedManagerIds}
+          onChange={setSelectedManagerIds}
         />
 
         <button
@@ -571,6 +609,158 @@ function EventTypesFilter({ open, setOpen, selected, onChange }: EventTypesFilte
         <Filter className="w-3.5 h-3.5" />
         Типы событий
         <span className="text-slate-500">{selectedCrmCount}</span>
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {popover}
+    </>
+  );
+}
+
+// ==================== Managers filter popup ====================
+
+interface ManagersFilterProps {
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  allManagers: ManagerOption[];
+  /** null = "all" (no filter applied). Set with subset = filter active. */
+  selected: Set<string> | null;
+  onChange: (next: Set<string> | null) => void;
+}
+
+function ManagersFilter({ open, setOpen, allManagers, selected, onChange }: ManagersFilterProps) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [style, setStyle] = useState<React.CSSProperties>({});
+
+  useEffect(() => {
+    if (!open || !buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setStyle({
+      position: "fixed",
+      top: rect.bottom + 8,
+      left: rect.left,
+      width: 280,
+      maxHeight: "70vh",
+      zIndex: 100,
+    });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      const pop = document.getElementById("tracking-managers-popover");
+      if (pop?.contains(target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("mousedown", handler);
+    return () => window.removeEventListener("mousedown", handler);
+  }, [open, setOpen]);
+
+  // Group managers by line — same convention as the main list (line "1"/"2"/"3")
+  const grouped = useMemo(() => {
+    const byLine = new Map<string, ManagerOption[]>();
+    for (const m of allManagers) {
+      const k = m.line ? `Линия ${m.line}` : "Без линии";
+      let arr = byLine.get(k);
+      if (!arr) { arr = []; byLine.set(k, arr); }
+      arr.push(m);
+    }
+    return Array.from(byLine.entries());
+  }, [allManagers]);
+
+  const isAllSelected = selected === null;
+  const selectedCount = selected ? selected.size : allManagers.length;
+
+  const toggleOne = (id: string) => {
+    // First click after "all" → start with all minus the one being unticked.
+    const base = selected ?? new Set(allManagers.map((m) => m.id));
+    const next = new Set(base);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    // If user selected literally everyone, collapse back to null ("all") so
+    // the param is omitted and cache key matches the default state.
+    if (next.size === allManagers.length) onChange(null);
+    else onChange(next);
+  };
+
+  const selectAll = () => onChange(null);
+  const selectNone = () => onChange(new Set());
+
+  const buttonLabel = isAllSelected
+    ? `Все (${allManagers.length})`
+    : selected!.size === 0
+      ? "никто"
+      : `${selected!.size}/${allManagers.length}`;
+
+  const popover = open && typeof document !== "undefined" ? createPortal(
+    <div
+      id="tracking-managers-popover"
+      style={style}
+      className="rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col bg-slate-900"
+    >
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-950">
+        <span className="text-xs font-semibold text-white">Менеджеры</span>
+        <span className="text-[11px] text-slate-400 ml-auto">
+          {selectedCount}/{allManagers.length}
+        </span>
+        <button type="button" onClick={selectAll} className="text-[11px] text-blue-400 hover:text-blue-300 px-1.5">
+          Все
+        </button>
+        <button type="button" onClick={selectNone} className="text-[11px] text-rose-400 hover:text-rose-300 px-1.5">
+          Снять
+        </button>
+      </div>
+      <div className="overflow-y-auto flex-1 px-2 py-2">
+        {allManagers.length === 0 ? (
+          <div className="text-[11px] text-slate-500 px-2 py-4 text-center">Загрузка…</div>
+        ) : grouped.map(([groupName, items]) => (
+          <div key={groupName} className="mb-2">
+            <div className="text-[10px] uppercase tracking-widest text-slate-500 px-1 pb-1">{groupName}</div>
+            <div className="flex flex-col">
+              {items.map((m) => {
+                const checked = isAllSelected || (selected?.has(m.id) ?? false);
+                return (
+                  <label
+                    key={m.id}
+                    className="flex items-center gap-2 px-2 py-1 rounded-md text-xs cursor-pointer hover:bg-white/5"
+                  >
+                    <span
+                      className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                        checked ? "bg-blue-500 border-blue-500" : "border-slate-600"
+                      }`}
+                    >
+                      {checked && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleOne(m.id)}
+                      className="sr-only"
+                    />
+                    <span className="text-slate-200 truncate">{m.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 border border-white/5 hover:bg-slate-800 text-xs text-slate-300 transition-all"
+      >
+        <Users className="w-3.5 h-3.5" />
+        Менеджеры
+        <span className="text-slate-500">{buttonLabel}</span>
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {popover}
