@@ -1,6 +1,7 @@
 // ==================== Kommo event types (master list) ====================
 // All event types the Tracking tab can display. Keys are Kommo's internal
-// `type` field from /api/v4/events. Labels match the names the user gave.
+// `type` field from /api/v4/events. The full canonical list comes from
+// /api/v4/events/types?language_code=ru — labels match what Kommo returns.
 //
 // Categories:
 //   - "call" → blue segment (has real duration via note.params.duration)
@@ -13,7 +14,7 @@ export type EventCategory = "call" | "crm";
 
 export interface EventTypeDef {
   key: string;          // Kommo API type (stable)
-  label: string;        // Russian label (as provided by user)
+  label: string;        // Russian label (matches /events/types output)
   category: EventCategory;
   group: string;        // UI grouping for the filter popup
 }
@@ -46,6 +47,12 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { key: "company_unlinked", label: "Открепление компании", category: "crm", group: "Компании" },
 
   // ── Customers ──────────────────────────────────────────────────────
+  // NOTE: Kommo's /api/v4/events filter[entity] does NOT accept "customer"
+  // (only lead/contact/company/task). These types exist in Kommo's catalogue
+  // but are not currently fetchable by this account's API contract — the
+  // entity loop in fetchRawEvents skips `customer`. They remain here so the
+  // filter popup matches Simple Sales' UI; if Kommo enables customer scope
+  // later, fetchRawEvents will start returning rows automatically.
   { key: "customer_added", label: "Новый покупатель", category: "crm", group: "Покупатели" },
   { key: "customer_deleted", label: "Покупатель удален", category: "crm", group: "Покупатели" },
   { key: "customer_status_changed", label: "Изменение этапа покупателя", category: "crm", group: "Покупатели" },
@@ -64,11 +71,9 @@ export const EVENT_TYPES: EventTypeDef[] = [
   // ── Communications (non-call) ──────────────────────────────────────
   { key: "incoming_chat_message", label: "Входящее сообщение", category: "crm", group: "Коммуникации" },
   { key: "outgoing_chat_message", label: "Исходящее сообщение", category: "crm", group: "Коммуникации" },
-  // `internal_chat_message` rejected by Kommo's /events filter on this account
-  // (400 "Invalid params passed to filter" with key=type). Removed so the
-  // whole types batch stops 400ing. If Kommo re-enables it, restore the entry.
-  { key: "incoming_email", label: "Входящее письмо", category: "crm", group: "Коммуникации" },
-  { key: "outgoing_email", label: "Исходящее письмо", category: "crm", group: "Коммуникации" },
+  { key: "entity_direct_message", label: "Внутреннее сообщение", category: "crm", group: "Коммуникации" },
+  { key: "incoming_mail", label: "Входящее письмо", category: "crm", group: "Коммуникации" },
+  { key: "outgoing_mail", label: "Исходящее письмо", category: "crm", group: "Коммуникации" },
   { key: "incoming_sms", label: "Входящее SMS", category: "crm", group: "Коммуникации" },
   { key: "outgoing_sms", label: "Исходящее SMS", category: "crm", group: "Коммуникации" },
 
@@ -77,19 +82,22 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { key: "entity_tag_deleted", label: "Теги убраны", category: "crm", group: "Теги и сегменты" },
   { key: "entity_linked", label: "Прикрепление", category: "crm", group: "Теги и сегменты" },
   { key: "entity_unlinked", label: "Открепление", category: "crm", group: "Теги и сегменты" },
-  { key: "segment_added", label: "Добавлен в сегмент", category: "crm", group: "Теги и сегменты" },
-  { key: "segment_removed", label: "Удалён из сегмента", category: "crm", group: "Теги и сегменты" },
+  { key: "entity_segment_attached", label: "Добавлен в сегмент", category: "crm", group: "Теги и сегменты" },
+  { key: "entity_segment_detached", label: "Удалён из сегмента", category: "crm", group: "Теги и сегменты" },
   { key: "segment_created", label: "Сегмент создан", category: "crm", group: "Теги и сегменты" },
-  { key: "retargeting_added", label: "Добавление в ретаргетинг", category: "crm", group: "Теги и сегменты" },
-  { key: "retargeting_removed", label: "Удаление из ретаргетинга", category: "crm", group: "Теги и сегменты" },
+  { key: "targeting_in_note_added", label: "Добавление в ретаргетинг", category: "crm", group: "Теги и сегменты" },
+  { key: "targeting_out_note_added", label: "Удаление из ретаргетинга", category: "crm", group: "Теги и сегменты" },
 
   // ── Field changes ──────────────────────────────────────────────────
   { key: "entity_responsible_changed", label: "Ответственный изменен", category: "crm", group: "Изменения полей" },
   { key: "sale_field_changed", label: "Изменение поля \"Бюджет\"", category: "crm", group: "Изменения полей" },
   { key: "name_field_changed", label: "Изменение поля \"Название\"", category: "crm", group: "Изменения полей" },
+  // Generic AND per-id (`custom_field_<ID>_value_changed`) collapse into this
+  // for selection. Normalisation happens in timeline.ts so timed activity
+  // counts every per-field event under one filter checkbox.
   { key: "custom_field_value_changed", label: "Изменение поля", category: "crm", group: "Изменения полей" },
-  { key: "ltv_changed", label: "Сумма покупок", category: "crm", group: "Изменения полей" },
-  { key: "question_topic_defined", label: "Тема вопроса определена", category: "crm", group: "Изменения полей" },
+  { key: "ltv_field_changed", label: "Сумма покупок", category: "crm", group: "Изменения полей" },
+  { key: "intent_identified", label: "Тема вопроса определена", category: "crm", group: "Изменения полей" },
 
   // ── Notes / files / media ─────────────────────────────────────────
   { key: "common_note_added", label: "Новое примечание", category: "crm", group: "Примечания и файлы" },
@@ -97,7 +105,7 @@ export const EVENT_TYPES: EventTypeDef[] = [
   { key: "geo_note_added", label: "Новое примечание с гео-меткой", category: "crm", group: "Примечания и файлы" },
   { key: "service_note_added", label: "Новое системное примечание", category: "crm", group: "Примечания и файлы" },
   { key: "attachment_note_added", label: "Добавлен новый файл", category: "crm", group: "Примечания и файлы" },
-  { key: "dropbox_note_added", label: "Файл Dropbox", category: "crm", group: "Примечания и файлы" },
+  { key: "dropbox_attachment", label: "Файл Dropbox", category: "crm", group: "Примечания и файлы" },
   { key: "picture_opened", label: "Картинка была открыта", category: "crm", group: "Примечания и файлы" },
   { key: "picture_closed", label: "Картинка была закрыта", category: "crm", group: "Примечания и файлы" },
   { key: "video_opened", label: "Видео было открыто", category: "crm", group: "Примечания и файлы" },
@@ -105,31 +113,31 @@ export const EVENT_TYPES: EventTypeDef[] = [
 
   // ── Site / links / visits ─────────────────────────────────────────
   { key: "link_followed", label: "Переход по ссылке", category: "crm", group: "Сайт и ссылки" },
-  { key: "site_visit", label: "Заход на сайт", category: "crm", group: "Сайт и ссылки" },
+  { key: "site_visit_note_added", label: "Заход на сайт", category: "crm", group: "Сайт и ссылки" },
   { key: "page_mention", label: "Упоминание страницы", category: "crm", group: "Сайт и ссылки" },
 
   // ── Purchases / invoices / NPS ────────────────────────────────────
-  { key: "purchase_added", label: "Покупка", category: "crm", group: "Продажи и счета" },
+  { key: "transaction_added", label: "Покупка", category: "crm", group: "Продажи и счета" },
   { key: "invoice_paid", label: "При оплате счета/покупки", category: "crm", group: "Продажи и счета" },
   { key: "invoice_created", label: "Счет/покупка создана", category: "crm", group: "Продажи и счета" },
   { key: "nps_rate_added", label: "Новая оценка NPS", category: "crm", group: "Продажи и счета" },
-  { key: "cashier_message", label: "Сообщение кассиру", category: "crm", group: "Продажи и счета" },
+  { key: "message_to_cashier_note_added", label: "Сообщение кассиру", category: "crm", group: "Продажи и счета" },
 
   // ── Automation / robot / AI ───────────────────────────────────────
   { key: "robot_replied", label: "Ответ робота", category: "crm", group: "Автоматизация и AI" },
-  { key: "kommo_ai", label: "Kommo AI", category: "crm", group: "Автоматизация и AI" },
-  { key: "key_action", label: "Ключевое действие", category: "crm", group: "Автоматизация и AI" },
+  { key: "ai_result", label: "Kommo AI", category: "crm", group: "Автоматизация и AI" },
+  { key: "key_action_completed", label: "Ключевое действие", category: "crm", group: "Автоматизация и AI" },
 
   // ── Talks / conversations ─────────────────────────────────────────
   { key: "talk_created", label: "Беседа создана", category: "crm", group: "Беседы" },
   { key: "talk_closed", label: "Беседа закрыта", category: "crm", group: "Беседы" },
-  { key: "no_reply_needed", label: "Не требует ответа", category: "crm", group: "Беседы" },
-  { key: "reply_time_exceeded", label: "Превышено время на ответ", category: "crm", group: "Беседы" },
-  { key: "subscribed", label: "подписан на", category: "crm", group: "Беседы" },
-  { key: "unsubscribed", label: "Unsubscribed from", category: "crm", group: "Беседы" },
+  { key: "conversation_answered", label: "Не требует ответа", category: "crm", group: "Беседы" },
+  { key: "talk_missed_event", label: "Превышено время на ответ", category: "crm", group: "Беседы" },
+  { key: "meta_chat_subscription_added", label: "подписан на", category: "crm", group: "Беседы" },
+  { key: "meta_chat_subscription_removed", label: "Unsubscribed from", category: "crm", group: "Беседы" },
 
   // ── Misc ──────────────────────────────────────────────────────────
-  { key: "entities_merged", label: "Выполнено объединение", category: "crm", group: "Прочее" },
+  { key: "entity_merged", label: "Выполнено объединение", category: "crm", group: "Прочее" },
   { key: "zoom_conference", label: "Zoom conference", category: "crm", group: "Прочее" },
 ];
 
@@ -145,3 +153,14 @@ export const CALL_TYPES = new Set<string>(
 export const DEFAULT_SELECTED_KEYS: string[] = EVENT_TYPES
   .filter((t) => t.category === "crm")
   .map((t) => t.key);
+
+// Kommo emits one event type per custom field (e.g. `custom_field_879824_value_changed`)
+// IN ADDITION to the generic `custom_field_value_changed`. The per-id variants don't
+// appear in EVENT_TYPES (there are 200+ of them, account-specific). Normalise them to
+// the generic so a single filter checkbox covers all field-change activity.
+const CUSTOM_FIELD_PER_ID = /^custom_field_\d+_value_changed$/;
+
+export function normalizeEventType(rawType: string): string {
+  if (CUSTOM_FIELD_PER_ID.test(rawType)) return "custom_field_value_changed";
+  return rawType;
+}

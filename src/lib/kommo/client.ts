@@ -751,6 +751,14 @@ export interface CallNoteRow {
   createdAt: number;
   duration: number;
   callStatus: number | undefined;
+  // Full Kommo params — captured for cross-reference with telephony CDR
+  // (uniq), recording playback (link), debug (phone, source), and analytics
+  // (callResult). Stored in tracking_events.raw JSONB; no schema migration.
+  uniq?: string;
+  pbxSource?: string;
+  link?: string;
+  phone?: string;
+  callResult?: string;
 }
 
 export async function getAllCallNotesByDate(
@@ -837,6 +845,11 @@ export async function getAllCallNotesByDate(
             createdAt: n.created_at,
             duration: Number(n.params?.duration) || 0,
             callStatus: n.params?.call_status,
+            uniq: n.params?.uniq,
+            pbxSource: n.params?.source,
+            link: n.params?.link,
+            phone: n.params?.phone,
+            callResult: n.params?.call_result,
           });
         }
 

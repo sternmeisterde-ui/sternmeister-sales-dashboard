@@ -74,7 +74,33 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        filter[updated_at][from/to] (≡ created_at for unedited PBX call
 //        notes, which is the overwhelming majority). Force re-backfill so
 //        v7-shaped tracking_events get the missing calls. (2026-04-28)
-const CURRENT_FILTER_VERSION = 8;
+//   v9 — corrected EVENT_TYPES keys to match Kommo's canonical /events/types
+//        catalogue. 19 type-keys were guesses that 400'd at the API and got
+//        permanently blacklisted on first sync after each restart, dropping
+//        whole categories of CRM activity from the timeline:
+//          • emails: incoming_email/outgoing_email → incoming_mail/outgoing_mail
+//          • merges: entities_merged → entity_merged
+//          • segments: segment_added/removed → entity_segment_attached/detached
+//          • retargeting: retargeting_added/removed → targeting_in/out_note_added
+//          • sales: purchase_added → transaction_added; cashier_message → message_to_cashier_note_added
+//          • site: site_visit → site_visit_note_added
+//          • AI: kommo_ai → ai_result; key_action → key_action_completed
+//          • talks: no_reply_needed → conversation_answered; reply_time_exceeded → talk_missed_event
+//          • subscriptions: subscribed/unsubscribed → meta_chat_subscription_added/removed
+//          • files: dropbox_note_added → dropbox_attachment
+//          • fields: ltv_changed → ltv_field_changed; question_topic_defined → intent_identified
+//        Also added entity_direct_message (Внутреннее сообщение) and unblocked
+//        incoming_chat_message which is now in Kommo's catalogue. Per-field-id
+//        custom_field_<ID>_value_changed events normalise to the generic key in
+//        the timeline render so one checkbox covers all field changes.
+//        Re-backfill picks up everything that was previously dropped. (2026-04-28)
+//   v10 — captured full Kommo call params in raw JSONB (uniq, pbx_source,
+//        link, phone, call_status, call_result). Pre-v10 rows have only
+//        {source, call_status} in raw — to keep tracking_events clean of
+//        stale partials, the user TRUNCATEd the table along with this bump.
+//        Re-backfill repopulates with full raw + corrected v9 type-keys.
+//        (2026-04-28)
+const CURRENT_FILTER_VERSION = 10;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
@@ -253,7 +279,27 @@ export async function syncDepartment(
           entityType: n.entityType,
           entityId: n.entityId,
           noteId: n.noteId,
-          raw: { source: "notes", call_status: n.callStatus } as Record<string, unknown>,
+          raw: {
+            // Marker — distinguishes /notes-sourced rows from /events-sourced
+            // ones during debug, since both share tracking_events table.
+            source: "notes",
+            // Full Kommo params for accurate accounting & cross-reference:
+            //   call_status — 1=left_msg 2=callback 3=no_answer 4=answered
+            //                 5=busy 6=wrong_num 7=phone_off
+            //   call_result — free-text result if PBX writes one
+            //   uniq        — PBX call ID; matches CDR rows in
+            //                 analytics.communications for sanity-checks
+            //   pbx_source  — which integration wrote the note
+            //                 (callgear / cloudtalk / etc)
+            //   link        — recording URL (UI can deep-link to playback)
+            //   phone       — caller/callee number for context
+            call_status: n.callStatus,
+            call_result: n.callResult,
+            uniq: n.uniq,
+            pbx_source: n.pbxSource,
+            link: n.link,
+            phone: n.phone,
+          } as Record<string, unknown>,
         };
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);

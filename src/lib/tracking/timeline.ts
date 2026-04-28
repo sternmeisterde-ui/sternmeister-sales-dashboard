@@ -1,4 +1,4 @@
-import { CALL_TYPES } from "./event-types";
+import { CALL_TYPES, normalizeEventType } from "./event-types";
 
 // ==================== Timeline builder ====================
 // Input:
@@ -162,6 +162,11 @@ export function buildTimeline(params: {
   const callAt = new Array<{ start: number; end: number; type: string; dur: number } | null>(total).fill(null);
   // CRM event starts (for labels / cluster merging)
   const crmStarts: Array<{ minute: number; type: string }> = [];
+  // EXACT seconds on the line within the shift window. Sums each call's
+  // clipped duration in seconds, never the minute-grid count. Used as the
+  // canonical "сколько на линии" metric — the minute grid below has a 1-min
+  // floor for visibility and would over-count a barrage of <60s calls.
+  let callSecExact = 0;
 
   for (const ev of events) {
     const evMs = ev.createdAt.getTime();
@@ -174,6 +179,17 @@ export function buildTimeline(params: {
       // (Missed calls show up with duration = 0.)
       if (!ev.durationSec || ev.durationSec <= 0) continue;
 
+      // Exact metric: seconds inside the shift window (clipped at both ends).
+      // A 19:55→20:30 call contributes 5 min, an 08:55→09:05 call contributes 5 min.
+      const callStartMs = Math.max(evMs, shiftStartUtcMs);
+      const callEndMs = Math.min(evMs + ev.durationSec * 1000, shiftEndUtcMs);
+      if (callEndMs > callStartMs) {
+        callSecExact += (callEndMs - callStartMs) / 1000;
+      }
+
+      // Visual grid: round-to-minute with 1-min floor so a 10s call still
+      // shows as a tick. Over-counts call MINUTES, but pct/minutes math below
+      // ignores the grid and uses callSecExact instead.
       const startMinFloat = (evMs - shiftStartUtcMs) / 60_000;
       const durationMin = Math.max(1, Math.round(ev.durationSec / 60));
       let startMin = Math.max(0, Math.floor(startMinFloat));
@@ -190,8 +206,10 @@ export function buildTimeline(params: {
       // Record tooltip source (use first minute as anchor)
       callAt[startMin] = { start: startMin, end: endMin, type: ev.eventType, dur: ev.durationSec };
     } else {
-      // CRM event — only count if selected by filter
-      if (!selectedCrmTypes.has(ev.eventType)) continue;
+      // CRM event — only count if selected by filter. Per-id custom_field
+      // variants collapse to the generic key so one checkbox covers them all.
+      const filterKey = normalizeEventType(ev.eventType);
+      if (!selectedCrmTypes.has(filterKey)) continue;
       if (evMs < shiftStartUtcMs) continue;
 
       const minute = Math.floor((evMs - shiftStartUtcMs) / 60_000);
@@ -258,15 +276,16 @@ export function buildTimeline(params: {
     cursor = end;
   }
 
-  // Percentages
-  let callMin = 0;
+  // Side-panel metrics: independent of the visual minute-grid.
+  //   • call comes from callSecExact — actual seconds on the line, clipped
+  //     to shift. The grid is allowed to over-count short calls for the
+  //     reader's eyes, but the numbers next to the bar must be honest.
+  //   • crm = number of grid cells == 1 (1 event = 1 minute, intentional).
+  //   • idle = total − call − crm, never below 0.
+  const callMin = Math.round(callSecExact / 60);
   let crmMin = 0;
-  let idleMin = 0;
-  for (const s of segments) {
-    if (s.type === "call") callMin += s.durationMin;
-    else if (s.type === "crm") crmMin += s.durationMin;
-    else idleMin += s.durationMin;
-  }
+  for (let i = 0; i < total; i++) if (grid[i] === 1) crmMin++;
+  const idleMin = Math.max(0, total - callMin - crmMin);
   const pct = {
     call: total > 0 ? Math.round((callMin / total) * 100) : 0,
     crm: total > 0 ? Math.round((crmMin / total) * 100) : 0,
