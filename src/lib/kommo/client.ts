@@ -779,8 +779,21 @@ export async function getAllCallNotesByDate(
         const url = new URL(`${baseUrl}/${entityType}/notes`);
         url.searchParams.append("filter[note_type][]", "call_in");
         url.searchParams.append("filter[note_type][]", "call_out");
-        url.searchParams.set("filter[created_at][from]", String(dateFrom));
-        url.searchParams.set("filter[created_at][to]", String(dateTo));
+        // Kommo /notes docs only document filter[updated_at][from/to] —
+        // filter[created_at] is NOT a recognized filter on this endpoint.
+        // Sending it appears to be silently ignored, so the endpoint
+        // returned the most recent notes (dominated by chat messages on
+        // busy accounts) regardless of date range — that's why dashboard
+        // call counts collapsed to ~0 even on workdays. Note that
+        // updated_at == created_at for any note that's never been edited
+        // (almost all PBX-written call notes), so this preserves call-time
+        // semantics in practice. The note's `created_at` field in the
+        // response still holds the actual call timestamp.
+        // Order ascending so pagination doesn't drop oldest calls past the
+        // 250-row page limit on busy accounts.
+        url.searchParams.set("filter[updated_at][from]", String(dateFrom));
+        url.searchParams.set("filter[updated_at][to]", String(dateTo));
+        url.searchParams.set("order[updated_at]", "asc");
         url.searchParams.set("limit", "250");
         url.searchParams.set("page", String(page));
 

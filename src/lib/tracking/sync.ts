@@ -65,7 +65,16 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        such filter — we get every call and attribute via createdBy with
 //        responsibleUserId fallback. Same fix as ETL commit f70e8f5.
 //        (2026-04-28)
-const CURRENT_FILTER_VERSION = 7;
+//   v8 — getAllCallNotesByDate was sending filter[created_at][from/to],
+//        but Kommo's /{entity}/notes endpoint only documents
+//        filter[updated_at]. The created_at filter was silently ignored
+//        and the endpoint returned the most recent 250 notes overall —
+//        dominated by chat messages on busy accounts — so v7's call
+//        backfill landed almost zero call rows. Switched to
+//        filter[updated_at][from/to] (≡ created_at for unedited PBX call
+//        notes, which is the overwhelming majority). Force re-backfill so
+//        v7-shaped tracking_events get the missing calls. (2026-04-28)
+const CURRENT_FILTER_VERSION = 8;
 
 /** Load Kommo-linked managers for a department. Only role='manager' — the
  *  Tracking tab is about individual manager performance; ROPs/admins have
