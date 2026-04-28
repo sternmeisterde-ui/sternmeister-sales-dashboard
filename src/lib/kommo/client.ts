@@ -300,23 +300,52 @@ export async function getLeads(
 
 /**
  * Fetch tasks. Results cached for 5 minutes.
+ *
+ * Without `kommoUserIds`, fetches the whole account — slow on busy accounts
+ * (was the cause of dashboard department-switch hangs after we raised
+ * maxPages to 100). When the caller knows whose tasks it actually needs,
+ * pass them as `kommoUserIds` to use Kommo's filter[responsible_user_id][]
+ * (capped at 10 IDs per request, batched). For 16 managers this typically
+ * cuts the response size 50–200×.
  */
 export async function getTasks(
   isCompleted: boolean = false,
-  // Raised from 10 → 100 (× limit=250) so the account-wide overdue-tasks
-  // fetch for dashboard's "Просрочено задач" metric doesn't silently
-  // truncate on busy accounts. Cached 5 min so the higher cap doesn't cost
-  // per-request — first call backfills, rest hit cache.
-  maxPages = 100
+  kommoUserIds?: number[],
+  maxPages = 20
 ): Promise<KommoTask[]> {
-  const cacheKey = `tasks:${isCompleted}:${maxPages}`;
+  const sortedIds = kommoUserIds && kommoUserIds.length > 0
+    ? [...kommoUserIds].sort((a, b) => a - b).join(",")
+    : "all";
+  const cacheKey = `tasks:${isCompleted}:${sortedIds}:${maxPages}`;
 
-  return cached(cacheKey, CACHE_TTL.TASKS, () => {
-    const params: Record<string, string> = {};
-    if (!isCompleted) {
-      params["filter[is_completed]"] = "0";
+  return cached(cacheKey, CACHE_TTL.TASKS, async () => {
+    if (!kommoUserIds || kommoUserIds.length === 0) {
+      // Account-wide fetch (legacy behaviour) — keep as a fallback for any
+      // ad-hoc caller that doesn't have a manager list.
+      const params: Record<string, string> = {};
+      if (!isCompleted) params["filter[is_completed]"] = "0";
+      return kommoGetAll<KommoTask>("/tasks", "tasks", params, maxPages);
     }
-    return kommoGetAll<KommoTask>("/tasks", "tasks", params, maxPages);
+
+    // Filter by responsible_user_id — Kommo caps this filter at 10 IDs per
+    // call, so batch and dedup by task id.
+    const USER_BATCH = 10;
+    const seen = new Map<number, KommoTask>();
+    for (let i = 0; i < kommoUserIds.length; i += USER_BATCH) {
+      const batch = kommoUserIds.slice(i, i + USER_BATCH);
+      const params: Record<string, string> = {};
+      if (!isCompleted) params["filter[is_completed]"] = "0";
+      // kommoGetAll only supports `Record<string, string>`, so encode the
+      // multi-value filter as a comma-separated string. Kommo accepts both
+      // PHP `[]` array form and comma-list for filter[responsible_user_id]
+      // — comma-list is shorter and works.
+      params["filter[responsible_user_id]"] = batch.join(",");
+      const batchTasks = await kommoGetAll<KommoTask>("/tasks", "tasks", params, maxPages);
+      for (const t of batchTasks) {
+        if (!seen.has(t.id)) seen.set(t.id, t);
+      }
+    }
+    return Array.from(seen.values());
   });
 }
 

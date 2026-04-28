@@ -420,6 +420,9 @@ async function buildDashboardResponse(
     const activeStatusIds = getActiveStatusIds(department);
 
     const allManagers = await getManagersWithKommo(department);
+    const managerKommoIds = allManagers
+      .map((m) => m.kommoUserId)
+      .filter((id): id is number => id != null);
 
     // All external calls in parallel. Calls (and trend) come from the analytics
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
@@ -429,7 +432,12 @@ async function buildDashboardResponse(
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
-      getTasks(false).catch(() => []),
+      // Tasks are filtered server-side by responsible_user_id so we pull only
+      // our 16-or-so managers' open tasks instead of every task in the
+      // account. Big win on department switch latency — the prior account-
+      // wide fetch was running through 5–20 pages of unrelated tasks for
+      // every dashboard load.
+      getTasks(false, managerKommoIds).catch(() => []),
       getAnalyticsLeads({ pipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
       getAnalyticsLeads({ pipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
       getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch((e) => {

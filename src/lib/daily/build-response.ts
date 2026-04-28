@@ -699,7 +699,15 @@ export async function buildDailyResponse(department: string, period: string, dat
   const [snapshotActiveLeads, tasks, wonLeads, lostLeads, analyticsCallMap, termsWonLeads, newLeadsInPeriod, termAACount, closedAfterDate] = await Promise.all([
     // Snapshot: all active leads (closed_at IS NULL). One SQL query, ~50ms.
     getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: allActiveStatusIds, activeOnly: true }).catch(trackError("snapshot leads")),
-    isHistorical ? Promise.resolve([] as KommoTask[]) : getTasks(false).catch(trackError("tasks")),
+    // Filter tasks server-side by responsible_user_id so we pull only our
+    // managers' open tasks (vs the entire account). Cuts Daily's main-thread
+    // wait by ~10× on busy accounts.
+    isHistorical
+      ? Promise.resolve([] as KommoTask[])
+      : getTasks(
+          false,
+          allManagers.map((m) => m.kommoUserId).filter((id): id is number => id != null),
+        ).catch(trackError("tasks")),
     getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(trackError("won leads")),
     getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(trackError("lost leads")),
     // Call metrics come from the analytics DB (integrator mirror). Keyed by master_managers.id.
