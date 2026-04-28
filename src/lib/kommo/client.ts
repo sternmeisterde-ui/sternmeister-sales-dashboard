@@ -769,53 +769,77 @@ export async function getAllCallNotesByDate(
   // Track seen note IDs to deduplicate across entity endpoints
   const seen = new Set<number>();
 
-  // Iterate every entity type Kommo's /notes accepts. Missing `companies`
-  // would silently undercount calls logged on company entities (B2B
-  // accounts can have a meaningful share of these).
+  // Iterate every entity type Kommo's /notes accepts. Each entity is
+  // wrapped in try/catch so a single endpoint failure (account without
+  // permission, endpoint not supported for that entity, or 5xx after
+  // retries) doesn't abort the whole call-fetch — losing one entity's
+  // worth of calls is much better than losing all of them and watching
+  // dashboard call counts go to zero.
   for (const entityType of ["contacts", "leads", "companies"] as const) {
-    let page = 1;
-    while (page <= maxPages) {
-      const url = new URL(`${baseUrl}/${entityType}/notes`);
-      url.searchParams.append("filter[note_type][]", "call_in");
-      url.searchParams.append("filter[note_type][]", "call_out");
-      url.searchParams.set("filter[created_at][from]", String(dateFrom));
-      url.searchParams.set("filter[created_at][to]", String(dateTo));
-      url.searchParams.set("limit", "250");
-      url.searchParams.set("page", String(page));
+    try {
+      let page = 1;
+      while (page <= maxPages) {
+        const url = new URL(`${baseUrl}/${entityType}/notes`);
+        url.searchParams.append("filter[note_type][]", "call_in");
+        url.searchParams.append("filter[note_type][]", "call_out");
+        url.searchParams.set("filter[created_at][from]", String(dateFrom));
+        url.searchParams.set("filter[created_at][to]", String(dateTo));
+        url.searchParams.set("limit", "250");
+        url.searchParams.set("page", String(page));
 
-      const res = await rateLimitedFetch(url.toString(), { headers });
-      if (res.status === 204) break;
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Kommo ${entityType}/notes ${res.status}: ${text}`);
+        const res = await rateLimitedFetch(url.toString(), { headers });
+        if (res.status === 204) break;
+        if (!res.ok) {
+          const text = await res.text();
+          // Soft-skip 4xx for this entity (e.g. account doesn't have
+          // /companies/notes enabled, or note_type filter not supported
+          // there) — fall through to the next entity instead of taking
+          // down the whole call fetch.
+          if (res.status >= 400 && res.status < 500) {
+            console.warn(
+              `[getAllCallNotesByDate] ${entityType}/notes ${res.status} — skipping entity: ${text.slice(0, 200)}`,
+            );
+            break;
+          }
+          // 5xx → throw into the per-entity catch so one entity's outage
+          // doesn't take down the others.
+          throw new Error(`Kommo ${entityType}/notes ${res.status}: ${text}`);
+        }
+
+        const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
+        const notes = data._embedded?.notes ?? [];
+
+        for (const n of notes) {
+          if (seen.has(n.id)) continue;
+          seen.add(n.id);
+          result.push({
+            type: n.note_type,
+            noteId: n.id,
+            entityType:
+              entityType === "contacts"
+                ? "contact"
+                : entityType === "companies"
+                  ? "company"
+                  : "lead",
+            entityId: n.entity_id,
+            createdBy: n.created_by,
+            responsibleUserId: n.responsible_user_id,
+            createdAt: n.created_at,
+            duration: Number(n.params?.duration) || 0,
+            callStatus: n.params?.call_status,
+          });
+        }
+
+        if (!data._links?.next) break;
+        page++;
       }
-
-      const data = (await res.json()) as KommoPaginatedResponse<KommoCallNote>;
-      const notes = data._embedded?.notes ?? [];
-
-      for (const n of notes) {
-        if (seen.has(n.id)) continue;
-        seen.add(n.id);
-        result.push({
-          type: n.note_type,
-          noteId: n.id,
-          entityType:
-            entityType === "contacts"
-              ? "contact"
-              : entityType === "companies"
-                ? "company"
-                : "lead",
-          entityId: n.entity_id,
-          createdBy: n.created_by,
-          responsibleUserId: n.responsible_user_id,
-          createdAt: n.created_at,
-          duration: Number(n.params?.duration) || 0,
-          callStatus: n.params?.call_status,
-        });
-      }
-
-      if (!data._links?.next) break;
-      page++;
+    } catch (err) {
+      // Per-entity isolation — log and move on. The other entities still
+      // contribute to `result`, and the next sync can re-attempt this one.
+      console.error(
+        `[getAllCallNotesByDate] ${entityType}/notes failed, continuing with other entities:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
