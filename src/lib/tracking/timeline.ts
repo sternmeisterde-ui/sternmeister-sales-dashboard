@@ -29,6 +29,14 @@ export interface TimelineEvent {
   eventType: string;
   createdAt: Date;
   durationSec: number;
+  /**
+   * Kommo entity scope: "lead" | "contact" | "company" | "task" | null.
+   * Needed for filtering: Kommo emits one generic `entity_linked` /
+   * `entity_unlinked` for every type of attachment, with the actual scope
+   * carried in this column. The UI filter offers entity-specific keys
+   * (`lead_linked`, `contact_linked`, …) — we expand them at match time.
+   */
+  entityType?: string | null;
 }
 
 export interface TimelineSegment {
@@ -206,10 +214,21 @@ export function buildTimeline(params: {
       // Record tooltip source (use first minute as anchor)
       callAt[startMin] = { start: startMin, end: endMin, type: ev.eventType, dur: ev.durationSec };
     } else {
-      // CRM event — only count if selected by filter. Per-id custom_field
-      // variants collapse to the generic key so one checkbox covers them all.
-      const filterKey = normalizeEventType(ev.eventType);
-      if (!selectedCrmTypes.has(filterKey)) continue;
+      // CRM event — only count if selected by filter. Three matching paths:
+      //   1. direct: eventType matches a selected key (most events)
+      //   2. per-id custom_field_<ID>_value_changed → generic
+      //   3. entity_linked / entity_unlinked carry entity_type — they
+      //      light up the specific lead_linked / contact_linked / etc.
+      //      checkbox via the entity_type column. This covers Kommo's
+      //      "all link events emit as entity_*, with entity scope in
+      //      a separate column" semantics.
+      const directKey = normalizeEventType(ev.eventType);
+      let matched = selectedCrmTypes.has(directKey);
+      if (!matched && (ev.eventType === "entity_linked" || ev.eventType === "entity_unlinked") && ev.entityType) {
+        const suffix = ev.eventType === "entity_linked" ? "_linked" : "_unlinked";
+        matched = selectedCrmTypes.has(`${ev.entityType}${suffix}`);
+      }
+      if (!matched) continue;
       if (evMs < shiftStartUtcMs) continue;
 
       const minute = Math.floor((evMs - shiftStartUtcMs) / 60_000);

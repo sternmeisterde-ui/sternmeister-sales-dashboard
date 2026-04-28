@@ -193,6 +193,11 @@ export async function GET(req: NextRequest) {
         eventType: trackingEvents.eventType,
         createdAt: trackingEvents.createdAt,
         durationSec: trackingEvents.durationSec,
+        // entity_type carries the scope for entity_linked/entity_unlinked
+        // (Kommo emits one generic type for all link operations and puts
+        // "lead"/"contact"/"company" in this column). buildTimeline uses
+        // it to match the entity-specific filter checkboxes.
+        entityType: trackingEvents.entityType,
       })
       .from(trackingEvents)
       .where(
@@ -222,6 +227,7 @@ export async function GET(req: NextRequest) {
         eventType: e.eventType,
         createdAt: new Date(e.createdAt),
         durationSec: e.durationSec ?? 0,
+        entityType: e.entityType,
       });
     }
 
