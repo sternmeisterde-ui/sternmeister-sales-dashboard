@@ -444,6 +444,10 @@ async function fetchOkkData(
     const acc = accMap.get(p);
     if (!acc) continue;
 
+    // Reconciliation guarantee: a call is counted by the per-manager bucket
+    // ONLY if the per-period bucket also accepted it. Otherwise a row whose
+    // blocks all have max_score=0 (processBlocks → had=false) would be
+    // skipped period-side but still bump the manager total — totals diverge.
     let had: boolean;
     if (isAllFunnels) {
       const funnel = funnelLabelForOkk(department, row.promptType);
@@ -451,7 +455,8 @@ async function fetchOkkData(
     } else {
       had = processBlocks(blocks, acc, row.totalScore);
     }
-    if (had) processedCount++;
+    if (!had) continue;
+    processedCount++;
 
     const mgrKey = row.managerId ?? NO_MANAGER_KEY;
     if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
@@ -600,6 +605,8 @@ async function fetchRoleplayData(
     const acc = accMap.get(p);
     if (!acc) continue;
 
+    // See reconciliation note in fetchOkkData — manager bucket follows the
+    // period bucket's accept/reject decision.
     let had: boolean;
     if (isAllFunnels) {
       const funnel = funnelLabelForRoleplay(department, row.callType);
@@ -607,7 +614,8 @@ async function fetchRoleplayData(
     } else {
       had = processBlocks(blocks, acc, row.score ?? null);
     }
-    if (had) processedCount++;
+    if (!had) continue;
+    processedCount++;
 
     const mgrKey = row.userId ?? NO_MANAGER_KEY;
     if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());

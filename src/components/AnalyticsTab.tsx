@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
@@ -182,8 +182,13 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     return params;
   }, [department, source, line, groupBy, managerId]);
 
+  // Loading-state toggle uses a ref so it doesn't end up in the deps array
+  // — having `data` as a dep caused fetchData to get a new identity after
+  // every successful response, which re-fired the effect and hammered the
+  // API in a tight refetch loop.
+  const hasDataRef = useRef(false);
   const fetchData = useCallback(async (signal?: AbortSignal) => {
-    if (!data) setLoading(true);
+    if (!hasDataRef.current) setLoading(true);
     setError(null);
     try {
       const params = buildParams(dateRange);
@@ -193,13 +198,14 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
       const json = await res.json();
       if (!json.success) throw new Error(json.error || "Unknown error");
       setData(json.data);
+      hasDataRef.current = true;
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [buildParams, dateRange, data]);
+  }, [buildParams, dateRange]);
 
   const fetchCompareData = useCallback(async (signal?: AbortSignal) => {
     if (!compareMode) return;
@@ -822,9 +828,13 @@ function CompareManagerRows({ mgr, blockNames, isCollapsed, onToggle }: {
         <td className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${getCriteriaColor(scoreB)} ${getCriteriaBg(scoreB)}`}>{fmtScore(scoreB)}</td>
         <td className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${getDeltaColor(scoreA, scoreB)}`}>{fmtDelta(scoreA, scoreB)}</td>
       </tr>
-      {!isCollapsed && blockNames.map((bName, bi) => {
-        const bScoreA = mgr.a?.blocks[bi]?.score ?? null;
-        const bScoreB = mgr.b?.blocks[bi]?.score ?? null;
+      {!isCollapsed && blockNames.map((bName) => {
+        // Look up by name, not positional index — when dataA and dataB
+        // have different block sets (e.g. after a criteria edit) the
+        // positional access returns the wrong row's score for the union
+        // entries, silently corrupting the delta column.
+        const bScoreA = mgr.a?.blocks.find((b) => b.name === bName)?.score ?? null;
+        const bScoreB = mgr.b?.blocks.find((b) => b.name === bName)?.score ?? null;
         return (
           <tr key={`${mgr.id}-${bName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[10px] text-slate-500 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{bName}</td>
