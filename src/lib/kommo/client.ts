@@ -109,6 +109,28 @@ export function getKommoHealth() {
   };
 }
 
+/**
+ * Resolve the Kommo API host, rejecting user-facing kommo.com subdomains as
+ * those are fronted by nginx and return bare 403 on /api/v4 requests. Valid
+ * API hosts on Kommo start with `api-` (regional shards: api-c, api-b…) or
+ * `api.`. Anything else looking like `${account}.kommo.com` is the user-facing
+ * host — silently using it is the exact misconfiguration that took the
+ * Анализ pipeline down for two days, so we hard-reject it with a clear
+ * warning instead of letting it become a 403 deep in a fetch loop.
+ */
+function resolveKommoApiHost(envValue: string | undefined): string {
+  const fallback = "api-c.kommo.com";
+  if (!envValue) return fallback;
+  if (envValue.endsWith(".kommo.com") && !/^api[-.]/.test(envValue)) {
+    console.warn(
+      `[Kommo] KOMMO_API_DOMAIN="${envValue}" is a user-facing host (nginx 403s on /api/v4). ` +
+        `Forcing API shard host "${fallback}" instead. Set KOMMO_API_DOMAIN to api-c.kommo.com (or a real shard) to silence this.`,
+    );
+    return fallback;
+  }
+  return envValue;
+}
+
 function ensureKommoConfig(): Promise<void> {
   const needsRefresh = _configLoadedAt > 0 && (Date.now() - _configLoadedAt) > CONFIG_REFRESH_MS;
 
@@ -119,7 +141,7 @@ function ensureKommoConfig(): Promise<void> {
       // 1. Check env vars first
       if (process.env.KOMMO_ACCESS_TOKEN) {
         _cachedToken = process.env.KOMMO_ACCESS_TOKEN;
-        _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+        _cachedDomain = resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
         _configLoadedAt = Date.now();
         return;
       }
@@ -138,7 +160,7 @@ function ensureKommoConfig(): Promise<void> {
         const rows = await db.select().from(kommoTokens).limit(1);
         if (rows.length > 0) {
           _cachedToken = rows[0].accessToken;
-          _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+          _cachedDomain = resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
           _configLoadedAt = Date.now();
           console.log(`[Kommo] Token loaded from DB (account=${rows[0].subdomain}, host=${_cachedDomain}, expires=${rows[0].expiresAt?.toISOString() ?? "unknown"})`);
           return;
@@ -178,7 +200,7 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 
 async function getBaseUrl(): Promise<string> {
   await ensureKommoConfig();
-  const domain = _cachedDomain || process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
+  const domain = _cachedDomain || resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
   return `https://${domain}/api/v4`;
 }
 
