@@ -377,6 +377,23 @@ function TimelineBar({ day }: { day: DayTimeline }) {
     );
   }
 
+  // Working day with zero activity — manager's schedule says they should
+  // have been on shift but no calls and no CRM events landed. Showing this
+  // as a wall of red rose-500/70 made every fully-idle day pop out and
+  // overpower days with real partial idle worth flagging. Render the same
+  // muted grey as scheduled-off days plus a "Нет активности" badge so the
+  // distinction stays (off-day vs no-show vs partial-idle).
+  const isFullyIdle = day.minutes.call === 0 && day.minutes.crm === 0;
+  if (isFullyIdle) {
+    return (
+      <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
+        <div className="absolute inset-0 flex items-center justify-center text-[10px] uppercase tracking-widest text-slate-500">
+          Нет активности
+        </div>
+      </div>
+    );
+  }
+
   const total = day.totalMinutes || 1;
 
   const moveTip = (e: React.MouseEvent<HTMLDivElement>, text: string) => {
