@@ -11,6 +11,10 @@ export async function GET() {
     kommo: {
       consecutiveFailures: kommo.consecutiveFailures,
       tokenLoadedAt: kommo.tokenLoadedAt,
+      domain: kommo.domain,
+      tokenSource: kommo.tokenSource,
+      envTokenAuthFailed: kommo.envTokenAuthFailed,
+      tokenSourceOverride: kommo.tokenSourceOverride,
       status: kommo.consecutiveFailures > 0 ? "degraded" : "ok",
     },
     lastError,
