@@ -8,6 +8,8 @@ import {
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
 import { eq, sql, and, gte, lte, isNotNull, inArray } from "drizzle-orm";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
 import { getLines, type DepartmentId } from "@/lib/config/tenant";
 import { parseDateBoundary, addDaysCivil, todayCivil, APP_TZ } from "@/lib/utils/date";
@@ -149,6 +151,80 @@ function normalizeName(name: string, map: Record<string, string>): string {
   return map[name] ?? name;
 }
 
+// Strip a leading "N. " (or "01. ", "23. ") numeric prefix that some prompt
+// versions add for the LLM. The canonical name in src/criteria/*.json is
+// always the bare form, so stripping here lets the same criterion match
+// across rows that were evaluated under different prompt versions.
+function stripNumericPrefix(name: string): string {
+  return name.replace(/^\s*\d+\.\s*/, "").trim();
+}
+
+// ─── Canonical block / criteria order from JSON config ─────────
+//
+// The Criteria tab (src/criteria/*.json) is the single source of truth for
+// which blocks/criteria exist. Reading it here means: the moment an admin
+// edits criteria via /api/criteria, Analytics picks up the new structure
+// (subject only to the 2-min cache TTL). It also kills the duplicate-row
+// problem caused by mixing data from multiple prompt_types — every criterion
+// is keyed by its canonical (prefix-stripped, alias-resolved) name, and
+// criteria not in JSON are dropped instead of being shown half-empty.
+
+interface CanonicalCriteria {
+  blockOrder: string[];
+  blockCriteria: Map<string, string[]>;
+  // Set of canonical "block::criterion" keys for fast membership check.
+  validKeys: Set<string>;
+}
+
+const EMPTY_CANONICAL: CanonicalCriteria = {
+  blockOrder: [],
+  blockCriteria: new Map(),
+  validKeys: new Set(),
+};
+
+async function loadCanonicalCriteria(promptTypes: string[]): Promise<CanonicalCriteria> {
+  const blockOrder: string[] = [];
+  const blockCriteria = new Map<string, string[]>();
+  const blockCriteriaSets = new Map<string, Set<string>>();
+  const validKeys = new Set<string>();
+
+  for (const pt of promptTypes) {
+    const filePath = path.join(process.cwd(), "src", "criteria", `${pt}.json`);
+    try {
+      const content = await readFile(filePath, "utf-8");
+      const json = JSON.parse(content) as { stages?: Array<{ name?: string; criteria?: Array<{ name?: string }> }> };
+      const stages = Array.isArray(json.stages) ? json.stages : [];
+      for (const stage of stages) {
+        const rawBlockName = typeof stage.name === "string" ? stage.name : "";
+        if (!rawBlockName || EXCLUDED_BLOCKS.has(rawBlockName)) continue;
+        const blockName = normalizeName(rawBlockName, BLOCK_NAME_MAP);
+        if (!blockCriteriaSets.has(blockName)) {
+          blockCriteriaSets.set(blockName, new Set());
+          blockCriteria.set(blockName, []);
+          blockOrder.push(blockName);
+        }
+        const seen = blockCriteriaSets.get(blockName)!;
+        const ordered = blockCriteria.get(blockName)!;
+        const crits = Array.isArray(stage.criteria) ? stage.criteria : [];
+        for (const c of crits) {
+          const rawCName = typeof c.name === "string" ? c.name : "";
+          if (!rawCName) continue;
+          const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
+          if (!seen.has(cName)) {
+            seen.add(cName);
+            ordered.push(cName);
+            validKeys.add(`${blockName}::${cName}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[Analytics] Failed to load criteria/${pt}.json:`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  return { blockOrder, blockCriteria, validKeys };
+}
+
 // ─── Accumulator ────────────────────────────────────────────
 
 interface PeriodAcc {
@@ -198,7 +274,8 @@ function processBlocks(
     if (be) { be.scoreSum += blockPct; be.count++; }
     else acc.blocks.set(name, { scoreSum: blockPct, count: 1 });
 
-    // Criteria — safely handle any shape
+    // Criteria — strip numeric prefix and resolve aliases so different
+    // prompt versions ("1. Foo" vs "Foo") collapse into the same row.
     const criteria = Array.isArray(block.criteria) ? block.criteria : [];
     for (const rawC of criteria) {
       const c = rawC as Record<string, unknown>;
@@ -206,7 +283,7 @@ function processBlocks(
       const cScore = typeof c.score === "number" ? c.score : 0;
       const cMax = typeof c.max_score === "number" ? c.max_score : 0;
       if (!rawCName || cMax <= 0) continue;
-      const cName = normalizeName(rawCName, CRITERIA_NAME_MAP);
+      const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
 
       const pct = Math.round((cScore / cMax) * 100);
       const key = `${name}::${cName}`;
@@ -344,7 +421,13 @@ async function fetchOkkData(
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown);
+  // Canonical block/criteria order from the prompt's JSON config — drives
+  // the left column of the table. For "all", we union across every line of
+  // the department; for a specific line, only that line's prompt_type.
+  const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
+  const canonical = await loadCanonicalCriteria(promptTypesForCanonical);
+
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical);
 }
 
 // ─── Roleplay data fetcher ──────────────────────────────────
@@ -467,7 +550,10 @@ async function fetchRoleplayData(
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown);
+  // Roleplay evaluations don't currently have a JSON criteria config (the
+  // d2_*/r2_* configs are for OKK). Fall back to dynamic collection inside
+  // buildResponse via EMPTY_CANONICAL until a roleplay-specific config lands.
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, EMPTY_CANONICAL);
 }
 
 // ─── Build response from accumulators ───────────────────────
@@ -480,24 +566,35 @@ function buildResponse(
   source: string,
   department: string,
   totalCalls: number,
-  managersForBreakdown?: Array<{ id: string; name: string }>,
+  managersForBreakdown: Array<{ id: string; name: string }> | undefined,
+  canonical: CanonicalCriteria,
 ): AnalyticsResponse {
   // The dropdown stays scoped to active managers (`managers`); the breakdown
   // uses the full set including inactive/admin/"no-manager" so totals match.
   const breakdownSource = managersForBreakdown ?? managers;
-  const blockOrder: string[] = [];
-  const blockCriteriaOrder = new Map<string, string[]>();
 
-  // Collect block/criteria order from all accumulators
-  for (const acc of [...accMap.values(), ...managerAccMap.values()]) {
-    for (const bName of acc.blocks.keys()) {
-      if (!blockOrder.includes(bName)) blockOrder.push(bName);
-    }
-    for (const key of acc.criteria.keys()) {
-      const [bName, cName] = key.split("::");
-      if (!blockCriteriaOrder.has(bName)) blockCriteriaOrder.set(bName, []);
-      const arr = blockCriteriaOrder.get(bName)!;
-      if (!arr.includes(cName)) arr.push(cName);
+  // Block/criteria order comes from the JSON config when we have one (every
+  // OKK department covers it). Without canonical data (e.g. roleplay until
+  // its criteria configs land) we fall back to dynamic collection so the
+  // table still renders something.
+  let blockOrder: string[];
+  let blockCriteriaOrder: Map<string, string[]>;
+  if (canonical.blockOrder.length > 0) {
+    blockOrder = [...canonical.blockOrder];
+    blockCriteriaOrder = new Map(canonical.blockCriteria);
+  } else {
+    blockOrder = [];
+    blockCriteriaOrder = new Map<string, string[]>();
+    for (const acc of [...accMap.values(), ...managerAccMap.values()]) {
+      for (const bName of acc.blocks.keys()) {
+        if (!blockOrder.includes(bName)) blockOrder.push(bName);
+      }
+      for (const key of acc.criteria.keys()) {
+        const [bName, cName] = key.split("::");
+        if (!blockCriteriaOrder.has(bName)) blockCriteriaOrder.set(bName, []);
+        const arr = blockCriteriaOrder.get(bName)!;
+        if (!arr.includes(cName)) arr.push(cName);
+      }
     }
   }
 

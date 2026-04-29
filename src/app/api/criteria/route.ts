@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ALL_PROMPT_TYPES, isValidPromptType as isValidPT } from "@/lib/config/tenant";
+import { clearCache } from "@/lib/kommo/cache";
 
 function isValidPromptType(value: unknown): value is string {
   return typeof value === "string" && isValidPT(value);
@@ -70,6 +71,10 @@ export async function POST(request: NextRequest) {
 
     const filePath = getCriteriaFilePath(promptType);
     await writeFile(filePath, JSON.stringify(config, null, 2), "utf-8");
+
+    // Drop cached Analytics responses so the new criteria show up
+    // immediately instead of waiting for the 2-min TTL.
+    clearCache();
 
     return NextResponse.json({ success: true });
   } catch (error) {
