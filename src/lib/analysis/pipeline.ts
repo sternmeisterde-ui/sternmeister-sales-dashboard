@@ -89,11 +89,33 @@ export function parseKommoUrl(url: string): { pipelineId: string; filters: Recor
 
 async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-interface KommoLead { id: number; name: string; responsible_user_id: number; status_id: number; pipeline_id: number }
+interface KommoLeadCustomFieldValue { value?: string; enum_id?: number; enum_code?: string }
+interface KommoLeadCustomField { field_id: number; values: KommoLeadCustomFieldValue[] }
+interface KommoLead {
+  id: number;
+  name: string;
+  responsible_user_id: number;
+  status_id: number;
+  pipeline_id: number;
+  custom_fields_values?: KommoLeadCustomField[] | null;
+}
 interface KommoNote { id: number; note_type: string; params: { duration?: number; link?: string }; created_at: number; responsible_user_id: number }
 
+/** Result of translating a Kommo frontend URL: the API query string (filters
+ * that Kommo's API understands) and the client-side filter rules that the API
+ * doesn't (custom-field enums — silently dropped by /api/v4/leads even though
+ * the structure is documented for create/update payloads). */
+interface ParsedKommoFilter {
+  apiQuery: string;
+  /** Map<fieldId, Set<enumId>>. Lead passes if for every field, at least one
+   * of its values' enum_id is in the corresponding set (AND-across-fields,
+   * OR-within-field — same semantics the Kommo UI applies). */
+  cfEnumFilter: Map<number, Set<number>>;
+}
+
 /**
- * Translates Kommo *frontend* URL params into Kommo *API v4* filter params.
+ * Translates Kommo *frontend* URL params into Kommo *API v4* filter params,
+ * plus a client-side filter rule for things the API can't filter on.
  *
  * The frontend uses a different filter syntax than the public API. Pasting
  * a frontend URL straight into /api/v4/leads silently ignores everything
@@ -101,24 +123,30 @@ interface KommoNote { id: number; note_type: string; params: { duration?: number
  * the pagination cap — that's why the pipeline used to scan ~5000 deals
  * even when the Kommo UI showed 596.
  *
- * Mappings handled here:
+ * Mappings handled by the API:
  *   • `filter[pipe][PIPELINE_ID][]=STATUS_ID` (one or many)
  *       → `filter[statuses][N][pipeline_id]=PIPELINE_ID`
  *         `filter[statuses][N][status_id]=STATUS_ID`
- *   • `filter[cf][FIELD_ID][]=ENUM_ID` (one or many per field)
- *       → `filter[custom_fields_values][FIELD_ID][values][N][enum_id]=ENUM_ID`
  *   • `filter_date_switch=closed|created|updated` + `filter_date_from=DD.MM.YYYY`
  *     + `filter_date_to=DD.MM.YYYY`
  *       → `filter[<api_field>][from]=<unix>` + `filter[<api_field>][to]=<unix>`
  *   • path `/pipeline/<PIPELINE_ID>/` as fallback when no status filter is set
- *       → `filter[pipeline_id]=PIPELINE_ID`
+ *       → `filter[pipeline_id][]=PIPELINE_ID`
+ *
+ * Handled CLIENT-SIDE (not in the API query):
+ *   • `filter[cf][FIELD_ID][]=ENUM_ID` — Kommo's /api/v4/leads endpoint does
+ *     NOT support filter[custom_fields_values] in GET requests despite that
+ *     param being documented for create/update payloads. Sending it has no
+ *     effect (confirmed via amocrm/amocrm-api-php#339 + Kommo developers
+ *     forum). We extract the cf rules and apply them in-memory after the
+ *     leads come back, reading each lead's `custom_fields_values` array.
  *
  * Any frontend params we don't recognise are dropped — narrowing the result
  * is always safer than passing unrecognised filters and getting an over-wide
  * dataset back. Things like `useFilter=y` are decorative and intentionally
- * ignored. Returns the full search-string (without leading `?`).
+ * ignored.
  */
-function buildLeadsApiQuery(kommoUrl: string): string {
+function buildLeadsApiQuery(kommoUrl: string): ParsedKommoFilter {
   const parsed = new URL(kommoUrl);
   if (parsed.hostname !== KOMMO.host) throw new Error("Invalid Kommo URL domain");
 
@@ -142,9 +170,11 @@ function buildLeadsApiQuery(kommoUrl: string): string {
   // pipeline tab without picking a status, use the path pipeline so we don't
   // pull leads from other pipelines. When statuses are present they already
   // pin a pipeline, so we skip this branch then.
+  // Param name is `filter[pipeline_id][]` per docs (array form), NOT
+  // `filter[pipeline_id]` — single-value form is silently ignored.
   if (!hasStatusFilter) {
     const pathPipeline = parsed.pathname.match(/\/pipeline\/(\d+)/)?.[1];
-    if (pathPipeline) out.set("filter[pipeline_id]", pathPipeline);
+    if (pathPipeline) out.append("filter[pipeline_id][]", pathPipeline);
   }
 
   // 2. Date filter
@@ -164,26 +194,46 @@ function buildLeadsApiQuery(kommoUrl: string): string {
     }
   }
 
-  // 3. Custom-field enum filters — group by field, index by position per field.
+  // 3. Custom-field enum filters — collected for client-side application.
+  // We deliberately do NOT add them to `out`: Kommo /api/v4/leads ignores
+  // `filter[custom_fields_values]` on GET, so attempting to filter via the
+  // API would not narrow the dataset and would just bloat the URL.
   const CF_RE = /^filter\[cf\]\[(\d+)\]\[\]$/;
-  const cfByField = new Map<string, string[]>();
+  const cfEnumFilter = new Map<number, Set<number>>();
   for (const [key, value] of fp.entries()) {
     const m = key.match(CF_RE);
     if (!m) continue;
-    const fieldId = m[1];
-    if (!cfByField.has(fieldId)) cfByField.set(fieldId, []);
-    cfByField.get(fieldId)!.push(value);
-  }
-  for (const [fieldId, enumIds] of cfByField) {
-    enumIds.forEach((enumId, i) => {
-      out.append(
-        `filter[custom_fields_values][${fieldId}][values][${i}][enum_id]`,
-        enumId,
-      );
-    });
+    const fieldId = Number(m[1]);
+    const enumId = Number(value);
+    if (!Number.isFinite(fieldId) || !Number.isFinite(enumId)) continue;
+    if (!cfEnumFilter.has(fieldId)) cfEnumFilter.set(fieldId, new Set());
+    cfEnumFilter.get(fieldId)!.add(enumId);
   }
 
-  return out.toString();
+  return { apiQuery: out.toString(), cfEnumFilter };
+}
+
+/**
+ * Apply client-side custom-field-enum filter (the part Kommo's API ignores).
+ * Same semantics as the Kommo UI: AND across fields, OR within a field.
+ * A lead passes only if every requested field has at least one of its
+ * values' enum_ids in the requested set.
+ */
+function passesCfFilter(
+  lead: KommoLead,
+  cfEnumFilter: Map<number, Set<number>>,
+): boolean {
+  if (cfEnumFilter.size === 0) return true;
+  const fields = lead.custom_fields_values ?? [];
+  for (const [requiredFieldId, allowedEnumIds] of cfEnumFilter) {
+    const f = fields.find((cf) => cf.field_id === requiredFieldId);
+    if (!f) return false;
+    const hasMatch = f.values.some(
+      (v) => v.enum_id !== undefined && allowedEnumIds.has(v.enum_id),
+    );
+    if (!hasMatch) return false;
+  }
+  return true;
 }
 
 function parseRuDate(s: string, endOfDay: boolean): number | null {
@@ -201,16 +251,32 @@ function parseRuDate(s: string, endOfDay: boolean): number | null {
 }
 
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
-  const apiQuery = buildLeadsApiQuery(kommoUrl);
+  const { apiQuery, cfEnumFilter } = buildLeadsApiQuery(kommoUrl);
+  const hasCfFilter = cfEnumFilter.size > 0;
 
-  const allLeads: KommoLead[] = [];
+  // When a CF filter is in play, we must over-fetch and post-filter, so let
+  // the API return everything matching pipeline+status+date, then narrow
+  // locally. Without CF filtering, what comes back is already final.
+  // `with=` adds nothing here — `custom_fields_values` is included in
+  // /api/v4/leads responses by default.
+  const apiQueryFull = apiQuery;
+
+  const apiLeads: KommoLead[] = [];
   for (let page = 1; page <= 20; page++) {
-    const apiUrl = `/leads?${apiQuery}&limit=250&page=${page}`;
+    const apiUrl = `/leads?${apiQueryFull}&limit=250&page=${page}`;
     const data = await kommoFetchPath(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
     if (!data?._embedded?.leads?.length) break;
-    allLeads.push(...data._embedded.leads);
+    apiLeads.push(...data._embedded.leads);
   }
-  return allLeads;
+
+  if (!hasCfFilter) return apiLeads;
+
+  const filtered = apiLeads.filter((l) => passesCfFilter(l, cfEnumFilter));
+  console.log(
+    `[Analysis] CF filter: ${apiLeads.length} leads from API → ${filtered.length} after custom-field filter ` +
+      `(fields: ${[...cfEnumFilter.keys()].join(",")})`,
+  );
+  return filtered;
 }
 
 async function fetchCallNotes(leadId: number): Promise<KommoNote[]> {
