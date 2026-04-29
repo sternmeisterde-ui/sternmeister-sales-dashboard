@@ -298,41 +298,57 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
-    // ─── B2B SLA eligibility filter ───────────────────────────────────────
-    // For Коммерция (b2b) SLA is computed only on real prospects:
-    //   1) at first_call + 2h the lead is still in {Бух Комм, Мед Комм}
-    //      (skips leads that drifted out of the funnel quickly), and
-    //   2) the lead is NOT closed-not-realized at +2h with reason ∈
-    //      {Неквал лид, Спам, Предложение сотрудничества}. Closed-lost with
-    //      ANY OTHER reason stays in the pool.
+    // ─── SLA eligibility filter (per-dept) ────────────────────────────────
+    // The cohort SLA AVG drops lead-call pairs that don't represent a "real
+    // prospect" — managers shouldn't be penalised on SLA for spam/unqualified
+    // leads. Lead row itself is still counted everywhere else; only the SLA
+    // AVG column is gated.
     //
-    // Reason source: Kommo custom field 876383 "Причины закрытия (Обязательное
-    // поле)" — required by Kommo when status_id=143 on B2B pipelines, mirrored
-    // into analytics.leads_cohort.b2b_close_reason_enum_id by sync-leads. The
-    // standard Kommo loss_reason_id is intentionally NOT used here: managers
-    // leave it NULL on this account, the custom field is what they actually
-    // populate.
+    // B2B (Коммерция):
+    //   1) at first_call + 2h the lead must still be in {Бух Комм, Мед Комм},
+    //   2) NOT closed-not-realized at +2h with reason ∈
+    //      {Неквал лид, Спам, Предложение сотрудничества}.
+    //   Reason source: custom field 876383 «Причины закрытия (Обязательное
+    //   поле)» (Kommo enforces it as required at status_id=143). Mirrored
+    //   into leads_cohort.b2b_close_reason_enum_id.
+    //
+    // B2G (Госники):
+    //   Pipeline = Бух Гос (Квалификатер / first line) OR Бух Бератер
+    //   (Доведение / second line, when filtered to that pipeline). For both
+    //   exclude closed-not-realized with reason ∈ {Неквал лид, Неправильный
+    //   номер}. Reason source: custom field 879824 «Причина закрытия Госники»,
+    //   mirrored into leads_cohort.non_qual_enum_id.
+    //
+    //   Note: Бух Бератер metric should additionally exclude leads that
+    //   bypassed first line and went straight to second (B2/C1 German level,
+    //   immediate AA termin). That gate isn't wired yet — the underlying
+    //   custom fields aren't synced.
     //
     // The +2h state comes from analytics.lead_status_changes. Calls /
     // messages / counts are NOT filtered — that data is shared with other
     // tabs. The gate only suppresses the call-pair from the SLA AVG; the
     // lead row itself is still counted.
-    //
-    // For B2G this CTE is omitted and the SLA gate is empty (legacy behaviour).
     const isB2B = dept === "b2b";
-    // Custom field 876383 enum_ids:
+    const isB2G = dept === "b2g";
+    const needSlaEligibility = isB2B || isB2G;
+    // CF 876383 enum_ids:
     //   740587 Неквал лид · 740593 Спам · 740595 Предложение сотрудничества
     const B2B_BAD_CLOSE_ENUM_IDS = [740587, 740593, 740595];
     const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
-    const B2B_CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
-    const slaEligibilityCte = isB2B
+    // CF 879824 enum_ids (Причина закрытия Госники):
+    //   744876 Неквал лид · 744486 Неправильный номер
+    const B2G_BAD_NON_QUAL_ENUM_IDS = [744876, 744486];
+    const CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
+    const slaEligibilityCte = needSlaEligibility
       ? `,
       sla_eligibility AS (
         SELECT
           fl.lead_id,
           COALESCE(sc.pipeline, lc_full.pipeline) AS pipeline_at_plus2h,
           COALESCE(sc.status,   lc_full.status)   AS status_at_plus2h,
-          lc_full.b2b_close_reason_enum_id        AS close_reason_enum_id
+          lc_full.status                          AS current_status,
+          lc_full.b2b_close_reason_enum_id        AS close_reason_enum_id,
+          lc_full.non_qual_enum_id                AS non_qual_enum_id
         FROM filtered_leads fl
         JOIN analytics.sla s          ON s.lead_id = fl.lead_id
         JOIN analytics.leads_cohort lc_full ON lc_full.lead_id = fl.lead_id
@@ -348,23 +364,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `
       : "";
-    const slaEligibilityJoin = isB2B
+    const slaEligibilityJoin = needSlaEligibility
       ? `LEFT JOIN sla_eligibility sle ON sle.lead_id = fl.lead_id`
       : "";
     // SQL fragment usable inside an existing WHERE/CASE WHEN — leading "AND".
-    // Drops the lead-call pair only when (closed-lost-at-+2h AND reason in
-    // junk set). NULL close_reason_enum_id is treated as «not junk» → kept,
-    // matching user's «по любой причине, кроме …» semantics. Pipeline-at-+2h
-    // arm stays (must be in B2B funnels at the 2h checkpoint).
+    // Drops the lead-call pair only when (closed-lost AND reason in junk set).
+    // NULL reason fields are treated as «not junk» → kept, matching user's
+    // «за исключением сделок закрытых с тематикой …» semantics.
     const slaEligibilityCondition = isB2B
       ? `
           AND sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
           AND NOT (
-            sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+            sle.status_at_plus2h IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
             AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
           )
         `
-      : "";
+      : isB2G
+        ? `
+          AND NOT (
+            sle.current_status IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+            AND sle.non_qual_enum_id IN (${B2G_BAD_NON_QUAL_ENUM_IDS.join(", ")})
+          )
+        `
+        : "";
 
     // Looker cohort views aggregate calls PER LEAD via JOIN on lead_id.
     // Post enrich-telephony-leads (2026-04-28) telephony rows are fanned out
@@ -574,13 +596,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
              WHEN s.first_call_out_at IS NULL THEN NULL
              WHEN sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
               AND NOT (
-                sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+                sle.status_at_plus2h IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
                 AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
               )
              THEN TRUE
              ELSE FALSE
            END`
-        : `TRUE`;
+        : isB2G
+          ? `CASE
+               WHEN s.first_call_out_at IS NULL THEN NULL
+               WHEN NOT (
+                 sle.current_status IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+                 AND sle.non_qual_enum_id IN (${B2G_BAD_NON_QUAL_ENUM_IDS.join(", ")})
+               )
+               THEN TRUE
+               ELSE FALSE
+             END`
+          : `TRUE`;
       mainQuery = `
         WITH ${filteredLeadsCte},
         ${commAggCte}${slaEligibilityCte}
