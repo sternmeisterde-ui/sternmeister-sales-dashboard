@@ -562,16 +562,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         .map((s) => `fl.${s}`);
       const groupByClause = groupCols.length > 0 ? `GROUP BY ${groupCols.join(", ")}` : "";
 
+      // TLT (Time to Last Touch) measures BH staleness from the lead's
+      // last touch to NOW — written into analytics.sla.business_hours_since_last_contact
+      // by compute-sla every ETL tick. Whitelist + per-pipeline gate identical
+      // to SLA первого звонка (verified by direct probe: same status sets
+      // for both metrics in integrator's custom_report).
       mainQuery = `
         WITH ${tltFilteredLeadsCte},
         ${commAggCte},
-        ${callGapsCte}
+        ${callGapsCte}${slaEligibilityCte}
         SELECT
           ${projectSlice(slice1, 1)},
           ${projectSlice(slice2, 2)},
           ${projectSlice(slice3, 3)},
           COUNT(fl.lead_id) AS lead_count,
-          ROUND(AVG(s.sla_first_contact_seconds)) AS avg_tlt,
+          ROUND(AVG(
+            CASE WHEN s.last_contact_at IS NOT NULL ${slaEligibilityCondition}
+                 THEN s.business_hours_since_last_contact
+            END
+          )) AS avg_tlt,
           ROUND(AVG(cg.avg_gap_sec)) AS avg_gap_sec,
           COALESCE(SUM(ca.outgoing_calls), 0) AS outgoing_calls,
           COALESCE(SUM(ca.messages_sent), 0) AS messages_sent,
@@ -580,6 +589,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
+        ${slaEligibilityJoin}
         ${groupByClause}
         ORDER BY lead_count DESC
       `;
@@ -675,7 +685,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           fl.manager,
           fl.status AS current_status,
           fl.lead_id,
-          s.sla_first_contact_seconds AS tlt,
+          s.business_hours_since_last_contact AS tlt,
           COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
           COALESCE(ca.messages_sent, 0) AS messages_sent,
           COALESCE(ca.outgoing_calls, 0) + COALESCE(ca.messages_sent, 0) AS total_comms,
@@ -684,7 +694,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
-        ORDER BY tlt ASC NULLS LAST
+        ORDER BY tlt DESC NULLS LAST
         LIMIT ${limit} OFFSET ${offset}
       `;
       countQuery = `

@@ -247,8 +247,13 @@ export async function computeSla(
     const slaFirstCallFromShiftSec = comms.firstCallOutAt
       ? secondsFromShiftStart(comms.firstCallOutAt, managerShiftHour)
       : null;
+    // business_hours_since_last_contact: BH staleness from the lead's last
+    // touch to NOW. Matches integrator's `sla.business_hours_since_last_contact`
+    // semantics — drives the TLT (Time to Last Touch) metric in Looker.
+    // Snapshot at compute-time; recomputed every ETL tick so it stays fresh.
+    const nowUtc = new Date();
     const bhSinceLastContact = comms.lastContactAt
-      ? businessHoursSeconds(slaStart, comms.lastContactAt)
+      ? businessHoursSeconds(comms.lastContactAt, nowUtc)
       : null;
 
     let slaStatus: string;
