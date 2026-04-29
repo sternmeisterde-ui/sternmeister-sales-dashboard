@@ -170,14 +170,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       : `lc.manager`;
 
     // Shift-start hour per manager (canonical name) — master default.
-    // Default 9 (09:00 Berlin) when the master has no shift configured.
+    // Fallback when master_managers.shift_start_time is NULL: B2G defaults to
+    // 10 (matches integrator's universal 10:00 shift start for Бух Гос/Бух
+    // Бератер); B2B falls back to 9.
+    const defaultShiftHour = dept === "b2g" ? 10 : 9;
     const shiftCases: string[] = [];
     for (const [name, hour] of shiftHourByName) {
       shiftCases.push(`WHEN fl.manager = '${esc(name)}' THEN ${hour}`);
     }
     const masterShiftHourExpr = shiftCases.length > 0
-      ? `CASE ${shiftCases.join(" ")} ELSE 9 END`
-      : `9`;
+      ? `CASE ${shiftCases.join(" ")} ELSE ${defaultShiftHour} END`
+      : `${defaultShiftHour}`;
+    // End-of-shift hour for the «рабочие часы» SLA clip. Integrator uses 18:00
+    // universally on B2G; we hard-code that to match exactly. (No per-manager
+    // shift_end_time in master_managers yet — add later when needed.)
+    const shiftEndHour = 18;
 
     // Per-day shift overrides from manager_schedule (Daily calendar).
     // Built as an inline VALUES CTE and LEFT JOIN'd on (manager, lead_date).
@@ -482,17 +489,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             CASE WHEN s.first_call_out_at IS NOT NULL
                   ${slaEligibilityCondition}
                  THEN GREATEST(0, EXTRACT(EPOCH FROM (
-                   s.first_call_out_at
+                   -- Integrator's «SLA первого звонка» (рабочие часы):
+                   --   bh = MAX(0, MIN(call, shift_end) - MAX(sla_start, shift_start))
+                   -- where shift_start / shift_end are anchored to the CALL
+                   -- day. Verified against sternmeister_sla.sla_first_call_seconds
+                   -- by direct probe — values match to the second.
+                   -- Cross-day handling: when sla_start ≥ shift_end (lead
+                   -- arrived after work hours) the LEAST/GREATEST collapse to
+                   -- a negative diff → GREATEST(0, …) zeros it out, which
+                   -- mirrors the integrator's behaviour for end-of-day leads.
+                   LEAST(
+                     s.first_call_out_at,
+                     date_trunc('day', s.first_call_out_at) + ${shiftEndHour} * INTERVAL '1 hour'
+                   )
                    - GREATEST(
                        s.sla_start,
-                       -- Anchor shift to the CALL day, not the lead day.
-                       -- Integrator's «SLA первого звонка» (рабочие часы)
-                       -- subtracts only the time from the start of the
-                       -- manager's shift on the day the call happened,
-                       -- not on the day the lead arrived. For night-time
-                       -- leads called the next morning that yields
-                       -- (call - shift_start_call_day) instead of a 12h+
-                       -- gap measured from the prior day's shift.
                        date_trunc('day', s.first_call_out_at) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
                      )
                  )))
