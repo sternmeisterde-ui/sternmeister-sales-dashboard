@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users } from "lucide-react";
+import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users, Search, X } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import {
   EVENT_TYPES,
@@ -138,6 +138,16 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   const [revalidating, setRevalidating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
+
+  // Loupe modal — clicking the magnifier icon opens a deep-dive overlay
+  // for one (manager, date) pair. We track the target tuple here and the
+  // modal lazy-fetches /api/tracking/detail when mounted.
+  const [detailTarget, setDetailTarget] = useState<{
+    managerId: string;
+    managerName: string;
+    line: string | null;
+    date: string;
+  } | null>(null);
 
   // Reset manager filter when switching department — the manager IDs from
   // b2g aren't valid for b2b and would just show "no data" until cleared.
@@ -306,9 +316,24 @@ export default function TrackingTab({ department }: TrackingTabProps) {
         ) : managers.length === 0 ? (
           <div className="text-center py-16 text-slate-500 text-sm">Менеджеры не найдены</div>
         ) : (
-          <ManagerList managers={managers} dates={dates} />
+          <ManagerList
+            managers={managers}
+            dates={dates}
+            onOpenDetail={(managerId, managerName, line, date) =>
+              setDetailTarget({ managerId, managerName, line, date })
+            }
+          />
         )}
       </div>
+
+      {detailTarget && (
+        <DetailModal
+          department={department}
+          target={detailTarget}
+          typesParam={typesParam}
+          onClose={() => setDetailTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -324,7 +349,15 @@ function LegendDot({ color, label }: { color: string; label: string }) {
   );
 }
 
-function ManagerList({ managers, dates }: { managers: ManagerTimeline[]; dates: string[] }) {
+function ManagerList({
+  managers,
+  dates,
+  onOpenDetail,
+}: {
+  managers: ManagerTimeline[];
+  dates: string[];
+  onOpenDetail: (managerId: string, managerName: string, line: string | null, date: string) => void;
+}) {
   const multiDay = dates.length > 1;
   return (
     <div className="flex flex-col gap-2">
@@ -348,12 +381,21 @@ function ManagerList({ managers, dates }: { managers: ManagerTimeline[]; dates: 
             {m.days.map((day) => (
               <div
                 key={day.date}
-                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_230px]" : "grid-cols-[1fr_230px]"}`}
+                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_28px_230px]" : "grid-cols-[1fr_28px_230px]"}`}
               >
                 {multiDay && (
                   <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
                 )}
                 <TimelineBar day={day} />
+                <button
+                  type="button"
+                  onClick={() => onOpenDetail(m.id, m.name, m.line, day.date)}
+                  className="w-6 h-6 flex items-center justify-center rounded-md bg-slate-800/40 hover:bg-slate-700 border border-white/5 text-slate-400 hover:text-white transition-colors"
+                  title="Подробнее: события за день"
+                  aria-label={`Подробнее по ${m.name} ${day.date}`}
+                >
+                  <Search className="w-3 h-3" />
+                </button>
                 <PctSummary day={day} />
               </div>
             ))}
@@ -782,5 +824,387 @@ function ManagersFilter({ open, setOpen, allManagers, selected, onChange }: Mana
       </button>
       {popover}
     </>
+  );
+}
+
+// ==================== Detail modal (loupe) ====================
+
+interface DetailEvent {
+  eventId: string;
+  eventType: string;
+  label: string;
+  group: string;
+  createdAt: string;
+  timeBerlin: string;
+  durationSec: number;
+  entityType: string | null;
+  entityId: number | null;
+  raw: Record<string, unknown> | null;
+}
+
+interface DetailResponse {
+  department: string;
+  manager: { id: string; name: string; line: string | null };
+  date: string;
+  timeline: DayTimeline;
+  events: DetailEvent[];
+}
+
+function DetailModal({
+  department,
+  target,
+  typesParam,
+  onClose,
+}: {
+  department: "b2g" | "b2b";
+  target: { managerId: string; managerName: string; line: string | null; date: string };
+  typesParam: string;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<DetailResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [hoverSeg, setHoverSeg] = useState<Segment | null>(null);
+
+  // Lazy-load detail when modal mounts
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErr(null);
+    const params = new URLSearchParams({
+      department,
+      managerId: target.managerId,
+      date: target.date,
+      types: typesParam,
+    });
+    fetch(`/api/tracking/detail?${params.toString()}`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+        return res.json();
+      })
+      .then((json: DetailResponse) => {
+        if (!cancelled) setData(json);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [department, target.managerId, target.date, typesParam]);
+
+  // Esc to close
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  if (typeof document === "undefined") return null;
+
+  const timeline = data?.timeline;
+  const events = data?.events ?? [];
+
+  // Bucket events by which timeline segment they fall into. Time-based —
+  // converts each event's Berlin timeBerlin to minutes-from-shift-start
+  // and matches against [segment.startMin, segment.endMin).
+  const eventsBySegment = (() => {
+    if (!timeline || timeline.mode !== "working") return new Map<number, DetailEvent[]>();
+    const map = new Map<number, DetailEvent[]>();
+    const shiftStartMin = parseShiftMin(timeline.shiftStart ?? "09:00");
+    for (const ev of events) {
+      const evMin = parseShiftMin(ev.timeBerlin) - shiftStartMin;
+      const seg = timeline.segments.find(
+        (s) => evMin >= s.startMin && evMin < s.endMin,
+      );
+      if (!seg) continue;
+      const list = map.get(seg.startMin) ?? [];
+      list.push(ev);
+      map.set(seg.startMin, list);
+    }
+    return map;
+  })();
+
+  const segEvents = hoverSeg ? eventsBySegment.get(hoverSeg.startMin) ?? [] : [];
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-5xl max-h-[85vh] overflow-y-auto rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/50 sticky top-0 z-10">
+          <Search className="w-4 h-4 text-slate-400" />
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold text-white">{target.managerName}</span>
+            <span className="text-[11px] text-slate-500">
+              {target.line ? `Линия ${target.line} · ` : ""}
+              {formatRussianDate(target.date)}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto w-7 h-7 flex items-center justify-center rounded-md bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+            aria-label="Закрыть"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-16 text-slate-400">
+              <Loader2 className="w-6 h-6 animate-spin" />
+            </div>
+          ) : err ? (
+            <div className="text-rose-300 text-sm">{err}</div>
+          ) : !timeline || timeline.mode === "off" ? (
+            <div className="text-center py-16 text-slate-400 text-sm">
+              {timeline?.offReason ?? "Нет расписания"}
+            </div>
+          ) : (
+            <>
+              <DetailTimelineBar timeline={timeline} onHover={setHoverSeg} />
+
+              <HourGrid
+                shiftStart={timeline.shiftStart!}
+                shiftEnd={timeline.shiftEnd!}
+                totalMinutes={timeline.totalMinutes}
+              />
+
+              <div className="mt-4 grid grid-cols-3 gap-3">
+                <StatTile color="bg-blue-500" label="На звонках" minutes={timeline.minutes.call} pct={timeline.pct.call} />
+                <StatTile color="bg-emerald-500" label="В CRM" minutes={timeline.minutes.crm} pct={timeline.pct.crm} />
+                <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+              </div>
+
+              {hoverSeg ? (
+                <SegmentEventList
+                  seg={hoverSeg}
+                  events={segEvents}
+                  shiftStart={timeline.shiftStart!}
+                />
+              ) : (
+                <FullEventList events={events} />
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function parseShiftMin(hm: string): number {
+  const [h, m] = hm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function formatRussianDate(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  return `${d}.${m}.${y}`;
+}
+
+function formatSegmentTime(shiftStart: string, offsetMin: number): string {
+  const startMin = parseShiftMin(shiftStart) + offsetMin;
+  const h = Math.floor(startMin / 60);
+  const m = startMin % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function DetailTimelineBar({
+  timeline,
+  onHover,
+}: {
+  timeline: DayTimeline;
+  onHover: (seg: Segment | null) => void;
+}) {
+  const total = timeline.totalMinutes || 1;
+  return (
+    <div className="relative h-12 rounded-lg bg-slate-800/60 border border-white/5 overflow-hidden flex">
+      {timeline.segments.map((s, i) => {
+        const widthPct = (s.durationMin / total) * 100;
+        const bg =
+          s.type === "call"
+            ? "bg-blue-500"
+            : s.type === "crm"
+              ? "bg-emerald-500"
+              : "bg-rose-500/70";
+        return (
+          <div
+            key={`${s.type}-${s.startMin}-${i}`}
+            className={`${bg} h-full transition-opacity hover:opacity-80 cursor-pointer`}
+            style={{ width: `${widthPct}%` }}
+            onMouseEnter={() => onHover(s)}
+            onMouseLeave={() => onHover(null)}
+            title={s.label ?? ""}
+          />
+        );
+      })}
+      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-white/70 font-mono pointer-events-none">
+        {timeline.shiftStart}
+      </span>
+      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-white/70 font-mono pointer-events-none">
+        {timeline.shiftEnd}
+      </span>
+    </div>
+  );
+}
+
+function HourGrid({
+  shiftStart,
+  shiftEnd,
+  totalMinutes,
+}: {
+  shiftStart: string;
+  shiftEnd: string;
+  totalMinutes: number;
+}) {
+  const startH = Number(shiftStart.split(":")[0]);
+  const endH = Number(shiftEnd.split(":")[0]);
+  const hours: number[] = [];
+  for (let h = startH; h <= endH; h++) hours.push(h);
+  return (
+    <div className="relative mt-1.5 h-3">
+      {hours.map((h) => {
+        const offsetMin = (h - startH) * 60;
+        const leftPct = (offsetMin / totalMinutes) * 100;
+        return (
+          <span
+            key={h}
+            className="absolute text-[10px] text-slate-500 font-mono -translate-x-1/2"
+            style={{ left: `${leftPct}%` }}
+          >
+            {String(h).padStart(2, "0")}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function StatTile({
+  color,
+  label,
+  minutes,
+  pct,
+}: {
+  color: string;
+  label: string;
+  minutes: number;
+  pct: number;
+}) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return (
+    <div className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2">
+      <div className="flex items-center gap-1.5 mb-1">
+        <span className={`w-2 h-2 rounded-full ${color}`} />
+        <span className="text-[11px] text-slate-400">{label}</span>
+      </div>
+      <div className="font-mono tabular-nums">
+        <span className="text-base text-white">{h}ч {m}м</span>
+        <span className="text-[11px] text-slate-500 ml-1.5">{pct}%</span>
+      </div>
+    </div>
+  );
+}
+
+function SegmentEventList({
+  seg,
+  events,
+  shiftStart,
+}: {
+  seg: Segment;
+  events: DetailEvent[];
+  shiftStart: string;
+}) {
+  const segStart = formatSegmentTime(shiftStart, seg.startMin);
+  const segEnd = formatSegmentTime(shiftStart, seg.endMin);
+  return (
+    <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
+      <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : "Простой"}
+        <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
+          {segStart}–{segEnd}
+        </span>
+        <span className="text-slate-500 normal-case tracking-normal ml-2">
+          {events.length} {events.length === 1 ? "событие" : events.length < 5 ? "события" : "событий"}
+        </span>
+      </div>
+      {events.length === 0 ? (
+        <div className="text-xs text-slate-500 py-2">{seg.type === "idle" ? "Без активности" : "Нет деталей"}</div>
+      ) : (
+        <ul className="flex flex-col divide-y divide-white/5 max-h-72 overflow-y-auto">
+          {events.map((ev) => (
+            <EventRow key={ev.eventId} ev={ev} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function FullEventList({ events }: { events: DetailEvent[] }) {
+  return (
+    <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
+      <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
+        Все события за день · {events.length}
+        <span className="text-slate-500 normal-case tracking-normal ml-2">
+          (наведи на отрезок чтобы отфильтровать)
+        </span>
+      </div>
+      {events.length === 0 ? (
+        <div className="text-xs text-slate-500 py-2">Нет событий</div>
+      ) : (
+        <ul className="flex flex-col divide-y divide-white/5 max-h-96 overflow-y-auto">
+          {events.map((ev) => (
+            <EventRow key={ev.eventId} ev={ev} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function EventRow({ ev }: { ev: DetailEvent }) {
+  const isCall = ev.eventType === "incoming_call" || ev.eventType === "outgoing_call";
+  const isMissed = isCall && ev.durationSec === 0;
+  const dotColor = isCall
+    ? isMissed
+      ? "bg-rose-500/60"
+      : "bg-blue-500"
+    : "bg-emerald-500";
+
+  let suffix = "";
+  if (isCall) {
+    if (isMissed) suffix = " · пропущенный";
+    else if (ev.durationSec >= 60) suffix = ` · ${Math.round(ev.durationSec / 60)} мин`;
+    else suffix = ` · ${ev.durationSec} сек`;
+    const phone = (ev.raw as { phone?: string } | null)?.phone;
+    if (phone) suffix += ` · ${phone}`;
+  }
+
+  return (
+    <li className="flex items-baseline gap-2 py-1.5 text-xs">
+      <span className="text-slate-500 font-mono tabular-nums w-12 shrink-0">{ev.timeBerlin}</span>
+      <span className={`w-1.5 h-1.5 rounded-full ${dotColor} mt-1 shrink-0`} />
+      <span className="text-slate-200 truncate">
+        {ev.label}
+        {suffix && <span className="text-slate-500">{suffix}</span>}
+      </span>
+      <span className="ml-auto text-[10px] text-slate-600 shrink-0">{ev.group}</span>
+    </li>
   );
 }
