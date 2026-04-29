@@ -5,6 +5,17 @@ import {
   Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2, RotateCw,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// Re-flow Grok summaries that emitted markdown tables on a single line
+// (rows separated only by `| |`, no newlines). Without this even GFM can't
+// parse them — markdown table rows MUST live on their own line. Triggered
+// only when a `|---` delimiter row is present, so legitimate inline `| |`
+// content elsewhere stays untouched.
+function normalizeMarkdownTables(md: string): string {
+  if (!md.includes("|---") && !md.includes("| ---")) return md;
+  return md.replace(/\|[ \t]+\|/g, "|\n|");
+}
 
 interface Analysis {
   id: string;
@@ -361,7 +372,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                       <div className="mt-2 space-y-3">
                         <div className="text-[11px] uppercase tracking-widest text-blue-400 font-bold">Сводный анализ</div>
                         <div className="max-h-[700px] overflow-y-auto space-y-3">
-                          <ReactMarkdown components={{
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
                             h1: ({ children }) => (
                               <div className="p-4 bg-blue-500/10 rounded-xl border border-blue-500/20 mt-6 mb-4">
                                 <h2 className="text-[16px] font-bold text-blue-300">{children}</h2>
@@ -402,7 +413,30 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                               <blockquote className="border-l-2 border-blue-500/30 pl-4 mx-4 my-3 text-[11px] text-slate-400 italic">{children}</blockquote>
                             ),
                             hr: () => <hr className="border-white/10 my-5" />,
-                          }}>{detail.resultSummary}</ReactMarkdown>
+                            table: ({ children }) => (
+                              <div className="mx-4 my-4 overflow-x-auto rounded-xl border border-white/10">
+                                <table className="w-full border-collapse text-[12px]">{children}</table>
+                              </div>
+                            ),
+                            thead: ({ children }) => (
+                              <thead className="bg-slate-800/60">{children}</thead>
+                            ),
+                            tbody: ({ children }) => (
+                              <tbody className="divide-y divide-white/5">{children}</tbody>
+                            ),
+                            tr: ({ children }) => (
+                              <tr className="align-top">{children}</tr>
+                            ),
+                            th: ({ children }) => (
+                              <th className="px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wider text-blue-300 border-b border-white/10">{children}</th>
+                            ),
+                            td: ({ children }) => (
+                              <td className="px-3 py-2 text-slate-300 leading-[1.6]">{children}</td>
+                            ),
+                            code: ({ children }) => (
+                              <code className="px-1.5 py-0.5 rounded bg-slate-800/80 text-blue-300 text-[11px]">{children}</code>
+                            ),
+                          }}>{normalizeMarkdownTables(detail.resultSummary)}</ReactMarkdown>
                         </div>
                       </div>
                     )}
