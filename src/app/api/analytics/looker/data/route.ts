@@ -455,7 +455,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
                    s.first_call_out_at
                    - GREATEST(
                        s.sla_start,
-                       date_trunc('day', s.sla_start) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
+                       -- Anchor shift to the CALL day, not the lead day.
+                       -- Integrator's «SLA первого звонка» (рабочие часы)
+                       -- subtracts only the time from the start of the
+                       -- manager's shift on the day the call happened,
+                       -- not on the day the lead arrived. For night-time
+                       -- leads called the next morning that yields
+                       -- (call - shift_start_call_day) instead of a 12h+
+                       -- gap measured from the prior day's shift.
+                       date_trunc('day', s.first_call_out_at) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
                      )
                  )))
             END
@@ -469,7 +477,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ${slaEligibilityJoin}
         LEFT JOIN schedule_overrides so
           ON so.manager_name = fl.manager
-         AND so.schedule_date = s.sla_start::date
+         AND so.schedule_date = s.first_call_out_at::date
         GROUP BY fl.manager
         ORDER BY lead_count DESC
       `;
