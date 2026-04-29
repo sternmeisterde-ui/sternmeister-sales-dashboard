@@ -55,6 +55,13 @@ export const leadsCohort = analyticsSchema.table(
     // B2G non-qual categorisation (Kommo custom field 879824 enum_id).
     // enum_ids: 744486 Неправильный номер, 744876/747530/747532/747534/747536 Неквал.*
     nonQualEnumId: bigint("non_qual_enum_id", { mode: "number" }),
+    // B2B closing-reason categorisation (Kommo custom field 876383 enum_id).
+    // Required by Kommo at status_id=143 on pipelines 10631243 (Бух Комм) and
+    // 13209983 (Мед Комм) — distinct from the standard loss_reason_id which
+    // managers leave NULL on this account. Drives Looker SLA gate, where
+    // {740587 Неквал лид, 740593 Спам, 740595 Предложение сотрудничества}
+    // drop a lead-call pair from the SLA AVG. See migration 0007.
+    b2bCloseReasonEnumId: bigint("b2b_close_reason_enum_id", { mode: "number" }),
     // Termin dashboard (Бух Бератер pipeline). Looked up by field NAME in
     // sync-leads — see B2G_CUSTOM_FIELD_NAMES.terminDate / aaTerminDate.
     // Added in migration 0006_termin_dates.sql.

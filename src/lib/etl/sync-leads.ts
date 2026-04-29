@@ -22,6 +22,13 @@ const CF = {
    * Referenced in build-response.ts B2G qualLeads filter.
    */
   NON_QUAL_REASON: 879824,
+  /**
+   * B2B closing reason (enum, "Причины закрытия (Обязательное поле)").
+   * Required by Kommo at status_id=143 on pipelines 10631243/13209983.
+   * Used by Looker B2B SLA gate to drop {Неквал лид, Спам, Предложение
+   * сотрудничества} from the SLA AVG.
+   */
+  B2B_CLOSE_REASON: 876383,
 } as const;
 
 // ---- B2B payment custom-fields (looked up by name, not by id) ----
@@ -162,6 +169,10 @@ export async function syncLeads(
       lead.custom_fields_values as Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
       CF.NON_QUAL_REASON,
     );
+    const b2bCloseReasonEnumId = cfEnumId(
+      lead.custom_fields_values as Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
+      CF.B2B_CLOSE_REASON,
+    );
     // Termin dashboard fields — Бух Бератер pipeline (12154099). Other
     // pipelines simply don't have these fields, so findByName returns
     // undefined and parseDate yields NULL — no extra guard needed.
@@ -196,6 +207,7 @@ export async function syncLeads(
       prepaymentDate,
       prepaymentAmount,
       nonQualEnumId,
+      b2bCloseReasonEnumId,
       terminDate,
       aaTerminDate,
     });

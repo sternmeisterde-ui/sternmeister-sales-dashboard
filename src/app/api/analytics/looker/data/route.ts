@@ -302,24 +302,27 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // For Коммерция (b2b) SLA is computed only on real prospects:
     //   1) at first_call + 2h the lead is still in {Бух Комм, Мед Комм}
     //      (skips leads that drifted out of the funnel quickly), and
-    //   2) the lead is NOT closed-not-realized at +2h with loss_reason ∈
-    //      {Спам, Неквал лид, Предложение сотрудничества}. Closed-lost with
-    //      ANY OTHER reason — or with no reason yet set — STAYS in the SLA
-    //      pool (per user spec: «не идут только закрытые с этими статусами»).
-    // The +2h state comes from analytics.lead_status_changes (mirrored Kommo
-    // history). loss_reason is the current snapshot from leads_cohort. Calls
-    // / messages / counts are NOT filtered — that data is shared with other
+    //   2) the lead is NOT closed-not-realized at +2h with reason ∈
+    //      {Неквал лид, Спам, Предложение сотрудничества}. Closed-lost with
+    //      ANY OTHER reason stays in the pool.
+    //
+    // Reason source: Kommo custom field 876383 "Причины закрытия (Обязательное
+    // поле)" — required by Kommo when status_id=143 on B2B pipelines, mirrored
+    // into analytics.leads_cohort.b2b_close_reason_enum_id by sync-leads. The
+    // standard Kommo loss_reason_id is intentionally NOT used here: managers
+    // leave it NULL on this account, the custom field is what they actually
+    // populate.
+    //
+    // The +2h state comes from analytics.lead_status_changes. Calls /
+    // messages / counts are NOT filtered — that data is shared with other
     // tabs. The gate only suppresses the call-pair from the SLA AVG; the
     // lead row itself is still counted.
     //
-    // Heads-up: 100% of April B2B closed-lost leads have loss_reason=NULL in
-    // Kommo (verified via direct API probe — managers stopped tagging since
-    // 2026-04-06). So this gate is effectively a no-op on current data; it
-    // only takes effect once tagging resumes or a backfill lands.
-    //
     // For B2G this CTE is omitted and the SLA gate is empty (legacy behaviour).
     const isB2B = dept === "b2b";
-    const B2B_BAD_LOSS_REASONS = ["Спам", "Неквал лид", "Предложение сотрудничества"];
+    // Custom field 876383 enum_ids:
+    //   740587 Неквал лид · 740593 Спам · 740595 Предложение сотрудничества
+    const B2B_BAD_CLOSE_ENUM_IDS = [740587, 740593, 740595];
     const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
     const B2B_CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
     const slaEligibilityCte = isB2B
@@ -329,7 +332,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           fl.lead_id,
           COALESCE(sc.pipeline, lc_full.pipeline) AS pipeline_at_plus2h,
           COALESCE(sc.status,   lc_full.status)   AS status_at_plus2h,
-          lc_full.loss_reason                      AS current_loss_reason
+          lc_full.b2b_close_reason_enum_id        AS close_reason_enum_id
         FROM filtered_leads fl
         JOIN analytics.sla s          ON s.lead_id = fl.lead_id
         JOIN analytics.leads_cohort lc_full ON lc_full.lead_id = fl.lead_id
@@ -350,7 +353,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       : "";
     // SQL fragment usable inside an existing WHERE/CASE WHEN — leading "AND".
     // Drops the lead-call pair only when (closed-lost-at-+2h AND reason in
-    // junk set). NULL loss_reason is treated as «not in junk set» → kept,
+    // junk set). NULL close_reason_enum_id is treated as «not junk» → kept,
     // matching user's «по любой причине, кроме …» semantics. Pipeline-at-+2h
     // arm stays (must be in B2B funnels at the 2h checkpoint).
     const slaEligibilityCondition = isB2B
@@ -358,8 +361,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           AND sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
           AND NOT (
             sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-            AND sle.current_loss_reason IS NOT NULL
-            AND sle.current_loss_reason IN (${B2B_BAD_LOSS_REASONS.map((r) => `'${esc(r)}'`).join(", ")})
+            AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
           )
         `
       : "";
@@ -565,8 +567,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
              WHEN sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
               AND NOT (
                 sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-                AND sle.current_loss_reason IS NOT NULL
-                AND sle.current_loss_reason IN (${B2B_BAD_LOSS_REASONS.map((r) => `'${esc(r)}'`).join(", ")})
+                AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
               )
              THEN TRUE
              ELSE FALSE
