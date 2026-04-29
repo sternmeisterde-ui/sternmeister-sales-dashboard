@@ -100,6 +100,47 @@ export async function computeSla(
 
   const leadIds = leads.map((l) => l.leadId).filter((id): id is number => id !== null);
 
+  // sla_start = first event_at in the lead's most-meaningful "main"
+  // pipeline. Replicates the integrator's logic verified empirically
+  // against 9 sample leads:
+  //   * Lead currently in Бух Бератер  → first Бух Бератер entry
+  //   * Lead currently in Бух Гос       → first Бух Гос entry
+  //   * Lead currently in Бух Комм but
+  //     historically passed through
+  //     Бух Гос                          → first Бух Гос entry
+  //   * Lead never touched Бух Гос      → first event in next pipeline by
+  //                                        priority: Бух Бератер → Бух Комм
+  //                                        → Мед Гос → Мед Комм
+  //   * No status events at all          → fallback to lead_created_at
+  //
+  // Pipelines OUTSIDE this priority list (Аппеляции, webinars, Тестовая,
+  // Обучение) are intentionally skipped — they're not part of the SLA
+  // funnel and a lead's brief detour through them shouldn't move
+  // sla_start. COALESCE walks the priority list and picks the first
+  // pipeline that has any history.
+  const slaStartRes = await analyticsDb.execute<{
+    lead_id: number;
+    sla_start_at: Date | null;
+  }>(sql`
+    SELECT lead_id,
+           COALESCE(
+             MIN(event_at) FILTER (WHERE pipeline = 'Бух Гос'),
+             MIN(event_at) FILTER (WHERE pipeline = 'Бух Бератер'),
+             MIN(event_at) FILTER (WHERE pipeline = 'Бух Комм'),
+             MIN(event_at) FILTER (WHERE pipeline = 'Мед Гос'),
+             MIN(event_at) FILTER (WHERE pipeline = 'Мед Комм')
+           ) AT TIME ZONE 'UTC' AS sla_start_at
+    FROM analytics.lead_status_changes
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+    GROUP BY lead_id
+  `);
+  const slaStartByLead = new Map<number, Date>();
+  for (const row of slaStartRes.rows) {
+    if (row.sla_start_at) {
+      slaStartByLead.set(Number(row.lead_id), new Date(row.sla_start_at));
+    }
+  }
+
   // Fetch communication summaries for these leads.
   //
   // AT TIME ZONE 'UTC' converts bare `timestamp` columns to `timestamptz` so
@@ -173,7 +214,10 @@ export async function computeSla(
       lastContactAt: null,
     };
 
-    const slaStart = lead.createdAt; // integrator adds ~3min; we use created_at directly
+    // sla_start: prefer the first entry into the lead's CURRENT pipeline
+    // (matches integrator's behaviour for transferred / reactivated leads).
+    // Fallback to lead_created_at for leads with no status history yet.
+    const slaStart = slaStartByLead.get(lead.leadId) ?? lead.createdAt;
 
     const isWaiting = comms.firstContactAt === null ? 1 : 0;
     const isWaitingCall = comms.firstCallOutAt === null ? 1 : 0;

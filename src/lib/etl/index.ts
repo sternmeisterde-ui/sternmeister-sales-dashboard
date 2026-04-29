@@ -25,7 +25,6 @@ import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncTelephony } from "./sync-telephony";
 import { enrichTelephonyLeads } from "./enrich-telephony-leads";
-import { mirrorIntegratorSla } from "./mirror-integrator-sla";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql } from "drizzle-orm";
@@ -225,24 +224,6 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const slaRows = skip.has("sla")
     ? 0
     : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
-
-  // Mirror integrator's sla_start from their MySQL — overrides our
-  // lead_created_at heuristic with their per-lead pickup-time value.
-  // Non-fatal: if integrator MySQL is unreachable or env missing, we keep
-  // our values. Wider lookback in incremental mode catches up reactivated
-  // leads whose sla_start shifted recently.
-  if (!skip.has("sla")) {
-    try {
-      const mirrorFromDate = incremental
-        ? new Date(opts.toDate.getTime() - 30 * 24 * 60 * 60 * 1000)
-        : opts.fromDate;
-      await mirrorIntegratorSla(mirrorFromDate, opts.toDate);
-    } catch (err) {
-      console.error(
-        `[ETL] mirror-integrator-sla failed (non-fatal): ${err instanceof Error ? err.message : err}`,
-      );
-    }
-  }
 
   const result: SyncResult = {
     leads: leadsCount,

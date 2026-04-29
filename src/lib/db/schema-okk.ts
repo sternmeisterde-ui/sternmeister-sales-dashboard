@@ -124,6 +124,16 @@ export const okkEvaluations = pgTable("evaluations", {
   modelUsed: text("model_used"),
   tokensUsed: integer("tokens_used"),
   callNumber: text("call_number"),
+  // Phase 2 — structured follow-up + override audit signal
+  overrideMetadata: jsonb("override_metadata").$type<{
+    is_followup: boolean;
+    followup_signal_source: "lead_id" | "phone_fallback" | "phone_fallback_no_crm" | null;
+    prior_count: number;
+    call_type: string | null;
+    overrides_applied: number[];
+    score_before_override: number | null;
+    score_after_override: number;
+  }>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
@@ -154,6 +164,36 @@ export const okkWorstCalls = pgTable("worst_calls", {
   respondedAt: timestamp("responded_at", { withTimezone: true }),
   responseAdequate: boolean("response_adequate"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ─── telephony_cdr (Phase 2 — webhook coverage tracking) ─────
+export const okkTelephonyCdr = pgTable("telephony_cdr", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  department: text("department").notNull(),
+  managerId: uuid("manager_id"),
+  managerName: text("manager_name"),
+  telephony: text("telephony").notNull(),
+  externalCallId: text("external_call_id").notNull(),
+  contactPhone: text("contact_phone"),
+  callStartedAt: timestamp("call_started_at", { withTimezone: true }).notNull(),
+  durationSeconds: integer("duration_seconds"),
+  direction: text("direction"),
+  isInOkk: boolean("is_in_okk").notNull().default(false),
+  okkCallId: uuid("okk_call_id"),
+  syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── phantom_history (Phase 2 — daily coverage aggregate) ────
+export const okkPhantomHistory = pgTable("phantom_history", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  department: text("department").notNull(),
+  managerId: uuid("manager_id"),
+  managerName: text("manager_name").notNull(),
+  date: text("date").notNull(),
+  phantomCount: integer("phantom_count").notNull().default(0),
+  okkCount: integer("okk_count").notNull().default(0),
+  coveragePct: integer("coverage_pct"),
+  computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 // ==================== RELATIONS ====================

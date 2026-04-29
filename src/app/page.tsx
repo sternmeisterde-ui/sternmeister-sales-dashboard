@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock,
+  CalendarClock, ShieldCheck,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -15,6 +15,7 @@ import AnalyticsTab from "@/components/AnalyticsTab";
 import TrackingTab from "@/components/TrackingTab";
 import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
+import AuditTab from "@/components/AuditTab";
 import CriteriaTab from "@/components/CriteriaTab";
 import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
@@ -97,7 +98,7 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit">("dashboard");
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -641,6 +642,7 @@ export default function Dashboard() {
             { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
             { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
             { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true },
+            { id: "audit", icon: ShieldCheck, label: "Аудит", adminOnly: true },
           ].filter(item => isAdmin || !item.adminOnly).map((item) => (
             <button
               key={item.id}
@@ -784,6 +786,8 @@ export default function Dashboard() {
         {activeTab === "looker" && <LookerTab department={activeDepartment} />}
 
         {activeTab === "termins" && <TerminTab />}
+
+        {activeTab === "audit" && <AuditTab department={activeDepartment} />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
         {(activeTab === "real_calls" || activeTab === "ai_calls") && (
