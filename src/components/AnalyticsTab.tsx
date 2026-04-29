@@ -4,6 +4,13 @@ import { useState, useEffect, useCallback } from "react";
 import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
+import {
+  fmtLocalDate,
+  todayBerlinDate,
+  berlinCivilDate,
+  addDaysCivil,
+  todayCivil,
+} from "@/lib/utils/date";
 
 // ==================== Types ====================
 
@@ -54,8 +61,11 @@ function fmtPeriod(p: string, g: string): string {
   return p;
 }
 
+// Berlin civil "YYYY-MM-DD" — was using browser-local getFullYear/getMonth/
+// getDate which silently shifted the day in non-Berlin browsers (US East
+// pickers were dropping a full day before hitting the API).
 function fmtDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return fmtLocalDate(d);
 }
 
 function fmtShortRange(r: DateRange): string {
@@ -97,13 +107,17 @@ function getAnalyticsLines(dept: "b2g" | "b2b"): { id: string; label: string }[]
 
 export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
-  const [line, setLine] = useState("1");
+  // "all" aggregates every active funnel for the selected department/source.
+  // Per-line drill-downs remain available via the pill row below.
+  const [line, setLine] = useState("all");
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerId, setManagerId] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>(() => {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(start.getDate() - 30);
+    // Berlin-civil 30-day window. Browser-local `setDate(now − 30)` produced
+    // a Date whose `fmtDate` (now Berlin) read as one day off the picker
+    // highlight in non-Berlin browsers.
+    const end = todayBerlinDate();
+    const start = berlinCivilDate(addDaysCivil(todayCivil(), -30));
     return { start, end };
   });
 
@@ -116,10 +130,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   // Comparison mode
   const [compareMode, setCompareMode] = useState(false);
   const [compareDateRange, setCompareDateRange] = useState<DateRange>(() => {
-    const end = new Date();
-    end.setDate(end.getDate() - 30);
-    const start = new Date();
-    start.setDate(start.getDate() - 60);
+    // Compare window = 30-day window ending 30 days ago, Berlin civil.
+    const today = todayCivil();
+    const end = berlinCivilDate(addDaysCivil(today, -30));
+    const start = berlinCivilDate(addDaysCivil(today, -60));
     return { start, end };
   });
   const [compareData, setCompareData] = useState<AnalyticsData | null>(null);
@@ -133,15 +147,17 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 
   // Reset manager when context changes (different DB/line = different manager UUIDs)
   useEffect(() => {
-    // Reset to the first line of the new department when switching.
-    setLine(getAnalyticsLines(department)[0]?.id ?? "1");
+    // Reset to the cross-funnel "all" view when switching department —
+    // the per-line drill-down is opt-in.
+    setLine("all");
     setManagerId("");
   }, [department]);
   useEffect(() => {
     setManagerId("");
     // When switching to roleplay, collapse sub-lines to their group id because
-    // roleplay data isn't tagged with the sub-line (e.g. "2b" → "2").
-    if (source === "roleplay") {
+    // roleplay data isn't tagged with the sub-line (e.g. "2b" → "2"). Leave
+    // "all" alone — it's already the cross-funnel view.
+    if (source === "roleplay" && line !== "all") {
       const current = getLines(department).find((l) => l.id === line);
       if (current && current.id !== current.group) setLine(current.group);
     }
@@ -214,9 +230,8 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   }, [fetchCompareData, compareMode]);
 
   const setQuickRange = (days: number) => {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(start.getDate() - days);
+    const end = todayBerlinDate();
+    const start = berlinCivilDate(addDaysCivil(todayCivil(), -days));
     setDateRange({ start, end });
   };
 
@@ -241,9 +256,16 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 
         {/* Line filter — sourced from tenant config. For roleplay we collapse
             sub-lines into their group (e.g. "2a"/"2b" → single "2") because
-            roleplay calls aren't tagged with the sub-line. */}
+            roleplay calls aren't tagged with the sub-line. The leading "Все"
+            pill aggregates every active funnel. */}
         {(department === "b2b" ? source === "okk" : true) && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
+            <button onClick={() => { setLine("all"); setManagerId(""); }}
+              className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
+                line === "all" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
+              }`}>
+              Все
+            </button>
             {(() => {
               const lines = getAnalyticsLines(department);
               // For roleplay, dedupe by group so each group shows once.
@@ -309,10 +331,9 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             value={compareDateRange}
             onChange={setCompareDateRange}
             onClear={() => {
-              const end = new Date();
-              end.setDate(end.getDate() - 30);
-              const start = new Date();
-              start.setDate(start.getDate() - 60);
+              const today = todayCivil();
+              const end = berlinCivilDate(addDaysCivil(today, -30));
+              const start = berlinCivilDate(addDaysCivil(today, -60));
               setCompareDateRange({ start, end });
             }}
           />

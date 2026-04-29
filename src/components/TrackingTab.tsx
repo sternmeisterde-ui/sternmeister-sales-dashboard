@@ -9,6 +9,7 @@ import {
   EVENT_TYPE_MAP,
   DEFAULT_SELECTED_KEYS,
 } from "@/lib/tracking/event-types";
+import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
@@ -69,35 +70,22 @@ interface TrackingTabProps {
 // date — see berlinToday() below for why the "today" default can't use the
 // browser's clock directly.
 
+// Berlin civil "YYYY-MM-DD". `getFullYear/getMonth/getDate` reads BROWSER-LOCAL
+// components, so a Berlin-midnight UTC instant (what CalendarPicker emits)
+// resolved to the previous civil day in US-east browsers and the API got the
+// wrong window with no obvious symptom. Delegate to the shared helper.
 function toLocalISO(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return fmtLocalDate(d);
 }
 
 /**
- * Browser-local midnight Date whose calendar parts match Berlin's CURRENT
- * calendar date. Without this, a user in a different timezone opening the
- * tab near midnight sees "today" = their own date while Berlin is already
- * on the next day (or vice versa); the server's `includesToday` check then
- * misses and auto-refresh goes silent. Uses Intl so DST flips are correct.
+ * UTC instant for 00:00 Berlin of today's Berlin civil date. Aligned with
+ * CalendarPicker's emit shape so range comparisons in this tab don't mix
+ * "browser-local-midnight Date with Berlin parts" against "UTC instant for
+ * Berlin midnight" — they're not interchangeable across `getTime()`.
  */
 function berlinToday(): Date {
-  const partsByType: Record<string, string> = {};
-  for (const p of new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Berlin",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date())) {
-    if (p.type !== "literal") partsByType[p.type] = p.value;
-  }
-  return new Date(
-    Number(partsByType.year),
-    Number(partsByType.month) - 1,
-    Number(partsByType.day),
-  );
+  return todayBerlinDate();
 }
 
 function formatDateShort(iso: string): string {

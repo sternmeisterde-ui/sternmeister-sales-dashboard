@@ -23,6 +23,11 @@ import {
 import DinoLoader from "@/components/DinoLoader";
 import SchedulePopup from "@/components/SchedulePopup";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
+import {
+  todayBerlinDate,
+  berlinCivilComponents,
+  berlinCivilDate,
+} from "@/lib/utils/date";
 
 // ====================== TYPES ======================
 
@@ -855,7 +860,9 @@ function ManagerMetricsTable({
 
 export default function DailyTab({ department }: { department: "b2g" | "b2b" }) {
   const [mode, setMode] = useState<"days" | "weeks" | "months">("days");
-  const [selectedMonth, setSelectedMonth] = useState<Date>(new Date());
+  // Berlin civil "today" — `new Date()` browser-local picked the wrong month
+  // for users east of Berlin in the first hours after their midnight.
+  const [selectedMonth, setSelectedMonth] = useState<Date>(() => todayBerlinDate());
   const [data, setData] = useState<RangeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -893,7 +900,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     let abort = false;
     (async () => {
       try {
-        const res = await fetch(`/api/daily/range?department=${department}&mode=months&year=${selectedMonth.getFullYear()}`);
+        const res = await fetch(`/api/daily/range?department=${department}&mode=months&year=${berlinCivilComponents(selectedMonth).y}`);
         const json = await res.json();
         if (!abort) setMonthsOfYear(json);
       } catch (e) {
@@ -909,14 +916,17 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
       setError(null);
       try {
         let url: string;
-        const monthStr = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
+        // Read selectedMonth components in Berlin TZ — browser-local readers
+        // crossed the month boundary at midnight in non-Berlin zones.
+        const sel = berlinCivilComponents(selectedMonth);
+        const monthStr = `${sel.y}-${String(sel.m).padStart(2, "0")}`;
         if (mode === "days") {
           url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}`;
         } else if (mode === "weeks") {
           // Weeks-of-selected-month (4–5 Mon-Sun weeks that touch the month)
           url = `/api/daily/range?department=${department}&mode=weeks&month=${monthStr}`;
         } else {
-          url = `/api/daily/range?department=${department}&mode=months&year=${selectedMonth.getFullYear()}`;
+          url = `/api/daily/range?department=${department}&mode=months&year=${sel.y}`;
         }
 
         const res = await fetch(url, { signal });
@@ -927,14 +937,11 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         const json = await res.json();
         setData(json);
 
-        // Auto-select today if in current month
+        // Auto-select today if in current month — Berlin civil comparison.
         if (mode === "days" && json.days) {
-          const today = new Date();
-          if (
-            today.getFullYear() === selectedMonth.getFullYear() &&
-            today.getMonth() === selectedMonth.getMonth()
-          ) {
-            setSelectedDayIdx(today.getDate() - 1);
+          const today = berlinCivilComponents(todayBerlinDate());
+          if (today.y === sel.y && today.m === sel.m) {
+            setSelectedDayIdx(today.d - 1);
           } else {
             setSelectedDayIdx(null);
           }
@@ -957,15 +964,21 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     return () => ac.abort();
   }, [fetchData]);
 
-  // Navigation
+  // Navigation — civil-calendar arithmetic keyed off Berlin components so a
+  // user east of Berlin clicking "previous month" near midnight doesn't skip
+  // a month (the old `setMonth(getMonth() − 1)` ran browser-local).
   const shiftMonth = (dir: -1 | 1) => {
-    const d = new Date(selectedMonth);
+    const { y, m } = berlinCivilComponents(selectedMonth);
+    let nextY = y;
+    let nextM = m;
     if (mode === "days" || mode === "weeks") {
-      d.setMonth(d.getMonth() + dir);
+      nextM = m + dir;
+      if (nextM < 1) { nextY -= 1; nextM = 12; }
+      if (nextM > 12) { nextY += 1; nextM = 1; }
     } else {
-      d.setFullYear(d.getFullYear() + dir);
+      nextY = y + dir;
     }
-    setSelectedMonth(d);
+    setSelectedMonth(berlinCivilDate(`${nextY}-${String(nextM).padStart(2, "0")}-01`));
     setSelectedDayIdx(null);
   };
 
@@ -1013,10 +1026,12 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   // Schedule from today's snapshot (for active managers panel)
   const todaySchedule = useMemo(() => {
     if (mode !== "days" || !data?.days) return undefined;
-    const today = new Date();
+    // Berlin civil today — `new Date()` + browser-local getters bucketed
+    // around the user's local midnight, missing today's row in non-Berlin zones.
+    const today = berlinCivilComponents(todayBerlinDate());
     const todayIdx = data.days.findIndex((d) => {
-      const dd = new Date(d.date);
-      return dd.getDate() === today.getDate() && dd.getMonth() === today.getMonth() && dd.getFullYear() === today.getFullYear();
+      const dd = berlinCivilComponents(new Date(d.date));
+      return dd.d === today.d && dd.m === today.m && dd.y === today.y;
     });
     return todayIdx >= 0 ? data.days[todayIdx] : undefined;
   }, [data, mode]);
@@ -1070,7 +1085,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             <ChevronRight className="w-4 h-4" />
           </button>
           <button
-            onClick={() => { setSelectedMonth(new Date()); setSelectedDayIdx(null); }}
+            onClick={() => { setSelectedMonth(todayBerlinDate()); setSelectedDayIdx(null); }}
             className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
           >
             Сейчас
@@ -1770,10 +1785,17 @@ function RatingFirstLineView({ monthlySnapshot, monthPeriodDate }: {
   const [yearStr, monthStr] = monthPeriodDate.slice(0, 7).split("-");
   const year = Number(yearStr);
   const monthNum = Number(monthStr);
-  const totalDaysInMonth = new Date(year, monthNum, 0).getDate();
-  const now = new Date();
-  const isCurrentMonth = now.getFullYear() === year && now.getMonth() + 1 === monthNum;
-  const daysSoFar = isCurrentMonth ? now.getDate() : totalDaysInMonth;
+  // `Date.UTC(y, m, 0)` rolls back to the last day of month m-1 in UTC — pure
+  // calendar arithmetic, no TZ. Original `new Date(y, m, 0)` did the same
+  // math but in browser-local; harmless for last-day count, but switching
+  // keeps the file uniform with the rest of this audit.
+  const totalDaysInMonth = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+  // Berlin civil "now" — pace-of-month calculation must align with the
+  // business calendar, otherwise daysSoFar is off by one in non-Berlin zones
+  // and skews per-day target deltas.
+  const now = berlinCivilComponents(todayBerlinDate());
+  const isCurrentMonth = now.y === year && now.m === monthNum;
+  const daysSoFar = isCurrentMonth ? now.d : totalDaysInMonth;
 
   if (rows.length === 0) {
     return (

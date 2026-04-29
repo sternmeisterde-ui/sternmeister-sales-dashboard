@@ -3,6 +3,13 @@
 import { Fragment, useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Loader2, ExternalLink, ChevronDown, ChevronRight, ChevronUp, ArrowUpDown } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
+import {
+  fmtLocalDate,
+  todayBerlinDate,
+  berlinCivilDate,
+  addDaysCivil,
+  todayCivil,
+} from "@/lib/utils/date";
 
 // ─── Department config ──────────────────────────────────────────────────────
 
@@ -192,15 +199,21 @@ function fmtDate(val: unknown): string {
   return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+// Berlin civil "YYYY-MM-DD". `.toISOString().slice(0, 10)` looked the same
+// at a glance but returned UTC components — for a Berlin-midnight UTC instant
+// (CET/CEST is UTC+1/+2) that's 22:00–23:00 of the PREVIOUS UTC day, so the
+// API received yesterday for any picker click.
 function toISODate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return fmtLocalDate(d);
 }
 
 function makeDefaultRange(): DateRange {
-  const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - 30);
-  return { start, end };
+  // 30-day window ending today, Berlin civil. Was `new Date()` + browser-local
+  // setDate(), which drifted ±1 day in non-Berlin browsers and pushed the
+  // wrong window through toISODate above.
+  const today = todayBerlinDate();
+  const start = berlinCivilDate(addDaysCivil(todayCivil(), -30));
+  return { start, end: today };
 }
 
 // ─── Pill button helper ──────────────────────────────────────────────────────
@@ -1204,8 +1217,12 @@ export default function LookerTab({ department }: LookerTabProps) {
     fetch(`/api/analytics/looker/data?${params}`)
       .then((r) => r.json())
       .then((json: { minDate?: string | null; maxDate?: string | null }) => {
-        setMinDate(json.minDate ? new Date(`${json.minDate}T00:00:00`) : null);
-        setMaxDate(json.maxDate ? new Date(`${json.maxDate}T23:59:59`) : null);
+        // `new Date("YYYY-MM-DDT00:00:00")` parses as BROWSER-LOCAL midnight,
+        // so a Moscow user's bound was 2h ahead of Berlin. CalendarPicker uses
+        // the bounds with `<` / `>` against Berlin-midnight Dates, and the
+        // mismatch greyed out an extra day at each edge.
+        setMinDate(json.minDate ? berlinCivilDate(json.minDate) : null);
+        setMaxDate(json.maxDate ? berlinCivilDate(json.maxDate) : null);
       })
       .catch(() => {/* non-critical */});
   }, [department]);
@@ -1368,9 +1385,8 @@ export default function LookerTab({ department }: LookerTabProps) {
   }, []);
 
   const setQuickRange = useCallback((days: number) => {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(start.getDate() - (days - 1));
+    const end = todayBerlinDate();
+    const start = berlinCivilDate(addDaysCivil(todayCivil(), -(days - 1)));
     setDateRange({ start, end });
     setTltPage(0);
   }, []);

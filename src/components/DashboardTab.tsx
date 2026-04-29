@@ -13,7 +13,13 @@ import {
 } from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
-import { fmtLocalDate as formatDate, todayBerlinDate } from "@/lib/utils/date";
+import {
+  fmtLocalDate as formatDate,
+  todayBerlinDate,
+  berlinCivilDate,
+  addDaysCivil,
+  diffDaysCivil,
+} from "@/lib/utils/date";
 
 // ==================== Types ====================
 
@@ -208,18 +214,28 @@ export default function DashboardTab({ department }: { department: string }) {
     formatDate(range.start) === formatDate(range.end);
 
   const shiftDate = (dir: -1 | 1) => {
-    const spanDays =
-      Math.round((range.end.getTime() - range.start.getTime()) / 86_400_000) + 1;
-    const nextStart = new Date(range.start);
-    nextStart.setDate(nextStart.getDate() + dir * spanDays);
-    const nextEnd = new Date(range.end);
-    nextEnd.setDate(nextEnd.getDate() + dir * spanDays);
-    setRange({ start: nextStart, end: nextEnd });
+    // Civil-day arithmetic. The previous `setDate(d + 1)` added 24h browser-
+    // local, which crossed DST silently — at the CET↔CEST boundary the next
+    // window was offset by 1h and `formatDate` (Berlin TZ) flipped one of
+    // the bounds onto an unrelated civil day.
+    const startCivil = formatDate(range.start);
+    const endCivil = formatDate(range.end);
+    const spanDays = diffDaysCivil(endCivil, startCivil) + 1;
+    const nextStartCivil = addDaysCivil(startCivil, dir * spanDays);
+    const nextEndCivil = addDaysCivil(endCivil, dir * spanDays);
+    setRange({
+      start: berlinCivilDate(nextStartCivil),
+      end: berlinCivilDate(nextEndCivil),
+    });
   };
 
+  // All Date objects here are Berlin-midnight UTC instants from the picker.
+  // `toLocaleDateString` without a timeZone option reads the user's browser
+  // zone — for non-Berlin browsers that produced a label one civil day off
+  // from what the picker had highlighted.
   const dateDisplay = isSingleDay
-    ? range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })
-    : `${range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })} — ${range.end.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" })}`;
+    ? range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/Berlin" })
+    : `${range.start.toLocaleDateString("ru-RU", { day: "numeric", month: "short", timeZone: "Europe/Berlin" })} — ${range.end.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric", timeZone: "Europe/Berlin" })}`;
 
   // ── Aggregate per-line totals client-side from perManager ─────────────
   // For B2G the user wants every call-stat tile to show three sub-numbers
