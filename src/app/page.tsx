@@ -27,6 +27,10 @@ import {
   endOfBerlinDay,
   startOfBerlinDay,
   todayBerlinDate,
+  todayCivil,
+  addDaysCivil,
+  berlinCivilDate,
+  berlinCivilComponents,
 } from "@/lib/utils/date";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useTheme } from "@/hooks/useTheme";
@@ -52,25 +56,30 @@ const cleanText = (text: string) => {
     .trim();
 };
 
-// Функции для работы с календарем
+// Calendar helpers — Berlin-civil-day correct.
+//
+// Every Date that flows through the inline filter calendar is a UTC instant
+// for 00:00 Berlin of some civil day. Constructing dates with `new Date(y,m,d)`
+// uses BROWSER-LOCAL midnight, which silently shifts the civil-day by ±1 in
+// non-Berlin browsers (Moscow users were filtering "yesterday" when clicking
+// "today"). All math here mirrors CalendarPicker.tsx so both pickers agree.
 const getDaysInMonth = (date: Date) => {
-  const year = date.getFullYear();
-  const month = date.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOfMonth = new Date(year, month, 1).getDay();
+  const { y, m } = berlinCivilComponents(date);
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const firstDayOfMonth = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(); // 0 = Sun
   return { daysInMonth, firstDayOfMonth };
 };
 
 const isSameDay = (date1: Date | null, date2: Date | null) => {
   if (!date1 || !date2) return false;
-  return date1.getDate() === date2.getDate() &&
-    date1.getMonth() === date2.getMonth() &&
-    date1.getFullYear() === date2.getFullYear();
+  const a = berlinCivilComponents(date1);
+  const b = berlinCivilComponents(date2);
+  return a.y === b.y && a.m === b.m && a.d === b.d;
 };
 
 const isInRange = (date: Date, start: Date | null, end: Date | null) => {
   if (!start || !end) return false;
-  return date >= start && date <= end;
+  return date.getTime() >= start.getTime() && date.getTime() <= end.getTime();
 };
 
 interface SessionUser {
@@ -140,7 +149,14 @@ export default function Dashboard() {
   const [scoreFilter, setScoreFilter] = useState(0);
   const [dateRange, setDateRange] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
-  const [calendarMonth, setCalendarMonth] = useState(new Date());
+  // Berlin-civil 1st-of-month for the rendered calendar grid. Using
+  // `new Date()` here gave browser-local "today", which then read as the wrong
+  // civil month for Moscow users in the first ~2 h of a Berlin civil day.
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
+    const today = todayBerlinDate();
+    const { y, m } = berlinCivilComponents(today);
+    return berlinCivilDate(`${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-01`);
+  });
   // "День" — one click applies a single-day filter immediately.
   // "Период" — two clicks pick a start/end range.
   const [dateFilterMode, setDateFilterMode] = useState<"single" | "range">("single");
@@ -216,33 +232,29 @@ export default function Dashboard() {
   const [isLoadingReal, setIsLoadingReal] = useState(true);
   const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
-  // Compute OKK date range from period/custom range
-  // "end" is set to tomorrow to capture calls that arrive with UTC timestamps
-  // ahead of the local date (e.g. a call at 18:00 UTC on April 3rd is still
-  // April 3rd in Moscow/Berlin, but appears as "future" if the browser is UTC).
+  // Compute OKK date range from period/custom range — Berlin civil days.
+  // `to` is one day past the upper bound so calls timestamped at 23:59 Berlin
+  // still fall inside the range when `to` is parsed as start-of-day downstream
+  // (legacy boundary parsing also accepts end-of-day, but tomorrow is safe in
+  // both interpretations and avoids browser-local TZ drift).
   const getOkkDateRange = useCallback((): { from: string; to: string } => {
-    const now = new Date();
     if (aiCustomRange.start && aiCustomRange.end) {
       return {
         from: fmtLocalDate(aiCustomRange.start),
         to: fmtLocalDate(aiCustomRange.end),
       };
     }
-    // Set end to tomorrow so same-day calls stored in UTC don't get cut off
-    const end = new Date(now);
-    end.setDate(end.getDate() + 1);
-    const start = new Date(now);
+    const today = todayCivil();
+    let from: string;
     if (aiDashPeriod === "day") {
-      // today only — keep start = today, end = tomorrow covers late UTC calls
+      from = today;
     } else if (aiDashPeriod === "week") {
-      start.setDate(start.getDate() - 6);
+      from = addDaysCivil(today, -6);
     } else {
-      start.setDate(1); // first of month
+      // "month" → 1st of current Berlin civil month, NOT browser-local.
+      from = `${today.slice(0, 7)}-01`;
     }
-    return {
-      from: fmtLocalDate(start),
-      to: fmtLocalDate(end),
-    };
+    return { from, to: addDaysCivil(today, 1) };
   }, [aiDashPeriod, aiCustomRange]);
 
   // Load BOTH datasets in PARALLEL (single useEffect, Promise.all)
@@ -357,12 +369,19 @@ export default function Dashboard() {
   const activeManagers = activeTab === "real_calls" ? realManagers : aiManagers;
   const isLoadingCalls = activeTab === "real_calls" ? isLoadingReal : isLoadingAI;
 
-  // Dashboard stats for calls tabs (managers only, no ROPs/admins)
+  // Dashboard stats for calls tabs (managers only, no ROPs/admins).
+  // Mirrors `filteredManagers` line-filter logic: B2B uses prompt_type → server
+  // already aggregated per-line, so a non-zero totalCalls is the proxy for
+  // "this manager belongs to the selected line in this period".
   const callsDashStats = (() => {
     const allCalls = activeCalls;
     const managers = activeManagers
       .filter(m => !m.role || m.role === "manager")
-      .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
+      .filter(m => {
+        if (lineFilter === "all") return true;
+        if (activeDepartment === "b2b") return m.totalCalls > 0;
+        return m.line === lineFilter;
+      });
     const managerNames = new Set(managers.map(m => m.name));
 
     // All bounds are Berlin civil-day aligned: every "today / week / month"
@@ -382,9 +401,13 @@ export default function Dashboard() {
     } else if (aiDashPeriod === "day") {
       periodStart = todayStart;
     } else if (aiDashPeriod === "week") {
-      periodStart = new Date(todayStart.getTime() - 7 * 86_400_000);
+      // last 7 calendar days (today + 6 prior). Aligned with `getOkkDateRange`.
+      periodStart = new Date(todayStart.getTime() - 6 * 86_400_000);
     } else {
-      periodStart = new Date(todayStart.getTime() - 30 * 86_400_000);
+      // "month" → 1st of current Berlin civil month, matching the server-side
+      // window so the bento counts and the loaded calls cover the same days.
+      const todayCivilStr = todayCivil();
+      periodStart = berlinCivilDate(`${todayCivilStr.slice(0, 7)}-01`);
     }
 
     // ALL calls in period (including unevaluated / score=0)
@@ -446,17 +469,27 @@ export default function Dashboard() {
     return { avgScore, totalCalls: totalRoleplays, perManager, perManagerTarget, target, teamTargetAvg };
   })();
 
-  // Filter managers by role + line — totalCalls & avgScore come directly from the API
+  // Filter managers by role + line — totalCalls & avgScore come directly from the API.
+  // For B2B the line is bound via prompt_type at the SQL boundary (manager.line is
+  // null on commerce side), so the API already aggregates per-line. The previous
+  // implementation passed every B2B manager through regardless of line which left
+  // off-line managers visible at "0 calls" — confusing in the bento. When a B2B
+  // line is active, hide rows that the server returned with totalCalls === 0.
   const filteredManagers = activeManagers
     .filter(m => !m.role || m.role === "manager")
-    .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
+    .filter(m => {
+      if (lineFilter === "all") return true;
+      if (activeDepartment === "b2b") return m.totalCalls > 0;
+      return m.line === lineFilter;
+    });
 
   // Set of manager names matching current line filter (for call filtering)
   const filteredManagerNames = new Set(filteredManagers.map(m => m.name));
 
   // Filter calls by line, date range, score, and search query
   const filteredCalls = activeCalls.filter(call => {
-    // Filter by line (via manager name)
+    // Filter by line (via manager name) — applies to both B2G (manager.line)
+    // and B2B (manager has totalCalls in the line-filtered period).
     if (lineFilter !== "all" && !filteredManagerNames.has(call.name)) {
       return false;
     }
@@ -931,7 +964,11 @@ export default function Dashboard() {
                       const allCalls = activeTab === "real_calls" ? realCalls : aiCalls;
                       const managers = activeManagers
                         .filter(m => !m.role || m.role === "manager")
-                        .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
+                        .filter(m => {
+                          if (lineFilter === "all") return true;
+                          if (activeDepartment === "b2b") return m.totalCalls > 0;
+                          return m.line === lineFilter;
+                        });
                       const managerNames = new Set(managers.map(m => m.name));
                       return allCalls.filter(c => managerNames.has(c.name));
                     })()}
@@ -1131,22 +1168,25 @@ export default function Dashboard() {
                           <div className="flex items-center justify-between mb-3">
                             <button
                               onClick={() => {
-                                const newMonth = new Date(calendarMonth);
-                                newMonth.setMonth(newMonth.getMonth() - 1);
-                                setCalendarMonth(newMonth);
+                                const { y, m } = berlinCivilComponents(calendarMonth);
+                                // Date.UTC handles Jan→Dec rollover automatically.
+                                const ny = m === 1 ? y - 1 : y;
+                                const nm = m === 1 ? 12 : m - 1;
+                                setCalendarMonth(berlinCivilDate(`${ny}-${String(nm).padStart(2, "0")}-01`));
                               }}
                               className="p-1 hover:bg-white/5 rounded-lg transition-colors"
                             >
                               <ChevronRight className="w-4 h-4 rotate-180 text-slate-400" />
                             </button>
                             <span className="text-xs font-bold text-white">
-                              {calendarMonth.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}
+                              {calendarMonth.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' })}
                             </span>
                             <button
                               onClick={() => {
-                                const newMonth = new Date(calendarMonth);
-                                newMonth.setMonth(newMonth.getMonth() + 1);
-                                setCalendarMonth(newMonth);
+                                const { y, m } = berlinCivilComponents(calendarMonth);
+                                const ny = m === 12 ? y + 1 : y;
+                                const nm = m === 12 ? 1 : m + 1;
+                                setCalendarMonth(berlinCivilDate(`${ny}-${String(nm).padStart(2, "0")}-01`));
                               }}
                               className="p-1 hover:bg-white/5 rounded-lg transition-colors"
                             >
@@ -1160,12 +1200,18 @@ export default function Dashboard() {
                             ))}
                             {(() => {
                               const { daysInMonth, firstDayOfMonth } = getDaysInMonth(calendarMonth);
+                              const { y: monthY, m: monthM } = berlinCivilComponents(calendarMonth);
                               const days = [];
                               for (let i = 0; i < firstDayOfMonth; i++) {
                                 days.push(<div key={`empty-${i}`} className="aspect-square" />);
                               }
                               for (let day = 1; day <= daysInMonth; day++) {
-                                const date = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), day);
+                                // Berlin-midnight UTC instant for this civil day.
+                                // `new Date(y, m, day)` would build BROWSER-LOCAL midnight,
+                                // which converts to the wrong civil day in non-Berlin TZs.
+                                const date = berlinCivilDate(
+                                  `${monthY}-${String(monthM).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+                                );
                                 const isStart = isSameDay(date, dateRange.start);
                                 const isEnd = isSameDay(date, dateRange.end);
                                 const inRange = dateRange.start && dateRange.end && isInRange(date, dateRange.start, dateRange.end);
@@ -1208,9 +1254,9 @@ export default function Dashboard() {
                           </div>
 
                           <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-800/50 rounded-lg px-2 py-1.5 mb-3">
-                            <span>{dateRange.start ? dateRange.start.toLocaleDateString('ru-RU') : 'Начало'}</span>
+                            <span>{dateRange.start ? dateRange.start.toLocaleDateString('ru-RU', { timeZone: 'Europe/Berlin' }) : 'Начало'}</span>
                             <span className="text-slate-600">→</span>
-                            <span>{dateRange.end ? dateRange.end.toLocaleDateString('ru-RU') : 'Конец'}</span>
+                            <span>{dateRange.end ? dateRange.end.toLocaleDateString('ru-RU', { timeZone: 'Europe/Berlin' }) : 'Конец'}</span>
                           </div>
 
                           <div className="flex gap-2">
