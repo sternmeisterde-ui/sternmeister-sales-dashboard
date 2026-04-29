@@ -335,9 +335,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     //   740587 Неквал лид · 740593 Спам · 740595 Предложение сотрудничества
     const B2B_BAD_CLOSE_ENUM_IDS = [740587, 740593, 740595];
     const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
-    // CF 879824 enum_ids (Причина закрытия Госники):
-    //   744876 Неквал лид · 744486 Неправильный номер
-    const B2G_BAD_NON_QUAL_ENUM_IDS = [744876, 744486];
+    // CF 879824 enum_ids (Причина закрытия Госники).
+    // Per user spec «все кто имеют что-то неквал»: every Неквал* variant
+    // plus Неправильный номер counts as a bad reason.
+    //   744486 Неправильный номер
+    //   744876 Неквал лид
+    //   747530 Неквал Доход · 747532 Неквал Образование
+    //   747534 Неквал Возраст · 747536 Неквал Язык
+    //   750386 Неквал АГЕНТ
+    const B2G_BAD_NON_QUAL_ENUM_IDS = [
+      744486, 744876, 747530, 747532, 747534, 747536, 750386,
+    ];
     const CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
     const slaEligibilityCte = needSlaEligibility
       ? `,
