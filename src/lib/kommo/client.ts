@@ -94,6 +94,19 @@ let _configPromise: Promise<void> | null = null;
 let _cachedToken: string | null = null;
 let _cachedDomain: string | null = null;
 let _configLoadedAt = 0;
+/**
+ * Sticky flag: env token produced a 401, so skip the env source until process
+ * restart (or 30-min refresh window — see CONFIG_REFRESH_MS) and use DB.
+ *
+ * Why this exists: Dokploy's KOMMO_ACCESS_TOKEN was set once and is never
+ * rotated, while the kommo_tokens table is updated by the OAuth refresh
+ * flow on every renewal. When the env value goes stale (Kommo OAuth tokens
+ * are typically 24h-lived), every request hammers api-c with the bad token
+ * and gets 401 — `resetKommoConfig()` would just re-load the same bad env
+ * value on the next attempt, so we'd loop infinitely. Marking env as failed
+ * lets the second attempt fall through to the DB token.
+ */
+let _envTokenAuthFailed = false;
 
 /** Re-check token from DB every 30 minutes (picks up refreshed tokens without restart) */
 const CONFIG_REFRESH_MS = 30 * 60 * 1000;
@@ -101,11 +114,16 @@ const CONFIG_REFRESH_MS = 30 * 60 * 1000;
 /** Track consecutive API failures for diagnostics */
 let _consecutiveFailures = 0;
 export function getKommoHealth() {
+  const envSet = !!process.env.KOMMO_ACCESS_TOKEN;
+  const skipEnv = process.env.KOMMO_TOKEN_SOURCE === "db" || _envTokenAuthFailed;
+  const effectiveSource = envSet && !skipEnv ? "env" : (_cachedToken ? "db" : "none");
   return {
     consecutiveFailures: _consecutiveFailures,
     tokenLoadedAt: _configLoadedAt ? new Date(_configLoadedAt).toISOString() : null,
     domain: _cachedDomain,
-    tokenSource: process.env.KOMMO_ACCESS_TOKEN ? "env" : (_cachedToken ? "db" : "none"),
+    tokenSource: effectiveSource,
+    envTokenAuthFailed: _envTokenAuthFailed,
+    tokenSourceOverride: process.env.KOMMO_TOKEN_SOURCE ?? null,
   };
 }
 
@@ -138,8 +156,17 @@ function ensureKommoConfig(): Promise<void> {
     // If refreshing, don't null out _configPromise until new one resolves
     // (prevents concurrent requests from all hitting DB at once)
     const newPromise = (async () => {
+      // KOMMO_TOKEN_SOURCE=db: explicit operator-controlled override that
+      // skips the env token entirely and goes straight to kommo_tokens DB.
+      // Use when env contains a stale/wrong token but you can't (or don't
+      // want to) unset it from Dokploy — set KOMMO_TOKEN_SOURCE=db once,
+      // restart, done.
+      // _envTokenAuthFailed: same bypass triggered automatically after a
+      // 401 on the env token, so the next reload self-heals to DB.
+      const skipEnv = process.env.KOMMO_TOKEN_SOURCE === "db" || _envTokenAuthFailed;
+
       // 1. Check env vars first
-      if (process.env.KOMMO_ACCESS_TOKEN) {
+      if (process.env.KOMMO_ACCESS_TOKEN && !skipEnv) {
         _cachedToken = process.env.KOMMO_ACCESS_TOKEN;
         _cachedDomain = resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
         _configLoadedAt = Date.now();
@@ -188,6 +215,31 @@ export function resetKommoConfig(): void {
   _configLoadedAt = 0;
 }
 
+/**
+ * Mark the env token as bad (called on 401 by callers that know the env
+ * token was the one in flight). The next ensureKommoConfig() will skip
+ * env and go to DB. Sticky for this process.
+ */
+function markEnvTokenAuthFailed(): void {
+  if (_envTokenAuthFailed) return;
+  _envTokenAuthFailed = true;
+  console.warn(
+    "[Kommo] env-token authentication failed — switching to DB-stored token for the rest of this process " +
+      "(set KOMMO_TOKEN_SOURCE=db in Dokploy to skip env from the start)",
+  );
+}
+
+/**
+ * True iff the currently-cached token came from process.env (vs. DB).
+ * Used by 401 handlers to decide whether to mark env as failed.
+ */
+function envTokenInUse(): boolean {
+  return !!process.env.KOMMO_ACCESS_TOKEN
+    && !_envTokenAuthFailed
+    && process.env.KOMMO_TOKEN_SOURCE !== "db"
+    && _cachedToken === process.env.KOMMO_ACCESS_TOKEN;
+}
+
 // ==================== HELPERS ====================
 
 async function getAuthHeaders(): Promise<HeadersInit> {
@@ -215,6 +267,7 @@ async function kommoGet<T>(path: string, params?: Record<string, string>): Promi
     _consecutiveFailures++;
     if (res.status === 401) {
       console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+      if (envTokenInUse()) markEnvTokenAuthFailed();
       resetKommoConfig();
     }
     const text = await res.text();
@@ -267,6 +320,7 @@ export async function kommoFetchPath(pathWithQuery: string): Promise<unknown> {
     _consecutiveFailures++;
     if (res.status === 401) {
       console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+      if (envTokenInUse()) markEnvTokenAuthFailed();
       resetKommoConfig();
     }
     const retriable = res.status === 429 || res.status >= 500 || res.status === 401;
@@ -314,6 +368,7 @@ async function kommoGetAll<T>(
       _consecutiveFailures++;
       if (res.status === 401) {
         console.error("[Kommo] 401 Unauthorized in paginated request — resetting config");
+        if (envTokenInUse()) markEnvTokenAuthFailed();
         resetKommoConfig();
       }
       const text = await res.text();
