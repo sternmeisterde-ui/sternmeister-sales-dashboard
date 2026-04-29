@@ -212,6 +212,24 @@ function markEnvTokenAuthFailed(): void {
 }
 
 /**
+ * Heuristic: a 403 with nginx-shaped HTML body is Kommo's response to a
+ * revoked token at `${subdomain}.kommo.com`, not a permission denial.
+ * Per commit 1d3af60 incident notes: "nginx returns 403 HTML on revoked
+ * tokens at ${subdomain}.kommo.com, not because the host is wrong but
+ * because the token is dead." We treat such responses the same as a 401
+ * for failover purposes — env→DB token swap, retry — instead of bubbling
+ * a permanent error and looping the cron forever.
+ *
+ * A genuine permission-403 from Kommo's app server returns JSON, not
+ * nginx HTML, so this signature stays narrow.
+ */
+function isNginxAuthFailure(status: number, body: string): boolean {
+  if (status !== 403) return false;
+  const lc = body.slice(0, 512).toLowerCase();
+  return lc.includes("<html") && lc.includes("nginx") && lc.includes("forbidden");
+}
+
+/**
  * True iff the currently-cached token came from process.env (vs. DB).
  * Used by 401 handlers to decide whether to mark env as failed.
  */
@@ -247,12 +265,13 @@ async function kommoGet<T>(path: string, params?: Record<string, string>): Promi
   const res = await rateLimitedFetch(url.toString(), { headers: await getAuthHeaders() });
   if (!res.ok) {
     _consecutiveFailures++;
-    if (res.status === 401) {
-      console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+    const text = await res.text();
+    if (res.status === 401 || isNginxAuthFailure(res.status, text)) {
+      const reason = res.status === 401 ? "401 Unauthorized" : "403 nginx (revoked token)";
+      console.error(`[Kommo] ${reason} — resetting cached config for re-load`);
       if (envTokenInUse()) markEnvTokenAuthFailed();
       resetKommoConfig();
     }
-    const text = await res.text();
     throw new Error(`Kommo API ${res.status}: ${text}`);
   }
   _consecutiveFailures = 0;
@@ -300,14 +319,22 @@ export async function kommoFetchPath(pathWithQuery: string): Promise<unknown> {
       return res.json();
     }
     _consecutiveFailures++;
-    if (res.status === 401) {
-      console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+    // Read body once so we can inspect it for the nginx-revoked-token
+    // signature without consuming the stream twice. The body is small
+    // (<512 chars for the 403 case, JSON body otherwise), so this is cheap.
+    const text = await res.text();
+    const isNginx403 = isNginxAuthFailure(res.status, text);
+    if (res.status === 401 || isNginx403) {
+      const reason = res.status === 401 ? "401 Unauthorized" : "403 nginx (revoked token)";
+      console.error(`[Kommo] ${reason} — resetting cached config for re-load`);
       if (envTokenInUse()) markEnvTokenAuthFailed();
       resetKommoConfig();
     }
-    const retriable = res.status === 429 || res.status >= 500 || res.status === 401;
+    // 403-nginx is treated as retriable too — once env→DB swap fires, the
+    // next attempt picks up the live DB token without bubbling a permanent
+    // error.
+    const retriable = res.status === 429 || res.status >= 500 || res.status === 401 || isNginx403;
     if (!retriable || attempt === 4) {
-      const text = await res.text();
       // Include host in the error so a 403 nginx HTML body is unambiguously
       // attributable to the wrong API host vs. an actual auth/permission
       // problem on the right host. Caller (DB error_message) sees the host.
@@ -348,12 +375,13 @@ async function kommoGetAll<T>(
     if (res.status === 204) break;
     if (!res.ok) {
       _consecutiveFailures++;
-      if (res.status === 401) {
-        console.error("[Kommo] 401 Unauthorized in paginated request — resetting config");
+      const text = await res.text();
+      if (res.status === 401 || isNginxAuthFailure(res.status, text)) {
+        const reason = res.status === 401 ? "401 Unauthorized" : "403 nginx (revoked token)";
+        console.error(`[Kommo] ${reason} in paginated request — resetting config`);
         if (envTokenInUse()) markEnvTokenAuthFailed();
         resetKommoConfig();
       }
-      const text = await res.text();
       throw new Error(`Kommo API ${res.status}: ${text}`);
     }
     _consecutiveFailures = 0;
