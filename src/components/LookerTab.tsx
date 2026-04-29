@@ -1,7 +1,7 @@
 "use client";
 
-import { Fragment, useState, useEffect, useRef, useCallback } from "react";
-import { Loader2, ExternalLink, ChevronDown, ChevronRight } from "lucide-react";
+import { Fragment, useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { Loader2, ExternalLink, ChevronDown, ChevronRight, ChevronUp, ArrowUpDown } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 
 // ─── Department config ──────────────────────────────────────────────────────
@@ -61,6 +61,9 @@ const DEPT_CONFIG = {
 // ─── Slice options ──────────────────────────────────────────────────────────
 
 const SLICE_OPTIONS = [
+  // "—" hides the column entirely. Default for all three slices so the user
+  // sees one aggregate row first and can opt in to pivots one at a time.
+  { label: "—", col: "none" },
   { label: "Менеджер", col: "manager" },
   { label: "Источник", col: "utm_source" },
   { label: "Статус", col: "status" },
@@ -553,6 +556,10 @@ function CohortDetailInline({
     );
   }
 
+  // Drill-down can return up to LIMIT (200) leads — cap visible at 10 with
+  // sticky thead so the user can scroll the rest without losing the column
+  // headers. Critical because the worst-SLA outlier sits on top and the user
+  // shouldn't have to scroll back up to read which column they're looking at.
   return (
     <div className="rounded-xl border border-white/5 bg-slate-900/40 overflow-hidden">
       <div className="px-3 py-2 border-b border-white/5 flex items-center gap-2">
@@ -561,12 +568,13 @@ function CohortDetailInline({
         </span>
         <span className="text-[10px] text-slate-500 ml-auto">
           {rows.length} лид{rows.length === 1 ? "" : rows.length < 5 ? "а" : "ов"}
+          {rows.length > 10 ? ` · показаны первые 10, прокрутите ниже` : ""}
         </span>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto overflow-y-auto max-h-[400px]">
         <table className="w-full text-left border-collapse text-[11px]">
-          <thead>
-            <tr className="border-b border-white/5 bg-slate-900/60">
+          <thead className="sticky top-0 bg-slate-900 z-10">
+            <tr className="border-b border-white/5 bg-slate-900/95">
               {["Лид", "Создан", "Воронка / Текущий статус", "SLA лид→звонок", "SLA рабочие часы", "SLA от смены", "Звонки", "Первый звонок"].map((h) => (
                 <th key={h} className="px-3 py-2 text-[9px] uppercase tracking-widest text-slate-500 font-semibold whitespace-nowrap">
                   {h}
@@ -634,135 +642,245 @@ function CohortDetailInline({
 
 // ─── TLT Tables ──────────────────────────────────────────────────────────────
 
-function TltSummaryTable({
-  rows,
-  loading,
-  slice1Label,
-  slice2Label,
-  slice3Label,
+/** Numeric columns that support click-to-sort in TltUnifiedTable.
+ *  Detail mode uses "tlt" (per-lead TLT); summary mode uses "avg_tlt".
+ *  Other keys map 1:1 between modes. */
+type TltSortKey =
+  | "lead_count"
+  | "avg_tlt"
+  | "tlt"
+  | "avg_gap_sec"
+  | "outgoing_calls"
+  | "messages_sent"
+  | "total_comms";
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onClick,
 }: {
-  rows: TltSummaryRow[];
-  loading: boolean;
-  slice1Label: string;
-  slice2Label: string;
-  slice3Label: string;
+  label: string;
+  sortKey: TltSortKey;
+  activeKey: TltSortKey | null;
+  direction: "asc" | "desc";
+  onClick: (k: TltSortKey) => void;
 }) {
-  const colCount = 9;
-  const safeRows = rows ?? [];
-
-  const totalLeads = safeRows.reduce((s, r) => s + Number(r.lead_count), 0);
-  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
-  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
-  const totalComms = safeRows.reduce((s, r) => s + Number(r.total_comms), 0);
-  const tltRows = safeRows.filter((r) => r.avg_tlt != null);
-  const totalSumTlt = tltRows.reduce((s, r) => s + Number(r.avg_tlt) * Number(r.lead_count), 0);
-  const totalLeadsWithTlt = tltRows.reduce((s, r) => s + Number(r.lead_count), 0);
-  const totalAvgTlt = totalLeadsWithTlt > 0 ? Math.round(totalSumTlt / totalLeadsWithTlt) : null;
-  const gapRows = safeRows.filter((r) => r.avg_gap_sec != null);
-  const totalSumGap = gapRows.reduce((s, r) => s + Number(r.avg_gap_sec) * Number(r.lead_count), 0);
-  const totalLeadsWithGap = gapRows.reduce((s, r) => s + Number(r.lead_count), 0);
-  const totalAvgGap = totalLeadsWithGap > 0 ? Math.round(totalSumGap / totalLeadsWithGap) : null;
-
+  const active = activeKey === sortKey;
   return (
-    <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="border-b border-white/10">
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice1Label}</th>
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice2Label}</th>
-              <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice3Label}</th>
-              {["Кол-во лидов", "TLT средний", "Ср. между звонками", "Исходящие", "Сообщений", "Всего коммуникаций"].map((h) => (
-                <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr>
-                <td colSpan={colCount} className="text-center py-16 text-slate-400">
-                  <Loader2 className="w-5 h-5 animate-spin mx-auto" />
-                </td>
-              </tr>
-            ) : safeRows.length === 0 ? (
-              <tr>
-                <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
-                  Нет данных за выбранный период
-                </td>
-              </tr>
-            ) : (
-              <>
-                {safeRows.map((r, i) => (
-                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param1 ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param2 ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param3 ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_tlt)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_gap_sec)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_comms)}</td>
-                  </tr>
-                ))}
-                <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
-                  <td className="px-4 py-2.5 text-slate-200" colSpan={3}>Общий итог</td>
-                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalLeads)}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalAvgTlt)}</td>
-                  <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalAvgGap)}</td>
-                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalOut)}</td>
-                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalMsg)}</td>
-                  <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalComms)}</td>
-                </tr>
-              </>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={() => onClick(sortKey)}
+      className={`group inline-flex items-center gap-1 transition-colors ${
+        active ? "text-blue-300" : "text-slate-400 hover:text-white"
+      }`}
+    >
+      {label}
+      {active ? (
+        direction === "asc" ? (
+          <ChevronUp className="w-3 h-3" />
+        ) : (
+          <ChevronDown className="w-3 h-3" />
+        )
+      ) : (
+        <ArrowUpDown className="w-3 h-3 opacity-30 group-hover:opacity-60" />
+      )}
+    </button>
   );
 }
 
-function TltDetailTable({
-  rows,
+/**
+ * Unified TLT table — replaces the previous separate "Сводная" + "Детализация
+ * по лидам" tables. The two had ~90% column overlap (gap/outgoing/messages/
+ * total), so we render ONE table whose left side adapts to the user's slice
+ * choice:
+ *
+ *   • All three slices = "—"  → per-lead detail mode.
+ *     Columns: Менеджер | Статус | Лид (Kommo link) | TLT | Ср.между звонками
+ *              | Исходящие | Сообщений | Всего коммуникаций
+ *
+ *   • At least one slice ≠ "—" → aggregated summary mode.
+ *     Columns: <active slice labels> | Лидов | TLT средний | Ср.между звонками
+ *              | Исходящие | Сообщений | Всего коммуникаций
+ *
+ * Pagination only applies in detail mode (per-lead can be 1000s).
+ * Sortable headers in both modes.
+ */
+function TltUnifiedTable({
+  mode,
+  summaryRows,
+  detailRows,
   loading,
-  total,
+  slice1,
+  slice2,
+  slice3,
+  slice1Label,
+  slice2Label,
+  slice3Label,
   page,
+  total,
   onPageChange,
 }: {
-  rows: TltDetailRow[];
+  mode: "detail" | "summary";
+  summaryRows: TltSummaryRow[];
+  detailRows: TltDetailRow[];
   loading: boolean;
-  total: number;
+  slice1: SliceCol;
+  slice2: SliceCol;
+  slice3: SliceCol;
+  slice1Label: string;
+  slice2Label: string;
+  slice3Label: string;
   page: number;
+  total: number;
   onPageChange: (p: number) => void;
 }) {
-  const colCount = 8;
+  const showS1 = slice1 !== "none";
+  const showS2 = slice2 !== "none";
+  const showS3 = slice3 !== "none";
+  const visibleSliceCols = [showS1, showS2, showS3].filter(Boolean).length;
+
+  // Detail mode always has 3 left-side columns (Manager / Status / Lead).
+  // Summary mode shows 0..3 active slice cols.
+  const leftColCount = mode === "detail" ? 3 : visibleSliceCols;
+  const numericColCount = mode === "detail" ? 5 : 6; // detail has no lead_count; summary has it
+  const colCount = leftColCount + numericColCount;
+
+  // Sort state. Keys differ between modes; cycle: unsorted → desc → asc → unsorted.
+  const [sortKey, setSortKey] = useState<TltSortKey | "tlt" | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const handleSort = useCallback((k: TltSortKey | "tlt") => {
+    setSortKey((prev) => {
+      if (prev !== k) {
+        setSortDir("desc");
+        return k;
+      }
+      if (sortDir === "desc") {
+        setSortDir("asc");
+        return k;
+      }
+      setSortDir("desc");
+      return null;
+    });
+  }, [sortDir]);
+
+  // Sort in JS — server already orders sensibly (TLT ASC for detail, lead_count DESC
+  // for summary), but the user can override.
+  const sortedDetailRows = useMemo(() => {
+    if (mode !== "detail" || !sortKey) return detailRows;
+    const sign = sortDir === "asc" ? 1 : -1;
+    const k = sortKey as keyof TltDetailRow;
+    return [...detailRows].sort((a, b) => {
+      const av = a[k];
+      const bv = b[k];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return sign * (Number(av) - Number(bv));
+    });
+  }, [mode, detailRows, sortKey, sortDir]);
+
+  const sortedSummaryRows = useMemo(() => {
+    if (mode !== "summary" || !sortKey) return summaryRows;
+    const sign = sortDir === "asc" ? 1 : -1;
+    const k = sortKey as keyof TltSummaryRow;
+    return [...summaryRows].sort((a, b) => {
+      const av = a[k];
+      const bv = b[k];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return sign * (Number(av) - Number(bv));
+    });
+  }, [mode, summaryRows, sortKey, sortDir]);
+
+  // Footer totals
+  const detailTotalOut = detailRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const detailTotalMsg = detailRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const detailTotalComms = detailRows.reduce((s, r) => s + Number(r.total_comms), 0);
+  const detailTltRows = detailRows.filter((r) => r.tlt != null);
+  const detailAvgTlt = detailTltRows.length > 0
+    ? Math.round(detailTltRows.reduce((s, r) => s + Number(r.tlt), 0) / detailTltRows.length)
+    : null;
+  const detailGapRows = detailRows.filter((r) => r.avg_gap_sec != null);
+  const detailAvgGap = detailGapRows.length > 0
+    ? Math.round(detailGapRows.reduce((s, r) => s + Number(r.avg_gap_sec), 0) / detailGapRows.length)
+    : null;
+
+  const sumTotalLeads = summaryRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const sumTotalOut = summaryRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
+  const sumTotalMsg = summaryRows.reduce((s, r) => s + Number(r.messages_sent), 0);
+  const sumTotalComms = summaryRows.reduce((s, r) => s + Number(r.total_comms), 0);
+  const sumTltRows = summaryRows.filter((r) => r.avg_tlt != null);
+  const sumLeadsWithTlt = sumTltRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const sumAvgTlt = sumLeadsWithTlt > 0
+    ? Math.round(sumTltRows.reduce((s, r) => s + Number(r.avg_tlt) * Number(r.lead_count), 0) / sumLeadsWithTlt)
+    : null;
+  const sumGapRows = summaryRows.filter((r) => r.avg_gap_sec != null);
+  const sumLeadsWithGap = sumGapRows.reduce((s, r) => s + Number(r.lead_count), 0);
+  const sumAvgGap = sumLeadsWithGap > 0
+    ? Math.round(sumGapRows.reduce((s, r) => s + Number(r.avg_gap_sec) * Number(r.lead_count), 0) / sumLeadsWithGap)
+    : null;
+
   const PAGE_SIZE = 100;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const safeRows = rows ?? [];
-
-  const totalOut = safeRows.reduce((s, r) => s + Number(r.outgoing_calls), 0);
-  const totalMsg = safeRows.reduce((s, r) => s + Number(r.messages_sent), 0);
-  const totalComms = safeRows.reduce((s, r) => s + Number(r.total_comms), 0);
-  const tltRows = safeRows.filter((r) => r.tlt != null);
-  const totalAvgTlt = tltRows.length > 0 ? Math.round(tltRows.reduce((s, r) => s + Number(r.tlt), 0) / tltRows.length) : null;
-  const gapRows = safeRows.filter((r) => r.avg_gap_sec != null);
-  const totalAvgGap = gapRows.length > 0 ? Math.round(gapRows.reduce((s, r) => s + Number(r.avg_gap_sec), 0) / gapRows.length) : null;
+  const renderedRowCount = mode === "detail" ? sortedDetailRows.length : sortedSummaryRows.length;
 
   return (
     <div className="flex flex-col gap-2">
       <div className="glass-panel rounded-2xl overflow-hidden border border-white/5">
-        <div className="overflow-x-auto">
+        {renderedRowCount > 10 && !loading && (
+          <div className="px-4 py-1.5 text-[10px] text-slate-500 border-b border-white/5 bg-slate-900/40">
+            {mode === "detail" ? `${fmtNum(total)} лидов` : `${renderedRowCount} строк`} · показаны первые 10, прокрутите ниже
+          </div>
+        )}
+        <div className="overflow-x-auto overflow-y-auto max-h-[420px]">
           <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-white/10">
-                {["Менеджер", "Статус", "Лид", "TLT", "Исходящие", "Сообщений", "Всего коммуникаций", "Ср. между звонками"].map((h) => (
-                  <th key={h} className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">
-                    {h}
+            <thead className="sticky top-0 bg-slate-900 z-10">
+              <tr className="border-b border-white/10 bg-slate-900/95">
+                {/* Left-side columns — slice or detail-fixed */}
+                {mode === "detail" ? (
+                  <>
+                    <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">Менеджер</th>
+                    <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">Статус</th>
+                    <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">Лид</th>
+                  </>
+                ) : (
+                  <>
+                    {showS1 && <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice1Label}</th>}
+                    {showS2 && <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice2Label}</th>}
+                    {showS3 && <th className="px-4 py-3 text-[10px] uppercase tracking-widest text-slate-400 font-semibold whitespace-nowrap">{slice3Label}</th>}
+                  </>
+                )}
+                {/* Numeric columns — sortable */}
+                {mode === "summary" && (
+                  <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                    <SortHeader label="Лидов" sortKey="lead_count" activeKey={sortKey as TltSortKey | null} direction={sortDir} onClick={handleSort} />
                   </th>
-                ))}
+                )}
+                <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                  <SortHeader
+                    label={mode === "summary" ? "TLT средний" : "TLT"}
+                    sortKey={(mode === "summary" ? "avg_tlt" : "tlt") as TltSortKey}
+                    activeKey={sortKey as TltSortKey | null}
+                    direction={sortDir}
+                    onClick={handleSort}
+                  />
+                </th>
+                <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                  <SortHeader label="Ср. между звонками" sortKey="avg_gap_sec" activeKey={sortKey as TltSortKey | null} direction={sortDir} onClick={handleSort} />
+                </th>
+                <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                  <SortHeader label="Исходящие" sortKey="outgoing_calls" activeKey={sortKey as TltSortKey | null} direction={sortDir} onClick={handleSort} />
+                </th>
+                <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                  <SortHeader label="Сообщений" sortKey="messages_sent" activeKey={sortKey as TltSortKey | null} direction={sortDir} onClick={handleSort} />
+                </th>
+                <th className="px-4 py-3 text-[10px] uppercase tracking-widest font-semibold whitespace-nowrap">
+                  <SortHeader label="Всего коммуникаций" sortKey="total_comms" activeKey={sortKey as TltSortKey | null} direction={sortDir} onClick={handleSort} />
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -772,75 +890,114 @@ function TltDetailTable({
                     <Loader2 className="w-5 h-5 animate-spin mx-auto" />
                   </td>
                 </tr>
-              ) : safeRows.length === 0 ? (
+              ) : renderedRowCount === 0 ? (
                 <tr>
                   <td colSpan={colCount} className="text-center py-16 text-slate-500 text-xs">
                     Нет данных за выбранный период
                   </td>
                 </tr>
-              ) : (
-                <>
-                  {safeRows.map((r, i) => (
-                    <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
-                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager ?? "—"}</td>
-                      <td className="px-4 py-2.5 text-slate-300 max-w-[180px] truncate whitespace-nowrap">{r.current_status ?? "—"}</td>
-                      <td className="px-4 py-2.5">
-                        <a
-                          href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
-                        >
-                          {r.lead_id}
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      </td>
-                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.tlt)}</td>
-                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
-                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
-                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_comms)}</td>
-                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_gap_sec)}</td>
-                    </tr>
-                  ))}
-                  <tr className="border-t border-white/10 font-semibold bg-white/[0.04]">
-                    <td className="px-4 py-2.5 text-slate-200" colSpan={3}>Общий итог</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalAvgTlt)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalOut)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalMsg)}</td>
-                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(totalComms)}</td>
-                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(totalAvgGap)}</td>
+              ) : mode === "detail" ? (
+                sortedDetailRows.map((r) => (
+                  <tr key={r.lead_id} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.manager ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-300 max-w-[180px] truncate whitespace-nowrap">{r.current_status ?? "—"}</td>
+                    <td className="px-4 py-2.5">
+                      <a
+                        href={`https://sternmeister.kommo.com/leads/detail/${r.lead_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
+                      >
+                        {r.lead_id}
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.tlt)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_gap_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_comms)}</td>
                   </tr>
-                </>
+                ))
+              ) : (
+                sortedSummaryRows.map((r, i) => (
+                  <tr key={i} className="border-t border-white/5 hover:bg-white/[0.03] transition-colors">
+                    {showS1 && <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param1 ?? "—"}</td>}
+                    {showS2 && <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param2 ?? "—"}</td>}
+                    {showS3 && <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{r.param3 ?? "—"}</td>}
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.lead_count)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_tlt)}</td>
+                    <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(r.avg_gap_sec)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.outgoing_calls)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.messages_sent)}</td>
+                    <td className="px-4 py-2.5 text-slate-200">{fmtNum(r.total_comms)}</td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
         </div>
+        {!loading && renderedRowCount > 0 && (
+          <div className="border-t border-white/10 bg-white/[0.04]">
+            <table className="w-full text-left border-collapse text-xs">
+              <tbody>
+                <tr className="font-semibold">
+                  {mode === "detail" ? (
+                    <>
+                      <td className="px-4 py-2.5 text-slate-200" colSpan={3}>Общий итог</td>
+                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(detailAvgTlt)}</td>
+                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(detailAvgGap)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(detailTotalOut)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(detailTotalMsg)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(detailTotalComms)}</td>
+                    </>
+                  ) : (
+                    <>
+                      {visibleSliceCols > 0 ? (
+                        <td className="px-4 py-2.5 text-slate-200" colSpan={visibleSliceCols}>Общий итог</td>
+                      ) : null}
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(sumTotalLeads)}</td>
+                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(sumAvgTlt)}</td>
+                      <td className="px-4 py-2.5 text-slate-200 whitespace-nowrap">{fmtHMS(sumAvgGap)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(sumTotalOut)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(sumTotalMsg)}</td>
+                      <td className="px-4 py-2.5 text-slate-200">{fmtNum(sumTotalComms)}</td>
+                    </>
+                  )}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center justify-between px-1">
-        <span className="text-xs text-slate-400">
-          {loading ? "Загрузка..." : `${fmtNum(total)} строк`}
-        </span>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onPageChange(Math.max(0, page - 1))}
-            disabled={page === 0 || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ‹
-          </button>
-          <span className="text-xs text-slate-400">Стр {page + 1} / {totalPages}</span>
-          <button
-            type="button"
-            onClick={() => onPageChange(page + 1)}
-            disabled={(page + 1) * PAGE_SIZE >= total || loading}
-            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
-          >
-            ›
-          </button>
+      {/* Pagination — detail mode only. Summary tables are typically <100 rows. */}
+      {mode === "detail" && (
+        <div className="flex items-center justify-between px-1">
+          <span className="text-xs text-slate-400">
+            {loading ? "Загрузка..." : `${fmtNum(total)} строк`}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onPageChange(Math.max(0, page - 1))}
+              disabled={page === 0 || loading}
+              className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
+            >
+              ‹
+            </button>
+            <span className="text-xs text-slate-400">Стр {page + 1} / {totalPages}</span>
+            <button
+              type="button"
+              onClick={() => onPageChange(page + 1)}
+              disabled={(page + 1) * PAGE_SIZE >= total || loading}
+              className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/60 border border-white/10 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all text-sm"
+            >
+              ›
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -983,9 +1140,11 @@ export default function LookerTab({ department }: LookerTabProps) {
   const [slaRange, setSlaRange] = useState("");
   const [pipeline, setPipeline] = useState("");
   const [tltPage, setTltPage] = useState(0);
-  const [slice1, setSlice1] = useState<SliceCol>("manager");
-  const [slice2, setSlice2] = useState<SliceCol>("utm_source");
-  const [slice3, setSlice3] = useState<SliceCol>("status");
+  // Default to "—" for all three so TLT opens with a single aggregate row.
+  // User opts in to pivots one slice at a time.
+  const [slice1, setSlice1] = useState<SliceCol>("none");
+  const [slice2, setSlice2] = useState<SliceCol>("none");
+  const [slice3, setSlice3] = useState<SliceCol>("none");
 
   const [data, setData] = useState<ApiResponse | null>(null);
   const [tltSummaryRows, setTltSummaryRows] = useState<TltSummaryRow[]>([]);
@@ -1101,30 +1260,38 @@ export default function LookerTab({ department }: LookerTabProps) {
           setTltSummaryRows([]);
           setTltDetailRows([]);
         } else if (view === "tlt") {
-          const sumParams = buildBaseParams();
-          sumParams.set("view", "tlt_summary");
-          sumParams.set("slice1", slice1);
-          sumParams.set("slice2", slice2);
-          sumParams.set("slice3", slice3);
+          // Single-table mode: when no slices are active, show per-lead detail.
+          // Otherwise show aggregated summary by the active slices. Either way
+          // the user sees ONE table with the same columns (gap/out/msgs/total)
+          // — only the left side and "Лидов vs Лид" differs.
+          const hasAnySlice = slice1 !== "none" || slice2 !== "none" || slice3 !== "none";
 
-          const detParams = buildBaseParams();
-          detParams.set("view", "tlt_detail");
-          detParams.set("limit", "100");
-          detParams.set("offset", String(tltPage * 100));
-
-          const [sumRes, detRes] = await Promise.all([
-            fetch(`/api/analytics/looker/data?${sumParams}`, { signal: controller.signal }),
-            fetch(`/api/analytics/looker/data?${detParams}`, { signal: controller.signal }),
-          ]);
-          if (!sumRes.ok || !detRes.ok) throw new Error("fetch error");
-          const [sumJson, detJson] = await Promise.all([
-            sumRes.json() as Promise<ApiResponse>,
-            detRes.json() as Promise<ApiResponse>,
-          ]);
-          setTltSummaryRows(sumJson.rows as TltSummaryRow[]);
-          setTltDetailRows(detJson.rows as TltDetailRow[]);
-          setTltDetailTotal(detJson.total);
-          setManagers(sumJson.filterOptions.managers);
+          if (hasAnySlice) {
+            const params = buildBaseParams();
+            params.set("view", "tlt_summary");
+            params.set("slice1", slice1);
+            params.set("slice2", slice2);
+            params.set("slice3", slice3);
+            const res = await fetch(`/api/analytics/looker/data?${params}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = (await res.json()) as ApiResponse;
+            setTltSummaryRows(json.rows as TltSummaryRow[]);
+            setTltDetailRows([]);
+            setTltDetailTotal(0);
+            setManagers(json.filterOptions.managers);
+          } else {
+            const params = buildBaseParams();
+            params.set("view", "tlt_detail");
+            params.set("limit", "100");
+            params.set("offset", String(tltPage * 100));
+            const res = await fetch(`/api/analytics/looker/data?${params}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = (await res.json()) as ApiResponse;
+            setTltDetailRows(json.rows as TltDetailRow[]);
+            setTltDetailTotal(json.total);
+            setTltSummaryRows([]);
+            setManagers(json.filterOptions.managers);
+          }
           setData(null);
         } else {
           const params = buildBaseParams();
@@ -1220,6 +1387,10 @@ export default function LookerTab({ department }: LookerTabProps) {
 
   const activeSlaLabel = config.slaRanges.find((r) => r.value === slaRange)?.label;
   const activePipelineLabel = pipeline || undefined;
+
+  // TLT mode: any active slice → aggregated "summary"; all "—" → per-lead "detail".
+  const tltMode: "detail" | "summary" =
+    slice1 !== "none" || slice2 !== "none" || slice3 !== "none" ? "summary" : "detail";
 
   const slice1Label = SLICE_OPTIONS.find((o) => o.col === slice1)?.label ?? slice1;
   const slice2Label = SLICE_OPTIONS.find((o) => o.col === slice2)?.label ?? slice2;
@@ -1431,28 +1602,21 @@ export default function LookerTab({ department }: LookerTabProps) {
       )}
       {view === "conversions" && <ConversionsSection rows={convRows} loading={loading} />}
       {view === "tlt" && (
-        <div className="flex flex-col gap-6">
-          <div className="flex flex-col gap-2">
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold px-1">TLT — сводная таблица</p>
-            <TltSummaryTable
-              rows={tltSummaryRows}
-              loading={loading}
-              slice1Label={slice1Label}
-              slice2Label={slice2Label}
-              slice3Label={slice3Label}
-            />
-          </div>
-          <div className="flex flex-col gap-2">
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold px-1">TLT — детализация по лидам</p>
-            <TltDetailTable
-              rows={tltDetailRows}
-              loading={loading}
-              total={tltDetailTotal}
-              page={tltPage}
-              onPageChange={setTltPage}
-            />
-          </div>
-        </div>
+        <TltUnifiedTable
+          mode={tltMode}
+          summaryRows={tltSummaryRows}
+          detailRows={tltDetailRows}
+          loading={loading}
+          slice1={slice1}
+          slice2={slice2}
+          slice3={slice3}
+          slice1Label={slice1Label}
+          slice2Label={slice2Label}
+          slice3Label={slice3Label}
+          page={tltPage}
+          total={tltDetailTotal}
+          onPageChange={setTltPage}
+        />
       )}
     </div>
   );

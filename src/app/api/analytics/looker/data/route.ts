@@ -49,7 +49,10 @@ const VALID_VIEWS = new Set([
   "meta",
 ]);
 const VALID_SLA = new Set(["0-9", "10-29", "30+"]);
-const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category"]);
+// "none" hides the slice column entirely — UI sends it when the user picks
+// the "—" option in the срез dropdown. SELECT emits NULL for that param,
+// GROUP BY skips it, and the client hides the column.
+const VALID_SLICES = new Set(["manager", "utm_source", "status", "pipeline", "category", "none"]);
 
 function esc(s: string): string {
   return s.replace(/'/g, "''");
@@ -423,14 +426,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         SELECT COUNT(*) AS count FROM filtered_leads
       `;
     } else if (view === "tlt_summary") {
+      // Each slice can be "none" — UI sends it when the user picks "—" in
+      // the срез dropdown. NULL is projected for that paramN, the column is
+      // dropped from GROUP BY, and the client hides the column entirely.
+      // All three "none" → no GROUP BY → single aggregate row for the
+      // selected window.
+      const projectSlice = (slice: string, n: number): string =>
+        slice === "none"
+          ? `NULL::text AS param${n}`
+          : `COALESCE(fl.${slice}::text, '—') AS param${n}`;
+      const groupCols = [slice1, slice2, slice3]
+        .filter((s) => s !== "none")
+        .map((s) => `fl.${s}`);
+      const groupByClause = groupCols.length > 0 ? `GROUP BY ${groupCols.join(", ")}` : "";
+
       mainQuery = `
         WITH ${tltFilteredLeadsCte},
         ${commAggCte},
         ${callGapsCte}
         SELECT
-          COALESCE(fl.${slice1}::text, '—') AS param1,
-          COALESCE(fl.${slice2}::text, '—') AS param2,
-          COALESCE(fl.${slice3}::text, '—') AS param3,
+          ${projectSlice(slice1, 1)},
+          ${projectSlice(slice2, 2)},
+          ${projectSlice(slice3, 3)},
           COUNT(fl.lead_id) AS lead_count,
           ROUND(AVG(s.sla_first_contact_seconds)) AS avg_tlt,
           ROUND(AVG(cg.avg_gap_sec)) AS avg_gap_sec,
@@ -441,7 +458,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
-        GROUP BY fl.${slice1}, fl.${slice2}, fl.${slice3}
+        ${groupByClause}
         ORDER BY lead_count DESC
       `;
       countQuery = mainQuery;

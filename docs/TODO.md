@@ -6,6 +6,37 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 ---
 
+## P0 — Looker frontend follow-up (2026-04-29) — DONE
+
+User-requested polish after the phone→lead enrichment audit confirmed the
+drill-down works. All four merged + the "two TLT tables → one" follow-up.
+
+- [x] **SLA cohort drill-down: fixed 10-row scrollable.** `CohortDetailInline`
+  body has `max-h-[400px] overflow-y-auto` with sticky thead; ~10 rows
+  visible by default.
+
+- [x] **TLT slices: add "—" (none) option, default to it.** `SLICE_OPTIONS`
+  prepends `{ label: "—", col: "none" }`. Default for slice1/2/3 = "none".
+  API: `tlt_summary` excludes "none" slices from both SELECT and GROUP BY.
+
+- [x] **TLT summary: sortable headers.** `SortHeader` component, cycle
+  unsorted → desc → asc → unsorted. Default = server order (lead_count
+  DESC for summary, TLT ASC for detail). Arrow icons next to active col.
+
+- [x] **TLT 10-row scrollable.** Sticky thead, body scrolls; footer
+  totals row anchored below viewport (separate inner table).
+
+- [x] **Merged "Сводная" + "Детализация по лидам" → ONE table.** User
+  feedback: 90% column overlap. New `TltUnifiedTable` adapts:
+    • all 3 slices = "—" → per-lead detail mode (Manager / Status /
+      Lead-link / TLT / Ср.между звонками / Исходящие / Сообщений / Всего).
+    • any slice ≠ "—" → aggregated summary (active slice cols / Лидов /
+      TLT средний / rest same).
+  Frontend chooses endpoint (`tlt_detail` vs `tlt_summary`) via
+  `hasAnySlice`. Pagination stays in detail mode only.
+
+---
+
 ## P0 — Looker phone→lead enrichment (in progress 2026-04-28)
 
 **Goal:** make Looker show real call counts (currently ~2% — 60 of 3105 calls in 4-day window). Root cause: 100% of telephony rows post-hard-split have `lead_id=NULL`, so `comm_agg ON ca.lead_id = fl.lead_id` excludes them. Verified live via Neon MCP.
