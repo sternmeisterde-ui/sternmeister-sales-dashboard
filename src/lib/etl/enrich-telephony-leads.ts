@@ -127,11 +127,23 @@ const BULK_BATCH_SIZE = 500;
  * scoped: only links leads in pipelines belonging to b2g + b2b (the union),
  * skipping foreign pipelines like webinars/test that the dashboards don't
  * surface.
+ *
+ * Sweep mode: when called from the 15-min cron, the toDate window is too
+ * tight to retry rows whose Kommo contact wasn't yet known at first
+ * attempt. Pass `lookbackDays` (e.g., 7) to widen the from-date so each
+ * tick re-tries old failures. Without this, telephony rows that landed
+ * before Kommo had the contact stay lead_id=NULL forever and SLA never
+ * picks up their first_call_out_at.
  */
 export async function enrichTelephonyLeads(
   fromDate: Date,
   toDate: Date,
+  options: { lookbackDays?: number } = {},
 ): Promise<EnrichResult> {
+  const lookbackDays = options.lookbackDays;
+  const effectiveFromDate = lookbackDays !== undefined && lookbackDays > 0
+    ? new Date(toDate.getTime() - lookbackDays * 24 * 60 * 60 * 1000)
+    : fromDate;
   const result: EnrichResult = {
     scannedRows: 0,
     phonesQueried: 0,
@@ -186,7 +198,7 @@ export async function enrichTelephonyLeads(
       AND phone IS NOT NULL
       AND phone <> ''
       AND communication_type LIKE 'call%'
-      AND created_at >= ${fromDate}
+      AND created_at >= ${effectiveFromDate}
       AND created_at <= ${toDate}
   `);
 
@@ -209,7 +221,7 @@ export async function enrichTelephonyLeads(
   }));
   result.scannedRows = unenriched.length;
   if (unenriched.length === 0) {
-    console.log(`[ETL enrich] window ${fromDate.toISOString()}..${toDate.toISOString()}: 0 unenriched rows`);
+    console.log(`[ETL enrich] window ${effectiveFromDate.toISOString()}..${toDate.toISOString()}: 0 unenriched rows`);
     return result;
   }
 

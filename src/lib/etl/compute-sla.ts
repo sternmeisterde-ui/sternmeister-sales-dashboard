@@ -100,10 +100,18 @@ export async function computeSla(
 
   const leadIds = leads.map((l) => l.leadId).filter((id): id is number => id !== null);
 
-  // Fetch communication summaries for these leads
-  // AT TIME ZONE 'UTC' converts bare `timestamp` columns to `timestamptz` so that
-  // the Neon HTTP client returns ISO strings with Z suffix. Without this, Node.js
-  // parses the bare string in the server's local timezone (e.g. Europe/Berlin → 2h off).
+  // Fetch communication summaries for these leads.
+  //
+  // AT TIME ZONE 'UTC' converts bare `timestamp` columns to `timestamptz` so
+  // the Neon HTTP client returns ISO strings with Z suffix. Without this,
+  // Node.js parses the bare string in the server's local timezone.
+  //
+  // Бератер post-transfer floor: telephony phone-enrichment can match calls
+  // that happened while the lead was still in Бух Гос (before transfer to
+  // Бух Бератер). Those pre-transfer calls would corrupt MIN(created_at).
+  // We floor first_call_out_at by the latest event_at of the lead's entry
+  // into Бух Бератер in `lead_status_changes`. For non-Бератер leads the
+  // floor is NULL → no effect.
   const commSummaries = await analyticsDb.execute<{
     lead_id: number;
     first_contact_at: Date | null;
@@ -111,15 +119,27 @@ export async function computeSla(
     first_message_at: Date | null;
     last_contact_at: Date | null;
   }>(sql`
+    WITH berater_floor AS (
+      SELECT lead_id, MIN(event_at) AS entry_at
+      FROM analytics.lead_status_changes
+      WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+        AND pipeline = 'Бух Бератер'
+      GROUP BY lead_id
+    )
     SELECT
-      lead_id,
-      (MIN(created_at))                                               AT TIME ZONE 'UTC' AS first_contact_at,
-      (MIN(created_at) FILTER (WHERE communication_type = 'call_out')) AT TIME ZONE 'UTC' AS first_call_out_at,
-      (MIN(created_at) FILTER (WHERE communication_type = 'outgoing_chat_message')) AT TIME ZONE 'UTC' AS first_message_at,
-      (MAX(created_at))                                               AT TIME ZONE 'UTC' AS last_contact_at
-    FROM analytics.communications
-    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
-    GROUP BY lead_id
+      c.lead_id,
+      (MIN(c.created_at))                                                  AT TIME ZONE 'UTC' AS first_contact_at,
+      (MIN(c.created_at) FILTER (
+         WHERE c.communication_type = 'call_out'
+           AND (bf.entry_at IS NULL OR c.created_at >= bf.entry_at)
+      ))                                                                   AT TIME ZONE 'UTC' AS first_call_out_at,
+      (MIN(c.created_at) FILTER (WHERE c.communication_type = 'outgoing_chat_message'))
+                                                                           AT TIME ZONE 'UTC' AS first_message_at,
+      (MAX(c.created_at))                                                  AT TIME ZONE 'UTC' AS last_contact_at
+    FROM analytics.communications c
+    LEFT JOIN berater_floor bf ON bf.lead_id = c.lead_id
+    WHERE c.lead_id IN (${sql.raw(leadIds.join(","))})
+    GROUP BY c.lead_id
   `);
 
   const commMap = new Map<

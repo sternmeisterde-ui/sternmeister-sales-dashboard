@@ -25,6 +25,7 @@ import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncTelephony } from "./sync-telephony";
 import { enrichTelephonyLeads } from "./enrich-telephony-leads";
+import { mirrorIntegratorSla } from "./mirror-integrator-sla";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql } from "drizzle-orm";
@@ -177,18 +178,29 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const enrichmentLeadIds: number[] = [];
   if (!skip.has("telephony") && hasTelephonyCreds) {
     try {
-      const enrichRes = await enrichTelephonyLeads(opts.fromDate, opts.toDate);
+      // In incremental mode (15-min cron), Kommo may not have the contact
+      // for a phone yet at first attempt — without sweep we'd never retry.
+      // 7-day lookback re-tries every still-unenriched call so cron is
+      // self-healing. In full mode the caller controls fromDate already.
+      const enrichRes = incremental
+        ? await enrichTelephonyLeads(opts.fromDate, opts.toDate, { lookbackDays: 7 })
+        : await enrichTelephonyLeads(opts.fromDate, opts.toDate);
       telephonyRowsLinked = enrichRes.rowsLinked;
       telephonyRowsFannedOut = enrichRes.rowsFannedOut;
       // Capture the leads that just got linked so the SLA step picks them up
-      // even if their lead_created_at is outside this window.
+      // even if their lead_created_at is outside this window. In incremental
+      // mode the enrichment swept 7 days back, so widen the lookup too —
+      // otherwise SLA misses leads enriched from older windows.
       if (enrichRes.rowsLinked > 0 || enrichRes.rowsFannedOut > 0) {
+        const linkedFromDate = incremental
+          ? new Date(opts.toDate.getTime() - 7 * 24 * 60 * 60 * 1000)
+          : opts.fromDate;
         const linked = await analyticsDb.execute<{ lead_id: number | string }>(sql`
           SELECT DISTINCT lead_id
           FROM analytics.communications
           WHERE communication_type LIKE 'call%'
             AND lead_id IS NOT NULL
-            AND created_at >= ${opts.fromDate}
+            AND created_at >= ${linkedFromDate}
             AND created_at <= ${opts.toDate}
         `);
         for (const r of linked.rows) enrichmentLeadIds.push(Number(r.lead_id));
@@ -213,6 +225,24 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const slaRows = skip.has("sla")
     ? 0
     : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
+
+  // Mirror integrator's sla_start from their MySQL — overrides our
+  // lead_created_at heuristic with their per-lead pickup-time value.
+  // Non-fatal: if integrator MySQL is unreachable or env missing, we keep
+  // our values. Wider lookback in incremental mode catches up reactivated
+  // leads whose sla_start shifted recently.
+  if (!skip.has("sla")) {
+    try {
+      const mirrorFromDate = incremental
+        ? new Date(opts.toDate.getTime() - 30 * 24 * 60 * 60 * 1000)
+        : opts.fromDate;
+      await mirrorIntegratorSla(mirrorFromDate, opts.toDate);
+    } catch (err) {
+      console.error(
+        `[ETL] mirror-integrator-sla failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
 
   const result: SyncResult = {
     leads: leadsCount,
