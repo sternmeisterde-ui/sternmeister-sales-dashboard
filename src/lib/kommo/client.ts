@@ -127,28 +127,6 @@ export function getKommoHealth() {
   };
 }
 
-/**
- * Resolve the Kommo API host, rejecting user-facing kommo.com subdomains as
- * those are fronted by nginx and return bare 403 on /api/v4 requests. Valid
- * API hosts on Kommo start with `api-` (regional shards: api-c, api-b…) or
- * `api.`. Anything else looking like `${account}.kommo.com` is the user-facing
- * host — silently using it is the exact misconfiguration that took the
- * Анализ pipeline down for two days, so we hard-reject it with a clear
- * warning instead of letting it become a 403 deep in a fetch loop.
- */
-function resolveKommoApiHost(envValue: string | undefined): string {
-  const fallback = "api-c.kommo.com";
-  if (!envValue) return fallback;
-  if (envValue.endsWith(".kommo.com") && !/^api[-.]/.test(envValue)) {
-    console.warn(
-      `[Kommo] KOMMO_API_DOMAIN="${envValue}" is a user-facing host (nginx 403s on /api/v4). ` +
-        `Forcing API shard host "${fallback}" instead. Set KOMMO_API_DOMAIN to api-c.kommo.com (or a real shard) to silence this.`,
-    );
-    return fallback;
-  }
-  return envValue;
-}
-
 function ensureKommoConfig(): Promise<void> {
   const needsRefresh = _configLoadedAt > 0 && (Date.now() - _configLoadedAt) > CONFIG_REFRESH_MS;
 
@@ -168,26 +146,30 @@ function ensureKommoConfig(): Promise<void> {
       // 1. Check env vars first
       if (process.env.KOMMO_ACCESS_TOKEN && !skipEnv) {
         _cachedToken = process.env.KOMMO_ACCESS_TOKEN;
-        _cachedDomain = resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
+        // Honour KOMMO_API_DOMAIN verbatim — empirically this Kommo account
+        // works on `${subdomain}.kommo.com` and 401s on `api-c.kommo.com`,
+        // even though the JWT's `api_domain` claim says api-c. The auto-pick
+        // is just a fallback for when no env override is provided.
+        _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
         _configLoadedAt = Date.now();
         return;
       }
 
       // 2. Fallback: load from kommo_tokens table in D1 (main branch DB).
-      // The `subdomain` column is the account name (e.g. "sternmeister") —
-      // useful for identification but NOT a valid API host. Kommo's
-      // user-facing host `${subdomain}.kommo.com` is fronted by nginx and
-      // returns bare 403 HTML on /api/v4/leads requests; the actual API
-      // shard host is `api-c.kommo.com` (or whatever KOMMO_API_DOMAIN says).
-      // Earlier behaviour ("${subdomain}.kommo.com") caused every
-      // env-token-not-set deploy to silently 403 on /leads list calls.
+      // Host resolution priority:
+      //   (a) KOMMO_API_DOMAIN env override (operator-controlled),
+      //   (b) `${subdomain}.kommo.com` from the DB row (matches what the
+      //       integration was provisioned against — empirically this is
+      //       the host that actually accepts the token on SternMeister's
+      //       account; the JWT's `api_domain` hint pointing at api-c is
+      //       misleading and 401s for this account).
       try {
         const { db } = await import("../db/index");
         const { kommoTokens } = await import("../db/schema-existing");
         const rows = await db.select().from(kommoTokens).limit(1);
         if (rows.length > 0) {
           _cachedToken = rows[0].accessToken;
-          _cachedDomain = resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
+          _cachedDomain = process.env.KOMMO_API_DOMAIN || `${rows[0].subdomain}.kommo.com`;
           _configLoadedAt = Date.now();
           console.log(`[Kommo] Token loaded from DB (account=${rows[0].subdomain}, host=${_cachedDomain}, expires=${rows[0].expiresAt?.toISOString() ?? "unknown"})`);
           return;
@@ -252,7 +234,7 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 
 async function getBaseUrl(): Promise<string> {
   await ensureKommoConfig();
-  const domain = _cachedDomain || resolveKommoApiHost(process.env.KOMMO_API_DOMAIN);
+  const domain = _cachedDomain || process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
   return `https://${domain}/api/v4`;
 }
 
