@@ -136,6 +136,60 @@ function getOkkPromptTypes(department: string, line: string): string[] | null {
   return inGroup.length > 0 ? inGroup : null;
 }
 
+// ─── Funnel labels for "Все" mode ──────────────────────────
+//
+// When line=all the left column lists funnels (one row per active line)
+// instead of criteria — B2G funnels (Квалификатор/Бератер/Доведение) have
+// disjoint criteria sets so cross-funnel criteria-level rows are noise.
+
+function funnelLabelForOkk(department: DepartmentId, promptType: string | null): string {
+  if (!promptType) return "Без воронки";
+  const line = getLines(department).find((l) => l.promptType === promptType);
+  return line ? (line.shortLabel ?? line.label) : promptType;
+}
+
+function funnelLabelForRoleplay(department: DepartmentId, callType: string | null): string {
+  if (department === "b2b") return "Все звонки"; // single roleplay script
+  if (!callType) return "Без воронки";
+  switch (callType) {
+    case "qualifier": return "Квалификатор";
+    case "berater": return "Бератер";
+    case "dovedenie": return "Доведение";
+    default: return callType;
+  }
+}
+
+function funnelOrderForOkk(department: DepartmentId): string[] {
+  return getLines(department).map((l) => l.shortLabel ?? l.label);
+}
+
+function funnelOrderForRoleplay(department: DepartmentId): string[] {
+  if (department === "b2b") return ["Все звонки"];
+  return ["Квалификатор", "Бератер", "Доведение"];
+}
+
+// Treat a single call as one entry under its funnel label. Uses total_score
+// directly (already 0–100) so the funnel's averaged score stays comparable
+// to the "Средний балл" overall row.
+function processCallAsFunnel(
+  acc: PeriodAcc,
+  totalScore: number | null,
+  funnelLabel: string,
+): boolean {
+  if (totalScore === null || totalScore === undefined) return false;
+  const fe = acc.blocks.get(funnelLabel);
+  if (fe) {
+    fe.scoreSum += totalScore;
+    fe.count++;
+  } else {
+    acc.blocks.set(funnelLabel, { scoreSum: totalScore, count: 1 });
+  }
+  acc.callCount++;
+  acc.totalScoreSum += totalScore;
+  acc.totalScoreCount++;
+  return true;
+}
+
 // ─── Name normalization (old evaluation versions used different names) ──
 
 const BLOCK_NAME_MAP: Record<string, string> = {
@@ -351,6 +405,7 @@ async function fetchOkkData(
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
         managerId: okkEvaluations.managerId,
+        promptType: okkEvaluations.promptType,
       })
       .from(okkCalls)
       .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
@@ -371,6 +426,13 @@ async function fetchOkkData(
   // sums stay consistent — every counted call lives in exactly one bucket.
   const managerAccMap = new Map<string, PeriodAcc>();
 
+  // Two aggregation modes:
+  //   funnels — line=all, accumulate per funnel label (one row per active
+  //     line in the dept). Block names = funnel labels, criteria = [].
+  //   criteria — line=specific, accumulate per block/criterion as before
+  //     and key off the canonical JSON config.
+  const isAllFunnels = line === "all" || !line;
+
   let processedCount = 0;
   for (const row of rows) {
     if (!row.callCreatedAt) continue;
@@ -382,12 +444,23 @@ async function fetchOkkData(
     const acc = accMap.get(p);
     if (!acc) continue;
 
-    const had = processBlocks(blocks, acc, row.totalScore);
+    let had: boolean;
+    if (isAllFunnels) {
+      const funnel = funnelLabelForOkk(department, row.promptType);
+      had = processCallAsFunnel(acc, row.totalScore, funnel);
+    } else {
+      had = processBlocks(blocks, acc, row.totalScore);
+    }
     if (had) processedCount++;
 
     const mgrKey = row.managerId ?? NO_MANAGER_KEY;
     if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
-    processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
+    if (isAllFunnels) {
+      const funnel = funnelLabelForOkk(department, row.promptType);
+      processCallAsFunnel(managerAccMap.get(mgrKey)!, row.totalScore, funnel);
+    } else {
+      processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
+    }
   }
 
   // Pull names for every managerId that produced data — including inactive
@@ -421,11 +494,21 @@ async function fetchOkkData(
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
   }
 
-  // Canonical block/criteria order from the prompt's JSON config — drives
-  // the left column of the table. For "all", we union across every line of
-  // the department; for a specific line, only that line's prompt_type.
-  const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
-  const canonical = await loadCanonicalCriteria(promptTypesForCanonical);
+  // In funnels mode the left column is the dept's funnel list (no criteria);
+  // in criteria mode it's the JSON-canonical block/criteria for the selected
+  // prompt_type(s).
+  let canonical: CanonicalCriteria;
+  if (isAllFunnels) {
+    const funnels = funnelOrderForOkk(department);
+    canonical = {
+      blockOrder: funnels,
+      blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
+      validKeys: new Set(),
+    };
+  } else {
+    const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
+    canonical = await loadCanonicalCriteria(promptTypesForCanonical);
+  }
 
   return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical);
 }
@@ -487,6 +570,7 @@ async function fetchRoleplayData(
         score: callsTable.score,
         evaluationJson: callsTable.evaluationJson,
         userId: callsTable.userId,
+        callType: callsTable.callType,
       })
       .from(callsTable)
       .where(and(...conditions))
@@ -503,6 +587,8 @@ async function fetchRoleplayData(
 
   const managerAccMap = new Map<string, PeriodAcc>();
 
+  const isAllFunnels = line === "all" || !line;
+
   let processedCount = 0;
   for (const row of rows) {
     if (!row.startedAt) continue;
@@ -514,12 +600,23 @@ async function fetchRoleplayData(
     const acc = accMap.get(p);
     if (!acc) continue;
 
-    const had = processBlocks(blocks, acc, row.score ?? null);
+    let had: boolean;
+    if (isAllFunnels) {
+      const funnel = funnelLabelForRoleplay(department, row.callType);
+      had = processCallAsFunnel(acc, row.score ?? null, funnel);
+    } else {
+      had = processBlocks(blocks, acc, row.score ?? null);
+    }
     if (had) processedCount++;
 
     const mgrKey = row.userId ?? NO_MANAGER_KEY;
     if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
-    processBlocks(blocks, managerAccMap.get(mgrKey)!, row.score ?? null);
+    if (isAllFunnels) {
+      const funnel = funnelLabelForRoleplay(department, row.callType);
+      processCallAsFunnel(managerAccMap.get(mgrKey)!, row.score ?? null, funnel);
+    } else {
+      processBlocks(blocks, managerAccMap.get(mgrKey)!, row.score ?? null);
+    }
   }
 
   // See fetchOkkData — pull names for inactive/admin users that produced
@@ -550,10 +647,21 @@ async function fetchRoleplayData(
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
   }
 
-  // Roleplay evaluations don't currently have a JSON criteria config (the
-  // d2_*/r2_* configs are for OKK). Fall back to dynamic collection inside
-  // buildResponse via EMPTY_CANONICAL until a roleplay-specific config lands.
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, EMPTY_CANONICAL);
+  // Funnels mode → per-funnel canonical; criteria mode → dynamic (no JSON
+  // config for roleplay yet, so we fall back to whatever evaluation_json
+  // surfaces).
+  let canonical: CanonicalCriteria;
+  if (isAllFunnels) {
+    const funnels = funnelOrderForRoleplay(department);
+    canonical = {
+      blockOrder: funnels,
+      blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
+      validKeys: new Set(),
+    };
+  } else {
+    canonical = EMPTY_CANONICAL;
+  }
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical);
 }
 
 // ─── Build response from accumulators ───────────────────────
