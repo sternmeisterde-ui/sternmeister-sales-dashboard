@@ -41,52 +41,99 @@ import {
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
 
 import { cached } from "@/lib/kommo/cache";
+import { APP_TZ, addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 // ==================== Helpers ====================
+//
+// All date windows resolve to Europe/Berlin wall-clock boundaries — never
+// UTC-naive day rollovers. The team's ground truth is Berlin local time, and
+// mixing UTC days with Berlin-day SQL grouping made per-manager tables and
+// the trend chart disagree by ±1–2h (incident 2026-04-29: dashboard showed
+// activity for "today" before Berlin business hours had started, because the
+// UTC-day filter swallowed the previous evening's calls).
+//
+// parseDateBoundary("YYYY-MM-DD", "start"|"end") returns the UTC Date that
+// represents 00:00:00 / 23:59:59.999 Berlin local for that civil date, with
+// DST handled. Civil-date arithmetic helpers (addDaysCivil/todayCivil) live
+// in @/lib/utils/date — keep this file free of duplicate copies.
+
+/** Day-of-week (0 = Sunday … 6 = Saturday) for a civil date, evaluated in
+ *  Berlin TZ. Drives the Monday-of-this-week shift in `getDateRange("week")`.
+ *  We use Intl rather than Zeller's congruence so DST-flip days still resolve
+ *  the same Berlin weekday (and to keep the helper count low). */
+function dayOfWeekBerlin(dateStr: string): number {
+  const start = parseDateBoundary(dateStr, "start");
+  if (!start) throw new Error(`Bad date string: ${dateStr}`);
+  const wd = new Intl.DateTimeFormat("en-US", { timeZone: APP_TZ, weekday: "short" })
+    .format(start);
+  return ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as const)[wd as "Sun"] ?? 0;
+}
+
+/** UTC seconds from a Berlin-local civil-date boundary. Throws on bad input. */
+function berlinDayBoundarySec(dateStr: string, kind: "start" | "end"): number {
+  const d = parseDateBoundary(dateStr, kind);
+  if (!d) throw new Error(`Bad date string: ${dateStr}`);
+  return Math.floor(d.getTime() / 1000);
+}
 
 function getDateRange(period: string, dateStr: string): { from: number; to: number } {
-  const base = new Date(dateStr + "T00:00:00Z");
-
   switch (period) {
     case "week": {
-      const day = base.getUTCDay();
-      const diff = day === 0 ? -6 : 1 - day;
-      const monday = new Date(base);
-      monday.setUTCDate(base.getUTCDate() + diff);
-      monday.setUTCHours(0, 0, 0, 0);
-      const sunday = new Date(monday);
-      sunday.setUTCDate(monday.getUTCDate() + 6);
-      sunday.setUTCHours(23, 59, 59, 999);
-      return { from: Math.floor(monday.getTime() / 1000), to: Math.floor(sunday.getTime() / 1000) };
+      // ISO week: Mon → Sun, in Berlin local.
+      const wd = dayOfWeekBerlin(dateStr);
+      const diff = wd === 0 ? -6 : 1 - wd;
+      const monday = addDaysCivil(dateStr, diff);
+      const sunday = addDaysCivil(monday, 6);
+      return {
+        from: berlinDayBoundarySec(monday, "start"),
+        to: berlinDayBoundarySec(sunday, "end"),
+      };
     }
     case "month": {
-      const firstDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
-      const lastDay = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0, 23, 59, 59, 999));
-      return { from: Math.floor(firstDay.getTime() / 1000), to: Math.floor(lastDay.getTime() / 1000) };
+      const match = /^(\d{4})-(\d{2})-/.exec(dateStr);
+      if (!match) throw new Error(`Bad date string: ${dateStr}`);
+      const y = Number(match[1]);
+      const m = Number(match[2]);
+      // Last day of month: civil arithmetic, no TZ involved.
+      const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const firstCivil = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-01`;
+      const lastCivil = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-${lastDay.toString().padStart(2, "0")}`;
+      return {
+        from: berlinDayBoundarySec(firstCivil, "start"),
+        to: berlinDayBoundarySec(lastCivil, "end"),
+      };
     }
     case "year": {
-      const yearStart = new Date(Date.UTC(base.getUTCFullYear(), 0, 1));
-      const yearEnd = new Date(Date.UTC(base.getUTCFullYear(), 11, 31, 23, 59, 59, 999));
-      return { from: Math.floor(yearStart.getTime() / 1000), to: Math.floor(yearEnd.getTime() / 1000) };
+      const match = /^(\d{4})-/.exec(dateStr);
+      if (!match) throw new Error(`Bad date string: ${dateStr}`);
+      const y = match[1];
+      return {
+        from: berlinDayBoundarySec(`${y}-01-01`, "start"),
+        to: berlinDayBoundarySec(`${y}-12-31`, "end"),
+      };
     }
     default: {
-      const dayStart = new Date(base);
-      dayStart.setUTCHours(0, 0, 0, 0);
-      const dayEnd = new Date(base);
-      dayEnd.setUTCHours(23, 59, 59, 999);
-      return { from: Math.floor(dayStart.getTime() / 1000), to: Math.floor(dayEnd.getTime() / 1000) };
+      return {
+        from: berlinDayBoundarySec(dateStr, "start"),
+        to: berlinDayBoundarySec(dateStr, "end"),
+      };
     }
   }
 }
 
 function getTrendRange(period: string, from: number, to: number): { trendFrom: number; trendTo: number; trendDays: number } {
   if (period === "day") {
-    // Last 7 days ending on selected date
-    const end = new Date(to * 1000);
-    const start = new Date(end);
-    start.setUTCDate(start.getUTCDate() - 6);
-    start.setUTCHours(0, 0, 0, 0);
-    return { trendFrom: Math.floor(start.getTime() / 1000), trendTo: to, trendDays: 7 };
+    // Last 7 Berlin-days ending on the selected date. We derive the Berlin
+    // civil date FROM the UTC `to` instant so DST changes inside the 7-day
+    // window don't drift the start by an hour: convert `to` → Berlin civil →
+    // subtract 6 civil days → take Berlin midnight UTC instant of that day.
+    const toCivil = new Date(to * 1000).toLocaleDateString("en-CA", { timeZone: APP_TZ });
+    const startCivil = addDaysCivil(toCivil, -6);
+    return {
+      trendFrom: berlinDayBoundarySec(startCivil, "start"),
+      trendTo: to,
+      trendDays: 7,
+    };
   }
   // For week/month/year — trend covers the full selected period
   const days = Math.ceil((to - from) / 86400);
@@ -455,18 +502,19 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const department = url.searchParams.get("department") || "b2g";
     const period = url.searchParams.get("period") || "day";
-    const dateStr = url.searchParams.get("date") || new Date().toISOString().slice(0, 10);
+    // Default "today" is Berlin-local, not UTC — otherwise users in the first
+    // ~2h after Berlin midnight see yesterday's date as default.
+    const dateStr = url.searchParams.get("date") || todayCivil();
     // Optional explicit range — when provided, overrides period-based boundaries.
     // Lets the UI collapse day/week/month/year buttons into one calendar with
     // День/Период toggle.
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v11 cache-key bump (2026-04-29): cohort status names now sourced
-    // directly from analytics.leads_cohort.{pipeline,status} text columns
-    // instead of Kommo /pipelines API — fixes the "Status 12345" rows that
-    // appeared whenever getPipelines() returned an incomplete or empty list.
-    const cacheKey = `dashboard-response:v11:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v12 cache-key bump (2026-04-29): all date windows now resolve in Europe/
+    // Berlin (was UTC). Same dateStr means a different UTC window than v11, so
+    // the old cached responses must not leak into the new boundary semantics.
+    const cacheKey = `dashboard-response:v12:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, period, dateStr, fromStr, toStr)
     );
@@ -496,11 +544,11 @@ async function buildDashboardResponse(
     let to: number;
     let effectivePeriod = period;
     if (fromStr && toStr) {
-      const fromDate = new Date(`${fromStr}T00:00:00Z`);
-      const toDate = new Date(`${toStr}T00:00:00Z`);
-      toDate.setUTCHours(23, 59, 59, 999);
-      from = Math.floor(fromDate.getTime() / 1000);
-      to = Math.floor(toDate.getTime() / 1000);
+      // Berlin-local boundaries: "from=2026-04-29" means 00:00 Berlin Apr 29
+      // (not 00:00 UTC which is 02:00 Berlin and shifts ~2h of activity into
+      // the wrong day's bucket).
+      from = berlinDayBoundarySec(fromStr, "start");
+      to = berlinDayBoundarySec(toStr, "end");
       // Mark as custom so getTrendRange uses the full range (not 7-day default).
       effectivePeriod = fromStr === toStr ? "day" : "custom";
     } else {

@@ -30,6 +30,7 @@ import {
   B2G_PIPELINES,
   BERATER_STATUSES,
 } from "@/lib/kommo/pipeline-config";
+import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 interface TerminRow {
   date: string;
@@ -38,28 +39,33 @@ interface TerminRow {
   count: number;
 }
 
-function parseDate(input: string | null, fallback: Date): Date {
-  if (!input) return fallback;
-  // Strict YYYY-MM-DD — extra characters → fall back to default rather than
-  // letting a malformed input drift into the SQL.
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) return fallback;
-  const ms = Date.parse(`${input}T00:00:00.000Z`);
-  if (Number.isNaN(ms)) return fallback;
-  return new Date(ms);
+/** Parse a YYYY-MM-DD as a Berlin-local civil date, then resolve to the UTC
+ *  instant for `kind` ("start" = 00:00 Berlin, "end" = 23:59:59.999 Berlin).
+ *  Returns null when the string is missing or malformed — caller substitutes
+ *  the default. Berlin-local rather than UTC because every other dashboard
+ *  surface treats dates as Berlin civil dates (matches calendar pickers). */
+function parseBerlinDate(input: string | null, kind: "start" | "end"): Date | null {
+  if (!input) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) return null;
+  return parseDateBoundary(input, kind);
 }
 
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
+  // Defaults are Berlin-local: "today" in Berlin and "29 days back" in Berlin
+  // civil days. Picking 30 calendar days is a UI choice; using UTC math here
+  // would shift the window by ±1–2h and slip leads into the wrong cohort row.
+  const todayBerlin = todayCivil();
+  const defaultFromCivil = addDaysCivil(todayBerlin, -29);
 
-  const defaultFrom = new Date(today);
-  defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 29);
+  const fromDate =
+    parseBerlinDate(url.searchParams.get("dateFrom"), "start") ??
+    parseDateBoundary(defaultFromCivil, "start")!;
+  const toDateEnd =
+    parseBerlinDate(url.searchParams.get("dateTo"), "end") ??
+    parseDateBoundary(todayBerlin, "end")!;
 
-  const fromDate = parseDate(url.searchParams.get("dateFrom"), defaultFrom);
-  const toDate = parseDate(url.searchParams.get("dateTo"), today);
-
-  if (fromDate.getTime() > toDate.getTime()) {
+  if (fromDate.getTime() > toDateEnd.getTime()) {
     return NextResponse.json(
       { error: "dateFrom must be on or before dateTo" },
       { status: 400 },
@@ -70,11 +76,6 @@ export async function GET(req: NextRequest) {
   // SQL query 100% parameterised (no string interpolation into the query).
   const granularity =
     url.searchParams.get("granularity") === "week" ? "week" : "day";
-
-  // Inclusive end-of-day for the upper bound — matches how the user picks a
-  // calendar range ("through Apr 28" should include all of Apr 28).
-  const toDateEnd = new Date(toDate);
-  toDateEnd.setUTCHours(23, 59, 59, 999);
 
   const pipelineId = B2G_PIPELINES.BERATER;
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;

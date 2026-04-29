@@ -8,12 +8,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { getPipelineIds } from "@/lib/kommo/pipeline-config";
+import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
-function parseDate(s: string | null, fallback: Date): Date {
-  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return fallback;
-  return new Date(`${s}T00:00:00Z`);
+/** Parse YYYY-MM-DD as a Berlin-local boundary; null on bad input. */
+function parseDate(s: string | null, kind: "start" | "end"): Date | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return parseDateBoundary(s, kind);
 }
 
 export async function GET(req: NextRequest) {
@@ -24,12 +26,15 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "dept=b2g|b2b required" }, { status: 400 });
     }
 
-    const today = new Date();
-    today.setUTCHours(23, 59, 59, 999);
-    const monthAgo = new Date(today.getTime() - 30 * 86_400_000);
-    const from = parseDate(url.searchParams.get("from"), monthAgo);
-    const to = parseDate(url.searchParams.get("to"), today);
-    to.setUTCHours(23, 59, 59, 999);
+    // Defaults: last 30 Berlin days through end-of-today Berlin.
+    const today = todayCivil();
+    const monthAgoCivil = addDaysCivil(today, -30);
+    const from =
+      parseDate(url.searchParams.get("from"), "start") ??
+      parseDateBoundary(monthAgoCivil, "start")!;
+    const to =
+      parseDate(url.searchParams.get("to"), "end") ??
+      parseDateBoundary(today, "end")!;
 
     const pipelineIds = getPipelineIds(dept);
     const pipelineList = sql.join(

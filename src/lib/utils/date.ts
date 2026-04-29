@@ -161,3 +161,94 @@ export function parseDateBoundary(
   const result = new Date(utcMs);
   return Number.isNaN(result.getTime()) ? null : result;
 }
+
+// ─── Civil-date arithmetic ────────────────────────────────────────
+//
+// "Civil" = the YYYY-MM-DD label as humans use it, with no zone attached.
+// We do day arithmetic on those strings via a UTC pivot so the math is
+// timezone-free; the conversion to actual UTC instants happens via
+// `parseDateBoundary` at the SQL boundary. Centralised here so dashboard,
+// tracking, analytics, and ETL routes don't each carry their own copy.
+
+/** Today's civil date (YYYY-MM-DD) in APP_TZ. The only "today" the dashboard
+ *  cares about — using server UTC default would shift to yesterday in the
+ *  ~2h after Berlin midnight (e.g. 00:30 Berlin Apr 29 = 22:30 UTC Apr 28). */
+export function todayCivil(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: APP_TZ });
+}
+
+/** Add `n` civil days to "YYYY-MM-DD". TZ-free: uses Date.UTC purely as a
+ *  Gregorian calendar pivot, never as an instant. The output is independent
+ *  of process timezone or DST. */
+export function addDaysCivil(dateStr: string, n: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) throw new Error(`Bad civil date: ${dateStr}`);
+  const [, y, m, d] = match;
+  const t = Date.UTC(Number(y), Number(m) - 1, Number(d)) + n * 86_400_000;
+  const o = new Date(t);
+  const yy = o.getUTCFullYear().toString().padStart(4, "0");
+  const mm = (o.getUTCMonth() + 1).toString().padStart(2, "0");
+  const dd = o.getUTCDate().toString().padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+/** UTC Date instant for 00:00 Berlin of `civilStr`. The single safe way to
+ *  build a "this civil day" Date in client code: `new Date(y, m, d)` is
+ *  browser-local-midnight (off by ±1–2 h in non-Berlin browsers), and the
+ *  picker would silently send the wrong civil day to the API after going
+ *  through fmtLocalDate. */
+export function berlinCivilDate(civilStr: string): Date {
+  const d = parseDateBoundary(civilStr, "start");
+  if (!d) throw new Error(`Bad civil date: ${civilStr}`);
+  return d;
+}
+
+/** "Today" as a UTC instant representing 00:00 Berlin of today's Berlin civil
+ *  date. Use this anywhere the picker / page wants a Date object for the
+ *  current day — never `new Date()` + setHours(0). */
+export function todayBerlinDate(): Date {
+  return berlinCivilDate(todayCivil());
+}
+
+/** End-of-day in Berlin for the civil day that `d` falls in (UTC instant for
+ *  23:59:59.999 Berlin). Use this in place of `d.setHours(23,59,59,999)`
+ *  whenever the intent is "the last millisecond of this Berlin day" —
+ *  setHours uses browser-local midnight which drifts by ±1–2h in non-Berlin
+ *  browsers. */
+export function endOfBerlinDay(d: Date): Date {
+  const civil = d.toLocaleDateString("en-CA", { timeZone: APP_TZ });
+  const end = parseDateBoundary(civil, "end");
+  if (!end) throw new Error(`Bad civil date from instant: ${civil}`);
+  return end;
+}
+
+/** Start-of-day in Berlin for the civil day that `d` falls in. Mirror of
+ *  endOfBerlinDay. */
+export function startOfBerlinDay(d: Date): Date {
+  const civil = d.toLocaleDateString("en-CA", { timeZone: APP_TZ });
+  const start = parseDateBoundary(civil, "start");
+  if (!start) throw new Error(`Bad civil date from instant: ${civil}`);
+  return start;
+}
+
+/** Berlin civil components (y/m/d) of any UTC instant. Useful when you need
+ *  to compare two Date objects "do they represent the same Berlin civil day"
+ *  without relying on browser-local getters. */
+export function berlinCivilComponents(d: Date): { y: number; m: number; d: number } {
+  const civil = d.toLocaleDateString("en-CA", { timeZone: APP_TZ });
+  return {
+    y: Number(civil.slice(0, 4)),
+    m: Number(civil.slice(5, 7)),
+    d: Number(civil.slice(8, 10)),
+  };
+}
+
+/** Civil-date difference in days (a − b). Positive when a > b. */
+export function diffDaysCivil(a: string, b: string): number {
+  const ma = /^(\d{4})-(\d{2})-(\d{2})$/.exec(a);
+  const mb = /^(\d{4})-(\d{2})-(\d{2})$/.exec(b);
+  if (!ma || !mb) throw new Error(`Bad civil date: ${a} or ${b}`);
+  const ua = Date.UTC(Number(ma[1]), Number(ma[2]) - 1, Number(ma[3]));
+  const ub = Date.UTC(Number(mb[1]), Number(mb[2]) - 1, Number(mb[3]));
+  return Math.round((ua - ub) / 86_400_000);
+}

@@ -3,23 +3,32 @@
 import { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { berlinCivilComponents, berlinCivilDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ─── helpers ───────────────────────────────────────────────
+//
+// Every Date this component handles is a UTC instant for 00:00 Berlin of some
+// civil day — built via `berlinCivilDate("YYYY-MM-DD")` or
+// `todayBerlinDate()`. NEVER `new Date(y, m, d)` (browser-local midnight) —
+// that drifts the civil-day signal in non-Berlin browsers and the picker
+// silently sends the wrong day to the API. Comparisons therefore use
+// `berlinCivilComponents` to read y/m/d in Berlin TZ.
+
 const getDaysInMonth = (date: Date) => {
-  const year = date.getFullYear();
-  const month = date.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOfMonth = new Date(year, month, 1).getDay(); // 0=Sun
+  // `date` is the Berlin-midnight UTC instant of any day in the desired month;
+  // read its components in Berlin TZ.
+  const { y, m } = berlinCivilComponents(date);
+  // Last-day-of-month and first-day-weekday: civil-calendar arithmetic, no TZ.
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const firstDayOfMonth = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(); // 0 = Sun
   return { daysInMonth, firstDayOfMonth };
 };
 
 const isSameDay = (a: Date | null, b: Date | null) => {
   if (!a || !b) return false;
-  return (
-    a.getDate() === b.getDate() &&
-    a.getMonth() === b.getMonth() &&
-    a.getFullYear() === b.getFullYear()
-  );
+  const ca = berlinCivilComponents(a);
+  const cb = berlinCivilComponents(b);
+  return ca.y === cb.y && ca.m === cb.m && ca.d === cb.d;
 };
 
 const isInRange = (d: Date, start: Date | null, end: Date | null) => {
@@ -28,8 +37,16 @@ const isInRange = (d: Date, start: Date | null, end: Date | null) => {
   return t >= start.getTime() && t <= end.getTime();
 };
 
-const fmtShort = (d: Date) =>
-  `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
+const fmtShort = (d: Date) => {
+  const { m, d: day } = berlinCivilComponents(d);
+  return `${String(day).padStart(2, "0")}.${String(m).padStart(2, "0")}`;
+};
+
+/** Build a Berlin-midnight Date for a civil (y, m, d) triple. */
+function berlinDayOfMonth(y: number, m: number, d: number): Date {
+  const civil = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-${d.toString().padStart(2, "0")}`;
+  return berlinCivilDate(civil);
+}
 
 // ─── types ─────────────────────────────────────────────────
 export interface DateRange {
@@ -75,13 +92,14 @@ export default function CalendarPicker({
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
-  // Start the calendar on maxDate's month if data hasn't reached today
+  // Start the calendar on maxDate's month if data hasn't reached today.
+  // Both branches return a Berlin-midnight Date for the 1st of that month so
+  // the rest of the component can navigate / render in a single TZ convention.
   const [month, setMonth] = useState(() => {
-    const today = new Date();
-    if (maxDate && maxDate < today) {
-      return new Date(maxDate.getFullYear(), maxDate.getMonth(), 1);
-    }
-    return new Date(today.getFullYear(), today.getMonth(), 1);
+    const today = todayBerlinDate();
+    const ref = maxDate && maxDate < today ? maxDate : today;
+    const { y, m } = berlinCivilComponents(ref);
+    return berlinDayOfMonth(y, m, 1);
   });
   const [draft, setDraft] = useState<DateRange>({ start: null, end: null });
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -278,15 +296,18 @@ export default function CalendarPicker({
 
           {/* Year + Month navigation (≪/≫ year, ◀/▶ month) */}
           {(() => {
-            const prevMonth = new Date(month.getFullYear(), month.getMonth() - 1, 1);
-            const nextMonth = new Date(month.getFullYear(), month.getMonth() + 1, 1);
-            const prevYear = new Date(month.getFullYear() - 1, month.getMonth(), 1);
-            const nextYear = new Date(month.getFullYear() + 1, month.getMonth(), 1);
+            const { y: my, m: mm } = berlinCivilComponents(month);
+            // Walk months/years in civil-calendar terms; month=Date.UTC overflow
+            // handles January-December roll automatically.
+            const prevMonth = berlinDayOfMonth(my, mm - 1, 1);
+            const nextMonth = berlinDayOfMonth(my, mm + 1, 1);
+            const prevYear = berlinDayOfMonth(my - 1, mm, 1);
+            const nextYear = berlinDayOfMonth(my + 1, mm, 1);
             const minMonth = minDate
-              ? new Date(minDate.getFullYear(), minDate.getMonth(), 1)
+              ? (() => { const c = berlinCivilComponents(minDate); return berlinDayOfMonth(c.y, c.m, 1); })()
               : null;
             const maxMonth = maxDate
-              ? new Date(maxDate.getFullYear(), maxDate.getMonth(), 1)
+              ? (() => { const c = berlinCivilComponents(maxDate); return berlinDayOfMonth(c.y, c.m, 1); })()
               : null;
             const prevDisabled = minMonth !== null && prevMonth < minMonth;
             const nextDisabled = maxMonth !== null && nextMonth > maxMonth;
@@ -355,13 +376,10 @@ export default function CalendarPicker({
                 cells.push(<div key={`e-${i}`} className="aspect-square" />);
               }
               const sel = effectiveMode === "range" ? draft : value;
-              const today = new Date();
+              const today = todayBerlinDate();
+              const { y: monthY, m: monthM } = berlinCivilComponents(month);
               for (let day = 1; day <= daysInMonth; day++) {
-                const date = new Date(
-                  month.getFullYear(),
-                  month.getMonth(),
-                  day
-                );
+                const date = berlinDayOfMonth(monthY, monthM, day);
                 const isStart = isSameDay(date, sel.start);
                 const isEnd = isSameDay(date, sel.end);
                 const inRange =

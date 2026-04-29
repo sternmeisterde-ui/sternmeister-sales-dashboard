@@ -12,14 +12,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { runSync } from "@/lib/etl";
+import { addDaysCivil, diffDaysCivil, parseDateBoundary } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 1800; // 30 min — full 3-month backfill
 
-function parseDay(s: string | null): Date | null {
+/** Parse YYYY-MM-DD as a Berlin-local civil string (no TZ conversion).
+ *  Returns the same "YYYY-MM-DD" for downstream civil arithmetic. */
+function parseCivil(s: string | null): string | null {
   if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-  const d = new Date(`${s}T00:00:00Z`);
-  return Number.isNaN(d.getTime()) ? null : d;
+  return s;
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -29,20 +31,20 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   const url = new URL(req.url);
-  const from = parseDay(url.searchParams.get("from"));
-  const to = parseDay(url.searchParams.get("to"));
+  const fromCivil = parseCivil(url.searchParams.get("from"));
+  const toCivil = parseCivil(url.searchParams.get("to"));
   const chunkDays = Math.max(
     1,
     Math.min(30, Number(url.searchParams.get("chunkDays")) || 7),
   );
 
-  if (!from || !to) {
+  if (!fromCivil || !toCivil) {
     return NextResponse.json(
       { error: "from + to required as YYYY-MM-DD" },
       { status: 400 },
     );
   }
-  if (from > to) {
+  if (diffDaysCivil(fromCivil, toCivil) > 0) {
     return NextResponse.json({ error: "from must be <= to" }, { status: 400 });
   }
 
@@ -51,10 +53,10 @@ export async function GET(req: NextRequest): Promise<Response> {
       const enc = new TextEncoder();
       const write = (line: string) => controller.enqueue(enc.encode(line + "\n"));
 
-      let cur = new Date(from);
+      let curCivil = fromCivil;
       let chunkNum = 0;
       const totalChunks =
-        Math.ceil((to.getTime() - from.getTime()) / (chunkDays * 86_400_000)) + 1;
+        Math.ceil((diffDaysCivil(toCivil, fromCivil) + 1) / chunkDays);
       let totalLeads = 0;
       let totalComms = 0;
       let totalStatus = 0;
@@ -62,25 +64,28 @@ export async function GET(req: NextRequest): Promise<Response> {
       const failures: Array<{ from: string; to: string; error: string }> = [];
 
       write(
-        `Backfill ${from.toISOString().slice(0, 10)} → ${to.toISOString().slice(0, 10)} | ${totalChunks} chunks of ${chunkDays}d`,
+        `Backfill ${fromCivil} → ${toCivil} (Berlin) | ${totalChunks} chunks of ${chunkDays}d`,
       );
 
-      while (cur <= to) {
+      while (diffDaysCivil(curCivil, toCivil) <= 0) {
         chunkNum++;
-        const chunkEndMs = Math.min(
-          cur.getTime() + (chunkDays - 1) * 86_400_000,
-          to.getTime(),
-        );
-        const chunkEnd = new Date(chunkEndMs);
-        chunkEnd.setUTCHours(23, 59, 59, 999);
-        const fromStr = cur.toISOString().slice(0, 10);
-        const toStr = new Date(chunkEndMs).toISOString().slice(0, 10);
+        // Civil-day chunk: [curCivil, curCivil+chunkDays-1] clamped to toCivil.
+        // Doing the slicing in civil days (not milliseconds) is what keeps the
+        // chunk boundaries aligned to Berlin midnight on every iteration —
+        // including across CET↔CEST transitions where a UTC-millis stride
+        // would land at 23:00 / 01:00 and skip or double a day's data.
+        const chunkEndCivil =
+          diffDaysCivil(addDaysCivil(curCivil, chunkDays - 1), toCivil) > 0
+            ? toCivil
+            : addDaysCivil(curCivil, chunkDays - 1);
+        const chunkStart = parseDateBoundary(curCivil, "start")!;
+        const chunkEnd = parseDateBoundary(chunkEndCivil, "end")!;
         const t0 = Date.now();
-        write(`[${chunkNum}/${totalChunks}] ${fromStr} → ${toStr} ...`);
+        write(`[${chunkNum}/${totalChunks}] ${curCivil} → ${chunkEndCivil} ...`);
 
         try {
           const result = await runSync({
-            fromDate: cur,
+            fromDate: chunkStart,
             toDate: chunkEnd,
           });
           const dt = Math.round((Date.now() - t0) / 1000);
@@ -94,11 +99,10 @@ export async function GET(req: NextRequest): Promise<Response> {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           write(`  FAILED: ${msg}`);
-          failures.push({ from: fromStr, to: toStr, error: msg });
+          failures.push({ from: curCivil, to: chunkEndCivil, error: msg });
         }
 
-        cur = new Date(chunkEndMs + 86_400_000);
-        cur.setUTCHours(0, 0, 0, 0);
+        curCivil = addDaysCivil(chunkEndCivil, 1);
       }
 
       write("=== DONE ===");

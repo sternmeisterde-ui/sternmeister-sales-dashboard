@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getAllCallNotesByDate } from "@/lib/kommo/client";
+import { parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
@@ -21,13 +22,17 @@ function parseInstant(s: string | null, fallback: Date): Date {
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const from = parseInstant(url.searchParams.get("from"), today);
-    const to = parseInstant(
-      url.searchParams.get("to"),
-      new Date(today.getTime() + 24 * 60 * 60_000),
+    // Default window = "today" Berlin → "tomorrow" Berlin (i.e. one full
+    // Berlin business day, ending at 00:00 Berlin tomorrow). The previous
+    // UTC-based default ran from 00:00 UTC to 24h later which is 02:00 →
+    // 02:00 Berlin and chops the local business day in half across the
+    // 02:00 Berlin boundary.
+    const todayStartBerlin = parseDateBoundary(todayCivil(), "start")!;
+    const tomorrowStartBerlin = new Date(
+      todayStartBerlin.getTime() + 24 * 60 * 60_000,
     );
+    const from = parseInstant(url.searchParams.get("from"), todayStartBerlin);
+    const to = parseInstant(url.searchParams.get("to"), tomorrowStartBerlin);
 
     const fromTs = Math.floor(from.getTime() / 1000);
     const toTs = Math.floor(to.getTime() / 1000);

@@ -21,8 +21,20 @@ import { sql } from "drizzle-orm";
 import { businessHoursSeconds } from "./business-hours";
 import type { LeadCacheEntry } from "./sync-leads";
 import type { KommoLookups } from "./lookups";
+import { APP_TZ, parseDateBoundary } from "@/lib/utils/date";
 
 type CommRow = typeof communications.$inferInsert;
+
+/** Truncate a UTC instant to 00:00 of its Berlin-local civil day, returning a
+ *  UTC Date. Used for `lead_day_start` so cohort grouping bucket matches the
+ *  Berlin business calendar instead of UTC midnight (which is 02:00 / 01:00
+ *  Berlin and shifts a sliver of leads into the wrong day). The non-null
+ *  assertion is safe: `toLocaleDateString("en-CA")` always returns a string
+ *  matching parseDateBoundary's regex. */
+function berlinDayStart(instant: Date): Date {
+  const civil = instant.toLocaleDateString("en-CA", { timeZone: APP_TZ });
+  return parseDateBoundary(civil, "start")!;
+}
 
 function buildLeadMap(cache: LeadCacheEntry[]): Map<number, LeadCacheEntry> {
   const m = new Map<number, LeadCacheEntry>();
@@ -69,9 +81,7 @@ export async function syncCommunications(
       pipelineName: lead?.pipelineName ?? null,
       category: lead?.category ?? null,
       leadCreatedAt: lead?.createdAt ?? null,
-      leadDayStart: lead
-        ? new Date(new Date(lead.createdAt).setUTCHours(0, 0, 0, 0))
-        : null,
+      leadDayStart: lead ? berlinDayStart(new Date(lead.createdAt)) : null,
       callStatus: null,
       duration: null,
       manager: ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : "",

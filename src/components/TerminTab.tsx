@@ -19,7 +19,12 @@ import {
 } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
-import { fmtLocalDate as formatDate } from "@/lib/utils/date";
+import {
+  fmtLocalDate as formatDate,
+  berlinCivilComponents,
+  berlinCivilDate,
+  todayBerlinDate,
+} from "@/lib/utils/date";
 
 interface TerminApiRow {
   date: string;
@@ -39,27 +44,23 @@ const PRESETS: Array<{ id: Preset; label: string }> = [
   { id: "custom", label: "Произвольный" },
 ];
 
-function startOfDay(d: Date): Date {
-  const next = new Date(d);
-  next.setHours(0, 0, 0, 0);
-  return next;
-}
-
 function rangeForPreset(preset: Preset): { start: Date; end: Date } {
-  const today = startOfDay(new Date());
+  // Berlin business calendar — every preset is a Berlin civil-day window so
+  // the picker, the URL, and the SQL agree regardless of browser TZ.
+  const today = todayBerlinDate();
   if (preset === "today") return { start: today, end: today };
   if (preset === "7d") {
-    const start = new Date(today);
-    start.setDate(start.getDate() - 6);
+    const start = new Date(today.getTime() - 6 * 86_400_000);
     return { start, end: today };
   }
   if (preset === "30d") {
-    const start = new Date(today);
-    start.setDate(start.getDate() - 29);
+    const start = new Date(today.getTime() - 29 * 86_400_000);
     return { start, end: today };
   }
-  // current month
-  const start = new Date(today.getFullYear(), today.getMonth(), 1);
+  // current month — first day of the Berlin civil month containing today
+  const { y, m } = berlinCivilComponents(today);
+  const civil = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-01`;
+  const start = berlinCivilDate(civil);
   return { start, end: today };
 }
 
@@ -186,8 +187,11 @@ export default function TerminTab() {
 
   const handleRangeChange = (r: DateRange) => {
     if (!r.start) return;
-    const start = startOfDay(r.start);
-    const end = startOfDay(r.end ?? r.start);
+    // Picker emits Berlin-midnight Dates already; pass them through unchanged
+    // (was: startOfDay() which forced browser-local midnight and dropped the
+    // Berlin alignment for non-Berlin browsers).
+    const start = r.start;
+    const end = r.end ?? r.start;
     setRange({ start, end });
     setPreset("custom");
   };

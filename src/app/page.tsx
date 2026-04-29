@@ -21,7 +21,13 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
-import { fmtLocalDate, parseDisplayDate } from "@/lib/utils/date";
+import {
+  fmtLocalDate,
+  parseDisplayDate,
+  endOfBerlinDay,
+  startOfBerlinDay,
+  todayBerlinDate,
+} from "@/lib/utils/date";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useTheme } from "@/hooks/useTheme";
 import { Sun, Moon } from "lucide-react";
@@ -295,23 +301,22 @@ export default function Dashboard() {
       call => call.name === selectedManager.name
     );
 
-    // Apply period filter
-    const now = new Date();
-    now.setHours(23, 59, 59, 999);
+    // Apply period filter — Berlin business calendar. `now` here is just the
+    // upper bound for the comparison; using endOfBerlinDay so the cut-off is
+    // 23:59:59.999 Berlin of today, not browser-local end-of-day (which is
+    // off by ±1–2 h for non-Berlin users).
+    const todayStart = todayBerlinDate();
+    const now = endOfBerlinDay(todayStart);
 
     const filteredByPeriod = allManagerCalls.filter(call => {
       const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
 
       if (managerPeriod === "week") {
-        const weekAgo = new Date(now);
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        weekAgo.setHours(0, 0, 0, 0);
-        return callDate >= weekAgo;
+        const weekAgo = new Date(todayStart.getTime() - 7 * 86_400_000);
+        return callDate >= weekAgo && callDate <= now;
       } else if (managerPeriod === "month") {
-        const monthAgo = new Date(now);
-        monthAgo.setDate(monthAgo.getDate() - 30);
-        monthAgo.setHours(0, 0, 0, 0);
-        return callDate >= monthAgo;
+        const monthAgo = new Date(todayStart.getTime() - 30 * 86_400_000);
+        return callDate >= monthAgo && callDate <= now;
       }
       return true; // all
     });
@@ -360,29 +365,26 @@ export default function Dashboard() {
       .filter(m => lineFilter === "all" || activeDepartment === "b2b" || m.line === lineFilter);
     const managerNames = new Set(managers.map(m => m.name));
 
-    const now = new Date();
-    now.setHours(23, 59, 59, 999);
+    // All bounds are Berlin civil-day aligned: every "today / week / month"
+    // button means "Berlin business calendar", not the user's browser locale.
+    const todayStart = todayBerlinDate();
+    const now = endOfBerlinDay(todayStart);
 
     let periodStart: Date;
     let periodEnd = now;
 
-    // Custom date range overrides period buttons
+    // Custom date range overrides period buttons. The picker now hands us
+    // Berlin-midnight Dates already, but normalise to start/end of Berlin
+    // day defensively in case anything upstream still emits browser-local.
     if (aiCustomRange.start && aiCustomRange.end) {
-      periodStart = new Date(aiCustomRange.start);
-      periodStart.setHours(0, 0, 0, 0);
-      periodEnd = new Date(aiCustomRange.end);
-      periodEnd.setHours(23, 59, 59, 999);
+      periodStart = startOfBerlinDay(aiCustomRange.start);
+      periodEnd = endOfBerlinDay(aiCustomRange.end);
     } else if (aiDashPeriod === "day") {
-      periodStart = new Date(now);
-      periodStart.setHours(0, 0, 0, 0);
+      periodStart = todayStart;
     } else if (aiDashPeriod === "week") {
-      periodStart = new Date(now);
-      periodStart.setDate(periodStart.getDate() - 7);
-      periodStart.setHours(0, 0, 0, 0);
+      periodStart = new Date(todayStart.getTime() - 7 * 86_400_000);
     } else {
-      periodStart = new Date(now);
-      periodStart.setDate(periodStart.getDate() - 30);
-      periodStart.setHours(0, 0, 0, 0);
+      periodStart = new Date(todayStart.getTime() - 30 * 86_400_000);
     }
 
     // ALL calls in period (including unevaluated / score=0)
@@ -459,13 +461,14 @@ export default function Dashboard() {
       return false;
     }
 
-    // Filter by date range
+    // Filter by date range — Berlin civil days. Picker hands us Berlin-
+    // midnight Dates; normalising via startOfBerlinDay/endOfBerlinDay keeps
+    // this filter independent of any caller that might still pass a raw
+    // browser-local Date.
     if (activeDateFilter.start && activeDateFilter.end) {
       const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
-      const startOfDay = new Date(activeDateFilter.start);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(activeDateFilter.end);
-      endOfDay.setHours(23, 59, 59, 999);
+      const startOfDay = startOfBerlinDay(activeDateFilter.start);
+      const endOfDay = endOfBerlinDay(activeDateFilter.end);
 
       if (!(callDate >= startOfDay && callDate <= endOfDay)) {
         return false;

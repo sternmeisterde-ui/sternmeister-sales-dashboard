@@ -13,7 +13,7 @@ import {
 } from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
-import { fmtLocalDate as formatDate } from "@/lib/utils/date";
+import { fmtLocalDate as formatDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
@@ -120,8 +120,10 @@ const LINE_COLOR_CLASS: Record<Exclude<LineFilter, "all">, string> = {
 
 export default function DashboardTab({ department }: { department: string }) {
   const [range, setRange] = useState<{ start: Date; end: Date }>(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Berlin-midnight Date so picker label and the date string sent to the API
+    // agree regardless of browser TZ (e.g. Moscow browser would otherwise pick
+    // the wrong civil day after fmtLocalDate's Berlin formatting).
+    const today = todayBerlinDate();
     return { start: today, end: today };
   });
   const [data, setData] = useState<DashboardData | null>(null);
@@ -284,8 +286,7 @@ export default function DashboardTab({ department }: { department: string }) {
               setRange({ start: r.start, end });
             }}
             onClear={() => {
-              const today = new Date();
-              today.setHours(0, 0, 0, 0);
+              const today = todayBerlinDate();
               setRange({ start: today, end: today });
             }}
           />
@@ -298,11 +299,10 @@ export default function DashboardTab({ department }: { department: string }) {
           <button aria-label="Следующий период" onClick={() => shiftDate(1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
             <ChevronRight className="w-4 h-4" />
           </button>
-          {(!isSingleDay || formatDate(range.start) !== formatDate(new Date())) && (
+          {(!isSingleDay || formatDate(range.start) !== formatDate(todayBerlinDate())) && (
             <button
               onClick={() => {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
+                const today = todayBerlinDate();
                 setRange({ start: today, end: today });
               }}
               className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"

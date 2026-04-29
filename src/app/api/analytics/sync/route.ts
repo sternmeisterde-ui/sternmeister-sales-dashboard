@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { runSync } from "@/lib/etl";
+import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 export const maxDuration = 300; // 5-minute timeout (Vercel/Dokploy Pro)
 
@@ -20,21 +21,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-    const today = new Date();
-    today.setUTCHours(23, 59, 59, 999);
-
     const fromStr = typeof body.from === "string" ? body.from : null;
     const toStr = typeof body.to === "string" ? body.to : null;
 
-    const fromDate = fromStr
-      ? new Date(`${fromStr}T00:00:00Z`)
-      : new Date(today.getTime() - 30 * 86400 * 1000); // default: last 30 days
+    // Default window: last 30 Berlin days through end-of-today Berlin. Civil-
+    // date math (not millisecond) so a DST flip inside the 30-day span doesn't
+    // shave or add an extra hour at one end.
+    const today = todayCivil();
+    const fromCivil = fromStr ?? addDaysCivil(today, -30);
+    const toCivil = toStr ?? today;
 
-    const toDate = toStr ? new Date(`${toStr}T23:59:59Z`) : today;
-
-    if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fromCivil) || !/^\d{4}-\d{2}-\d{2}$/.test(toCivil)) {
       return NextResponse.json({ success: false, error: "Invalid date format" }, { status: 400 });
     }
+
+    const fromDate = parseDateBoundary(fromCivil, "start");
+    const toDate = parseDateBoundary(toCivil, "end");
+    if (!fromDate || !toDate) {
+      return NextResponse.json({ success: false, error: "Invalid date format" }, { status: 400 });
+    }
+
     if (fromDate > toDate) {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }

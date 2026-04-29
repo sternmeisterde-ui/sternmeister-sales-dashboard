@@ -11,12 +11,25 @@ import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { getInvalidEventTypes } from "@/lib/kommo/client";
+import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
-function parseDate(s: string | null, fallback: Date): Date {
-  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return fallback;
-  return new Date(`${s}T00:00:00Z`);
+/** Parse ?from=YYYY-MM-DD as 00:00 Berlin (start) — civil string only.
+ *  Returns null on bad input; caller substitutes a default. */
+function parseStart(s: string | null): Date | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return parseDateBoundary(s, "start");
+}
+
+/** Parse ?to=YYYY-MM-DD as the EXCLUSIVE end of that civil day = 00:00 Berlin
+ *  of the next civil day. The SQL below uses `lt(createdAt, to)`, so an
+ *  exclusive upper bound is the natural convention; computing it as
+ *  next-day-start keeps it 1:1 with the default and avoids the 1ms gap that
+ *  arose from mixing "end" (23:59:59.999) with `lt`. */
+function parseToExclusive(s: string | null): Date | null {
+  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return parseDateBoundary(addDaysCivil(s, 1), "start");
 }
 
 export async function GET(req: NextRequest) {
@@ -27,11 +40,17 @@ export async function GET(req: NextRequest) {
     if (department !== "b2g" && department !== "b2b") {
       return NextResponse.json({ error: "department must be b2g or b2b" }, { status: 400 });
     }
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const yesterday = new Date(today.getTime() - 24 * 60 * 60_000);
-    const from = parseDate(url.searchParams.get("from"), yesterday);
-    const to = parseDate(url.searchParams.get("to"), new Date(today.getTime() + 24 * 60 * 60_000));
+    // Defaults: yesterday 00:00 Berlin → tomorrow 00:00 Berlin (a 48h window
+    // centred on the current Berlin business day, matches the diagnostic's
+    // intent of "show me what's around right now"). Both ends are exclusive
+    // upper-bound style so the SQL `lt(createdAt, to)` reads cleanly.
+    const today = todayCivil();
+    const from =
+      parseStart(url.searchParams.get("from")) ??
+      parseDateBoundary(addDaysCivil(today, -1), "start")!;
+    const to =
+      parseToExclusive(url.searchParams.get("to")) ??
+      parseDateBoundary(addDaysCivil(today, 1), "start")!;
 
     // Total count + breakdown by event_type for this department/window.
     const byType = await trackingDb
