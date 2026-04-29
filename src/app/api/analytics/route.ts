@@ -13,6 +13,11 @@ import { getLines, type DepartmentId } from "@/lib/config/tenant";
 
 const CACHE_TTL = 2 * 60 * 1000;
 
+// Synthetic key for calls whose managerId / userId is NULL — keeps per-manager
+// sums equal to per-period sums (every counted call lives in exactly one
+// bucket). Surfaced in the breakdown as "Без менеджера".
+const NO_MANAGER_KEY = "__no_manager__";
+
 const EXCLUDED_BLOCKS = new Set([
   "Рекомендации",
   "Фильтры",
@@ -267,7 +272,9 @@ async function fetchOkkData(
   const accMap = new Map<string, PeriodAcc>();
   for (const p of periods) accMap.set(p, newAcc());
 
-  // Per-manager accumulators (aggregate across all periods)
+  // Per-manager accumulators (aggregate across all periods). Calls without
+  // a managerId go into a synthetic bucket so per-period and per-manager
+  // sums stay consistent — every counted call lives in exactly one bucket.
   const managerAccMap = new Map<string, PeriodAcc>();
 
   let processedCount = 0;
@@ -284,14 +291,43 @@ async function fetchOkkData(
     const had = processBlocks(blocks, acc, row.totalScore);
     if (had) processedCount++;
 
-    // Per-manager accumulation
-    if (row.managerId) {
-      if (!managerAccMap.has(row.managerId)) managerAccMap.set(row.managerId, newAcc());
-      processBlocks(blocks, managerAccMap.get(row.managerId)!, row.totalScore);
-    }
+    const mgrKey = row.managerId ?? NO_MANAGER_KEY;
+    if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
+    processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount);
+  // Pull names for every managerId that produced data — including inactive
+  // (fired) managers and admins — so the breakdown table matches the
+  // per-period totals. Active managers come from `managers` (drives the
+  // dropdown); inactive/admin/etc. are loaded as `extras` here.
+  const knownIds = new Set(managers.map((m) => m.id));
+  const missingIds = [...managerAccMap.keys()].filter(
+    (id) => id !== NO_MANAGER_KEY && !knownIds.has(id),
+  );
+  let extras: Array<{ id: string; name: string; isActive: boolean | null; role: string | null }> = [];
+  if (missingIds.length > 0) {
+    extras = await db
+      .select({
+        id: okkManagers.id,
+        name: okkManagers.name,
+        isActive: okkManagers.isActive,
+        role: okkManagers.role,
+      })
+      .from(okkManagers)
+      .where(inArray(okkManagers.id, missingIds));
+  }
+  const allManagersForBreakdown: Array<{ id: string; name: string }> = [
+    ...managers,
+    ...extras.map((e) => ({
+      id: e.id,
+      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
+    })),
+  ];
+  if (managerAccMap.has(NO_MANAGER_KEY)) {
+    allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
+  }
+
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown);
 }
 
 // ─── Roleplay data fetcher ──────────────────────────────────
@@ -379,13 +415,40 @@ async function fetchRoleplayData(
     const had = processBlocks(blocks, acc, row.score ?? null);
     if (had) processedCount++;
 
-    if (row.userId) {
-      if (!managerAccMap.has(row.userId)) managerAccMap.set(row.userId, newAcc());
-      processBlocks(blocks, managerAccMap.get(row.userId)!, row.score ?? null);
-    }
+    const mgrKey = row.userId ?? NO_MANAGER_KEY;
+    if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
+    processBlocks(blocks, managerAccMap.get(mgrKey)!, row.score ?? null);
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount);
+  // See fetchOkkData — pull names for inactive/admin users that produced
+  // data so per-manager sums match per-period sums.
+  const knownIds = new Set(managers.map((m) => m.id));
+  const missingIds = [...managerAccMap.keys()].filter(
+    (id) => id !== NO_MANAGER_KEY && !knownIds.has(id),
+  );
+  let extras: Array<{ id: string; name: string; isActive: boolean | null }> = [];
+  if (missingIds.length > 0) {
+    extras = await db
+      .select({
+        id: usersTable.id,
+        name: usersTable.name,
+        isActive: usersTable.isActive,
+      })
+      .from(usersTable)
+      .where(inArray(usersTable.id, missingIds));
+  }
+  const allManagersForBreakdown: Array<{ id: string; name: string }> = [
+    ...managers,
+    ...extras.map((e) => ({
+      id: e.id,
+      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
+    })),
+  ];
+  if (managerAccMap.has(NO_MANAGER_KEY)) {
+    allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
+  }
+
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown);
 }
 
 // ─── Build response from accumulators ───────────────────────
@@ -398,7 +461,11 @@ function buildResponse(
   source: string,
   department: string,
   totalCalls: number,
+  managersForBreakdown?: Array<{ id: string; name: string }>,
 ): AnalyticsResponse {
+  // The dropdown stays scoped to active managers (`managers`); the breakdown
+  // uses the full set including inactive/admin/"no-manager" so totals match.
+  const breakdownSource = managersForBreakdown ?? managers;
   const blockOrder: string[] = [];
   const blockCriteriaOrder = new Map<string, string[]>();
 
@@ -457,8 +524,10 @@ function buildResponse(
     }
   }
 
-  // Per-manager breakdown (aggregate across all periods)
-  const managerBreakdown: ManagerBreakdown[] = managers
+  // Per-manager breakdown (aggregate across all periods). Uses the full
+  // breakdown source (active + inactive-with-data + "Без менеджера") so the
+  // sum of per-manager call counts equals `totalCalls`.
+  const managerBreakdown: ManagerBreakdown[] = breakdownSource
     .map((mgr) => {
       const acc = managerAccMap.get(mgr.id);
       if (!acc || acc.callCount === 0) return null;
