@@ -147,8 +147,14 @@ export default function Dashboard() {
   const [pageMounted, setPageMounted] = useState(false);
   useEffect(() => { setPageMounted(true); }, []);
   const [scoreFilter, setScoreFilter] = useState(0);
+  // `dateRange` is the user's in-progress selection inside the inline filter
+  // calendar (before they hit "Применить"). The single source of truth for the
+  // *applied* filter is `aiCustomRange` — driven by the period pills, the top
+  // CalendarPicker, and the inline calendar all setting it. We used to also
+  // keep a parallel `activeDateFilter` for the table filter, but the pills /
+  // top picker never reset it, so a stale inline-picked range silently zeroed
+  // out "День" on next click.
   const [dateRange, setDateRange] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
-  const [activeDateFilter, setActiveDateFilter] = useState<{ start: Date | null; end: Date | null }>({ start: null, end: null });
   // Berlin-civil 1st-of-month for the rendered calendar grid. Using
   // `new Date()` here gave browser-local "today", which then read as the wrong
   // civil month for Moscow users in the first ~2 h of a Berlin civil day.
@@ -494,14 +500,14 @@ export default function Dashboard() {
       return false;
     }
 
-    // Filter by date range — Berlin civil days. Picker hands us Berlin-
-    // midnight Dates; normalising via startOfBerlinDay/endOfBerlinDay keeps
-    // this filter independent of any caller that might still pass a raw
-    // browser-local Date.
-    if (activeDateFilter.start && activeDateFilter.end) {
+    // Filter by date range — Berlin civil days. The API has already filtered
+    // by `aiCustomRange` server-side; this client-side guard mainly handles
+    // the case where API caching returns a slightly wider window, and keeps
+    // the table aligned with whatever the bento is showing.
+    if (aiCustomRange.start && aiCustomRange.end) {
       const callDate = call.startedAtIso ? new Date(call.startedAtIso) : parseCallDate(call.date);
-      const startOfDay = startOfBerlinDay(activeDateFilter.start);
-      const endOfDay = endOfBerlinDay(activeDateFilter.end);
+      const startOfDay = startOfBerlinDay(aiCustomRange.start);
+      const endOfDay = endOfBerlinDay(aiCustomRange.end);
 
       if (!(callDate >= startOfDay && callDate <= endOfDay)) {
         return false;
@@ -827,7 +833,13 @@ export default function Dashboard() {
                   ] as const).map((p) => (
                     <button
                       key={p.id}
-                      onClick={() => { setAiDashPeriod(p.id); setAiCustomRange({ start: null, end: null }); }}
+                      onClick={() => {
+                        setAiDashPeriod(p.id);
+                        setAiCustomRange({ start: null, end: null });
+                        // Also drop the inline-picker draft so the dropdown
+                        // reopens clean instead of showing a stale selection.
+                        setDateRange({ start: null, end: null });
+                      }}
                       className={`px-4 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
                         aiDashPeriod === p.id && !aiCustomRange.start
                           ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
@@ -842,8 +854,16 @@ export default function Dashboard() {
                   mode="range"
                   allowModeToggle
                   value={aiCustomRange}
-                  onChange={(range) => setAiCustomRange(range)}
-                  onClear={() => setAiCustomRange({ start: null, end: null })}
+                  onChange={(range) => {
+                    setAiCustomRange(range);
+                    // Mirror the applied range into the inline-picker draft so
+                    // the two pickers don't disagree visually.
+                    setDateRange(range);
+                  }}
+                  onClear={() => {
+                    setAiCustomRange({ start: null, end: null });
+                    setDateRange({ start: null, end: null });
+                  }}
                 />
                 {/* Line filter pills — sourced from tenant config so adding a
                     line in src/lib/config/tenant.ts shows up here automatically. */}
@@ -1116,7 +1136,7 @@ export default function Dashboard() {
                     >
                       <Filter className="w-3.5 h-3.5 text-blue-400" />
                       <span className="text-xs">Фильтры</span>
-                      {activeDateFilter.start && activeDateFilter.end && (
+                      {aiCustomRange.start && aiCustomRange.end && (
                         <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
                       )}
                     </button>
@@ -1223,7 +1243,6 @@ export default function Dashboard() {
                                       if (dateFilterMode === "single") {
                                         const next = { start: date, end: date };
                                         setDateRange(next);
-                                        setActiveDateFilter(next);
                                         setAiCustomRange(next);
                                         setIsFilterOpen(false);
                                         return;
@@ -1237,7 +1256,6 @@ export default function Dashboard() {
                                         ? { start: dateRange.start, end: date }
                                         : { start: date, end: dateRange.start };
                                       setDateRange(next);
-                                      setActiveDateFilter(next);
                                       setAiCustomRange(next);
                                       setIsFilterOpen(false);
                                     }}
@@ -1263,8 +1281,6 @@ export default function Dashboard() {
                             <button
                               onClick={() => {
                                 const range = { start: dateRange.start, end: dateRange.end || dateRange.start };
-                                setActiveDateFilter(range);
-                                // Also update the API date range so data is loaded from server
                                 setAiCustomRange(range);
                                 setIsFilterOpen(false);
                               }}
@@ -1272,7 +1288,7 @@ export default function Dashboard() {
                               className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-xs font-semibold py-2 rounded-lg transition-colors"
                             >{dateRange.start && !dateRange.end ? "Выбрать день" : "Применить"}</button>
                             <button
-                              onClick={() => { setDateRange({ start: null, end: null }); setActiveDateFilter({ start: null, end: null }); setAiCustomRange({ start: null, end: null }); }}
+                              onClick={() => { setDateRange({ start: null, end: null }); setAiCustomRange({ start: null, end: null }); }}
                               className="px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold py-2 rounded-lg transition-colors"
                             >Сбросить</button>
                           </div>
