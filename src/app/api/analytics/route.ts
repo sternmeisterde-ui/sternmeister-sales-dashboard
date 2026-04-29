@@ -234,16 +234,16 @@ async function fetchOkkData(
     conditions.push(eq(okkEvaluations.managerId, managerId));
   }
 
-  // Filter managers by line for B2G (berater2 "2b" → same line "2"). Skip
-  // for "all" so the dropdown still lists everyone.
+  // Manager dropdown lists every currently-active manager/ROP in the
+  // department. We deliberately do NOT scope it to the selected line so a
+  // user switching from "Линия 1" to "Бератер 1" doesn't lose access to the
+  // full roster. Per-line scoping happens on the call rows themselves via
+  // `prompt_type`. New hires/fires flow in automatically through the
+  // `master_managers` sync (is_active toggle).
   const managerConditions = [
     eq(okkManagers.isActive, true),
     sql`${okkManagers.role} IN ('manager', 'rop')`,
   ];
-  if (department === "b2g" && line && line !== "all") {
-    const dbLine = line === "2b" ? "2" : line;
-    managerConditions.push(eq(okkManagers.line, dbLine));
-  }
 
   const [rows, managers] = await Promise.all([
     db
@@ -336,16 +336,11 @@ async function fetchRoleplayData(
     conditions.push(eq(callsTable.userId, managerId));
   }
 
-  // Filter managers by line for B2G. Skip for "all" so the dropdown lists
-  // everyone in the department.
+  // Manager dropdown — full active roster (see OKK comment). Same rationale.
   const managerConditions = [
     eq(usersTable.isActive, true),
     sql`${usersTable.role} IN ('manager', 'rop')`,
   ];
-  if (department === "b2g" && line && line !== "all") {
-    const dbLine = line === "2b" ? "2" : line;
-    managerConditions.push(eq(usersTable.line, dbLine));
-  }
 
   const [rows, managers] = await Promise.all([
     db
