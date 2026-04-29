@@ -577,47 +577,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         .map((s) => `fl.${s}`);
       const groupByClause = groupCols.length > 0 ? `GROUP BY ${groupCols.join(", ")}` : "";
 
-      // TLT (Time between Latest Touches) — BH-time between the two most
-      // recent call_out events made by the lead's responsible manager.
-      // Per-pipeline blacklist (NOT same as SLA whitelist):
-      //   Бух Гос     → drop {База, Отложенный старт, Термин ДЦ,
-      //                       Закрыто и не реализовано}
-      //   Бух Бератер → drop {Апелляция, Отложенный старт, Гутшайн одобрен,
-      //                       Закрыто и не реализовано}
-      // Other pipelines: include all (no spec-defined exclusions).
-      const tltBlacklistFragment = (() => {
-        const branches: string[] = [];
-        const pipelinesInScope = pipelineParam && (isB2B || isB2G)
-          ? [pipelineParam]
-          : isB2B
-            ? ["Бух Комм", "Мед Комм"]
-            : ["Бух Гос", "Бух Бератер"];
-        for (const p of pipelinesInScope) {
-          let bl: string[] | null = null;
-          if (p === "Бух Гос") bl = TLT_BUH_GOS_BLACKLIST;
-          else if (p === "Бух Бератер") bl = TLT_BUH_BERATER_BLACKLIST;
-          if (bl === null) {
-            branches.push(`(fl.pipeline = '${esc(p)}')`);
-          } else {
-            const list = bl.map((s) => `'${esc(s)}'`).join(", ");
-            branches.push(`(fl.pipeline = '${esc(p)}' AND fl.status NOT IN (${list}))`);
-          }
-        }
-        return branches.length > 0 ? `AND (${branches.join(" OR ")})` : "";
-      })();
-
+      // TLT (matches integrator's `report_sternmeister_custom_report`/'TLT')
+      // = business_hours_since_last_contact (BH-staleness from last touch).
+      // Verified by direct probe: integrator's TLT == bh_since_last_contact
+      // - constant_offset (3640s, just the time between their cron ticks).
+      //
+      // Status whitelist = same per-pipeline set as SLA первого звонка
+      // (verified empirically, identical lead sets in custom_report).
+      // The user's earlier «два крайних звонка» spec is a DIFFERENT metric
+      // tracked in s.tlt_seconds (kept in DB for future use) — not what
+      // the integrator computes for the «TLT» dashboard column.
       mainQuery = `
         WITH ${tltFilteredLeadsCte},
         ${commAggCte},
-        ${callGapsCte}
+        ${callGapsCte}${slaEligibilityCte}
         SELECT
           ${projectSlice(slice1, 1)},
           ${projectSlice(slice2, 2)},
           ${projectSlice(slice3, 3)},
           COUNT(fl.lead_id) AS lead_count,
           ROUND(AVG(
-            CASE WHEN s.tlt_seconds IS NOT NULL ${tltBlacklistFragment}
-                 THEN s.tlt_seconds
+            CASE WHEN s.last_contact_at IS NOT NULL ${slaEligibilityCondition}
+                 THEN s.business_hours_since_last_contact
             END
           )) AS avg_tlt,
           ROUND(AVG(cg.avg_gap_sec)) AS avg_gap_sec,
@@ -628,6 +609,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN call_gaps cg ON cg.lead_id = fl.lead_id
+        ${slaEligibilityJoin}
         ${groupByClause}
         ORDER BY lead_count DESC
       `;
@@ -723,7 +705,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           fl.manager,
           fl.status AS current_status,
           fl.lead_id,
-          s.tlt_seconds AS tlt,
+          s.business_hours_since_last_contact AS tlt,
           COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
           COALESCE(ca.messages_sent, 0) AS messages_sent,
           COALESCE(ca.outgoing_calls, 0) + COALESCE(ca.messages_sent, 0) AS total_comms,
