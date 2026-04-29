@@ -14,6 +14,7 @@ import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
 import { kommoFetchPath } from "@/lib/kommo/client";
+import { parseDateBoundary } from "@/lib/utils/date";
 import {
   FAILURE_PER_CALL_PROMPT, SUCCESS_PER_CALL_PROMPT,
   FAILURE_SUMMARY_PROMPT, SUCCESS_SUMMARY_PROMPT,
@@ -24,6 +25,17 @@ import {
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const DEFAULT_MIN_DURATION = 300; // 5 min
+
+// Per-request fetch timeouts. AbortSignal.timeout is Node 20+ / Next.js 16
+// runtime native; no manual setTimeout/clearTimeout dance needed. Without
+// these, a stalled TCP connection (rare but real on long runs) holds a
+// concurrency slot indefinitely — at 50 calls a single zombie worker doesn't
+// crash the run but quietly drops throughput by 33%.
+const ASSEMBLYAI_SUBMIT_TIMEOUT_MS = 60_000;   // POST that triggers AssemblyAI's own slow CDN fetch (1h MP3 from CloudTalk S3 can take 30-60s before they respond)
+const ASSEMBLYAI_POLL_TIMEOUT_MS = 15_000;     // single status read between 10s sleeps
+const ASSEMBLYAI_JOB_MAX_MS = 15 * 60 * 1000;  // hard wall-clock per transcription job (AssemblyAI sometimes gets stuck in 'processing' on their side; reclaim the slot)
+const GROK_TIMEOUT_MS = 120_000;               // single-attempt timeout: 25k-char prompts on grok-beta regularly hit 45-90s
+const GROK_TOTAL_TIMEOUT_MS = 180_000;         // overall callGrok budget across retries — bounds worker-freeze cascade if xAI partially outages
 // Hard ceiling to avoid runaway cost — raised from 100 because filters with
 // 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
 // the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
@@ -237,17 +249,16 @@ function passesCfFilter(
 }
 
 function parseRuDate(s: string, endOfDay: boolean): number | null {
-  // Accepts DD.MM.YYYY (Kommo frontend default). Returns Unix seconds at UTC.
-  // Account-level TZ drift (Kommo accounts are typically Europe/Berlin or
-  // Europe/Moscow) shifts the boundary by a few hours, but for "find calls
-  // in this date range" purposes that's fine — far better than fetching all
-  // leads in the account because the filter was untranslated.
+  // Accepts DD.MM.YYYY (Kommo frontend default) and treats the wall-clock as
+  // Europe/Berlin (per APP_TZ rule — business operates in Berlin time and
+  // matching the Kommo UI's date picker semantics keeps the analysis result
+  // set identical to what the user sees in the Kommo filter). Returns Unix
+  // seconds. parseDateBoundary handles DST automatically.
   const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
   if (!m) return null;
   const [, dd, mm, yyyy] = m;
-  const time = endOfDay ? "23:59:59Z" : "00:00:00Z";
-  const ts = Date.parse(`${yyyy}-${mm}-${dd}T${time}`);
-  return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+  const boundary = parseDateBoundary(`${yyyy}-${mm}-${dd}`, endOfDay ? "end" : "start");
+  return boundary ? Math.floor(boundary.getTime() / 1000) : null;
 }
 
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
@@ -310,16 +321,48 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
       method: "POST",
       headers: { Authorization: ASSEMBLYAI_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ audio_url: url, language_code: "ru", speaker_labels: true }),
+      signal: AbortSignal.timeout(ASSEMBLYAI_SUBMIT_TIMEOUT_MS),
     });
     const { id, error } = await submitRes.json() as { id?: string; error?: string };
     if (error || !id) return null;
 
+    // Wall-clock fence — 120 × 10s = 20 min loop budget already, but a job
+    // stuck on AssemblyAI's side can sit in `processing` indefinitely. Bail
+    // at 15 min (the typical p99 for 1-hour audio is ~5 min) so a single
+    // stuck job doesn't sit on a concurrency slot for the whole pipeline.
+    const jobStartedAt = Date.now();
+
     for (let i = 0; i < 120; i++) {
       await sleep(10000);
+      if (Date.now() - jobStartedAt > ASSEMBLYAI_JOB_MAX_MS) {
+        console.warn(`[tryTranscribe] AssemblyAI job ${id} exceeded ${ASSEMBLYAI_JOB_MAX_MS / 60000}min — abandoning slot`);
+        return null;
+      }
+      // Per-poll timeout shorter than the 10s sleep cadence so a hanging
+      // socket doesn't burn the whole 20-min poll budget on one bad request.
       const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
         headers: { Authorization: ASSEMBLYAI_KEY },
+        signal: AbortSignal.timeout(ASSEMBLYAI_POLL_TIMEOUT_MS),
+      }).catch((e: unknown) => {
+        // A timed-out poll isn't fatal — AssemblyAI's job continues on their
+        // side, we just retry on the next iteration. Returning null lets the
+        // loop continue so we don't lose all progress to one slow poll.
+        const isTimeout = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+        if (!isTimeout) throw e;
+        return null;
       });
-      const r = await pollRes.json() as { status: string; text?: string; utterances?: Array<{ speaker: string; text: string }>; error?: string };
+      if (!pollRes) continue;
+      // Same body-read-abort risk as Grok (AbortSignal stays armed after
+      // fetch resolves). For AssemblyAI it's far less likely (status payload
+      // is <500B), but skip the iteration on abort instead of letting it
+      // bubble out to the outer `catch { return null }` and discard the
+      // whole transcript.
+      let r: { status: string; text?: string; utterances?: Array<{ speaker: string; text: string }>; error?: string };
+      try {
+        r = await pollRes.json();
+      } catch {
+        continue;
+      }
       if (r.status === "completed") {
         const speakers = r.utterances?.map(u => `**Speaker ${u.speaker}:** ${u.text}`).join("\n\n") || r.text || "";
         return { text: r.text || "", speakers };
@@ -341,11 +384,19 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
 const QUOTA_EXHAUSTED_RE = /spending limit|out of credit|insufficient[_ ]?(?:credit|funds|quota)|exhausted/i;
 
 async function callGrok(systemPrompt: string, userContent: string, model: string, maxTokens: number): Promise<string> {
-  // Retry on transient 429 / 5xx with exponential backoff. xAI returns
-  // Retry-After on real rate limits; respect it. Quota-exhaustion (no
-  // Retry-After + body matches QUOTA_EXHAUSTED_RE) bails immediately so
-  // partially-done runs save their state via the caller's try/catch and the
-  // user can resume after topping up the account.
+  // Two-level timeout strategy:
+  //   • Per-fetch (GROK_TIMEOUT_MS = 120s): bounds a single attempt against
+  //     a stuck connection.
+  //   • Total (GROK_TOTAL_TIMEOUT_MS = 180s): bounds the whole retry chain.
+  //     Without this, 4 consecutive timeouts would block a worker for ~487s
+  //     (4 × 120s + backoff), and 3 such cascading workers could freeze the
+  //     pipeline for ~8 min during a partial xAI outage.
+  //
+  // 429 / 5xx with exponential backoff. xAI returns Retry-After on real
+  // rate limits; respect it. Quota-exhaustion (no Retry-After + body matches
+  // QUOTA_EXHAUSTED_RE) bails immediately so partially-done runs save their
+  // state via the caller's try/catch and the user can resume after topping
+  // up the account.
   const body = JSON.stringify({
     model,
     max_tokens: maxTokens,
@@ -356,16 +407,60 @@ async function callGrok(systemPrompt: string, userContent: string, model: string
     ],
   });
 
+  const overallDeadline = Date.now() + GROK_TOTAL_TIMEOUT_MS;
   let waitMs = 1000;
   for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await fetch("https://api.x.ai/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${XAI_API_KEY}`, "Content-Type": "application/json" },
-      body,
-    });
+    if (Date.now() >= overallDeadline) {
+      throw new Error(`Grok API: total budget ${GROK_TOTAL_TIMEOUT_MS}ms exceeded after ${attempt} attempt(s)`);
+    }
+    // Squeeze the per-attempt timeout into whatever's left of the overall
+    // budget so the last attempt can't blow past the cap.
+    const perAttemptMs = Math.min(GROK_TIMEOUT_MS, overallDeadline - Date.now());
+
+    let res: Response;
+    try {
+      res = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${XAI_API_KEY}`, "Content-Type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(perAttemptMs),
+      });
+    } catch (err: unknown) {
+      // Treat timeout / abort like a transient network error: retry within
+      // the same retry budget instead of aborting the whole run on one
+      // stuck connection. Other unexpected errors (TLS, DNS) get the same
+      // treatment for the same reason.
+      const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (attempt === 3 || Date.now() >= overallDeadline) {
+        throw new Error(`Grok API ${isTimeout ? `timeout after ${perAttemptMs}ms` : "network error"}: ${errMsg.slice(0, 200)}`);
+      }
+      console.warn(`[callGrok] ${isTimeout ? "timeout" : "network error"} (attempt ${attempt + 1}/4): ${errMsg.slice(0, 100)}`);
+      await sleep(waitMs);
+      waitMs *= 2;
+      continue;
+    }
     if (res.ok) {
-      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-      return data.choices?.[0]?.message?.content || "";
+      // res.json() is awaited here, but AbortSignal.timeout keeps observing
+      // the signal even after fetch() resolves — if the timer fires while
+      // body chunks are still draining (Grok generates near the 120s
+      // deadline, body arrives a few hundred ms later), undici aborts the
+      // body read and throws AbortError. That throw must be caught here so
+      // it's classified as transient and retried, not bubbled up to the
+      // outer pipeline catch which would fail the whole run.
+      try {
+        const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+        return data.choices?.[0]?.message?.content || "";
+      } catch (err: unknown) {
+        const isAbort = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+        if (attempt === 3 || Date.now() >= overallDeadline) {
+          throw new Error(`Grok body read ${isAbort ? "aborted" : "failed"}: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`);
+        }
+        console.warn(`[callGrok] body read ${isAbort ? "aborted" : "failed"} (attempt ${attempt + 1}/4) — retrying`);
+        await sleep(waitMs);
+        waitMs *= 2;
+        continue;
+      }
     }
     const errText = await res.text().catch(() => "");
     const retryAfter = Number(res.headers.get("retry-after") ?? "0");

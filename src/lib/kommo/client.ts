@@ -16,9 +16,27 @@ import { cached, CACHE_TTL } from "./cache";
 // even when multiple parallel chains call rateLimitedFetch concurrently.
 
 const RATE_LIMIT_MS = 145; // ~6.9 req/sec (Kommo limit is 7 req/sec)
+// Per-request timeout for Kommo. Most calls complete in <2s; setting 30s
+// guards against socket stalls without rejecting the legitimate slow tail
+// (lead-list pages with `with=` joins occasionally take 10-15s on large
+// accounts). A stalled connection here would otherwise block the global
+// mutex queue indefinitely on long ETL runs.
+const KOMMO_REQUEST_TIMEOUT_MS = 30_000;
 
 let lastRequestTime = 0;
 let rateLimitMutex: Promise<void> = Promise.resolve();
+
+function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+  // Compose the caller's signal (if any) with our default 30s timeout via
+  // AbortSignal.any — both can fire and abort the request. Earlier version
+  // skipped the timeout when caller passed a signal, which would silently
+  // remove the stall guard for any future request-scoped AbortController.
+  const timeoutSignal = AbortSignal.timeout(KOMMO_REQUEST_TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal;
+  return fetch(url, { ...options, signal });
+}
 
 async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
   // Acquire mutex
@@ -40,14 +58,16 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
     releaseMutex(); // Guaranteed release — never blocks the chain
   }
 
-  // Fetch with 1 retry on socket/network errors
+  // Fetch with 1 retry on socket/network errors (timeouts included via
+  // AbortSignal.timeout — they surface as a TimeoutError/AbortError DOMException
+  // that the catch block treats the same as any other transient network issue).
   let res: Response;
   try {
-    res = await fetch(url, options);
+    res = await fetchWithTimeout(url, options);
   } catch (err) {
     // Retry once on network errors (socket closed, timeout, etc.)
     await new Promise<void>((r) => setTimeout(r, 500));
-    res = await fetch(url, options);
+    res = await fetchWithTimeout(url, options);
   }
 
   // 429 Too Many Requests — wait and retry through the mutex so the retry
