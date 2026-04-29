@@ -47,6 +47,11 @@ services:
       # Legacy var name still read by src/lib/analysis/pipeline.ts at some
       # sites; retained for compatibility with existing Dokploy configs.
       - KOMMO_API_DOMAIN=${KOMMO_API_DOMAIN}
+      # Token-source override. Set to "db" in Dokploy when KOMMO_ACCESS_TOKEN
+      # is stale/revoked but you can't unset it — forces ensureKommoConfig
+      # to skip env and load the freshly-rotated OAuth token from the
+      # kommo_tokens DB table. See src/lib/kommo/client.ts:resolveKommoApiHost.
+      - KOMMO_TOKEN_SOURCE=${KOMMO_TOKEN_SOURCE}
 
       # Telephony — direct CDR pull (CallGear + CloudTalk). Without these,
       # sync-telephony silently skips, dashboard call counts go stale within
