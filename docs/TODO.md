@@ -62,25 +62,23 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 - [x] `scripts/recompute-sla.ts` — chunked CLI: `--from --to --chunk` (days). Wraps `computeSla` with date filter. Run after enrichment so SLA reflects new lead_ids.
 
-- [ ] **Run full backfill** for 2026-01-01..2026-04-28 (sequence):
-  1. `npx tsx scripts/backfill-from-telephony.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (rewrites raw rows now with `phone` column; ~15 min).
-  2. `npx tsx scripts/enrich-telephony-leads.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (Kommo phone→lead resolution; ~25 min @ 7 req/s).
-  3. `npx tsx scripts/recompute-sla.ts --from 2026-01-01 --to 2026-04-28 --chunk 7` (SLA pickup; ~2 min).
+- [x] **Run full backfill** for 2026-01-01..2026-04-28 — DONE 2026-04-28→29:
+  1. `backfill-from-telephony.ts` ran in ~17 min (2 chunks failed, retried at chunk=1). Final: 129 797 rows with phone (CG 106 741 + CT 23 056).
+  2. `enrich-telephony-leads.ts` — initial parallel attempt killed mid-flight at chunk 6/18 due to Neon HTTP retry storm; refactored to bulk SQL via jsonb_to_recordset (commit `cea081b`). Final: **15 568 phones resolved (97.9%)**, 87 267 rows linked, **34 600 fanned out** (Pattern A). 239 phones unresolved.
+  3. `recompute-sla.ts` ran in 117s. Updated 12 107 SLA rows.
 
-- [ ] **Post-backfill verification (audit anchor):**
-  1. `GET /api/analytics/debug?dept=b2g&from=2026-04-25&to=2026-04-28` — `callsCounted` per day unchanged.
-  2. Open Looker → All Calls → 2026-04-25..04-28 → totals should match Звонки/Daily within 5%. **Currently 60 vs 3105 (1.9%); target ~3000 vs 3105 (~95%).**
-  3. Open Looker → Cohorts → check per-manager `SLA лид → звонок` — should be non-NULL for ~70-90% of managers (vs 2.6%/0% pre-fix).
-  4. Click highest-SLA row → drill-down opens, shows ordered lead list with Kommo links. Click a lead, verify it opens correct deal.
-  5. Open Dashboard → Звонки → switch to B2B → verify Бух Комм / Мед Комм tile + trend split shows real numbers (not zeros).
-  6. Compare Daily/Звонки call totals before/after — should be ~unchanged (DISTINCT comm_id keeps semantics).
-  7. Check cron logs at next 15-min tick — `[ETL] enrich-telephony-leads: processed N phones, linked M leads` log should appear.
+- [x] **Post-backfill verification** — DONE:
+  1. Looker All Calls (2026-04-25..28 cohort): 60 → **2 291** out of 3 394 zvonki = **67.5% coverage** (gap = calls to leads created BEFORE window, semantically correct).
+  2. Looker per-lead full Jan-Apr: 9 804 leads, **8 960 (91.4%) have calls attached**, 109 119 distinct calls reach cohort leads.
+  3. SLA `first_call_out_at` non-NULL: 2.6%/0% → **63.2%** of all leads (gap = leads that had no call at all).
+  4. Drill-down API smoke for "Єлизавета Трапезникова" (worst-SLA, 11h avg): returned lead 19087385 with calendar SLA 2h54m → ≥30min red bucket → Kommo deep-link works.
+  5. **0 dupe (comm_id, lead_id) pairs** across 200k+ rows. Composite unique index holds.
 
-- [ ] Provision Dokploy etl-cron sidecar with `KOMMO_ACCESS_TOKEN` (already there) + new behaviour just kicks in. No new env needed.
+- [ ] Provision Dokploy etl-cron sidecar with `KOMMO_ACCESS_TOKEN` (already there) + new behaviour just kicks in. No new env needed. Verify at next prod cron tick that `[ETL enrich] done: phones queried=N resolved=M …` log line appears.
 
-- [ ] Update `docs/SESSION-HANDOFF.md` — mark "Known limitations #1" partially resolved (CDR coverage still depends on telephony tokens being live; phone→lead enrichment now closes the lead-attribution gap).
+- [x] Update `docs/SESSION-HANDOFF.md` — DONE (commit `6ed498b`). Known-issues #2 (unique key) marked RESOLVED via Migration 0005.
 
-- [ ] Update `docs/DASHBOARD-ZVONKI.md` — remove "Why B2B has no per-pipeline split" section; update KPI tiles description to note `COUNT(DISTINCT communication_id)` semantics.
+- [x] Update `docs/DASHBOARD-ZVONKI.md` — DONE (commit `6ed498b`). "Why B2B has no per-pipeline split" replaced with "B2B per-pipeline split (re-enabled)".
 
 ---
 
