@@ -231,6 +231,15 @@ export const sla = analyticsSchema.table(
     // TLT views with their own per-pipeline blacklist (different from
     // SLA первого звонка's whitelist). See 0008_tlt_seconds.sql.
     tltSeconds: bigint("tlt_seconds", { mode: "number" }),
+    // Integrator-snapshot columns — one-time mirror of values from
+    // 45.156.25.84/db before we cut off the integrator feed. compute-sla
+    // does NOT touch these; they're frozen at the snapshot. Looker
+    // COALESCE's them into queries so historical leads match integrator's
+    // Looker dashboard exactly. NULL = no integrator data → fallback to
+    // our compute. See 0009_integrator_snapshot.sql.
+    slaFirstCallSecondsIntegrator: bigint("sla_first_call_seconds_integrator", { mode: "number" }),
+    slaFirstCallCalendarSecondsIntegrator: bigint("sla_first_call_calendar_seconds_integrator", { mode: "number" }),
+    tltIntegrator: bigint("tlt_integrator", { mode: "number" }),
     slaStatus: text("sla_status"),
   },
   (t) => [

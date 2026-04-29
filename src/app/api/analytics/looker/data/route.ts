@@ -488,34 +488,39 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COALESCE(SUM(ca.total_calls), 0) AS total_all_calls,
           COALESCE(SUM(ca.total_duration_sec), 0) AS total_duration_sec,
           ROUND(COALESCE(SUM(ca.total_calls), 0)::numeric / NULLIF(COUNT(fl.lead_id), 0), 2) AS avg_calls_per_lead,
+          -- Calendar SLA: prefer integrator's frozen snapshot when present
+          -- (matches their Looker dashboard exactly for historical leads),
+          -- fall back to our live calc otherwise.
           ROUND(AVG(
             CASE WHEN s.first_call_out_at IS NOT NULL AND s.first_call_out_at > s.sla_start
                   ${slaEligibilityCondition}
-                 THEN EXTRACT(EPOCH FROM (s.first_call_out_at - s.sla_start))
+                 THEN COALESCE(
+                   s.sla_first_call_calendar_seconds_integrator,
+                   EXTRACT(EPOCH FROM (s.first_call_out_at - s.sla_start))
+                 )
             END
           )) AS avg_sla_lead_to_call_sec,
+          -- Working-hours SLA: COALESCE on integrator's exact value when
+          -- present (matches Looker per-second), fall back to our computed
+          -- shift-anchored formula. Same formula as integrator:
+          --   bh = MAX(0, MIN(call, shift_end) - MAX(sla_start, shift_start))
+          -- shift = 10:00–18:00 anchored to the CALL day.
           ROUND(AVG(
             CASE WHEN s.first_call_out_at IS NOT NULL
                   ${slaEligibilityCondition}
-                 THEN GREATEST(0, EXTRACT(EPOCH FROM (
-                   -- Integrator's «SLA первого звонка» (рабочие часы):
-                   --   bh = MAX(0, MIN(call, shift_end) - MAX(sla_start, shift_start))
-                   -- where shift_start / shift_end are anchored to the CALL
-                   -- day. Verified against sternmeister_sla.sla_first_call_seconds
-                   -- by direct probe — values match to the second.
-                   -- Cross-day handling: when sla_start ≥ shift_end (lead
-                   -- arrived after work hours) the LEAST/GREATEST collapse to
-                   -- a negative diff → GREATEST(0, …) zeros it out, which
-                   -- mirrors the integrator's behaviour for end-of-day leads.
-                   LEAST(
-                     s.first_call_out_at,
-                     date_trunc('day', s.first_call_out_at) + ${shiftEndHour} * INTERVAL '1 hour'
-                   )
-                   - GREATEST(
-                       s.sla_start,
-                       date_trunc('day', s.first_call_out_at) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
+                 THEN COALESCE(
+                   s.sla_first_call_seconds_integrator,
+                   GREATEST(0, EXTRACT(EPOCH FROM (
+                     LEAST(
+                       s.first_call_out_at,
+                       date_trunc('day', s.first_call_out_at) + ${shiftEndHour} * INTERVAL '1 hour'
                      )
-                 )))
+                     - GREATEST(
+                         s.sla_start,
+                         date_trunc('day', s.first_call_out_at) + (${effectiveShiftHourExpr}) * INTERVAL '1 hour'
+                       )
+                   )))
+                 )
             END
           )) AS avg_sla_from_shift_sec,
           COUNT(*) FILTER (
@@ -598,7 +603,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COUNT(fl.lead_id) AS lead_count,
           ROUND(AVG(
             CASE WHEN s.last_contact_at IS NOT NULL ${slaEligibilityCondition}
-                 THEN s.business_hours_since_last_contact
+                 THEN COALESCE(s.tlt_integrator, s.business_hours_since_last_contact)
             END
           )) AS avg_tlt,
           ROUND(AVG(cg.avg_gap_sec)) AS avg_gap_sec,
@@ -672,8 +677,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           (SELECT lc.status FROM analytics.leads_cohort lc WHERE lc.lead_id = fl.lead_id LIMIT 1) AS current_status,
           (SELECT lc.pipeline FROM analytics.leads_cohort lc WHERE lc.lead_id = fl.lead_id LIMIT 1) AS pipeline,
           s.first_call_out_at,
-          s.sla_first_call_seconds,
-          s.sla_first_call_calendar_seconds,
+          COALESCE(s.sla_first_call_seconds_integrator, s.sla_first_call_seconds) AS sla_first_call_seconds,
+          COALESCE(s.sla_first_call_calendar_seconds_integrator, s.sla_first_call_calendar_seconds) AS sla_first_call_calendar_seconds,
           s.sla_first_call_from_shift_seconds,
           COALESCE(ca.total_calls, 0) AS total_calls,
           COALESCE(ca.success_calls, 0) AS success_calls,
@@ -705,7 +710,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           fl.manager,
           fl.status AS current_status,
           fl.lead_id,
-          s.business_hours_since_last_contact AS tlt,
+          COALESCE(s.tlt_integrator, s.business_hours_since_last_contact) AS tlt,
           COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
           COALESCE(ca.messages_sent, 0) AS messages_sent,
           COALESCE(ca.outgoing_calls, 0) + COALESCE(ca.messages_sent, 0) AS total_comms,
