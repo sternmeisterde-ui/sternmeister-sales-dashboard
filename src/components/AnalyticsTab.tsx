@@ -173,7 +173,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     const fromStr = range.start ? fmtDate(range.start) : "";
     const toStr = range.end ? fmtDate(range.end) : "";
     if (!fromStr || !toStr) return null;
-    const effectiveLine = source === "roleplay" && line === "2b" ? "2" : line;
+    // Roleplay calls aren't tagged with the B2G sub-line, so collapse both
+    // 2a/2b → "2" before hitting the API. The collapse effect also runs but
+    // is async; doing it here too eliminates the race-window.
+    const effectiveLine = source === "roleplay" && (line === "2a" || line === "2b") ? "2" : line;
     const params = new URLSearchParams({ department, source, line: effectiveLine, groupBy, from: fromStr, to: toStr });
     if (managerId) params.set("managerId", managerId);
     return params;

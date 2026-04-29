@@ -7,9 +7,9 @@ import {
   okkManagers,
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
-import { eq, sql, and, gte, lte, isNotNull } from "drizzle-orm";
+import { eq, sql, and, gte, lte, isNotNull, inArray } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
-import { getLines } from "@/lib/config/tenant";
+import { getLines, type DepartmentId } from "@/lib/config/tenant";
 
 const CACHE_TTL = 2 * 60 * 1000;
 
@@ -98,20 +98,20 @@ function buildPeriodRange(from: Date, to: Date, groupBy: string): string[] {
 
 // ─── Prompt type mapping (delegates to tenant config) ──────────
 //
-// Global `line` filter uses the "group" key ("1"/"2"/"3" in B2G). For groups
-// that fan out to multiple prompt_types (e.g. line 2 = Бератер 1 AND Бератер 2),
-// return the FIRST id's prompt_type — Analytics treats a group-level filter as
-// "any of the group's prompts" downstream, but for this legacy API we pick one
-// representative.
+// Resolves a UI line filter to the set of `prompt_type`s it covers.
+// Returns `null` for "all"/empty (caller skips the filter). For an exact id
+// match returns one element. For a group id (e.g. B2G "2" = Бератер 1 AND
+// Бератер 2) returns every prompt_type belonging to that group so a group
+// filter doesn't silently drop sub-lines.
 
-function getOkkPromptType(department: string, line: string): string | null {
+function getOkkPromptTypes(department: string, line: string): string[] | null {
   if (department !== "b2g" && department !== "b2b") return null;
   if (line === "all" || !line) return null;
-  const lines = getLines(department);
+  const lines = getLines(department as DepartmentId);
   const exact = lines.find((l) => l.id === line);
-  if (exact) return exact.promptType;
-  const firstInGroup = lines.find((l) => l.group === line);
-  return firstInGroup?.promptType ?? null;
+  if (exact) return [exact.promptType];
+  const inGroup = lines.filter((l) => l.group === line).map((l) => l.promptType);
+  return inGroup.length > 0 ? inGroup : null;
 }
 
 // ─── Name normalization (old evaluation versions used different names) ──
@@ -219,7 +219,7 @@ async function fetchOkkData(
   managerId: string | null,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
-  const promptType = getOkkPromptType(department, line);
+  const promptTypes = getOkkPromptTypes(department, line);
 
   const conditions = [
     sql`${okkCalls.callCreatedAt} >= ${from}`,
@@ -227,19 +227,20 @@ async function fetchOkkData(
     sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
     isNotNull(okkEvaluations.totalScore),
   ];
-  if (promptType) {
-    conditions.push(sql`${okkEvaluations.promptType} = ${promptType}`);
+  if (promptTypes && promptTypes.length > 0) {
+    conditions.push(inArray(okkEvaluations.promptType, promptTypes));
   }
   if (managerId) {
     conditions.push(eq(okkEvaluations.managerId, managerId));
   }
 
-  // Filter managers by line for B2G (berater2 "2b" → same line "2")
+  // Filter managers by line for B2G (berater2 "2b" → same line "2"). Skip
+  // for "all" so the dropdown still lists everyone.
   const managerConditions = [
     eq(okkManagers.isActive, true),
     sql`${okkManagers.role} IN ('manager', 'rop')`,
   ];
-  if (department === "b2g" && line) {
+  if (department === "b2g" && line && line !== "all") {
     const dbLine = line === "2b" ? "2" : line;
     managerConditions.push(eq(okkManagers.line, dbLine));
   }
@@ -254,7 +255,7 @@ async function fetchOkkData(
       })
       .from(okkCalls)
       .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
-      .where(sql.join(conditions, sql` AND `))
+      .where(and(...conditions))
       .orderBy(okkCalls.callCreatedAt),
     db
       .select({ id: okkManagers.id, name: okkManagers.name })
@@ -295,13 +296,15 @@ async function fetchOkkData(
 
 // ─── Roleplay data fetcher ──────────────────────────────────
 
-function getRoleplayCallType(department: string, line: string): string | null {
+function getRoleplayCallTypes(department: string, line: string): string[] | null {
+  if (line === "all" || !line) return null;
   if (department === "b2b") return null; // B2B has one script
   switch (line) {
-    case "1": return "qualifier";
+    case "1": return ["qualifier"];
     case "2":
-    case "2b": return "berater";
-    case "3": return "dovedenie";
+    case "2a":
+    case "2b": return ["berater"]; // roleplay doesn't distinguish berater/berater2
+    case "3": return ["dovedenie"];
     default: return null;
   }
 }
@@ -318,7 +321,7 @@ async function fetchRoleplayData(
   const callsTable = department === "b2b" ? r1Calls : d1Calls;
   const usersTable = department === "b2b" ? r1Users : d1Users;
 
-  const callType = getRoleplayCallType(department, line);
+  const callTypes = getRoleplayCallTypes(department, line);
 
   const conditions = [
     gte(callsTable.startedAt, from),
@@ -326,19 +329,20 @@ async function fetchRoleplayData(
     isNotNull(callsTable.score),
     isNotNull(callsTable.evaluationJson),
   ];
-  if (callType) {
-    conditions.push(eq(callsTable.callType, callType));
+  if (callTypes && callTypes.length > 0) {
+    conditions.push(inArray(callsTable.callType, callTypes));
   }
   if (managerId) {
     conditions.push(eq(callsTable.userId, managerId));
   }
 
-  // Filter managers by line for B2G (berater2 "2b" → same line "2")
+  // Filter managers by line for B2G. Skip for "all" so the dropdown lists
+  // everyone in the department.
   const managerConditions = [
     eq(usersTable.isActive, true),
     sql`${usersTable.role} IN ('manager', 'rop')`,
   ];
-  if (department === "b2g" && line) {
+  if (department === "b2g" && line && line !== "all") {
     const dbLine = line === "2b" ? "2" : line;
     managerConditions.push(eq(usersTable.line, dbLine));
   }
@@ -502,7 +506,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const sp = request.nextUrl.searchParams;
     const department = (sp.get("department") === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
     const source = sp.get("source") === "roleplay" ? "roleplay" : "okk";
-    const line = sp.get("line") ?? "1";
+    const line = sp.get("line") ?? "all";
     const groupBy = sp.get("groupBy") ?? "day";
     const managerId = sp.get("managerId") || null;
 
@@ -519,13 +523,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const effectiveLine = line;
-    const cacheKey = `analytics:${department}:${source}:${effectiveLine}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
+    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, effectiveLine, from, to, groupBy, managerId)
-        : fetchOkkData(department, effectiveLine, from, to, groupBy, managerId),
+        ? fetchRoleplayData(department, line, from, to, groupBy, managerId)
+        : fetchOkkData(department, line, from, to, groupBy, managerId),
     );
 
     return NextResponse.json({ success: true, data });
