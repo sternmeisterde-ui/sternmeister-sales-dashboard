@@ -291,10 +291,23 @@ async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
 }
 
 async function fetchCallNotes(leadId: number): Promise<KommoNote[]> {
-  const data = await kommoFetchPath(
-    `/leads/${leadId}/notes?limit=100&filter[note_type]=call_in,call_out`,
-  ) as { _embedded?: { notes?: KommoNote[] } } | null;
-  return data?._embedded?.notes || [];
+  // Paginate so deals with >100 call notes (long-running deals can easily
+  // have 50-200 attempts) get fully covered. Prior single-page fetch
+  // silently capped the list at 100 — we'd miss earlier qualifying calls
+  // on busy leads. `filter[note_type][]` is the array form documented for
+  // /api/v4 endpoint; the comma-separated form was Kommo's legacy syntax.
+  const all: KommoNote[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const data = await kommoFetchPath(
+      `/leads/${leadId}/notes?limit=250&page=${page}` +
+        `&filter[note_type][]=call_in&filter[note_type][]=call_out`,
+    ) as { _embedded?: { notes?: KommoNote[] } } | null;
+    const batch = data?._embedded?.notes ?? [];
+    if (batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < 250) break;
+  }
+  return all;
 }
 
 // ==================== TRANSCRIPTION ====================
@@ -546,11 +559,17 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
 
     interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
     let scanned = 0;
+    let multiCallLeads = 0;
     const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
       const notes = await fetchCallNotes(lead.id).catch((e: unknown) => {
         console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
         return [] as KommoNote[];
       });
+      // Iterate every note, not just the latest — a single deal can have
+      // multiple qualifying calls (e.g. follow-up + closing call) and each
+      // one needs its own transcription/analysis. Per-URL dedup happens
+      // later globally so the same recording cross-referenced from another
+      // lead doesn't get double-processed.
       const matched: CallRecord[] = [];
       for (const n of notes) {
         const dur = n.params?.duration || 0;
@@ -566,6 +585,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
           direction: n.note_type === "call_in" ? "входящий" : "исходящий",
         });
       }
+      if (matched.length > 1) multiCallLeads++;
       scanned++;
       if (scanned % 25 === 0 || scanned === leads.length) {
         await db
@@ -576,6 +596,11 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       }
       return matched;
     });
+    if (multiCallLeads > 0) {
+      console.log(
+        `[Analysis ${analysisId}] ${multiCallLeads} lead(s) had >1 qualifying call — all will be transcribed`,
+      );
+    }
 
     // Global dedup by URL — same recording in several leads → count once,
     // attributed to the first lead we saw it on.
