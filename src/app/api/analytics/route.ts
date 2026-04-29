@@ -10,6 +10,7 @@ import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
 import { eq, sql, and, gte, lte, isNotNull, inArray } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 import { getLines, type DepartmentId } from "@/lib/config/tenant";
+import { parseDateBoundary, addDaysCivil, todayCivil, APP_TZ } from "@/lib/utils/date";
 
 const CACHE_TTL = 2 * 60 * 1000;
 
@@ -68,35 +69,49 @@ interface AnalyticsResponse {
   department: string;
 }
 
-// ─── Period helpers ─────────────────────────────────────────
+// ─── Period helpers (Berlin civil-day bucketing) ─────────────
+//
+// Every bucket key is derived from the Berlin civil date of the call —
+// never the UTC date. A 23:30 Berlin call and a 00:30 Berlin call on the
+// next day are different days for the user even though they're an hour
+// apart in UTC. Mixing UTC bucketing with the SQL `BETWEEN` filter (which
+// is also Berlin-aware below) used to leak calls across day boundaries.
 
-function getISOWeek(d: Date): string {
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const dayNum = date.getUTCDay() || 7;
-  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
-  const weekNum = Math.ceil(((date.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
-  return `${date.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+function toBerlinCivil(date: Date): string {
+  return date.toLocaleDateString("en-CA", { timeZone: APP_TZ });
+}
+
+function isoWeekOfCivil(civilStr: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(civilStr);
+  if (!match) return civilStr;
+  const [, y, m, d] = match;
+  // Pure calendar pivot — Date.UTC isn't being used as an instant here.
+  const dt = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+  const dayNum = dt.getUTCDay() || 7;
+  dt.setUTCDate(dt.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil(((dt.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+  return `${dt.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
 }
 
 function toPeriodKey(date: Date, groupBy: string): string {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
+  const civil = toBerlinCivil(date);
   switch (groupBy) {
-    case "day": return `${y}-${m}-${d}`;
-    case "week": return getISOWeek(date);
-    case "month": return `${y}-${m}`;
-    default: return `${y}-${m}-${d}`;
+    case "day": return civil;
+    case "week": return isoWeekOfCivil(civil);
+    case "month": return civil.slice(0, 7);
+    default: return civil;
   }
 }
 
-function buildPeriodRange(from: Date, to: Date, groupBy: string): string[] {
+function buildPeriodRange(fromCivil: string, toCivil: string, groupBy: string): string[] {
   const periods = new Set<string>();
-  const cur = new Date(from);
-  while (cur <= to) {
-    periods.add(toPeriodKey(cur, groupBy));
-    cur.setUTCDate(cur.getUTCDate() + 1);
+  let cur = fromCivil;
+  while (cur <= toCivil) {
+    if (groupBy === "day") periods.add(cur);
+    else if (groupBy === "month") periods.add(cur.slice(0, 7));
+    else periods.add(isoWeekOfCivil(cur));
+    cur = addDaysCivil(cur, 1);
   }
   return [...periods].sort();
 }
@@ -220,6 +235,8 @@ async function fetchOkkData(
   line: string,
   from: Date,
   to: Date,
+  fromCivil: string,
+  toCivil: string,
   groupBy: string,
   managerId: string | null,
 ): Promise<AnalyticsResponse> {
@@ -268,7 +285,7 @@ async function fetchOkkData(
       .where(and(...managerConditions)),
   ]);
 
-  const periods = buildPeriodRange(from, to, groupBy);
+  const periods = buildPeriodRange(fromCivil, toCivil, groupBy);
   const accMap = new Map<string, PeriodAcc>();
   for (const p of periods) accMap.set(p, newAcc());
 
@@ -350,6 +367,8 @@ async function fetchRoleplayData(
   line: string,
   from: Date,
   to: Date,
+  fromCivil: string,
+  toCivil: string,
   groupBy: string,
   managerId: string | null,
 ): Promise<AnalyticsResponse> {
@@ -395,7 +414,7 @@ async function fetchRoleplayData(
       .where(and(...managerConditions)),
   ]);
 
-  const periods = buildPeriodRange(from, to, groupBy);
+  const periods = buildPeriodRange(fromCivil, toCivil, groupBy);
   const accMap = new Map<string, PeriodAcc>();
   for (const p of periods) accMap.set(p, newAcc());
 
@@ -574,25 +593,30 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const groupBy = sp.get("groupBy") ?? "day";
     const managerId = sp.get("managerId") || null;
 
-    const now = new Date();
-    const defaultFrom = new Date(now);
-    defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 30);
+    // Civil dates (YYYY-MM-DD) — what the user picks in the calendar — are
+    // always interpreted as Berlin civil days here. Both the SQL filter and
+    // the period-key bucketing run off the same Berlin window, so a 23:30
+    // Berlin call lives in exactly one bucket and is included in exactly
+    // one filter range.
+    const todayC = todayCivil();
+    const fromCivil = sp.get("from") || addDaysCivil(todayC, -30);
+    const toCivil = sp.get("to") || todayC;
 
-    const fromStr = sp.get("from");
-    const toStr = sp.get("to");
-    const from = fromStr ? new Date(`${fromStr}T00:00:00Z`) : defaultFrom;
-    const to = toStr ? new Date(`${toStr}T23:59:59Z`) : now;
-
+    const from = parseDateBoundary(fromCivil, "start");
+    const to = parseDateBoundary(toCivil, "end");
+    if (!from || !to) {
+      return NextResponse.json({ success: false, error: "Invalid from/to" }, { status: 400 });
+    }
     if (from > to) {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromStr}:${toStr}:${managerId}`;
+    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerId}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, line, from, to, groupBy, managerId)
-        : fetchOkkData(department, line, from, to, groupBy, managerId),
+        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerId)
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerId),
     );
 
     return NextResponse.json({ success: true, data });
