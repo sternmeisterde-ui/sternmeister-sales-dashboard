@@ -170,6 +170,64 @@ async function kommoGet<T>(path: string, params?: Record<string, string>): Promi
   return res.json();
 }
 
+/**
+ * Public helper for ad-hoc Kommo API requests (analysis pipeline, debug tools).
+ * Accepts a path-with-query string (e.g. `/leads?filter[...]=...&page=1`) and
+ * runs it through the same auth + rate-limit + 5xx retry stack the rest of the
+ * dashboard uses. Returns parsed JSON, or null on 204.
+ *
+ * Intentionally separate from `kommoGet<T>` so callers passing a fully-formed
+ * Kommo frontend URL's search string (with PHP-style nested filters) don't
+ * have to deconstruct it back into a params object.
+ *
+ * Auth is re-resolved on every attempt — important after a 401 forces a
+ * `resetKommoConfig`, so retries pick up the freshly-loaded token instead of
+ * sending the stale one cached at the start of the loop.
+ */
+export async function kommoFetchPath(pathWithQuery: string): Promise<unknown> {
+  // Validate via URL constructor so malformed PHP-bracket params surface here
+  // (clear stack trace) instead of inside fetch with a cryptic message. The
+  // URL is resolved inside the loop so a config refresh between attempts gets
+  // applied to the next request.
+  let waitMs = 500;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const baseUrl = await getBaseUrl();
+    const headers = await getAuthHeaders();
+    const rawUrl = `${baseUrl}${pathWithQuery}`;
+    let url: string;
+    try {
+      // Validate by parsing — surfaces malformed input here instead of via a
+      // cryptic fetch error. Concatenation (not URL(rel, base)) preserves the
+      // /api/v4 path prefix; URL constructor with a leading-slash relative
+      // would replace it.
+      url = new URL(rawUrl).toString();
+    } catch (e) {
+      throw new Error(`kommoFetchPath: invalid URL "${rawUrl}": ${e instanceof Error ? e.message : e}`);
+    }
+    const res = await rateLimitedFetch(url, { headers });
+    if (res.status === 204) return null;
+    if (res.ok) {
+      _consecutiveFailures = 0;
+      return res.json();
+    }
+    _consecutiveFailures++;
+    if (res.status === 401) {
+      console.error("[Kommo] 401 Unauthorized — resetting cached config for re-load");
+      resetKommoConfig();
+    }
+    const retriable = res.status === 429 || res.status >= 500 || res.status === 401;
+    if (!retriable || attempt === 4) {
+      const text = await res.text();
+      throw new Error(`Kommo API ${res.status}: ${text.slice(0, 300)}`);
+    }
+    const retryAfter = Number(res.headers.get("retry-after") ?? "0");
+    const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
+    await new Promise<void>((r) => setTimeout(r, backoff));
+    waitMs *= 2;
+  }
+  throw new Error("Kommo API: exhausted retries");
+}
+
 // Paginate through all results
 async function kommoGetAll<T>(
   path: string,

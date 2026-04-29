@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses } from "@/lib/db/schema-existing";
-import { eq, or } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
 import { getSession } from "@/lib/auth";
 
@@ -26,15 +26,42 @@ export async function GET() {
 
   const db = getDbForDepartment("b2g");
 
-  const [pending] = await db
-    .select({ id: callAnalyses.id, status: callAnalyses.status })
-    .from(callAnalyses)
-    .where(or(eq(callAnalyses.status, "pending"), eq(callAnalyses.status, "processing")))
-    .limit(1);
+  // Atomic claim via single UPDATE...WHERE...RETURNING. Two concurrent
+  // /process callers (e.g. Resume click racing the polling effect) cannot
+  // both win:
+  //   • Both subqueries may pick the same row X.
+  //   • The UPDATE acquires a row-level lock on X; the second waits.
+  //   • In READ COMMITTED (default), the loser re-evaluates `status='pending'`
+  //     after the lock is granted (Postgres EvalPlanQual). Since the winner
+  //     already flipped it to `processing`, the WHERE no longer matches and
+  //     the loser gets zero rows back.
+  //
+  // FOR UPDATE SKIP LOCKED is intentionally NOT used: this is Neon HTTP mode
+  // where each request runs as its own implicit transaction (no explicit
+  // BEGIN), so the row-lock would release at statement end anyway. The
+  // re-evaluation is the actual interlock here.
+  //
+  // We deliberately DON'T auto-claim `processing` rows: previously that
+  // mechanism handled SSE-disconnect recovery, but it also let two browsers
+  // concurrently run the pipeline on the same row. Genuinely orphaned
+  // `processing` rows are recovered by the user via Resume (after explicitly
+  // deleting and re-creating, or — when status drifts to error — clicking
+  // Resume which routes back through `pending` here).
+  const claimed = await db
+    .update(callAnalyses)
+    .set({ status: "processing" })
+    .where(
+      and(
+        eq(callAnalyses.status, "pending"),
+        sql`${callAnalyses.id} = (SELECT id FROM call_analyses WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1)`,
+      ),
+    )
+    .returning({ id: callAnalyses.id });
 
-  if (!pending) {
+  if (claimed.length === 0) {
     return NextResponse.json({ status: "idle" });
   }
+  const pending = { id: claimed[0].id };
 
   // Use streaming to keep connection alive during long pipeline
   const encoder = new TextEncoder();

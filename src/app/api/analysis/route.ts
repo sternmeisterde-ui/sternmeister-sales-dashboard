@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses } from "@/lib/db/schema-existing";
 import { eq, desc } from "drizzle-orm";
-import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
 import { getSession } from "@/lib/auth";
 import { KOMMO } from "@/lib/config/tenant";
 

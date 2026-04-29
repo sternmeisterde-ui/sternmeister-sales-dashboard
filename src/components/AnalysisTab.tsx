@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2,
+  Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2, RotateCw,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
@@ -38,6 +38,13 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
   const [minDuration, setMinDuration] = useState(5);
   const [submitting, setSubmitting] = useState(false);
 
+  // Single in-flight SSE guard. The polling effect re-runs on every analyses
+  // change, and Resume manually calls triggerProcessing — without this ref we
+  // could open two EventSources at once. The server-side atomic claim already
+  // prevents duplicate pipeline runs, but skipping the second SSE here saves
+  // a connection slot and keeps the UI from racing two `done` events.
+  const sseRef = useRef<EventSource | null>(null);
+
   const fetchList = useCallback(async () => {
     try {
       const res = await fetch(`/api/analysis?department=${department}`);
@@ -49,22 +56,36 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
 
   // Trigger processing — SSE stream keeps connection alive
   const triggerProcessing = useCallback(() => {
+    if (sseRef.current) return; // already streaming — server will pick up the next pending row when the current one finishes
     const es = new EventSource("/api/analysis/process");
+    sseRef.current = es;
+    const cleanup = () => {
+      if (sseRef.current === es) sseRef.current = null;
+      es.close();
+    };
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.status === "done" || data.status === "error") {
-          es.close();
+        if (data.status === "done" || data.status === "error" || data.status === "idle") {
+          cleanup();
           fetchList();
         }
         // heartbeats are ignored (keep-alive)
       } catch { /* ignore parse errors */ }
     };
     es.onerror = () => {
-      es.close();
+      cleanup();
       fetchList();
     };
   }, [fetchList]);
+
+  // Tear down any live SSE on unmount.
+  useEffect(() => () => {
+    if (sseRef.current) {
+      sseRef.current.close();
+      sseRef.current = null;
+    }
+  }, []);
 
   useEffect(() => { setLoading(true); fetchList(); }, [fetchList]);
 
@@ -117,6 +138,20 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       await fetch(`/api/analysis/${id}/delete`, { method: "DELETE" });
       setAnalyses((prev) => prev.filter((a) => a.id !== id));
       if (selectedId === id) { setSelectedId(null); setDetail(null); }
+    } catch { /* ignore */ }
+  };
+
+  const handleResume = async (id: string) => {
+    try {
+      const res = await fetch(`/api/analysis/${id}/resume`, { method: "POST" });
+      if (!res.ok) return;
+      // Optimistic flip so the row immediately shows the spinner; the next
+      // fetchList tick will reconcile against the DB.
+      setAnalyses((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: "pending", errorMessage: null } : a)),
+      );
+      triggerProcessing();
+      fetchList();
     } catch { /* ignore */ }
   };
 
@@ -259,7 +294,23 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                     )}
 
                     {a.status === "error" && (
-                      <span className="text-[10px] text-rose-400 max-w-[200px] truncate shrink-0">{a.errorMessage}</span>
+                      <span
+                        className="text-[10px] text-rose-400 max-w-[260px] truncate shrink-0"
+                        title={a.errorMessage ?? ""}
+                      >
+                        {a.errorMessage}
+                      </span>
+                    )}
+
+                    {/* Resume — only on error rows */}
+                    {a.status === "error" && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleResume(a.id); }}
+                        className="p-1.5 rounded-lg text-amber-400 hover:bg-amber-500/10 shrink-0 transition-colors"
+                        title="Повторить (продолжит с уже сделанных звонков)"
+                      >
+                        <RotateCw className="w-3.5 h-3.5" />
+                      </button>
                     )}
 
                     {/* Delete / kill */}

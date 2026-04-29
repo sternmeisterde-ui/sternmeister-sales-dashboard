@@ -9,10 +9,11 @@
  *   3. Dedup by recording URL/ID
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
+import { kommoFetchPath } from "@/lib/kommo/client";
 import {
   FAILURE_PER_CALL_PROMPT, SUCCESS_PER_CALL_PROMPT,
   FAILURE_SUMMARY_PROMPT, SUCCESS_SUMMARY_PROMPT,
@@ -22,7 +23,6 @@ import {
 
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
-const KOMMO_TOKEN = process.env.KOMMO_ACCESS_TOKEN || "";
 const DEFAULT_MIN_DURATION = 300; // 5 min
 // Hard ceiling to avoid runaway cost — raised from 100 because filters with
 // 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
@@ -80,28 +80,12 @@ export function parseKommoUrl(url: string): { pipelineId: string; filters: Recor
 }
 
 // ==================== KOMMO API ====================
-
-async function kommoGet(path: string): Promise<unknown> {
-  // Retry on 429 / 5xx with exponential backoff. Each attempt honours
-  // Retry-After when present; otherwise doubles the wait.
-  let waitMs = 500;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(`${KOMMO.apiBaseUrl}${path}`, {
-      headers: { Authorization: `Bearer ${KOMMO_TOKEN}` },
-    });
-    if (res.status === 204) return null;
-    if (res.ok) return res.json();
-    const retriable = res.status === 429 || res.status >= 500;
-    if (!retriable || attempt === 4) {
-      throw new Error(`Kommo API ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    }
-    const retryAfter = Number(res.headers.get("retry-after") ?? "0");
-    const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
-    await sleep(backoff);
-    waitMs *= 2;
-  }
-  throw new Error("Kommo API: exhausted retries");
-}
+// Uses the shared kommo/client.ts helper so the analysis pipeline:
+//   • hits api-c.kommo.com (Kommo's API host) — not the user-facing
+//     subdomain, which a CDN/WAF can 403 with bare nginx HTML;
+//   • picks up rotated tokens from the kommo_tokens DB table when env is empty;
+//   • shares the same global rate-limiter + 401-resets-config behaviour the
+//     rest of the dashboard relies on.
 
 async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -112,21 +96,21 @@ async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
   const parsed = new URL(kommoUrl);
   if (parsed.hostname !== KOMMO.host) throw new Error("Invalid Kommo URL domain");
   const filterParams = parsed.search;
-  const pipelineMatch = parsed.pathname.match(/pipeline\/(\d+)/);
 
-  let allLeads: KommoLead[] = [];
+  const allLeads: KommoLead[] = [];
   for (let page = 1; page <= 20; page++) {
     const apiUrl = `/leads?${filterParams.substring(1)}&limit=250&page=${page}`;
-    const data = await kommoGet(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
+    const data = await kommoFetchPath(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
     if (!data?._embedded?.leads?.length) break;
     allLeads.push(...data._embedded.leads);
-    await sleep(200);
   }
   return allLeads;
 }
 
 async function fetchCallNotes(leadId: number): Promise<KommoNote[]> {
-  const data = await kommoGet(`/leads/${leadId}/notes?limit=100&filter[note_type]=call_in,call_out`) as { _embedded?: { notes?: KommoNote[] } } | null;
+  const data = await kommoFetchPath(
+    `/leads/${leadId}/notes?limit=100&filter[note_type]=call_in,call_out`,
+  ) as { _embedded?: { notes?: KommoNote[] } } | null;
   return data?._embedded?.notes || [];
 }
 
@@ -178,26 +162,53 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
 
 // ==================== GROK ANALYSIS ====================
 
+// xAI quota-exhausted responses don't set Retry-After (the 429 isn't transient
+// rate-limit; it's a billing condition). Detect them and fail fast — burning
+// 4 attempts against a known-out account just delays the operator-visible
+// error by ~10 seconds and adds noise to logs.
+const QUOTA_EXHAUSTED_RE = /spending limit|out of credit|insufficient[_ ]?(?:credit|funds|quota)|exhausted/i;
+
 async function callGrok(systemPrompt: string, userContent: string, model: string, maxTokens: number): Promise<string> {
-  const res = await fetch("https://api.x.ai/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${XAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent.substring(0, 25000) },
-      ],
-    }),
+  // Retry on transient 429 / 5xx with exponential backoff. xAI returns
+  // Retry-After on real rate limits; respect it. Quota-exhaustion (no
+  // Retry-After + body matches QUOTA_EXHAUSTED_RE) bails immediately so
+  // partially-done runs save their state via the caller's try/catch and the
+  // user can resume after topping up the account.
+  const body = JSON.stringify({
+    model,
+    max_tokens: maxTokens,
+    temperature: 0.1,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userContent.substring(0, 25000) },
+    ],
   });
-  if (!res.ok) {
+
+  let waitMs = 1000;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch("https://api.x.ai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${XAI_API_KEY}`, "Content-Type": "application/json" },
+      body,
+    });
+    if (res.ok) {
+      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+      return data.choices?.[0]?.message?.content || "";
+    }
     const errText = await res.text().catch(() => "");
-    throw new Error(`Grok API ${res.status}: ${errText.substring(0, 200)}`);
+    const retryAfter = Number(res.headers.get("retry-after") ?? "0");
+    const isQuotaExhausted = res.status === 429 && retryAfter === 0 && QUOTA_EXHAUSTED_RE.test(errText);
+    const retriable = (res.status === 429 || res.status >= 500) && !isQuotaExhausted;
+    if (!retriable || attempt === 3) {
+      const tag = isQuotaExhausted ? " (quota exhausted — top up xAI account or rotate XAI_API_KEY)" : "";
+      throw new Error(`Grok API ${res.status}${tag}: ${errText.substring(0, 200)}`);
+    }
+    const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
+    console.warn(`[callGrok] ${res.status} (attempt ${attempt + 1}/4), retrying in ${backoff}ms`);
+    await sleep(backoff);
+    waitMs *= 2;
   }
-  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-  return data.choices?.[0]?.message?.content || "";
+  throw new Error("Grok API: exhausted retries");
 }
 
 // ==================== MAIN PIPELINE ====================
@@ -218,11 +229,15 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     return;
   }
 
-  // Validate API keys — save error to DB if missing
+  // Validate API keys — save error to DB if missing.
+  // KOMMO_ACCESS_TOKEN is no longer required as an env var: kommoFetchPath()
+  // falls back to the kommo_tokens DB table when the env is empty (same path
+  // the rest of the dashboard uses). Missing-token errors will surface from
+  // ensureKommoConfig() at the first Kommo API call instead, with a clearer
+  // message than "env var not set".
   const missingKeys = [];
   if (!ASSEMBLYAI_KEY) missingKeys.push("ASSEMBLYAI_API_KEY");
   if (!XAI_API_KEY) missingKeys.push("XAI_API_KEY");
-  if (!KOMMO_TOKEN) missingKeys.push("KOMMO_ACCESS_TOKEN");
   if (missingKeys.length > 0) {
     const msg = `Не настроены переменные окружения: ${missingKeys.join(", ")}. Добавьте в Dokploy Environment.`;
     await db.update(callAnalyses).set({ status: "error", errorMessage: msg }).where(eq(callAnalyses.id, analysisId));
@@ -336,12 +351,26 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       .where(eq(callAnalysisFiles.analysisId, analysisId));
     const existingSet = new Set(existingFiles.map(f => f.filename));
 
-    const allAnalyses: string[] = [];
-    // Recover analyses from already-processed files
-    for (const f of existingFiles) {
-      if (f.content.includes("## Анализ")) {
-        const match = f.content.match(/## Анализ\n\n([\s\S]+)$/);
-        if (match) allAnalyses.push(match[1].trim());
+    // Index-keyed slot array — preserves call order in the final summary
+    // regardless of which concurrent worker finished first. Pre-populate from
+    // already-saved files (resume) and from any newly-processed call below.
+    const allAnalysesByIdx: (string | null)[] = new Array(cappedCalls.length).fill(null);
+
+    // Recover analyses from already-processed files. The filename is
+    // `call_NN_leadXXXX.md` where NN matches the index+1 in cappedCalls.
+    // Using a regex on filename is more robust than trying to match by leadId
+    // (a single lead can have multiple matching calls; lead-id is not unique).
+    const fileByName = new Map(existingFiles.map((f) => [f.filename, f.content]));
+    for (let i = 0; i < cappedCalls.length; i++) {
+      const num = String(i + 1).padStart(2, "0");
+      const fname = `call_${num}_lead${cappedCalls[i].leadId}.md`;
+      const content = fileByName.get(fname);
+      if (!content) continue;
+      const match = content.match(/## Анализ\n\n([\s\S]+)$/);
+      if (match) {
+        const dateStr = cappedCalls[i].date.toLocaleDateString("ru-RU");
+        const durMin = Math.round(cappedCalls[i].duration / 60);
+        allAnalysesByIdx[i] = `### Звонок ${num} (Lead ${cappedCalls[i].leadId}, ${dateStr}, ${durMin} мин)\n\n${match[1].trim()}`;
       }
     }
 
@@ -378,7 +407,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         console.log(`[Analysis ${analysisId}] [${num}] Analyzing with Grok...`);
         const analysisText = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
         md += `## Анализ\n\n${analysisText}\n`;
-        allAnalyses.push(`### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`);
+        allAnalysesByIdx[idx] = `### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`;
       }
 
       await db
@@ -405,6 +434,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
 
     // 4. Generate aggregate summary
     console.log(`[Analysis ${analysisId}] Generating summary...`);
+    const allAnalyses = allAnalysesByIdx.filter((s): s is string => s !== null);
     const allAnalysesText = allAnalyses.join("\n\n---\n\n");
     const summary = await callGrok(
       summaryPrompt,
