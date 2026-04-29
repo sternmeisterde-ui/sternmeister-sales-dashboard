@@ -101,7 +101,12 @@ const CONFIG_REFRESH_MS = 30 * 60 * 1000;
 /** Track consecutive API failures for diagnostics */
 let _consecutiveFailures = 0;
 export function getKommoHealth() {
-  return { consecutiveFailures: _consecutiveFailures, tokenLoadedAt: _configLoadedAt ? new Date(_configLoadedAt).toISOString() : null };
+  return {
+    consecutiveFailures: _consecutiveFailures,
+    tokenLoadedAt: _configLoadedAt ? new Date(_configLoadedAt).toISOString() : null,
+    domain: _cachedDomain,
+    tokenSource: process.env.KOMMO_ACCESS_TOKEN ? "env" : (_cachedToken ? "db" : "none"),
+  };
 }
 
 function ensureKommoConfig(): Promise<void> {
@@ -119,16 +124,23 @@ function ensureKommoConfig(): Promise<void> {
         return;
       }
 
-      // 2. Fallback: load from kommo_tokens table in D1 (main branch DB)
+      // 2. Fallback: load from kommo_tokens table in D1 (main branch DB).
+      // The `subdomain` column is the account name (e.g. "sternmeister") —
+      // useful for identification but NOT a valid API host. Kommo's
+      // user-facing host `${subdomain}.kommo.com` is fronted by nginx and
+      // returns bare 403 HTML on /api/v4/leads requests; the actual API
+      // shard host is `api-c.kommo.com` (or whatever KOMMO_API_DOMAIN says).
+      // Earlier behaviour ("${subdomain}.kommo.com") caused every
+      // env-token-not-set deploy to silently 403 on /leads list calls.
       try {
         const { db } = await import("../db/index");
         const { kommoTokens } = await import("../db/schema-existing");
         const rows = await db.select().from(kommoTokens).limit(1);
         if (rows.length > 0) {
           _cachedToken = rows[0].accessToken;
-          _cachedDomain = `${rows[0].subdomain}.kommo.com`;
+          _cachedDomain = process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
           _configLoadedAt = Date.now();
-          console.log(`[Kommo] Token loaded from DB (expires: ${rows[0].expiresAt?.toISOString() ?? "unknown"})`);
+          console.log(`[Kommo] Token loaded from DB (account=${rows[0].subdomain}, host=${_cachedDomain}, expires=${rows[0].expiresAt?.toISOString() ?? "unknown"})`);
           return;
         }
       } catch (e) {
@@ -238,7 +250,11 @@ export async function kommoFetchPath(pathWithQuery: string): Promise<unknown> {
     const retriable = res.status === 429 || res.status >= 500 || res.status === 401;
     if (!retriable || attempt === 4) {
       const text = await res.text();
-      throw new Error(`Kommo API ${res.status}: ${text.slice(0, 300)}`);
+      // Include host in the error so a 403 nginx HTML body is unambiguously
+      // attributable to the wrong API host vs. an actual auth/permission
+      // problem on the right host. Caller (DB error_message) sees the host.
+      const host = new URL(url).host;
+      throw new Error(`Kommo API ${res.status} [${host}]: ${text.slice(0, 300)}`);
     }
     const retryAfter = Number(res.headers.get("retry-after") ?? "0");
     const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
