@@ -154,40 +154,30 @@ export async function syncCommunications(
     return 0;
   }
 
-  // ── Upsert messages by communication_id ──────────────────────────────
-  // Backed by the partial unique index `communications_communication_id_unique`
-  // (where communication_id IS NOT NULL). Eliminates the DELETE-ordering
-  // fragility the parallel writer (sync-telephony) used to depend on.
+  // ── Persist: full message-row replacement in window ─────────────────
+  // Wipe message rows (chat/email/SMS) in the window, then INSERT fresh.
+  // Mirrors sync-telephony's pattern for the same reason: post-0005 the
+  // unique key is `(communication_id, COALESCE(lead_id, 0))`, which Drizzle
+  // can't express in `onConflictDoUpdate({ target })` (the COALESCE is part
+  // of the index expression, not a column). The previous upsert against
+  // `target: communicationId` referenced a dropped index and crashed the
+  // ETL on every run.
+  //
+  // Safe because `getMessageEvents` filters Kommo /events by created_at and
+  // the events feed is append-only — message edits don't re-emit older
+  // event ids with their original timestamps, so we never miss rows the
+  // DELETE didn't see. Call rows (call_in/call_out) stay untouched here;
+  // sync-telephony owns them and the legacy-cleanup sweep above wipes any
+  // orphan call rows that pre-date the 2026-04-28 hard-split.
+  await analyticsDb.execute(
+    sql`DELETE FROM analytics.communications
+        WHERE created_at >= ${fromDate} AND created_at <= ${toDate}
+          AND communication_type IN ('incoming_chat_message', 'outgoing_chat_message')`,
+  );
+
   const CHUNK = 500;
   for (let i = 0; i < allRows.length; i += CHUNK) {
-    await analyticsDb
-      .insert(communications)
-      .values(allRows.slice(i, i + CHUNK))
-      .onConflictDoUpdate({
-        target: communications.communicationId,
-        targetWhere: sql`${communications.communicationId} IS NOT NULL`,
-        set: {
-          communicationType: sql`excluded.communication_type`,
-          entityId: sql`excluded.entity_id`,
-          leadId: sql`excluded.lead_id`,
-          pipelineId: sql`excluded.pipeline_id`,
-          pipelineName: sql`excluded.pipeline_name`,
-          category: sql`excluded.category`,
-          leadCreatedAt: sql`excluded.lead_created_at`,
-          leadDayStart: sql`excluded.lead_day_start`,
-          callStatus: sql`excluded.call_status`,
-          duration: sql`excluded.duration`,
-          manager: sql`excluded.manager`,
-          statusId: sql`excluded.status_id`,
-          statusName: sql`excluded.status_name`,
-          utmSource: sql`excluded.utm_source`,
-          firstContactFlg: sql`excluded.first_contact_flg`,
-          lastContactFlg: sql`excluded.last_contact_flg`,
-          firstCallAt: sql`excluded.first_call_at`,
-          businessHoursSla: sql`excluded.business_hours_sla`,
-          businessHoursSinceCommunication: sql`excluded.business_hours_since_communication`,
-        },
-      });
+    await analyticsDb.insert(communications).values(allRows.slice(i, i + CHUNK));
   }
 
   console.log(`[ETL] sync-communications: upserted ${allRows.length} rows`);
