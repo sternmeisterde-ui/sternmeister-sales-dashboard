@@ -72,7 +72,26 @@ export interface ScheduleRow {
 // being clipped under the old defaults, hiding real working time.
 const TIMELINE_START = "09:00";
 const TIMELINE_END = "20:00";
-const CRM_CLUSTER_GAP_MIN = 2;
+
+// CRM activity model — calibrated 2026-04-29 against real manager behaviour.
+//
+// The naive "1 event = 1 minute, cluster gap ≤ 2 min" model under-counts
+// real focused CRM work by 3-5x: a manager spending 30 min editing cards
+// fires roughly one event every 4-7 minutes (task_text_changed,
+// custom_field_*, lead_status_changed) — every gap exceeds 2 min, so each
+// event renders as an isolated 1-min stripe. 30 minutes of work shows as
+// 6 minutes of green.
+//
+// Session-based model:
+//   • Events within SESSION_MAX_GAP_MIN of each other = one session
+//   • Each session's stripe spans first → last event minute
+//   • + SESSION_TAIL_MIN appended after the last event (managers don't
+//     stop working the instant they emit their last tracked action)
+//
+// Trade-off: an 8-minute AFK between two clicks counts as work. Acceptable
+// — alternative is the 4x under-count we used to have.
+const SESSION_MAX_GAP_MIN = 10;
+const SESSION_TAIL_MIN = 3;
 
 function parseHm(hm: string): { h: number; m: number } {
   const [hs, ms] = hm.split(":");
@@ -117,6 +136,14 @@ function pad2(n: number): string {
 
 function fmtHm(t: { h: number; m: number }): string {
   return `${pad2(t.h)}:${pad2(t.m)}`;
+}
+
+/** "HH:MM" string for an offset N minutes after shift start. */
+function fmtSegmentTime(start: { h: number; m: number }, offsetMin: number): string {
+  const total = start.h * 60 + start.m + offsetMin;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${pad2(h)}:${pad2(m)}`;
 }
 
 function labelForCall(eventType: string, durationSec: number): string {
@@ -240,20 +267,41 @@ export function buildTimeline(params: {
     }
   }
 
-  // Cluster CRM: fill gaps ≤ CRM_CLUSTER_GAP_MIN between green minutes, but only
-  // through idle cells (never overwrite call). This merges tight activity into a
-  // single readable green stripe.
-  for (let i = 0; i < total; i++) {
-    if (grid[i] !== 1) continue;
-    // look ahead up to CRM_CLUSTER_GAP_MIN for another green minute
-    for (let gap = 1; gap <= CRM_CLUSTER_GAP_MIN && i + gap < total; gap++) {
-      if (grid[i + gap] === 1) {
-        for (let k = 1; k < gap; k++) {
-          if (grid[i + k] === 0) grid[i + k] = 1;
-        }
-        break;
+  // Session model: events whose minutes are within SESSION_MAX_GAP_MIN of
+  // each other belong to the same continuous CRM-work session. Fill all
+  // minutes between the first and last event of the session, then add
+  // SESSION_TAIL_MIN minutes after the last event (managers don't drop the
+  // mouse the millisecond they fire their last tracked action).
+  //
+  // Skips minutes that are already classified as call (grid==2) — calls
+  // dominate, no overwrite. CRM stays 1, idle stays 0 outside sessions.
+  if (crmStarts.length > 0) {
+    // crmStarts are pushed in event-iteration order, not necessarily sorted by minute.
+    const sortedMinutes = crmStarts.map((s) => s.minute).sort((a, b) => a - b);
+
+    let sessionStart = sortedMinutes[0];
+    let sessionLast = sortedMinutes[0];
+
+    const closeSession = (start: number, last: number) => {
+      const end = Math.min(total, last + 1 + SESSION_TAIL_MIN);
+      for (let i = start; i < end; i++) {
+        if (grid[i] !== 2) grid[i] = 1;
+      }
+    };
+
+    for (let i = 1; i < sortedMinutes.length; i++) {
+      const minute = sortedMinutes[i];
+      if (minute - sessionLast <= SESSION_MAX_GAP_MIN) {
+        // Same session — extend.
+        sessionLast = minute;
+      } else {
+        // Gap too large — close current session, start new one.
+        closeSession(sessionStart, sessionLast);
+        sessionStart = minute;
+        sessionLast = minute;
       }
     }
+    closeSession(sessionStart, sessionLast);
   }
 
   // Collapse into segments
@@ -284,9 +332,15 @@ export function buildTimeline(params: {
     } else if (type === "crm") {
       const evCount = crmStarts.filter((e) => e.minute >= cursor && e.minute < end).length;
       seg.eventCount = evCount;
-      seg.label = evCount === 1
-        ? `Работа в CRM · ${seg.durationMin} мин · 1 событие`
-        : `Работа в CRM · ${seg.durationMin} мин · ${evCount} событий`;
+      // Format: «Работа в CRM · 09:30–09:45 · 12 событий».
+      // Time range is more useful than "X мин" alone — user immediately sees
+      // when the session was, plus the visible bar already conveys length.
+      // Event count is the user's selected types only (filtered above), so
+      // matches the dropdown selection.
+      const startHm = fmtSegmentTime(window.startLocal, cursor);
+      const endHm = fmtSegmentTime(window.startLocal, end);
+      const evWord = evCount === 1 ? "событие" : evCount < 5 ? "события" : "событий";
+      seg.label = `Работа в CRM · ${startHm}–${endHm} · ${evCount} ${evWord}`;
     } else {
       seg.label = `Простой · ${seg.durationMin} мин`;
     }

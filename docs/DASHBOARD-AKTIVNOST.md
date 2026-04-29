@@ -114,19 +114,34 @@ of: call (blue), crm (green), idle (grey).
   over-counting a barrage of <60s calls. A call running 19:55→20:30
   contributes 5 minutes (clipped at shift end).
 
-**CRM minutes (green):**
-- Each event = 1 minute mark. Multiple events in the same minute
-  collapse to one mark (no over-count).
-- Adjacent green minutes within `CRM_CLUSTER_GAP_MIN=2` are merged
-  into a single readable stripe.
+**CRM minutes (green) — session model (2026-04-29):**
+
+Earlier model used a 2-minute cluster gap which under-counted real focused
+work by 3-5x: managers filling cards / clearing tasks fire events every
+4-7 min, exceeding the gap, so 30 min of work showed as 6 min of green.
+
+Current rule:
+- Events whose minutes are within `SESSION_MAX_GAP_MIN=10` of each other
+  belong to the same session.
+- A session's stripe spans `firstEventMinute → lastEventMinute`, plus
+  `SESSION_TAIL_MIN=3` minutes of tail (manager doesn't drop the mouse the
+  millisecond after their last tracked action).
+- Calls dominate — session-fill never overwrites a call minute (`grid==2`).
 - Per-id `custom_field_<ID>_value_changed` events normalize to the
-  generic key via `normalizeEventType()` so one filter checkbox
-  covers all field changes.
-- `entity_linked` / `entity_unlinked` carry the actual entity scope
-  in `entity_type` column. The filter dropdown has separate
-  checkboxes for `lead_linked`, `contact_linked`, `company_linked`
-  etc.; render-time matching expands them to
-  `entity_linked WHERE entity_type='lead'` and so on.
+  generic key via `normalizeEventType()` so one filter checkbox covers
+  all field changes.
+- `entity_linked` / `entity_unlinked` carry the actual entity scope in
+  the `entity_type` column. The filter dropdown has separate checkboxes
+  for `lead_linked`, `contact_linked`, `company_linked` etc.; render-time
+  matching expands them to `entity_linked WHERE entity_type='lead'` and
+  so on.
+
+Example: events at 12:00, 12:05, 12:10, 12:15, 12:20, 12:25 (gaps all 5 min,
+all ≤10). One session 12:00→12:25, plus 3-min tail = green stripe 12:00→12:28
+(28 min). Tooltip: «Работа в CRM · 12:00–12:28 · 6 событий».
+
+Trade-off: an 8-min AFK between two clicks still counts as work. Acceptable
+— the alternative was 4x under-count.
 
 **Idle minutes (grey):**
 - `total - callMin - crmMin`, clamped to ≥0.
