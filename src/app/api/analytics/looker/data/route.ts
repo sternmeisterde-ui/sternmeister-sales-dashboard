@@ -298,6 +298,68 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
+    // ─── B2B SLA eligibility filter ───────────────────────────────────────
+    // For Коммерция (b2b) SLA must be computed only on real prospects:
+    //   1) at first_call + 2h the lead is still in {Бух Комм, Мед Комм}
+    //      (skips leads that fell out of the funnel quickly), and
+    //   2) the lead is NOT closed-not-realized (Closed - lost / Закрыто и не
+    //      реализовано) with loss_reason ∈ {Неквал лид, Спам, Предложение
+    //      сотрудничества}.
+    // The +2h state comes from analytics.lead_status_changes (mirrored Kommo
+    // history). loss_reason is taken from the current leads_cohort snapshot
+    // since the integrator doesn't mirror loss_reason history. Calls /
+    // messages / counts are NOT filtered — that data is shared with other
+    // tabs and must stay intact (per user spec). The gate only suppresses
+    // the call-pair from the SLA AVG; the lead row itself is still counted.
+    //
+    // For B2G this CTE is omitted and the SLA gate is empty (legacy behaviour).
+    const isB2B = dept === "b2b";
+    const B2B_BAD_LOSS_REASONS = ["Неквал лид", "Спам", "Предложение сотрудничества"];
+    const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
+    const B2B_CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
+    const slaEligibilityCte = isB2B
+      ? `,
+      sla_eligibility AS (
+        SELECT
+          fl.lead_id,
+          COALESCE(sc.pipeline, lc_full.pipeline)             AS pipeline_at_plus2h,
+          COALESCE(sc.status,   lc_full.status)               AS status_at_plus2h,
+          lc_full.loss_reason                                  AS current_loss_reason
+        FROM filtered_leads fl
+        JOIN analytics.sla s          ON s.lead_id = fl.lead_id
+        JOIN analytics.leads_cohort lc_full ON lc_full.lead_id = fl.lead_id
+        LEFT JOIN LATERAL (
+          SELECT pipeline, status
+          FROM analytics.lead_status_changes lsc
+          WHERE lsc.lead_id = fl.lead_id
+            AND lsc.event_at <= s.first_call_out_at + INTERVAL '2 hours'
+          ORDER BY lsc.event_at DESC
+          LIMIT 1
+        ) sc ON TRUE
+        WHERE s.first_call_out_at IS NOT NULL
+      )
+    `
+      : "";
+    const slaEligibilityJoin = isB2B
+      ? `LEFT JOIN sla_eligibility sle ON sle.lead_id = fl.lead_id`
+      : "";
+    // SQL fragment usable inside an existing WHERE/CASE WHEN — leading "AND".
+    // current_loss_reason is checked with IS NOT NULL up-front because PG's
+    // 3-valued logic would otherwise turn `NULL IN (...)` → NULL → drag the
+    // outer NOT into NULL → fail the WHEN clause. We want closed-lost rows
+    // with NO reason set to stay eligible (manager just hasn't categorised
+    // yet), only the explicit bad reasons should kick a lead out.
+    const slaEligibilityCondition = isB2B
+      ? `
+          AND sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
+          AND NOT (
+            sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+            AND sle.current_loss_reason IS NOT NULL
+            AND sle.current_loss_reason IN (${B2B_BAD_LOSS_REASONS.map((r) => `'${esc(r)}'`).join(", ")})
+          )
+        `
+      : "";
+
     // Looker cohort views aggregate calls PER LEAD via JOIN on lead_id.
     // Post enrich-telephony-leads (2026-04-28) telephony rows are fanned out
     // to one row per linked lead via Kommo phone→contact resolution, so they
@@ -354,10 +416,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       //   2. master_managers.shift_start_time (manager's default)
       //   3. 9 (fallback)
       // Both SLA columns exclude leads without an outgoing call.
+      //
+      // For dept=b2b, SLA averaging is gated by sla_eligibility (see CTE
+      // above): a lead-call pair must be in {Бух Комм, Мед Комм} at +2h and
+      // not closed-as-junk to count toward SLA. lead_count / outgoing_calls /
+      // messages / success_pct intentionally stay unfiltered — they reflect
+      // the same cohort the rest of the dashboard sees.
       mainQuery = `
         WITH ${filteredLeadsCte},
         ${commAggCte},
-        ${scheduleOverridesCte}
+        ${scheduleOverridesCte}${slaEligibilityCte}
         SELECT
           fl.manager,
           COUNT(fl.lead_id) AS lead_count,
@@ -370,11 +438,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           ROUND(COALESCE(SUM(ca.total_calls), 0)::numeric / NULLIF(COUNT(fl.lead_id), 0), 2) AS avg_calls_per_lead,
           ROUND(AVG(
             CASE WHEN s.first_call_out_at IS NOT NULL AND s.first_call_out_at > s.sla_start
+                  ${slaEligibilityCondition}
                  THEN EXTRACT(EPOCH FROM (s.first_call_out_at - s.sla_start))
             END
           )) AS avg_sla_lead_to_call_sec,
           ROUND(AVG(
             CASE WHEN s.first_call_out_at IS NOT NULL
+                  ${slaEligibilityCondition}
                  THEN GREATEST(0, EXTRACT(EPOCH FROM (
                    s.first_call_out_at
                    - GREATEST(
@@ -384,10 +454,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
                  )))
             END
           )) AS avg_sla_from_shift_sec,
-          COUNT(s.first_call_out_at) AS sla_lead_count
+          COUNT(*) FILTER (
+            WHERE s.first_call_out_at IS NOT NULL ${slaEligibilityCondition}
+          ) AS sla_lead_count
         FROM filtered_leads fl
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        ${slaEligibilityJoin}
         LEFT JOIN schedule_overrides so
           ON so.manager_name = fl.manager
          AND so.schedule_date = s.sla_start::date
@@ -478,9 +551,26 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           { status: 400 },
         );
       }
+      // For B2B, surface a per-lead `is_sla_eligible` flag so the user can
+      // see which leads are counted toward the cohort SLA average and which
+      // were filtered out. The lead row itself is still shown — only the SLA
+      // numbers are blanked when ineligible.
+      const eligibilityFlagExpr = isB2B
+        ? `CASE
+             WHEN s.first_call_out_at IS NULL THEN NULL
+             WHEN sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
+              AND NOT (
+                sle.status_at_plus2h IN (${B2B_CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
+                AND sle.current_loss_reason IS NOT NULL
+                AND sle.current_loss_reason IN (${B2B_BAD_LOSS_REASONS.map((r) => `'${esc(r)}'`).join(", ")})
+              )
+             THEN TRUE
+             ELSE FALSE
+           END`
+        : `TRUE`;
       mainQuery = `
         WITH ${filteredLeadsCte},
-        ${commAggCte}
+        ${commAggCte}${slaEligibilityCte}
         SELECT
           fl.lead_id,
           fl.created_at AS lead_created_at,
@@ -494,10 +584,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           COALESCE(ca.success_calls, 0) AS success_calls,
           COALESCE(ca.outgoing_calls, 0) AS outgoing_calls,
           COALESCE(ca.messages_sent, 0) AS messages_sent,
-          ca.avg_duration_sec
+          ca.avg_duration_sec,
+          ${eligibilityFlagExpr} AS is_sla_eligible
         FROM filtered_leads fl
         LEFT JOIN comm_agg ca ON ca.lead_id = fl.lead_id
         LEFT JOIN analytics.sla s ON s.lead_id = fl.lead_id
+        ${slaEligibilityJoin}
         ORDER BY
           -- worst SLA first (NULL = no call yet, also worth showing — push to bottom)
           s.sla_first_call_seconds DESC NULLS LAST,
