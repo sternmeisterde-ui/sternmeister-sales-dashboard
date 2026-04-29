@@ -1411,8 +1411,16 @@ export default function LookerTab({ department }: LookerTabProps) {
         <div className="flex flex-wrap gap-2 items-center">
           <CalendarPicker
             mode="range"
+            allowModeToggle
             value={dateRange}
-            onChange={(r) => { setDateRange(r); setTltPage(0); }}
+            onChange={(r) => {
+              if (!r.start) return;
+              // Single-day mode returns end=null; collapse to a 1-day range so
+              // the API gets to=from. Mirrors DashboardTab behaviour.
+              const end = r.end ?? r.start;
+              setDateRange({ start: r.start, end });
+              setTltPage(0);
+            }}
             onClear={() => { setDateRange(makeDefaultRange()); setTltPage(0); }}
             minDate={minDate}
             maxDate={maxDate}
