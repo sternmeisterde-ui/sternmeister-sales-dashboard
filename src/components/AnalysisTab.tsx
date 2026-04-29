@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 
 // Re-flow Grok summaries that emitted markdown tables on a single line
 // (rows separated only by `| |`, no newlines). Without this even GFM can't
@@ -372,7 +373,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                       <div className="mt-2 space-y-3">
                         <div className="text-[11px] uppercase tracking-widest text-blue-400 font-bold">Сводный анализ</div>
                         <div className="max-h-[700px] overflow-y-auto space-y-3">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={{
                             h1: ({ children }) => (
                               <div className="p-4 bg-blue-500/10 rounded-xl border border-blue-500/20 mt-6 mb-4">
                                 <h2 className="text-[16px] font-bold text-blue-300">{children}</h2>
