@@ -92,14 +92,120 @@ async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 interface KommoLead { id: number; name: string; responsible_user_id: number; status_id: number; pipeline_id: number }
 interface KommoNote { id: number; note_type: string; params: { duration?: number; link?: string }; created_at: number; responsible_user_id: number }
 
-async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
+/**
+ * Translates Kommo *frontend* URL params into Kommo *API v4* filter params.
+ *
+ * The frontend uses a different filter syntax than the public API. Pasting
+ * a frontend URL straight into /api/v4/leads silently ignores everything
+ * (params it doesn't recognize) and returns every lead in the account up to
+ * the pagination cap — that's why the pipeline used to scan ~5000 deals
+ * even when the Kommo UI showed 596.
+ *
+ * Mappings handled here:
+ *   • `filter[pipe][PIPELINE_ID][]=STATUS_ID` (one or many)
+ *       → `filter[statuses][N][pipeline_id]=PIPELINE_ID`
+ *         `filter[statuses][N][status_id]=STATUS_ID`
+ *   • `filter[cf][FIELD_ID][]=ENUM_ID` (one or many per field)
+ *       → `filter[custom_fields_values][FIELD_ID][values][N][enum_id]=ENUM_ID`
+ *   • `filter_date_switch=closed|created|updated` + `filter_date_from=DD.MM.YYYY`
+ *     + `filter_date_to=DD.MM.YYYY`
+ *       → `filter[<api_field>][from]=<unix>` + `filter[<api_field>][to]=<unix>`
+ *   • path `/pipeline/<PIPELINE_ID>/` as fallback when no status filter is set
+ *       → `filter[pipeline_id]=PIPELINE_ID`
+ *
+ * Any frontend params we don't recognise are dropped — narrowing the result
+ * is always safer than passing unrecognised filters and getting an over-wide
+ * dataset back. Things like `useFilter=y` are decorative and intentionally
+ * ignored. Returns the full search-string (without leading `?`).
+ */
+function buildLeadsApiQuery(kommoUrl: string): string {
   const parsed = new URL(kommoUrl);
   if (parsed.hostname !== KOMMO.host) throw new Error("Invalid Kommo URL domain");
-  const filterParams = parsed.search;
+
+  const fp = parsed.searchParams;
+  const out = new URLSearchParams();
+
+  // 1. Status pairs from filter[pipe][PID][]=SID
+  const PIPE_RE = /^filter\[pipe\]\[(\d+)\]\[\]$/;
+  let statusIdx = 0;
+  let hasStatusFilter = false;
+  for (const [key, value] of fp.entries()) {
+    const m = key.match(PIPE_RE);
+    if (!m) continue;
+    out.append(`filter[statuses][${statusIdx}][pipeline_id]`, m[1]);
+    out.append(`filter[statuses][${statusIdx}][status_id]`, value);
+    statusIdx++;
+    hasStatusFilter = true;
+  }
+
+  // 1b. Pipeline-only fallback from URL path. If the user filtered just by
+  // pipeline tab without picking a status, use the path pipeline so we don't
+  // pull leads from other pipelines. When statuses are present they already
+  // pin a pipeline, so we skip this branch then.
+  if (!hasStatusFilter) {
+    const pathPipeline = parsed.pathname.match(/\/pipeline\/(\d+)/)?.[1];
+    if (pathPipeline) out.set("filter[pipeline_id]", pathPipeline);
+  }
+
+  // 2. Date filter
+  const dateSwitch = fp.get("filter_date_switch");
+  const dateFrom = fp.get("filter_date_from");
+  const dateTo = fp.get("filter_date_to");
+  if (dateSwitch && dateFrom && dateTo) {
+    const apiField = dateSwitch === "closed" ? "closed_at"
+      : dateSwitch === "created" ? "created_at"
+      : dateSwitch === "updated" ? "updated_at"
+      : null;
+    const fromTs = parseRuDate(dateFrom, false);
+    const toTs = parseRuDate(dateTo, true);
+    if (apiField && fromTs !== null && toTs !== null) {
+      out.set(`filter[${apiField}][from]`, String(fromTs));
+      out.set(`filter[${apiField}][to]`, String(toTs));
+    }
+  }
+
+  // 3. Custom-field enum filters — group by field, index by position per field.
+  const CF_RE = /^filter\[cf\]\[(\d+)\]\[\]$/;
+  const cfByField = new Map<string, string[]>();
+  for (const [key, value] of fp.entries()) {
+    const m = key.match(CF_RE);
+    if (!m) continue;
+    const fieldId = m[1];
+    if (!cfByField.has(fieldId)) cfByField.set(fieldId, []);
+    cfByField.get(fieldId)!.push(value);
+  }
+  for (const [fieldId, enumIds] of cfByField) {
+    enumIds.forEach((enumId, i) => {
+      out.append(
+        `filter[custom_fields_values][${fieldId}][values][${i}][enum_id]`,
+        enumId,
+      );
+    });
+  }
+
+  return out.toString();
+}
+
+function parseRuDate(s: string, endOfDay: boolean): number | null {
+  // Accepts DD.MM.YYYY (Kommo frontend default). Returns Unix seconds at UTC.
+  // Account-level TZ drift (Kommo accounts are typically Europe/Berlin or
+  // Europe/Moscow) shifts the boundary by a few hours, but for "find calls
+  // in this date range" purposes that's fine — far better than fetching all
+  // leads in the account because the filter was untranslated.
+  const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (!m) return null;
+  const [, dd, mm, yyyy] = m;
+  const time = endOfDay ? "23:59:59Z" : "00:00:00Z";
+  const ts = Date.parse(`${yyyy}-${mm}-${dd}T${time}`);
+  return Number.isFinite(ts) ? Math.floor(ts / 1000) : null;
+}
+
+async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
+  const apiQuery = buildLeadsApiQuery(kommoUrl);
 
   const allLeads: KommoLead[] = [];
   for (let page = 1; page <= 20; page++) {
-    const apiUrl = `/leads?${filterParams.substring(1)}&limit=250&page=${page}`;
+    const apiUrl = `/leads?${apiQuery}&limit=250&page=${page}`;
     const data = await kommoFetchPath(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
     if (!data?._embedded?.leads?.length) break;
     allLeads.push(...data._embedded.leads);
