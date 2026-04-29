@@ -5,7 +5,7 @@ import { masterManagers, d1Users, r1Users } from "@/lib/db/schema-existing";
 import { getDbForDepartment } from "@/lib/db/index";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkManagers, okkCalls } from "@/lib/db/schema-okk";
-import { eq, and, notInArray, desc, sql, or, inArray } from "drizzle-orm";
+import { eq, and, ne, notInArray, desc, sql, or, inArray } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
 import { getUsers as getKommoUsers } from "@/lib/kommo/client";
 import { getEmployees as getCallGearEmployees } from "@/lib/telephony/callgear";
@@ -45,10 +45,18 @@ export async function GET(request: NextRequest) {
       console.warn("[Managers API GET] pull-from-okk failed (non-fatal):", err);
     });
 
+    // Admins are intentionally excluded from the Managers tab — the bot
+    // grants them access via role='admin' rows in d1_users/r1_users that are
+    // not mirrored into master_managers, so the bulk save flow must never
+    // touch them. Keeping them off the list also prevents accidental edits.
     const rows = await db
       .select()
       .from(masterManagers)
-      .where(and(eq(masterManagers.department, dept), eq(masterManagers.isActive, true)))
+      .where(and(
+        eq(masterManagers.department, dept),
+        eq(masterManagers.isActive, true),
+        ne(masterManagers.role, "admin"),
+      ))
       .orderBy(masterManagers.name);
 
     return NextResponse.json({ success: true, data: rows });
@@ -721,23 +729,34 @@ async function softDeleteFromTargets(
   const roleplayDb = getDbForDepartment(department);
   const usersTable = department === "b2g" ? d1Users : r1Users;
 
-  // Soft-delete from OKK (preserve call history)
+  // Soft-delete from OKK (preserve call history). Admins are shielded —
+  // they live in target tables but never in master_managers, so the cleanup
+  // must not deactivate them. okkManagers.role is nullable, so use
+  // IS DISTINCT FROM to also catch rows whose role hasn't been set.
   try {
     await okkDb
       .update(okkManagers)
       .set({ isActive: false })
-      .where(and(eq(okkManagers.name, name), eq(okkManagers.department, okkDept)));
+      .where(and(
+        eq(okkManagers.name, name),
+        eq(okkManagers.department, okkDept),
+        sql`${okkManagers.role} IS DISTINCT FROM 'admin'`,
+      ));
   } catch (err) {
     warnings.push(`OKK delete failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // Soft-delete from roleplay (may have call history via foreign key)
+  // Soft-delete from roleplay (may have call history via foreign key).
+  // d1Users/r1Users.role is NOT NULL — plain ne() is enough.
   if (telegramId) {
     try {
       await roleplayDb
         .update(usersTable)
         .set({ isActive: false, updatedAt: new Date() })
-        .where(eq(usersTable.telegramId, telegramId));
+        .where(and(
+          eq(usersTable.telegramId, telegramId),
+          ne(usersTable.role, "admin"),
+        ));
     } catch (err) {
       warnings.push(`Roleplay delete failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -809,11 +828,15 @@ async function deactivateOrphans(
         allowedKommoUserIds.length > 0;
 
       if (!hasAnyAllowed) {
-        // No active masters for this dept — deactivate everything
+        // No active masters for this dept — deactivate everything except admins.
         await okkDb
           .update(okkManagers)
           .set({ isActive: false })
-          .where(and(eq(okkManagers.department, okkDept), eq(okkManagers.isActive, true)));
+          .where(and(
+            eq(okkManagers.department, okkDept),
+            eq(okkManagers.isActive, true),
+            sql`${okkManagers.role} IS DISTINCT FROM 'admin'`,
+          ));
         continue;
       }
 
@@ -841,6 +864,8 @@ async function deactivateOrphans(
             eq(okkManagers.department, okkDept),
             eq(okkManagers.isActive, true),
             sql`NOT (${isAllowed})`,
+            // Admins live outside master_managers by design — never deactivate them.
+            sql`${okkManagers.role} IS DISTINCT FROM 'admin'`,
           ),
         );
     } catch (err) {
@@ -866,6 +891,9 @@ async function deactivateOrphans(
             and(
               eq(table.isActive, true),
               notInArray(table.telegramId, allowedTelegramIds),
+              // Admins (Aliia, Sasha) live in d1_users/r1_users without a
+              // matching master_managers row — keep them active.
+              ne(table.role, "admin"),
             )
           );
       } else {
