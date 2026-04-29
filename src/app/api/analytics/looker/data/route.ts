@@ -307,7 +307,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     // ─── SLA eligibility filter (per-dept) ────────────────────────────────
     // The cohort SLA AVG drops lead-call pairs that don't represent a "real
-    // prospect" — managers shouldn't be penalised on SLA for spam/unqualified
+    // prospect" — managers shouldn't be penalised on SLA for closed/idle
     // leads. Lead row itself is still counted everywhere else; only the SLA
     // AVG column is gated.
     //
@@ -320,16 +320,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     //   into leads_cohort.b2b_close_reason_enum_id.
     //
     // B2G (Госники):
-    //   Pipeline = Бух Гос (Квалификатер / first line) OR Бух Бератер
-    //   (Доведение / second line, when filtered to that pipeline). For both
-    //   exclude closed-not-realized with reason ∈ {Неквал лид, Неправильный
-    //   номер}. Reason source: custom field 879824 «Причина закрытия Госники»,
-    //   mirrored into leads_cohort.non_qual_enum_id.
-    //
-    //   Note: Бух Бератер metric should additionally exclude leads that
-    //   bypassed first line and went straight to second (B2/C1 German level,
-    //   immediate AA termin). That gate isn't wired yet — the underlying
-    //   custom fields aren't synced.
+    //   Whitelist by current_status — matches the integrator's
+    //   `report_sternmeister_custom_report`/`SLA первого звонка` metric
+    //   exactly. Status sets verified empirically by direct probe of their
+    //   MySQL feed (45.156.25.84/db). Closed-not-realized + idle (База /
+    //   Отложенный старт) + transferred-to-second-line (Термин ДЦ for Бух
+    //   Гос) are dropped. For Бух Бератер the «immediate transfer» exclusion
+    //   the user mentioned (B2/C1 German level, immediate AA termin) lands
+    //   inside the whitelist — those leads typically end up in Доведение /
+    //   Консультация перед термином АА, which we keep, but we don't have a
+    //   way to distinguish «came from Бух Гос» vs «landed straight here»
+    //   without syncing extra CFs.
     //
     // The +2h state comes from analytics.lead_status_changes. Calls /
     // messages / counts are NOT filtered — that data is shared with other
@@ -342,18 +343,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     //   740587 Неквал лид · 740593 Спам · 740595 Предложение сотрудничества
     const B2B_BAD_CLOSE_ENUM_IDS = [740587, 740593, 740595];
     const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
-    // CF 879824 enum_ids (Причина закрытия Госники).
-    // Per user spec «все кто имеют что-то неквал»: every Неквал* variant
-    // plus Неправильный номер counts as a bad reason.
-    //   744486 Неправильный номер
-    //   744876 Неквал лид
-    //   747530 Неквал Доход · 747532 Неквал Образование
-    //   747534 Неквал Возраст · 747536 Неквал Язык
-    //   750386 Неквал АГЕНТ
-    const B2G_BAD_NON_QUAL_ENUM_IDS = [
-      744486, 744876, 747530, 747532, 747534, 747536, 750386,
-    ];
     const CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
+    // Status whitelists — verified from integrator's custom_report SLA metric.
+    // Pipeline filter is enforced separately via `lc.pipeline IN (...)` in
+    // baseWhere; the whitelist narrows further to «still in active flow».
+    const B2G_KVALIFIKATOR_STATUSES = [
+      "Недозвон",
+      "Документы отправлены в ДЦ",
+      "Контакт установлен",
+      "Консультация проведена",
+      "Принимает решение",
+      "Новый лид",
+      "Взято в работу",
+    ];
+    const B2G_DOVEDENIE_STATUSES = [
+      "Доведение",
+      "Консультация перед термином ДЦ",
+      "Консультация перед термином АА",
+      "Термин ДЦ состоялся",
+      "Термин ДЦ отменен/перенесен",
+      "Консультация перед термином ДЦ проведена",
+      "На рассмотрении бератера",
+      "Консультация перед термином АА проведена",
+      "Термин АА отменен/перенесен",
+      "Гутшайн одобрен",
+    ];
     const slaEligibilityCte = needSlaEligibility
       ? `,
       sla_eligibility AS (
@@ -383,9 +397,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ? `LEFT JOIN sla_eligibility sle ON sle.lead_id = fl.lead_id`
       : "";
     // SQL fragment usable inside an existing WHERE/CASE WHEN — leading "AND".
-    // Drops the lead-call pair only when (closed-lost AND reason in junk set).
-    // NULL reason fields are treated as «not junk» → kept, matching user's
-    // «за исключением сделок закрытых с тематикой …» semantics.
+    // B2B: drop closed-lost+bad-reason. B2G: whitelist of «active» statuses
+    // (per-pipeline) that matches integrator's custom_report metric exactly.
+    //
+    // For B2G the user can request a single pipeline via `?pipeline=…`. When
+    // they do, restrict to that pipeline's whitelist. When they don't (= dept
+    // total), allow either whitelist — leads in Бух Гос flow stay valid via
+    // the Квалификатер list, leads already in Бух Бератер via the Доведение
+    // list.
+    const isBeraterOnly = isB2G && pipelineParam === "Бух Бератер";
+    const isGosOnly     = isB2G && pipelineParam === "Бух Гос";
+    const b2gWhitelist = isBeraterOnly
+      ? B2G_DOVEDENIE_STATUSES
+      : isGosOnly
+        ? B2G_KVALIFIKATOR_STATUSES
+        : [...B2G_KVALIFIKATOR_STATUSES, ...B2G_DOVEDENIE_STATUSES];
     const slaEligibilityCondition = isB2B
       ? `
           AND sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
@@ -396,10 +422,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         `
       : isB2G
         ? `
-          AND NOT (
-            sle.current_status IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-            AND sle.non_qual_enum_id IN (${B2G_BAD_NON_QUAL_ENUM_IDS.join(", ")})
-          )
+          AND sle.current_status IN (${b2gWhitelist.map((s) => `'${esc(s)}'`).join(", ")})
         `
         : "";
 
@@ -624,10 +647,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         : isB2G
           ? `CASE
                WHEN s.first_call_out_at IS NULL THEN NULL
-               WHEN NOT (
-                 sle.current_status IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-                 AND sle.non_qual_enum_id IN (${B2G_BAD_NON_QUAL_ENUM_IDS.join(", ")})
-               )
+               WHEN sle.current_status IN (${b2gWhitelist.map((s) => `'${esc(s)}'`).join(", ")})
                THEN TRUE
                ELSE FALSE
              END`
