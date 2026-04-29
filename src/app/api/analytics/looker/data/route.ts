@@ -305,90 +305,62 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       )
     `;
 
-    // ─── SLA eligibility filter (per-dept) ────────────────────────────────
-    // The cohort SLA AVG drops lead-call pairs that don't represent a "real
-    // prospect" — managers shouldn't be penalised on SLA for closed/idle
-    // leads. Lead row itself is still counted everywhere else; only the SLA
-    // AVG column is gated.
+    // ─── SLA eligibility filter (per-pipeline) ────────────────────────────
+    // Goal: replicate the integrator's `report_sternmeister_custom_report` /
+    // `SLA первого звонка` metric exactly so we can drop the dependency on
+    // their feed. Whitelists below were derived empirically by probing
+    // 45.156.25.84/db (June 2025–April 2026 window):
     //
-    // B2B (Коммерция):
-    //   1) at first_call + 2h the lead must still be in {Бух Комм, Мед Комм},
-    //   2) NOT closed-not-realized at +2h with reason ∈
-    //      {Неквал лид, Спам, Предложение сотрудничества}.
-    //   Reason source: custom field 876383 «Причины закрытия (Обязательное
-    //   поле)» (Kommo enforces it as required at status_id=143). Mirrored
-    //   into leads_cohort.b2b_close_reason_enum_id.
+    //   pipeline=Бух Гос      → 8 statuses (Квалификатер; closed-lost / Term
+    //                           ДЦ / Отложенный старт excluded)
+    //   pipeline=Бух Бератер  → 9 statuses (Доведение; closed-lost / Гутшайн
+    //                           / Апелляция / Отложенный старт excluded)
+    //   pipeline=Бух Комм     → ALL statuses (integrator includes everything)
+    //   pipeline=Мед Гос      → 2 statuses (very small cohort)
+    //   pipeline=Мед Комм     → integrator has 0 rows; we treat as Бух Комм
+    //                           (include all) as a sensible default
     //
-    // B2G (Госники):
-    //   Whitelist by current_status — matches the integrator's
-    //   `report_sternmeister_custom_report`/`SLA первого звонка` metric
-    //   exactly. Status sets verified empirically by direct probe of their
-    //   MySQL feed (45.156.25.84/db). Closed-not-realized + idle (База /
-    //   Отложенный старт) + transferred-to-second-line (Термин ДЦ for Бух
-    //   Гос) are dropped. For Бух Бератер the «immediate transfer» exclusion
-    //   the user mentioned (B2/C1 German level, immediate AA termin) lands
-    //   inside the whitelist — those leads typically end up in Доведение /
-    //   Консультация перед термином АА, which we keep, but we don't have a
-    //   way to distinguish «came from Бух Гос» vs «landed straight here»
-    //   without syncing extra CFs.
-    //
-    // The +2h state comes from analytics.lead_status_changes. Calls /
-    // messages / counts are NOT filtered — that data is shared with other
-    // tabs. The gate only suppresses the call-pair from the SLA AVG; the
-    // lead row itself is still counted.
+    // Status check uses leads_cohort.status (CURRENT status). Drift can occur
+    // if a lead's status moves between integrator's snapshot time and our
+    // sync — addressable by gating on lead_status_changes at first_call_at.
     const isB2B = dept === "b2b";
     const isB2G = dept === "b2g";
     const needSlaEligibility = isB2B || isB2G;
-    // CF 876383 enum_ids:
-    //   740587 Неквал лид · 740593 Спам · 740595 Предложение сотрудничества
-    const B2B_BAD_CLOSE_ENUM_IDS = [740587, 740593, 740595];
-    const B2B_PIPELINES_AT_2H = ["Бух Комм", "Мед Комм"];
-    const CLOSED_LOST_STATUSES = ["Closed - lost", "Закрыто и не реализовано"];
-    // Status whitelists — verified from integrator's custom_report SLA metric.
-    // Pipeline filter is enforced separately via `lc.pipeline IN (...)` in
-    // baseWhere; the whitelist narrows further to «still in active flow».
     const B2G_KVALIFIKATOR_STATUSES = [
       "Недозвон",
       "Документы отправлены в ДЦ",
       "Контакт установлен",
       "Консультация проведена",
+      "База",
       "Принимает решение",
       "Новый лид",
       "Взято в работу",
     ];
     const B2G_DOVEDENIE_STATUSES = [
       "Доведение",
-      "Консультация перед термином ДЦ",
-      "Консультация перед термином АА",
       "Термин ДЦ состоялся",
+      "Консультация перед термином ДЦ",
       "Термин ДЦ отменен/перенесен",
+      "Консультация перед термином АА",
       "Консультация перед термином ДЦ проведена",
       "На рассмотрении бератера",
       "Консультация перед термином АА проведена",
       "Термин АА отменен/перенесен",
-      "Гутшайн одобрен",
+    ];
+    const B2G_MED_STATUSES = [
+      "Закрыто и не реализовано",
+      "Консультация проведена",
     ];
     const slaEligibilityCte = needSlaEligibility
       ? `,
       sla_eligibility AS (
         SELECT
           fl.lead_id,
-          COALESCE(sc.pipeline, lc_full.pipeline) AS pipeline_at_plus2h,
-          COALESCE(sc.status,   lc_full.status)   AS status_at_plus2h,
-          lc_full.status                          AS current_status,
-          lc_full.b2b_close_reason_enum_id        AS close_reason_enum_id,
-          lc_full.non_qual_enum_id                AS non_qual_enum_id
+          lc_full.status   AS current_status,
+          lc_full.pipeline AS current_pipeline
         FROM filtered_leads fl
         JOIN analytics.sla s          ON s.lead_id = fl.lead_id
         JOIN analytics.leads_cohort lc_full ON lc_full.lead_id = fl.lead_id
-        LEFT JOIN LATERAL (
-          SELECT pipeline, status
-          FROM analytics.lead_status_changes lsc
-          WHERE lsc.lead_id = fl.lead_id
-            AND lsc.event_at <= s.first_call_out_at + INTERVAL '2 hours'
-          ORDER BY lsc.event_at DESC
-          LIMIT 1
-        ) sc ON TRUE
         WHERE s.first_call_out_at IS NOT NULL
       )
     `
@@ -396,35 +368,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const slaEligibilityJoin = needSlaEligibility
       ? `LEFT JOIN sla_eligibility sle ON sle.lead_id = fl.lead_id`
       : "";
-    // SQL fragment usable inside an existing WHERE/CASE WHEN — leading "AND".
-    // B2B: drop closed-lost+bad-reason. B2G: whitelist of «active» statuses
-    // (per-pipeline) that matches integrator's custom_report metric exactly.
-    //
-    // For B2G the user can request a single pipeline via `?pipeline=…`. When
-    // they do, restrict to that pipeline's whitelist. When they don't (= dept
-    // total), allow either whitelist — leads in Бух Гос flow stay valid via
-    // the Квалификатер list, leads already in Бух Бератер via the Доведение
-    // list.
-    const isBeraterOnly = isB2G && pipelineParam === "Бух Бератер";
-    const isGosOnly     = isB2G && pipelineParam === "Бух Гос";
-    const b2gWhitelist = isBeraterOnly
-      ? B2G_DOVEDENIE_STATUSES
-      : isGosOnly
-        ? B2G_KVALIFIKATOR_STATUSES
-        : [...B2G_KVALIFIKATOR_STATUSES, ...B2G_DOVEDENIE_STATUSES];
-    const slaEligibilityCondition = isB2B
-      ? `
-          AND sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
-          AND NOT (
-            sle.status_at_plus2h IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-            AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
-          )
-        `
-      : isB2G
-        ? `
-          AND sle.current_status IN (${b2gWhitelist.map((s) => `'${esc(s)}'`).join(", ")})
-        `
-        : "";
+    // Per-pipeline whitelist matched 1:1 to integrator's metric. The
+    // pipeline param can pin to a single pipeline; otherwise we union all
+    // dept pipelines' whitelists. Бух Комм / Мед Комм return TRUE always
+    // (integrator includes ALL statuses there, no filter).
+    const slaEligibilityCondition = (() => {
+      if (!needSlaEligibility) return "";
+      // For each pipeline in scope, build a "pipeline=X AND (whitelist OR all)" branch.
+      const branches: string[] = [];
+      const pipelinesInScope = pipelineParam && (isB2B || isB2G)
+        ? [pipelineParam]
+        : isB2B
+          ? ["Бух Комм", "Мед Комм"]
+          : ["Бух Гос", "Бух Бератер"];
+      for (const p of pipelinesInScope) {
+        let wl: string[] | null = null;
+        if (p === "Бух Гос") wl = B2G_KVALIFIKATOR_STATUSES;
+        else if (p === "Бух Бератер") wl = B2G_DOVEDENIE_STATUSES;
+        else if (p === "Мед Гос") wl = B2G_MED_STATUSES;
+        // Бух Комм / Мед Комм: wl stays null → match-all
+        if (wl === null) {
+          branches.push(`(sle.current_pipeline = '${esc(p)}')`);
+        } else {
+          const list = wl.map((s) => `'${esc(s)}'`).join(", ");
+          branches.push(`(sle.current_pipeline = '${esc(p)}' AND sle.current_status IN (${list}))`);
+        }
+      }
+      return `AND (${branches.join(" OR ")})`;
+    })();
 
     // Looker cohort views aggregate calls PER LEAD via JOIN on lead_id.
     // Post enrich-telephony-leads (2026-04-28) telephony rows are fanned out
@@ -633,25 +604,35 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       // see which leads are counted toward the cohort SLA average and which
       // were filtered out. The lead row itself is still shown — only the SLA
       // numbers are blanked when ineligible.
-      const eligibilityFlagExpr = isB2B
-        ? `CASE
-             WHEN s.first_call_out_at IS NULL THEN NULL
-             WHEN sle.pipeline_at_plus2h IN (${B2B_PIPELINES_AT_2H.map((p) => `'${esc(p)}'`).join(", ")})
-              AND NOT (
-                sle.status_at_plus2h IN (${CLOSED_LOST_STATUSES.map((s) => `'${esc(s)}'`).join(", ")})
-                AND sle.close_reason_enum_id IN (${B2B_BAD_CLOSE_ENUM_IDS.join(", ")})
-              )
-             THEN TRUE
-             ELSE FALSE
-           END`
-        : isB2G
-          ? `CASE
+      // Same eligibility logic as the cohorts gate, but flipped from
+      // WHERE-fragment to a CASE expression that returns TRUE/FALSE per row.
+      const eligibilityFlagExpr = needSlaEligibility
+        ? (() => {
+            const branches: string[] = [];
+            const pipelinesInScope = pipelineParam && (isB2B || isB2G)
+              ? [pipelineParam]
+              : isB2B
+                ? ["Бух Комм", "Мед Комм"]
+                : ["Бух Гос", "Бух Бератер"];
+            for (const p of pipelinesInScope) {
+              let wl: string[] | null = null;
+              if (p === "Бух Гос") wl = B2G_KVALIFIKATOR_STATUSES;
+              else if (p === "Бух Бератер") wl = B2G_DOVEDENIE_STATUSES;
+              else if (p === "Мед Гос") wl = B2G_MED_STATUSES;
+              if (wl === null) {
+                branches.push(`(sle.current_pipeline = '${esc(p)}')`);
+              } else {
+                const list = wl.map((s) => `'${esc(s)}'`).join(", ");
+                branches.push(`(sle.current_pipeline = '${esc(p)}' AND sle.current_status IN (${list}))`);
+              }
+            }
+            return `CASE
                WHEN s.first_call_out_at IS NULL THEN NULL
-               WHEN sle.current_status IN (${b2gWhitelist.map((s) => `'${esc(s)}'`).join(", ")})
-               THEN TRUE
+               WHEN ${branches.join(" OR ")} THEN TRUE
                ELSE FALSE
-             END`
-          : `TRUE`;
+             END`;
+          })()
+        : `TRUE`;
       mainQuery = `
         WITH ${filteredLeadsCte},
         ${commAggCte}${slaEligibilityCte}
