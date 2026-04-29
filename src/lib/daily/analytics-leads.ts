@@ -144,6 +144,60 @@ async function fetchAnalyticsLeads(opts: AnalyticsLeadsFilter): Promise<KommoLea
   return result;
 }
 
+export interface AnalyticsCohortStatusRow {
+  pipelineId: number;
+  pipelineName: string;
+  statusId: number;
+  statusName: string;
+  count: number;
+}
+
+/**
+ * Cohort status breakdown driven by analytics.leads_cohort directly: leads
+ * created in [from, to], grouped by (pipeline_id, status_id), returning the
+ * Kommo-side `pipeline` / `status` text columns the ETL already mirrors.
+ *
+ * Why this exists instead of fetching all rows + resolving names via the Kommo
+ * API: getPipelines() can fail or be missing entries (e.g. token rotated, new
+ * pipeline not yet present in Kommo cache), and the previous code path then
+ * fell back to the literal "Status 12345" string in the dashboard cohort
+ * table. Reading names from the same DB row that already carries status_id is
+ * always consistent and removes a network dependency.
+ */
+export async function getAnalyticsCohortStatusBreakdown(
+  pipelineIds: number[],
+  fromSec: number,
+  toSec: number,
+): Promise<AnalyticsCohortStatusRow[]> {
+  if (pipelineIds.length === 0) return [];
+  const cacheKey = `cohort-status:${pipelineIds.slice().sort((a, b) => a - b).join(",")}:${fromSec}:${toSec}`;
+  return cached(cacheKey, 60 * 1000, async () => {
+    const fromDate = new Date(fromSec * 1000);
+    const toDate = new Date(toSec * 1000);
+    const res = await (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<{
+      pipeline_id: number | string;
+      pipeline: string | null;
+      status_id: number | string;
+      status: string | null;
+      cnt: number | string;
+    }>(sql`
+      SELECT pipeline_id, pipeline, status_id, status, COUNT(*)::int AS cnt
+      FROM analytics.leads_cohort
+      WHERE pipeline_id IN (${sql.join(pipelineIds.map((p) => sql`${p}`), sql`, `)})
+        AND created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+      GROUP BY pipeline_id, pipeline, status_id, status
+    `);
+    return res.rows.map((r) => ({
+      pipelineId: Number(r.pipeline_id),
+      pipelineName: r.pipeline ?? `Pipeline ${r.pipeline_id}`,
+      statusId: Number(r.status_id),
+      statusName: r.status ?? `Status ${r.status_id}`,
+      count: Number(r.cnt),
+    }));
+  });
+}
+
 /**
  * analytics.leads_cohort equivalent of getStatusChangeCount() — counts leads
  * that ENTERED one of the given status_ids during the window.
