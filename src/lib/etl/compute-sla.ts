@@ -141,6 +141,48 @@ export async function computeSla(
     }
   }
 
+  // TLT (Time between Latest Touches): per-lead BH-difference between
+  // the two most recent call_out events made by the lead's responsible
+  // manager. NULL when the manager has fewer than 2 calls. Computed in
+  // SQL via window functions to avoid pulling all calls into JS.
+  //
+  // Manager match: communications.manager (= name string) === leads_cohort.manager.
+  // We don't filter by call_status / duration here — every call_out attempt
+  // counts as a "touch", matching the spec's «звонок».
+  const tltRes = await analyticsDb.execute<{
+    lead_id: number;
+    last_call: Date | null;
+    prev_call: Date | null;
+  }>(sql`
+    WITH ranked AS (
+      SELECT
+        c.lead_id,
+        c.created_at,
+        ROW_NUMBER() OVER (PARTITION BY c.lead_id ORDER BY c.created_at DESC) AS rn
+      FROM analytics.communications c
+      JOIN analytics.leads_cohort lc USING (lead_id)
+      WHERE c.lead_id IN (${sql.raw(leadIds.join(","))})
+        AND c.communication_type = 'call_out'
+        AND c.manager = lc.manager
+    )
+    SELECT
+      lead_id,
+      (MAX(created_at) FILTER (WHERE rn = 1)) AT TIME ZONE 'UTC' AS last_call,
+      (MAX(created_at) FILTER (WHERE rn = 2)) AT TIME ZONE 'UTC' AS prev_call
+    FROM ranked
+    WHERE rn <= 2
+    GROUP BY lead_id
+  `);
+  const tltByLead = new Map<number, { last: Date; prev: Date | null }>();
+  for (const row of tltRes.rows) {
+    if (row.last_call) {
+      tltByLead.set(Number(row.lead_id), {
+        last: new Date(row.last_call),
+        prev: row.prev_call ? new Date(row.prev_call) : null,
+      });
+    }
+  }
+
   // Fetch communication summaries for these leads.
   //
   // AT TIME ZONE 'UTC' converts bare `timestamp` columns to `timestamptz` so
@@ -248,12 +290,21 @@ export async function computeSla(
       ? secondsFromShiftStart(comms.firstCallOutAt, managerShiftHour)
       : null;
     // business_hours_since_last_contact: BH staleness from the lead's last
-    // touch to NOW. Matches integrator's `sla.business_hours_since_last_contact`
-    // semantics — drives the TLT (Time to Last Touch) metric in Looker.
-    // Snapshot at compute-time; recomputed every ETL tick so it stays fresh.
+    // touch to NOW. Kept for compatibility / non-TLT usages — the dashboard
+    // TLT metric below replaced this for Looker.
     const nowUtc = new Date();
     const bhSinceLastContact = comms.lastContactAt
       ? businessHoursSeconds(comms.lastContactAt, nowUtc)
+      : null;
+
+    // tlt_seconds: BH gap between the two most recent call_out events made
+    // by the lead's responsible manager. NULL when manager has 0 calls;
+    // 0 when only 1 call (no «previous» to measure against).
+    const tltCalls = tltByLead.get(lead.leadId);
+    const tltSeconds = tltCalls
+      ? tltCalls.prev
+        ? businessHoursSeconds(tltCalls.prev, tltCalls.last)
+        : 0
       : null;
 
     let slaStatus: string;
@@ -288,6 +339,7 @@ export async function computeSla(
       slaFirstCallCalendarSeconds: slaFirstCallCalSec,
       slaFirstCallFromShiftSeconds: slaFirstCallFromShiftSec,
       businessHoursSinceLastContact: bhSinceLastContact,
+      tltSeconds,
       slaStatus,
     });
   }

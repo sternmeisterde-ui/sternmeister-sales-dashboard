@@ -225,6 +225,12 @@ export const sla = analyticsSchema.table(
     slaFirstCallCalendarSeconds: bigint("sla_first_call_calendar_seconds", { mode: "number" }),
     slaFirstCallFromShiftSeconds: bigint("sla_first_call_from_shift_seconds", { mode: "number" }),
     businessHoursSinceLastContact: bigint("business_hours_since_last_contact", { mode: "number" }),
+    // TLT (Time between Latest Touches) — BH-time between the two most
+    // recent call_out events made by the lead's responsible manager.
+    // NULL when the manager has 0–1 calls on the lead. Drives the Looker
+    // TLT views with their own per-pipeline blacklist (different from
+    // SLA первого звонка's whitelist). See 0008_tlt_seconds.sql.
+    tltSeconds: bigint("tlt_seconds", { mode: "number" }),
     slaStatus: text("sla_status"),
   },
   (t) => [
