@@ -5,6 +5,7 @@ Next.js admin dashboard for managing OKK (call quality control) and Roleplay (AI
 > **New Claude session — read these first:**
 > - [`docs/SESSION-HANDOFF.md`](docs/SESSION-HANDOFF.md) — current focus, what works, known issues, architecture map
 > - [`docs/TODO.md`](docs/TODO.md) — prioritised actionable tasks
+> - [`docs/kommo-api-usage.md`](docs/kommo-api-usage.md) — **Kommo rate-limit policy (1 rps per process, 2 rps combined). Read before touching any Kommo call.**
 >
 > Active focus: **call-count accuracy across Daily / Звонки / Looker / Активность**. Recently fixed Kommo `filter[updated_at]` bug; backfill running locally. Next: telephony CDR integration (CallGear + CloudTalk) for 100% dial-attempt coverage.
 

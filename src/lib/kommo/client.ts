@@ -15,7 +15,17 @@ import { cached, CACHE_TTL } from "./cache";
 // Mutex-based: ensures at most 1 HTTP request per RATE_LIMIT_MS,
 // even when multiple parallel chains call rateLimitedFetch concurrently.
 
-const RATE_LIMIT_MS = 145; // ~6.9 req/sec (Kommo limit is 7 req/sec)
+// Kommo's 7 req/sec is account-wide (per subdomain), shared with okk and any
+// other company integrators on the same account regardless of token (different
+// OAuth tokens go into the SAME bucket).
+//
+// Policy: each of OUR processes self-caps at 1 req/sec (1000 ms gap). Worst
+// case both Dashbord + okk burst simultaneously = 2 req/sec total from us,
+// leaving 5 req/sec for the other integrators. Conservative on purpose —
+// bumping this requires coordinating with the okk client at
+// /Users/user/okk/src/services/kommo.ts (RATE_LIMIT_MS) so the combined
+// ceiling stays ≤ 2 req/sec.
+const RATE_LIMIT_MS = 1000;
 // Per-request timeout for Kommo. Most calls complete in <2s; setting 30s
 // guards against socket stalls without rejecting the legitimate slow tail
 // (lead-list pages with `with=` joins occasionally take 10-15s on large
@@ -72,12 +82,27 @@ async function rateLimitedFetch(url: string, options: RequestInit): Promise<Resp
 
   // 429 Too Many Requests — wait and retry through the mutex so the retry
   // still respects the global rate limit (bare fetch would race the next caller).
+  // Honour HTTP Retry-After header first (seconds or HTTP-date per RFC 7231),
+  // then JSON body's `retry_after`, then a 1.5 s default.
   if (res.status === 429) {
     let retryAfterMs = 1500;
-    try {
-      const body = await res.clone().json() as { retry_after?: number };
-      if (body.retry_after) retryAfterMs = body.retry_after * 1000;
-    } catch { /* use default */ }
+    const headerVal = res.headers.get("retry-after");
+    if (headerVal) {
+      const asInt = Number.parseInt(headerVal, 10);
+      if (Number.isFinite(asInt) && asInt > 0) {
+        retryAfterMs = asInt * 1000;
+      } else {
+        const asDate = Date.parse(headerVal);
+        if (Number.isFinite(asDate)) {
+          retryAfterMs = Math.max(0, asDate - Date.now());
+        }
+      }
+    } else {
+      try {
+        const body = await res.clone().json() as { retry_after?: number };
+        if (body.retry_after) retryAfterMs = body.retry_after * 1000;
+      } catch { /* use default */ }
+    }
     console.warn(`[Kommo] 429 rate limited, retrying after ${retryAfterMs}ms`);
     await new Promise<void>((r) => setTimeout(r, retryAfterMs));
     return rateLimitedFetch(url, options);
