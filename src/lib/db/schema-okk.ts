@@ -63,6 +63,7 @@ export const okkCalls = pgTable("calls", {
   errorMessage: text("error_message"),
   callCreatedAt: timestamp("call_created_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   evaluatedAt: timestamp("evaluated_at", { withTimezone: true }),
   notifiedAt: timestamp("notified_at", { withTimezone: true }),
 });

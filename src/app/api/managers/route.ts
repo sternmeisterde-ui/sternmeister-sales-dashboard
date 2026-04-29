@@ -4,8 +4,8 @@ import { db } from "@/lib/db";
 import { masterManagers, d1Users, r1Users } from "@/lib/db/schema-existing";
 import { getDbForDepartment } from "@/lib/db/index";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { okkManagers } from "@/lib/db/schema-okk";
-import { eq, and, notInArray, desc, sql } from "drizzle-orm";
+import { okkManagers, okkCalls } from "@/lib/db/schema-okk";
+import { eq, and, notInArray, desc, sql, or, inArray } from "drizzle-orm";
 import { resolveTelegramUsername } from "@/lib/telegram/resolve";
 import { getUsers as getKommoUsers } from "@/lib/kommo/client";
 import { getEmployees as getCallGearEmployees } from "@/lib/telephony/callgear";
@@ -534,6 +534,7 @@ async function syncToTargets(
           || allSameNameOrTg.find((r) => r.cloudtalkAgentId)?.cloudtalkAgentId
           || null;
 
+        let canonicalId: string;
         if (canonical) {
           await okkDb
             .update(okkManagers)
@@ -548,6 +549,7 @@ async function syncToTargets(
               isActive: true,
             })
             .where(eq(okkManagers.id, canonical.id));
+          canonicalId = canonical.id;
 
           // Deactivate any sibling duplicates (same name or same tg_id in same dept)
           for (const dup of allSameNameOrTg) {
@@ -561,17 +563,65 @@ async function syncToTargets(
             }
           }
         } else {
-          await okkDb.insert(okkManagers).values({
-            name: row.name,
-            telegramId: row.telegramId,
-            kommoUserId: row.kommoUserId,
-            callgearEmployeeId: mergedCgId,
-            cloudtalkAgentId: mergedCtId,
-            department: okkDept,
-            role: row.role,
-            line: row.line,
-            isActive: true,
-          });
+          const [created] = await okkDb
+            .insert(okkManagers)
+            .values({
+              name: row.name,
+              telegramId: row.telegramId,
+              kommoUserId: row.kommoUserId,
+              callgearEmployeeId: mergedCgId,
+              cloudtalkAgentId: mergedCtId,
+              department: okkDept,
+              role: row.role,
+              line: row.line,
+              isActive: true,
+            })
+            .returning({ id: okkManagers.id });
+          canonicalId = created.id;
+        }
+
+        // Re-bind historic "Unmatched agent" calls now that this manager
+        // exists/is reactivated in OKK. Pattern matches the webhook's error
+        // message shape: "Unmatched agent: employee_id=N, name=..." or
+        // "Unmatched agent: ct_id=N, name=...". The OKK rematch cron also
+        // covers this, but doing it synchronously gives admins instant
+        // feedback after Save.
+        const relinkPatterns: string[] = [];
+        if (mergedCgId) relinkPatterns.push(`Unmatched agent: employee_id=${mergedCgId},%`);
+        if (mergedCtId) relinkPatterns.push(`Unmatched agent: ct_id=${mergedCtId},%`);
+        if (relinkPatterns.length > 0) {
+          try {
+            const relinkConditions = relinkPatterns.map(
+              (p) => sql`${okkCalls.errorMessage} LIKE ${p}`,
+            );
+            const relinked = await okkDb
+              .update(okkCalls)
+              .set({
+                managerId: canonicalId,
+                managerName: row.name,
+                status: "received",
+                errorMessage: null,
+                // Push updatedAt 20 min into the past so the OKK
+                // received-retry cron (every 10 min) picks them up.
+                updatedAt: new Date(Date.now() - 20 * 60 * 1000),
+              })
+              .where(
+                and(
+                  eq(okkCalls.status, "received"),
+                  or(...relinkConditions),
+                ),
+              )
+              .returning({ id: okkCalls.id });
+            if (relinked.length > 0) {
+              warnings.push(
+                `OKK: re-bound ${relinked.length} historic unmatched calls to "${row.name}" (will be re-evaluated)`,
+              );
+            }
+          } catch (err) {
+            warnings.push(
+              `OKK relink failed for "${row.name}": ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
         }
 
         // 3) Sync merged IDs back to master_managers so future renames keep them
@@ -712,21 +762,35 @@ async function deactivateOrphans(
 ) {
   // Load ALL active master managers grouped by department
   const allMaster = await db
-    .select({ name: masterManagers.name, telegramId: masterManagers.telegramId, department: masterManagers.department })
+    .select({
+      name: masterManagers.name,
+      telegramId: masterManagers.telegramId,
+      kommoUserId: masterManagers.kommoUserId,
+      department: masterManagers.department,
+    })
     .from(masterManagers)
     .where(eq(masterManagers.isActive, true));
 
-  const byDept: Record<"b2b" | "b2g", { names: string[]; telegramIds: string[] }> = {
-    b2b: { names: [], telegramIds: [] },
-    b2g: { names: [], telegramIds: [] },
+  const byDept: Record<
+    "b2b" | "b2g",
+    { names: string[]; telegramIds: string[]; kommoUserIds: number[] }
+  > = {
+    b2b: { names: [], telegramIds: [], kommoUserIds: [] },
+    b2g: { names: [], telegramIds: [], kommoUserIds: [] },
   };
   for (const m of allMaster) {
     const d = m.department === "b2b" ? "b2b" : "b2g";
     byDept[d].names.push(m.name);
     if (m.telegramId) byDept[d].telegramIds.push(m.telegramId);
+    if (m.kommoUserId) byDept[d].kommoUserIds.push(m.kommoUserId);
   }
 
   // ── OKK cleanup in BOTH departments (R2 + D2) ──
+  // Orphan = OKK row not matching ANY of {name, telegramId, kommoUserId}
+  // from active master rows in the same department. Pure-name match alone
+  // was too aggressive: a master rename used to deactivate the OKK row
+  // before its cg/ct id could be carried over, which orphaned subsequent
+  // webhook calls until manual intervention.
   const okkTargets: Array<{ dept: "b2g" | "b2b"; okkDept: "d2" | "r2" }> = [
     { dept: "b2g", okkDept: "d2" },
     { dept: "b2b", okkDept: "r2" },
@@ -735,25 +799,50 @@ async function deactivateOrphans(
   for (const { dept, okkDept } of okkTargets) {
     const okkDb = getOkkDbForDepartment(dept);
     const allowedNames = byDept[dept].names;
+    const allowedTelegramIds = byDept[dept].telegramIds;
+    const allowedKommoUserIds = byDept[dept].kommoUserIds;
+
     try {
-      if (allowedNames.length > 0) {
-        await okkDb
-          .update(okkManagers)
-          .set({ isActive: false })
-          .where(
-            and(
-              eq(okkManagers.department, okkDept),
-              eq(okkManagers.isActive, true),
-              notInArray(okkManagers.name, allowedNames),
-            )
-          );
-      } else {
+      const hasAnyAllowed =
+        allowedNames.length > 0 ||
+        allowedTelegramIds.length > 0 ||
+        allowedKommoUserIds.length > 0;
+
+      if (!hasAnyAllowed) {
         // No active masters for this dept — deactivate everything
         await okkDb
           .update(okkManagers)
           .set({ isActive: false })
           .where(and(eq(okkManagers.department, okkDept), eq(okkManagers.isActive, true)));
+        continue;
       }
+
+      // Build "row matches at least one allowed identifier" predicate, then
+      // negate. Each clause guarded by length>0 because empty arrays would
+      // produce invalid SQL ("WHERE x IN ()").
+      const matchClauses: ReturnType<typeof inArray>[] = [];
+      if (allowedNames.length > 0) {
+        matchClauses.push(inArray(okkManagers.name, allowedNames));
+      }
+      if (allowedTelegramIds.length > 0) {
+        matchClauses.push(inArray(okkManagers.telegramId, allowedTelegramIds));
+      }
+      if (allowedKommoUserIds.length > 0) {
+        matchClauses.push(inArray(okkManagers.kommoUserId, allowedKommoUserIds));
+      }
+
+      const isAllowed = matchClauses.length === 1 ? matchClauses[0] : or(...matchClauses);
+
+      await okkDb
+        .update(okkManagers)
+        .set({ isActive: false })
+        .where(
+          and(
+            eq(okkManagers.department, okkDept),
+            eq(okkManagers.isActive, true),
+            sql`NOT (${isAllowed})`,
+          ),
+        );
     } catch (err) {
       warnings.push(`OKK ${okkDept} orphan cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     }
