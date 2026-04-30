@@ -3,14 +3,15 @@ import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
 import { eq, and, or, isNotNull, sql } from "drizzle-orm";
-import { fetchRawEvents, getAllCallNotesByDate } from "@/lib/kommo/client";
+import { fetchRawEvents } from "@/lib/kommo/client";
 import { ensureTrackingSchema } from "./init";
 import { CALL_TYPES, EVENT_TYPES } from "./event-types";
 
-// CRM event types only — calls go through getAllCallNotesByDate (/notes
-// endpoint) which catches calls created by PBX integrations under a service
-// user. Querying `incoming_call`/`outgoing_call` via /events with
-// filter[created_by]=manager_ids was missing those system-created calls.
+// CRM (non-call) event types only. Calls are NOT synced from Kommo anymore —
+// /api/tracking now sources them from analytics.communications (the
+// integrator's CDR mirror), so Активность agrees with Звонки/Daily/Dashboard
+// and survives Kommo PBX-integration outages. The CALL_TYPES filter below
+// keeps the safety net in case the catalogue ever regains a non-PBX call type.
 const NON_CALL_EVENT_TYPES = EVENT_TYPES
   .filter((t) => !CALL_TYPES.has(t.key))
   .map((t) => t.key);
@@ -106,7 +107,18 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        out via role='manager' alone, so her calls landed under no
 //        attribution and were dropped. Re-backfill picks them up.
 //        (2026-04-28)
-const CURRENT_FILTER_VERSION = 11;
+//   v12 — calls no longer synced into tracking_events at all. /api/tracking
+//        now reads call segments from analytics.communications (integrator's
+//        CDR mirror — same source as Звонки/Daily/Dashboard). Reasons:
+//          • Kommo /notes only sees calls when the PBX integration is
+//            healthy; CloudTalk/CallGear outages caused multi-hour gaps in
+//            Активность (incident 2026-04-29 b2b, 2026-04-30 b2g).
+//          • Звонки and Активность previously disagreed because they read
+//            from different sources — now both go through analytics.
+//        Re-backfill purges legacy "note:*" call rows from tracking_events
+//        below so the timeline isn't double-counting historic calls
+//        alongside the new analytics source. (2026-04-30)
+const CURRENT_FILTER_VERSION = 12;
 
 /** Load Kommo-linked managers for a department.
  *
@@ -272,64 +284,14 @@ export async function syncDepartment(
   };
 
   try {
-    // 1) Calls via /{entity}/notes. Returns ALL calls with duration inline,
-    //    no filter[created_by] gap. Costs ~1-2 paginated requests per
-    //    entity (contacts + leads), independent of manager count.
-    const callNotes = await getAllCallNotesByDate(dateFromSec, dateToSec).catch((err) => {
-      console.error(
-        `[tracking-sync] getAllCallNotesByDate failed; falling back to empty calls list:`,
-        err instanceof Error ? err.message : String(err),
-      );
-      return [] as Awaited<ReturnType<typeof getAllCallNotesByDate>>;
-    });
-    const callRows = callNotes
-      .map((n) => {
-        const attr = attribute(n.createdBy, n.responsibleUserId);
-        if (!attr) return null;
-        return {
-          department,
-          managerId: attr.managerId,
-          kommoUserId: attr.kommoUserId,
-          // /notes' note id can collide with /events' event id (different
-          // ID spaces in Kommo). Prefix to avoid the dedup unique index
-          // (department, event_id) treating a note 12345 as the same row
-          // as an event 12345.
-          eventId: `note:${n.noteId}`,
-          eventType: n.type === "call_in" ? "incoming_call" : "outgoing_call",
-          createdAt: new Date(n.createdAt * 1000),
-          durationSec: n.duration,
-          entityType: n.entityType,
-          entityId: n.entityId,
-          noteId: n.noteId,
-          raw: {
-            // Marker — distinguishes /notes-sourced rows from /events-sourced
-            // ones during debug, since both share tracking_events table.
-            source: "notes",
-            // Full Kommo params for accurate accounting & cross-reference:
-            //   call_status — 1=left_msg 2=callback 3=no_answer 4=answered
-            //                 5=busy 6=wrong_num 7=phone_off
-            //   call_result — free-text result if PBX writes one
-            //   uniq        — PBX call ID; matches CDR rows in
-            //                 analytics.communications for sanity-checks
-            //   pbx_source  — which integration wrote the note
-            //                 (callgear / cloudtalk / etc)
-            //   link        — recording URL (UI can deep-link to playback)
-            //   phone       — caller/callee number for context
-            call_status: n.callStatus,
-            call_result: n.callResult,
-            uniq: n.uniq,
-            pbx_source: n.pbxSource,
-            link: n.link,
-            phone: n.phone,
-          } as Record<string, unknown>,
-        };
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null);
-    if (callRows.length > 0) await persistRows(callRows);
-
-    // 2) Non-call CRM events via /events with the per-entity loop +
-    //    blacklist (fetchRawEvents). Streamed so partial failures leave
-    //    already-fetched events durable.
+    // CRM (non-call) events via /events with the per-entity loop +
+    // blacklist (fetchRawEvents). Streamed so partial failures leave
+    // already-fetched events durable.
+    //
+    // Calls intentionally NOT pulled here — /api/tracking reads them from
+    // analytics.communications at render time (filter_version v12 note
+    // above). Skipping the /notes pull also frees ~½ the per-sync Kommo
+    // rate-limit budget for CRM coverage.
     await fetchRawEvents(dateFromSec, dateToSec, {
       kommoUserIds,
       types: NON_CALL_EVENT_TYPES,
@@ -552,6 +514,24 @@ export async function ensureRangeCached(
         `[tracking-sync] ${department}: cleaned ${
           (deleted as { rowCount?: number }).rowCount ?? "?"
         } pre-v7 numeric-keyed call rows before re-backfill`,
+      );
+    }
+
+    // v12 cleanup: calls now read from analytics.communications at render
+    // time, never written to tracking_events. Purge ALL legacy call rows
+    // (any prefix) once on upgrade so /api/tracking can't double-count
+    // historic Kommo /notes rows alongside the new analytics source. Future
+    // syncs only insert CRM types so the table stays call-free.
+    if ((state.filterVersion ?? 0) < 12 && CURRENT_FILTER_VERSION >= 12) {
+      const deleted = await trackingDb.execute(
+        sql`DELETE FROM tracking_events
+            WHERE department = ${department}
+              AND event_type IN ('incoming_call', 'outgoing_call')`,
+      );
+      console.info(
+        `[tracking-sync] ${department}: purged ${
+          (deleted as { rowCount?: number }).rowCount ?? "?"
+        } legacy call rows on v12 upgrade (calls now live in analytics.communications)`,
       );
     }
 

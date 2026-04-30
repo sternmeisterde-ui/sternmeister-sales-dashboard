@@ -1,7 +1,7 @@
 // GET /api/tracking?department=b2g&from=2026-04-24&to=2026-04-24&types=a,b,c
 // Returns per-manager timelines for a department over the given date range.
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, gte, lt, inArray, asc, or, isNotNull } from "drizzle-orm";
+import { and, eq, gte, lt, inArray, asc, or, isNotNull, notInArray } from "drizzle-orm";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
@@ -10,6 +10,7 @@ import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
+import { getAnalyticsCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
@@ -204,6 +205,11 @@ export async function GET(req: NextRequest) {
       toUtc.getTime() + (24 * 60 - berlinOffsetMin(toUtc)) * 60_000,
     );
 
+    // CRM (non-call) events from tracking_events. Calls are sourced separately
+    // from analytics.communications below — that's the integrator's CDR mirror
+    // and is the source of truth for all call counts (Звонки/Daily/Dashboard
+    // already read from it). Pulling calls from there keeps Активность in
+    // lockstep with those tabs and survives Kommo PBX-integration outages.
     const events = await trackingDb
       .select({
         managerId: trackingEvents.managerId,
@@ -224,28 +230,57 @@ export async function GET(req: NextRequest) {
           inArray(trackingEvents.managerId, managerIds),
           gte(trackingEvents.createdAt, rangeStart),
           lt(trackingEvents.createdAt, rangeEnd),
+          // Drop any legacy call rows that were synced from Kommo /notes
+          // before we switched to analytics. Belt-and-suspenders — sync.ts
+          // no longer writes them, but historic rows linger until cleared.
+          notInArray(trackingEvents.eventType, ["incoming_call", "outgoing_call"]),
         ),
       );
 
+    // Calls from analytics.communications — same source as Звонки tab.
+    const callEvents = await getAnalyticsCallEventsByMaster(
+      managers.map((m) => ({ id: m.id, name: m.name })),
+      department,
+      Math.floor(rangeStart.getTime() / 1000),
+      Math.floor(rangeEnd.getTime() / 1000),
+    );
+
     // Group events by manager + local Berlin calendar date.
     const evByManagerDate = new Map<string, TimelineEvent[]>();
-    for (const e of events) {
-      const evDate = new Date(e.createdAt);
-      const localDate = new Date(evDate.getTime() + berlinOffsetMin(evDate) * 60_000)
+    const pushEvent = (
+      managerId: string,
+      ev: TimelineEvent,
+    ) => {
+      const localDate = new Date(
+        ev.createdAt.getTime() + berlinOffsetMin(ev.createdAt) * 60_000,
+      )
         .toISOString()
         .slice(0, 10);
-      const key = `${e.managerId}|${localDate}`;
+      const key = `${managerId}|${localDate}`;
       let list = evByManagerDate.get(key);
       if (!list) {
         list = [];
         evByManagerDate.set(key, list);
       }
-      list.push({
+      list.push(ev);
+    };
+
+    for (const e of events) {
+      pushEvent(e.managerId, {
         eventId: e.eventId,
         eventType: e.eventType,
         createdAt: new Date(e.createdAt),
         durationSec: e.durationSec ?? 0,
         entityType: e.entityType,
+      });
+    }
+    for (const c of callEvents) {
+      pushEvent(c.managerId, {
+        eventId: c.eventId,
+        eventType: c.eventType,
+        createdAt: c.createdAt,
+        durationSec: c.durationSec,
+        entityType: null,
       });
     }
 

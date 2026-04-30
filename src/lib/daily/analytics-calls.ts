@@ -158,6 +158,107 @@ async function fetchCallMetricsByMaster(
   return byMaster;
 }
 
+// Single call row, attributed to a master manager. Shape matches what
+// /api/tracking's buildTimeline consumes — `eventType` carries the direction,
+// `durationSec` drives the blue-segment width / "сколько на линии" math.
+export interface AnalyticsCallEvent {
+  managerId: string;        // master_managers.id
+  eventId: string;          // unique key (analytics communication_id)
+  eventType: "incoming_call" | "outgoing_call";
+  createdAt: Date;
+  durationSec: number;      // 0 for missed/unanswered
+}
+
+/**
+ * Per-call rows for a department + window, attributed via NAME_ALIASES to
+ * master_managers.id. Drives the Активность tab's blue segments — same
+ * underlying source as Звонки/Daily/Dashboard so call counts agree across
+ * tabs (and survive Kommo PBX-integration outages, since this reads from
+ * the integrator's CDR mirror, not Kommo /notes).
+ *
+ * Pattern A dedup: a single CDR call appears as N rows (one per lead the
+ * caller's contact is in). DISTINCT ON (communication_id) collapses them —
+ * manager/duration/created_at are constant across the fanout. Pipeline
+ * filter mirrors getAnalyticsCallMetricsByMaster: dept pipelines + NULL
+ * (telephony rows that enrich-telephony-leads couldn't tie to a lead still
+ * belong to the manager).
+ */
+export async function getAnalyticsCallEventsByMaster(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<AnalyticsCallEvent[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return [];
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `call-events:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () =>
+    fetchCallEventsByMaster(managers, pipelineIds, fromTs, toTs),
+  );
+}
+
+async function fetchCallEventsByMaster(
+  managers: Array<{ id: string; name: string }>,
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<AnalyticsCallEvent[]> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(
+    pipelineIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  // Build name → master_managers.id map (with aliases) up front so the loop
+  // below stays O(N).
+  const nameToMaster = new Map<string, string>();
+  for (const m of managers) {
+    nameToMaster.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) {
+      nameToMaster.set(alias, m.id);
+    }
+  }
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    communication_id: string | number;
+    communication_type: string;
+    manager: string;
+    duration: string | number | null;
+    created_at: string;
+  }>(sql`
+    SELECT DISTINCT ON (communication_id)
+      communication_id, communication_type, manager, duration, created_at
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND communication_type LIKE 'call%'
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      AND manager IS NOT NULL AND manager <> ''
+    ORDER BY communication_id, lead_id NULLS LAST
+  `);
+
+  const out: AnalyticsCallEvent[] = [];
+  for (const row of result.rows) {
+    const managerId = nameToMaster.get(row.manager);
+    if (!managerId) continue; // ex-manager / unmapped name → skip
+    const direction =
+      row.communication_type === "call_in" ? "incoming_call" : "outgoing_call";
+    out.push({
+      managerId,
+      eventId: `comm:${row.communication_id}`,
+      eventType: direction,
+      createdAt: new Date(row.created_at),
+      durationSec: Number(row.duration ?? 0),
+    });
+  }
+  return out;
+}
+
 /**
  * Team-level call aggregate across ALL managers (including ex-managers no longer
  * in master_managers). Use this for the dept-wide call rollup so numbers match
