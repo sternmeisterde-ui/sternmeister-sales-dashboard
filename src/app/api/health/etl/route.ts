@@ -29,6 +29,14 @@ const STALE_THRESHOLD_MIN = 30;
 // reports `degraded: true` and surfaces the count.
 const BACKLOG_DEGRADED_THRESHOLD = 2000;
 
+// Sentry rate-limit. Without this the badge polls every 60s and a stale
+// episode lasting an hour fires 60 captureEtlMessage calls — Sentry de-dups
+// by fingerprint but the issue's event count climbs uselessly. Send at most
+// once per status per cooldown window. Process-local cache resets when the
+// lambda recycles, which is fine — fresh lambda = fresh signal worth seeing.
+const SENTRY_COOLDOWN_MS = 5 * 60 * 1000;
+let lastSentryReportAt: { status: string; at: number } | null = null;
+
 interface FreshnessRow {
   source: string;
   latestAt: string | null;
@@ -104,33 +112,45 @@ export async function GET(): Promise<NextResponse> {
     const status = stale ? "stale" : noData ? "no_data" : degraded ? "degraded" : "ok";
     const httpStatus = stale ? 503 : 200;
 
-    // Send a Sentry signal on every probe that comes back unhealthy. The
-    // dashboard / EtlFreshnessBadge is the user-facing surface; Sentry is
-    // for off-hours pages and trend alerts. Polled at 60s by the badge,
-    // so de-dup is critical — we tag with the worst stale source so
-    // Sentry's grouping can collapse "communications stale for an hour"
-    // into one issue rather than 60 events.
+    // Send a Sentry signal on unhealthy state — but throttle. Badge polls
+    // every 60s; without throttling a stale episode of 1 h would fire 60
+    // captures. We send at most one per status per SENTRY_COOLDOWN_MS, and
+    // always send when status flips (e.g., ok → stale, or degraded → stale).
     if (stale || degraded) {
-      const worstSource = staleSources[0]?.source ?? "enrichment-backlog";
-      const ages = sources
-        .map((s) => `${s.source}=${s.ageSec ?? "null"}s`)
-        .join(", ");
-      captureEtlMessage(
-        stale
-          ? `analytics.* stale: ${staleSources.map((s) => s.source).join(", ")}`
-          : `enrichment backlog ${enrichmentBacklog} > ${BACKLOG_DEGRADED_THRESHOLD}`,
-        stale ? "error" : "warning",
-        {
-          step: `health:${worstSource}`,
-          severity: stale ? "fatal" : "warning",
-          extra: {
-            ages,
-            enrichmentBacklog,
-            stale_sources: staleSources.map((s) => s.source),
-            no_data_sources: noDataSources.map((s) => s.source),
+      const now = Date.now();
+      const statusChanged = lastSentryReportAt?.status !== status;
+      const cooldownPassed =
+        !lastSentryReportAt ||
+        now - lastSentryReportAt.at >= SENTRY_COOLDOWN_MS;
+
+      if (statusChanged || cooldownPassed) {
+        const worstSource = staleSources[0]?.source ?? "enrichment-backlog";
+        const ages = sources
+          .map((s) => `${s.source}=${s.ageSec ?? "null"}s`)
+          .join(", ");
+        captureEtlMessage(
+          stale
+            ? `analytics.* stale: ${staleSources.map((s) => s.source).join(", ")}`
+            : `enrichment backlog ${enrichmentBacklog} > ${BACKLOG_DEGRADED_THRESHOLD}`,
+          stale ? "error" : "warning",
+          {
+            step: `health:${worstSource}`,
+            severity: stale ? "fatal" : "warning",
+            extra: {
+              ages,
+              enrichmentBacklog,
+              stale_sources: staleSources.map((s) => s.source),
+              no_data_sources: noDataSources.map((s) => s.source),
+              statusChanged,
+            },
           },
-        },
-      );
+        );
+        lastSentryReportAt = { status, at: now };
+      }
+    } else if (lastSentryReportAt && lastSentryReportAt.status !== "ok") {
+      // Recovered — clear the cache so the next stale episode fires
+      // immediately instead of waiting out the cooldown.
+      lastSentryReportAt = null;
     }
 
     return NextResponse.json(

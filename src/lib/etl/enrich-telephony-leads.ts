@@ -140,11 +140,17 @@ interface InsertRecord {
 const BULK_BATCH_SIZE = 500;
 
 /**
- * Per-tick scan cap. Bounded by the Kommo /contacts rate limit (~1 rps per
- * token) and the cron route's `maxDuration = 300s` and the 6-min lease.
- * 300 distinct phones × 1 sec ≈ 5 min — fits inside maxDuration with
- * headroom for the bulk INSERT/UPDATE. Going higher (we tried 800) risks
- * the tick hitting the lease ceiling on a backlog of unresolvable phones.
+ * Per-tick scan cap. This is a *row* cap, not a phone cap — multiple rows
+ * can share the same phone (one caller, multiple CDR legs). Phones are
+ * de-duplicated inside `searchContactsByPhone`, so the effective Kommo
+ * request count is `≤ MAX_ROWS_PER_TICK`, not `=`.
+ *
+ * Bounded by the Kommo /contacts rate limit (~1 rps per token, 1 request
+ * per unique phone — see src/lib/kommo/client.ts) and the cron route's
+ * `maxDuration = 300s` and the 6-min lease. Worst case: 300 distinct
+ * phones × 1 sec ≈ 5 min — fits inside maxDuration with headroom for the
+ * bulk INSERT/UPDATE. Going higher (we tried 800) risks the tick hitting
+ * the lease ceiling on a backlog of unresolvable phones.
  *
  * Oldest rows first (ORDER BY created_at) so backfill / replay work
  * doesn't starve fresh tick rows. Backlog size is reported separately so
