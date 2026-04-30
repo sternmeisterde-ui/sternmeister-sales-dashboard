@@ -10,6 +10,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { runSync } from "@/lib/etl";
 import { analyticsDb } from "@/lib/db/analytics";
+import { captureEtlException, captureEtlMessage } from "@/lib/etl/sentry";
 
 export const maxDuration = 300;
 // Next.js must not cache this route
@@ -86,6 +87,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // Lock table missing or DB unreachable — fail loud so we don't run
     // unprotected. Most likely cause: migration 0010 not applied yet.
     console.error("[ETL cron] failed to acquire lease lock:", lockErr);
+    captureEtlException(lockErr, { step: "cron:acquire-lock", severity: "fatal" });
     return NextResponse.json(
       { success: false, error: "lease-lock query failed (run migration 0010?)" },
       { status: 500 },
@@ -94,6 +96,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   if (!token) {
     console.warn("[ETL cron] another tick is still running — skipping this run");
+    // Skip is not an error, but we want the signal in Sentry so a stuck
+    // tick (lease never released, repeated 409s every 10 min) is visible
+    // as a rising warning trend rather than only in container logs.
+    captureEtlMessage(
+      "ETL cron skipped — concurrent run in progress",
+      "warning",
+      { step: "cron:lock", severity: "warning" },
+    );
     return NextResponse.json(
       { success: false, skipped: true, reason: "concurrent run in progress" },
       { status: 409 },
@@ -109,10 +119,29 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     const result = await runSync({ fromDate, toDate, incremental: true });
+    // Per-step errors are already captured inside runStep; surface a
+    // summary message if any landed so the cron-level dashboard shows a
+    // single rolled-up signal too.
+    if (result.stepErrors.length > 0) {
+      captureEtlMessage(
+        `ETL cron tick had ${result.stepErrors.length} step error(s): ${result.stepErrors.map((e) => e.step).join(", ")}`,
+        "warning",
+        {
+          step: "cron:summary",
+          severity: "warning",
+          extra: { stepErrors: result.stepErrors, window: { from: fromDate.toISOString(), to: toDate.toISOString() } },
+        },
+      );
+    }
     return NextResponse.json({ success: true, result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Internal error";
     console.error("[ETL cron] sync failed:", error);
+    captureEtlException(error, {
+      step: "cron:runSync",
+      severity: "fatal",
+      extra: { window: { from: fromDate.toISOString(), to: toDate.toISOString() } },
+    });
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   } finally {
     try {

@@ -28,6 +28,7 @@ import { enrichTelephonyLeads } from "./enrich-telephony-leads";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql } from "drizzle-orm";
+import { captureEtlException } from "./sentry";
 
 /**
  * Load leadCache from analytics.leads_cohort — used when leads-sync is
@@ -109,6 +110,12 @@ async function runStep<T>(
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[ETL] ${name} failed (non-fatal):`, err);
     errors.push({ step: name, message });
+    // Send to Sentry with ETL tags so the event is filterable
+    // (`component:etl, step:<name>, severity:non_fatal`) on the existing
+    // dashboard or, later, a dedicated ETL project. Non_fatal because the
+    // pipeline keeps running — but we want the signal even when the cron's
+    // outer try/catch sees no exception.
+    captureEtlException(err, { step: name, severity: "non_fatal" });
     return fallback;
   }
 }

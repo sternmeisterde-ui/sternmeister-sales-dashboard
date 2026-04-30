@@ -16,6 +16,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
+import { captureEtlMessage } from "@/lib/etl/sentry";
 
 export const dynamic = "force-dynamic";
 
@@ -102,6 +103,35 @@ export async function GET(): Promise<NextResponse> {
 
     const status = stale ? "stale" : noData ? "no_data" : degraded ? "degraded" : "ok";
     const httpStatus = stale ? 503 : 200;
+
+    // Send a Sentry signal on every probe that comes back unhealthy. The
+    // dashboard / EtlFreshnessBadge is the user-facing surface; Sentry is
+    // for off-hours pages and trend alerts. Polled at 60s by the badge,
+    // so de-dup is critical — we tag with the worst stale source so
+    // Sentry's grouping can collapse "communications stale for an hour"
+    // into one issue rather than 60 events.
+    if (stale || degraded) {
+      const worstSource = staleSources[0]?.source ?? "enrichment-backlog";
+      const ages = sources
+        .map((s) => `${s.source}=${s.ageSec ?? "null"}s`)
+        .join(", ");
+      captureEtlMessage(
+        stale
+          ? `analytics.* stale: ${staleSources.map((s) => s.source).join(", ")}`
+          : `enrichment backlog ${enrichmentBacklog} > ${BACKLOG_DEGRADED_THRESHOLD}`,
+        stale ? "error" : "warning",
+        {
+          step: `health:${worstSource}`,
+          severity: stale ? "fatal" : "warning",
+          extra: {
+            ages,
+            enrichmentBacklog,
+            stale_sources: staleSources.map((s) => s.source),
+            no_data_sources: noDataSources.map((s) => s.source),
+          },
+        },
+      );
+    }
 
     return NextResponse.json(
       {
