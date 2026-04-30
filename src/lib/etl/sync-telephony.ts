@@ -205,32 +205,50 @@ export async function syncTelephony(
     };
   }
 
-  // ── Persist: full call-row replacement in window ────────────────────
-  // Wipe EVERY call row (call_in/call_out) in the window — both legacy
-  // Kommo-sourced rows and our own prior cg-leg:*/ct:* writes including
-  // any enriched fan-out copies from enrich-telephony-leads. Then INSERT
-  // fresh raw rows. Enrich step (downstream in runSync) will re-fan-out
-  // them to per-lead copies.
+  // ── Persist: legacy cleanup + idempotent upsert ─────────────────────
+  // (1) Wipe legacy non-prefixed call rows (Kommo /notes era, pre-2026-04-28
+  //     hard-split). They predate the cg-leg:*/ct:* prefix scheme and
+  //     wouldn't conflict with our ON CONFLICT below — they'd just persist
+  //     forever as orphans.
+  // (2) Upsert raw telephony rows by (communication_id, COALESCE(lead_id, 0)).
   //
-  // Why DELETE-then-INSERT instead of ON CONFLICT: post-0005 the unique key
-  // is (communication_id, COALESCE(lead_id, 0)), which Drizzle can't
-  // express in a `target` array (the COALESCE is part of the index
-  // expression, not a column). DELETE+INSERT is just as idempotent and
-  // simpler — we control the full window's contents.
+  // Why upsert (changed 2026-04-30, sister fix to sync-communications.ts):
+  // the previous DELETE-window+INSERT pattern was race-prone on the cron's
+  // 5-min overlap window. CallGear/CloudTalk can return the same CDR with
+  // a slightly different `created_at` between consecutive ticks (timestamp
+  // rounding, in-progress→completed transitions), and the prior tick's
+  // row would survive the DELETE filter — then INSERT crashed on
+  // `communications_comm_lead_unique` (23505), aborting `sync-telephony`
+  // and the downstream enrichment. With runStep isolation the tick
+  // continues, but data is missing for ~10 min until the next tick covers
+  // the same range.
   //
-  // Message rows (chat/email/SMS) stay untouched — they have non-call types.
+  // DO UPDATE refreshes mutable fields (manager / call_status / duration /
+  // first_call_at — the call may end after first sync, picking up a real
+  // duration on a later tick). Immutable fields (communication_id,
+  // communication_type, entity_id, created_at, lead_id, phone) stay frozen.
+  //
+  // Note we DO NOT wipe enriched fan-out copies anymore — they have the
+  // same communication_id but non-NULL lead_id, so they're unaffected by
+  // the upsert against `(comm_id, COALESCE(lead_id, 0)) = (comm_id, 0)`.
+  // Enrichment ran once for them; replaying it on every tick was wasted
+  // Kommo /contacts budget.
   await analyticsDb.execute(
     sql`DELETE FROM analytics.communications
         WHERE created_at >= ${fromDate}
           AND created_at <= ${toDate}
-          AND communication_type IN ('call_in', 'call_out')`,
+          AND communication_type IN ('call_in', 'call_out')
+          AND (
+            communication_id IS NULL
+            OR (communication_id NOT LIKE 'cg-leg:%' AND communication_id NOT LIKE 'ct:%')
+          )`,
   );
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb.insert(communications).values(rows.slice(i, i + CHUNK));
+    await upsertTelephony(rows.slice(i, i + CHUNK));
   }
-  console.log(`[ETL telephony] inserted ${rows.length} raw rows (lead_id=NULL — enrichment to follow)`);
+  console.log(`[ETL telephony] upserted ${rows.length} raw rows (lead_id=NULL — enrichment to follow)`);
 
   return {
     callgearLegs: cgCalls.length,
@@ -243,4 +261,90 @@ export async function syncTelephony(
     })),
     inserted: rows.length,
   };
+}
+
+/** Bulk upsert raw telephony rows via jsonb_to_recordset. Same pattern as
+ *  sync-communications.ts:upsertCommunications and
+ *  enrich-telephony-leads.ts:bulkInsertFanouts — one Neon HTTP call per
+ *  batch, ON CONFLICT with the partial expression index target. */
+async function upsertTelephony(batch: CommRow[]): Promise<void> {
+  const safe = batch.filter((r) => r.communicationId);
+  if (safe.length === 0) return;
+
+  const json = JSON.stringify(
+    safe.map((r) => ({
+      communication_id: r.communicationId,
+      communication_type: r.communicationType,
+      entity_id: r.entityId,
+      created_at: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
+      lead_id: r.leadId ?? null,
+      pipeline_id: r.pipelineId ?? null,
+      pipeline_name: r.pipelineName ?? null,
+      category: r.category ?? null,
+      lead_created_at: r.leadCreatedAt instanceof Date ? r.leadCreatedAt.toISOString() : r.leadCreatedAt,
+      lead_day_start: r.leadDayStart instanceof Date ? r.leadDayStart.toISOString() : r.leadDayStart,
+      call_status: r.callStatus ?? null,
+      duration: r.duration ?? null,
+      manager: r.manager ?? null,
+      status_id: r.statusId ?? null,
+      status_name: r.statusName ?? null,
+      utm_source: r.utmSource ?? null,
+      first_contact_flg: r.firstContactFlg ?? null,
+      last_contact_flg: r.lastContactFlg ?? null,
+      first_call_at: r.firstCallAt instanceof Date ? r.firstCallAt.toISOString() : r.firstCallAt,
+      business_hours_sla: r.businessHoursSla ?? null,
+      business_hours_since_communication: r.businessHoursSinceCommunication ?? null,
+      phone: r.phone ?? null,
+    })),
+  );
+
+  await analyticsDb.execute(sql`
+    INSERT INTO analytics.communications (
+      communication_id, communication_type, entity_id, created_at,
+      lead_id, pipeline_id, pipeline_name, category, lead_created_at,
+      lead_day_start, call_status, duration, manager,
+      status_id, status_name, utm_source,
+      first_contact_flg, last_contact_flg, first_call_at,
+      business_hours_sla, business_hours_since_communication, phone
+    )
+    SELECT
+      i.communication_id, i.communication_type, i.entity_id, i.created_at::timestamp,
+      i.lead_id, i.pipeline_id, i.pipeline_name, i.category, i.lead_created_at::timestamp,
+      i.lead_day_start::timestamp, i.call_status, i.duration, i.manager,
+      i.status_id, i.status_name, i.utm_source,
+      i.first_contact_flg, i.last_contact_flg, i.first_call_at::timestamp,
+      i.business_hours_sla, i.business_hours_since_communication, i.phone
+    FROM jsonb_to_recordset(${json}::jsonb) AS i(
+      communication_id                 text,
+      communication_type               text,
+      entity_id                        bigint,
+      created_at                       text,
+      lead_id                          bigint,
+      pipeline_id                      bigint,
+      pipeline_name                    text,
+      category                         text,
+      lead_created_at                  text,
+      lead_day_start                   text,
+      call_status                      smallint,
+      duration                         integer,
+      manager                          text,
+      status_id                        bigint,
+      status_name                      text,
+      utm_source                       text,
+      first_contact_flg                smallint,
+      last_contact_flg                 smallint,
+      first_call_at                    text,
+      business_hours_sla               bigint,
+      business_hours_since_communication double precision,
+      phone                            text
+    )
+    ON CONFLICT (communication_id, COALESCE(lead_id, 0))
+      WHERE communication_id IS NOT NULL
+      DO UPDATE SET
+        manager       = EXCLUDED.manager,
+        call_status   = EXCLUDED.call_status,
+        duration      = EXCLUDED.duration,
+        first_call_at = EXCLUDED.first_call_at,
+        phone         = COALESCE(analytics.communications.phone, EXCLUDED.phone)
+  `);
 }
