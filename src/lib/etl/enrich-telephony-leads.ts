@@ -36,6 +36,19 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { searchContactsByPhone } from "@/lib/kommo/client";
 import { getPipelineIds } from "@/lib/kommo/pipeline-config";
+import { APP_TZ, parseDateBoundary } from "@/lib/utils/date";
+
+/** Truncate an ISO/timestamp string to the start of its Berlin-local civil
+ *  day, returned as an ISO string. Mirrors `berlinDayStart` in
+ *  sync-communications.ts but works with strings since enrichment passes
+ *  lead_created_at as text from leads_cohort. Returns null if input is empty. */
+function berlinDayStartIso(leadCreatedAt: string | null): string | null {
+  if (!leadCreatedAt) return null;
+  const civil = new Date(leadCreatedAt).toLocaleDateString("en-CA", {
+    timeZone: APP_TZ,
+  });
+  return parseDateBoundary(civil, "start")?.toISOString() ?? null;
+}
 
 export interface EnrichResult {
   /** Rows scanned in the window with lead_id IS NULL AND phone IS NOT NULL */
@@ -50,6 +63,10 @@ export interface EnrichResult {
   rowsFannedOut: number;
   /** Phones we couldn't resolve at all — surface to logs for diagnostics */
   unresolvedPhones: string[];
+  /** Total unenriched rows still pending after this tick. Used by alerting
+   * to detect a stuck backlog — if this stays flat or grows across ticks,
+   * Kommo lookups are failing or unresolved phones outnumber the cap. */
+  backlogRemaining: number;
 }
 
 /** Carries every column we need to either UPDATE in place or copy into a fan-out INSERT. */
@@ -123,6 +140,19 @@ interface InsertRecord {
 const BULK_BATCH_SIZE = 500;
 
 /**
+ * Per-tick scan cap. Without it the unenriched-row backlog can grow
+ * unbounded: at one point we observed 1822 rows / 613 phones in a single
+ * tick. Kommo /contacts is rate-limited to ~1 rps per token, so a 10-min
+ * cron tick can realistically enrich ~600 distinct phones before the next
+ * tick wants the lock.
+ *
+ * Oldest rows first (ORDER BY created_at) so backfill / replay work
+ * doesn't starve fresh tick rows. Backlog size is reported so an alert
+ * can fire if it stops shrinking across ticks.
+ */
+const MAX_ROWS_PER_TICK = 800;
+
+/**
  * Run phone→lead enrichment for the [fromDate, toDate] window. Department-
  * scoped: only links leads in pipelines belonging to b2g + b2b (the union),
  * skipping foreign pipelines like webinars/test that the dashboards don't
@@ -151,6 +181,7 @@ export async function enrichTelephonyLeads(
     rowsLinked: 0,
     rowsFannedOut: 0,
     unresolvedPhones: [],
+    backlogRemaining: 0,
   };
 
   const allowedPipelines = new Set<number>([
@@ -159,7 +190,11 @@ export async function enrichTelephonyLeads(
   ]);
 
   // 1. Scan unenriched rows in window — pull EVERY column we'll need to
-  // either UPDATE in place or replicate into fan-out INSERTs.
+  // either UPDATE in place or replicate into fan-out INSERTs. Capped by
+  // MAX_ROWS_PER_TICK and ordered by created_at ASC so older backlog drains
+  // first instead of being starved by fresh-window rows. Whatever doesn't
+  // fit this tick is reported via `backlogRemaining` and picked up next
+  // tick — bounded latency under load instead of an unbounded slow scan.
   const scanRes = await analyticsDb.execute<{
     ctid: string;
     communication_id: string | null;
@@ -200,7 +235,24 @@ export async function enrichTelephonyLeads(
       AND communication_type LIKE 'call%'
       AND created_at >= ${effectiveFromDate}
       AND created_at <= ${toDate}
+    ORDER BY created_at ASC
+    LIMIT ${MAX_ROWS_PER_TICK}
   `);
+
+  // Total backlog (incl. rows past the cap) — separate fast COUNT so the
+  // tick still reports honest queue depth even when capped. Used by the
+  // /api/health/etl endpoint and the dashboard freshness badge.
+  const backlogRes = await analyticsDb.execute<{ n: string | number }>(sql`
+    SELECT COUNT(*) AS n
+    FROM analytics.communications
+    WHERE lead_id IS NULL
+      AND phone IS NOT NULL
+      AND phone <> ''
+      AND communication_type LIKE 'call%'
+      AND created_at >= ${effectiveFromDate}
+      AND created_at <= ${toDate}
+  `);
+  result.backlogRemaining = Number(backlogRes.rows[0]?.n ?? 0);
 
   const unenriched: UnenrichedRow[] = scanRes.rows.map((r) => ({
     rowCtid: r.ctid,
@@ -221,15 +273,21 @@ export async function enrichTelephonyLeads(
   }));
   result.scannedRows = unenriched.length;
   if (unenriched.length === 0) {
-    console.log(`[ETL enrich] window ${effectiveFromDate.toISOString()}..${toDate.toISOString()}: 0 unenriched rows`);
+    console.log(
+      `[ETL enrich] window ${effectiveFromDate.toISOString()}..${toDate.toISOString()}: 0 unenriched rows (backlog=${result.backlogRemaining})`,
+    );
     return result;
   }
 
   // 2. De-dup phones, then batch-resolve via Kommo.
   const distinctPhones = Array.from(new Set(unenriched.map((r) => r.phone)));
   result.phonesQueried = distinctPhones.length;
+  const cappedNote =
+    result.backlogRemaining > unenriched.length
+      ? ` (CAPPED — ${result.backlogRemaining - unenriched.length} more pending)`
+      : "";
   console.log(
-    `[ETL enrich] scanning ${unenriched.length} unenriched rows across ${distinctPhones.length} distinct phones`,
+    `[ETL enrich] scanning ${unenriched.length} unenriched rows across ${distinctPhones.length} distinct phones${cappedNote}`,
   );
 
   const phoneToLeadIds = await searchContactsByPhone(distinctPhones);
@@ -340,7 +398,13 @@ export async function enrichTelephonyLeads(
           pipeline_name: extra.pipelineName,
           category: extra.category,
           lead_created_at: extra.leadCreatedAt,
-          lead_day_start: row.leadDayStart,
+          // The fan-out row belongs to a *different* lead than the source —
+          // its cohort bucket must be that lead's Berlin day-start, not the
+          // source row's. Looker / Daily group by `lead_day_start` for daily
+          // aggregations, so copying the source's value silently mis-buckets
+          // calls that span midnight or fan out to leads created on a
+          // different day.
+          lead_day_start: berlinDayStartIso(extra.leadCreatedAt) ?? row.leadDayStart,
           call_status: row.callStatus,
           duration: row.duration,
           manager: row.manager,

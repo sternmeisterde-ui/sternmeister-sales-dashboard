@@ -84,11 +84,39 @@ export interface SyncResult {
   /** Additional rows INSERTed by enrichment fan-out (one per extra lead) */
   telephonyRowsFannedOut: number;
   durationMs: number;
+  /** Steps that threw — each kept the rest of the pipeline alive. */
+  stepErrors: { step: string; message: string }[];
+}
+
+/**
+ * Run an ETL step in isolation. Errors are caught, logged, recorded into
+ * `errors`, and a fallback value is returned so the rest of the pipeline
+ * proceeds. Used for every step whose failure should not cascade — i.e.,
+ * everything except `fetchLookups` (we cannot run without lookups) and
+ * `syncLeads` (downstream needs the lead cache; they can rehydrate from
+ * DB but a hard fetch failure already produced a Kommo error we want to
+ * surface).
+ */
+async function runStep<T>(
+  name: string,
+  fn: () => Promise<T>,
+  fallback: T,
+  errors: { step: string; message: string }[],
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[ETL] ${name} failed (non-fatal):`, err);
+    errors.push({ step: name, message });
+    return fallback;
+  }
 }
 
 export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const t0 = Date.now();
   const incremental = opts.incremental ?? false;
+  const stepErrors: { step: string; message: string }[] = [];
 
   // In incremental mode: skip tasks (slow — pulls all open tasks per lead).
   // Status_changes USED to be skipped here too, but the Termin dashboard
@@ -106,17 +134,31 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `[ETL] runSync mode=${incremental ? "incremental" : "full"} from=${opts.fromDate.toISOString()} to=${opts.toDate.toISOString()}`,
   );
 
+  // fetchLookups is the only step that can't be isolated — every downstream
+  // step needs `lookups` (pipelines, users, refusal enums). If Kommo is hard
+  // down, the run aborts; that's the correct behaviour.
   const lookups = await fetchLookups();
 
-  // Leads must always be synced first to build leadCache (needed for comms + status changes)
+  // Leads must always be synced first to build leadCache (needed for comms + status changes).
+  // Wrapped in runStep so a transient Kommo failure here doesn't kill the whole run —
+  // we fall back to rehydrating leadCache from analytics.leads_cohort and proceed.
   let leadsCount = 0;
   let leadCache: Awaited<ReturnType<typeof syncLeads>> = [];
 
   if (!skip.has("leads")) {
-    // Incremental: fetch by updated_at so we catch status changes + reassignments too
     const dateField = incremental ? "updated_at" : "created_at";
-    leadCache = await syncLeads(opts.fromDate, opts.toDate, lookups, dateField);
+    leadCache = await runStep(
+      "sync-leads",
+      () => syncLeads(opts.fromDate, opts.toDate, lookups, dateField),
+      [],
+      stepErrors,
+    );
     leadsCount = leadCache.length;
+    if (leadCache.length === 0 && stepErrors.some((e) => e.step === "sync-leads")) {
+      // Leads-fetch crashed — rehydrate from DB so downstream syncs still run.
+      leadCache = await loadLeadCacheFromDb(opts.fromDate, opts.toDate);
+      console.log(`[ETL] leadCache rehydrated from DB after sync-leads error: ${leadCache.length} leads`);
+    }
   } else if (!skip.has("communications") || !skip.has("status_changes") || !skip.has("tasks")) {
     // Leads skipped but downstream syncs need per-lead metadata (responsibleUserId,
     // statusId, etc.). Reload lead cache from analytics.leads_cohort — no Kommo call.
@@ -124,22 +166,48 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     console.log(`[ETL] leadCache rehydrated from DB: ${leadCache.length} leads`);
   }
 
+  // Comms + status_changes were `Promise.all`'d before — but `Promise.all`
+  // rejects on the first failure and orphans the other branch. We now run
+  // each in its own runStep so one falling over (e.g., the 2026-04-30 13:57Z
+  // crash on the partial-unique-index conflict) doesn't take the rest of the
+  // pipeline with it. They still run concurrently because each runStep
+  // returns a Promise we await together.
   const [commsCount, statusChangesCount] = await Promise.all([
     skip.has("communications")
       ? Promise.resolve(0)
-      : syncCommunications(opts.fromDate, opts.toDate, leadCache, lookups),
+      : runStep(
+          "sync-communications",
+          () => syncCommunications(opts.fromDate, opts.toDate, leadCache, lookups),
+          0,
+          stepErrors,
+        ),
     skip.has("status_changes")
       ? Promise.resolve(0)
-      : syncStatusChanges(opts.fromDate, opts.toDate, leadCache, lookups),
+      : runStep(
+          "sync-status-changes",
+          () => syncStatusChanges(opts.fromDate, opts.toDate, leadCache, lookups),
+          0,
+          stepErrors,
+        ),
   ]);
 
   const tasksCount = skip.has("tasks")
     ? 0
-    : await syncTasks(leadCache, lookups);
+    : await runStep(
+        "sync-tasks",
+        () => syncTasks(leadCache, lookups),
+        0,
+        stepErrors,
+      );
 
-  // Update contact_date on leads after communications are populated
+  // Update contact_date on leads after communications are populated.
   if (!skip.has("communications") && leadCache.length > 0) {
-    await updateContactDates(leadCache.map((e) => e.leadId));
+    await runStep(
+      "update-contact-dates",
+      () => updateContactDates(leadCache.map((e) => e.leadId)),
+      undefined,
+      stepErrors,
+    );
   }
 
   // Telephony first — its DELETE-then-INSERT wipes both legacy non-prefix
@@ -151,16 +219,18 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const hasTelephonyCreds =
     !!process.env.CALLGEAR_ACCESS_TOKEN || !!process.env.CLOUDTALK_API_ID;
   if (!skip.has("telephony") && hasTelephonyCreds) {
-    try {
-      const telRes = await syncTelephony(opts.fromDate, opts.toDate);
-      telephonyLegs = telRes.inserted;
-    } catch (err) {
-      // Don't fail the whole ETL — telephony is additive coverage; on error
-      // we still ship the Kommo-sourced rows that already landed.
-      console.error(
-        `[ETL] sync-telephony failed (non-fatal): ${err instanceof Error ? err.message : err}`,
-      );
-    }
+    const telRes = await runStep(
+      "sync-telephony",
+      () => syncTelephony(opts.fromDate, opts.toDate),
+      {
+        callgearLegs: 0,
+        cloudtalkCalls: 0,
+        unmatchedAgents: [] as { source: "callgear" | "cloudtalk"; agentId: string; name: string; count: number }[],
+        inserted: 0,
+      },
+      stepErrors,
+    );
+    telephonyLegs = telRes.inserted;
   } else if (!skip.has("telephony")) {
     console.log(
       "[ETL] sync-telephony: skipped (no CALLGEAR_ACCESS_TOKEN nor CLOUDTALK_API_ID set)",
@@ -176,24 +246,40 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   let telephonyRowsFannedOut = 0;
   const enrichmentLeadIds: number[] = [];
   if (!skip.has("telephony") && hasTelephonyCreds) {
-    try {
-      // In incremental mode (15-min cron), Kommo may not have the contact
-      // for a phone yet at first attempt — without sweep we'd never retry.
-      // 7-day lookback re-tries every still-unenriched call so cron is
-      // self-healing. In full mode the caller controls fromDate already.
-      const enrichRes = incremental
-        ? await enrichTelephonyLeads(opts.fromDate, opts.toDate, { lookbackDays: 7 })
-        : await enrichTelephonyLeads(opts.fromDate, opts.toDate);
-      telephonyRowsLinked = enrichRes.rowsLinked;
-      telephonyRowsFannedOut = enrichRes.rowsFannedOut;
-      // Capture the leads that just got linked so the SLA step picks them up
-      // even if their lead_created_at is outside this window. In incremental
-      // mode the enrichment swept 7 days back, so widen the lookup too —
-      // otherwise SLA misses leads enriched from older windows.
-      if (enrichRes.rowsLinked > 0 || enrichRes.rowsFannedOut > 0) {
-        const linkedFromDate = incremental
-          ? new Date(opts.toDate.getTime() - 7 * 24 * 60 * 60 * 1000)
-          : opts.fromDate;
+    // In incremental mode (15-min cron), Kommo may not have the contact
+    // for a phone yet at first attempt — without sweep we'd never retry.
+    // 7-day lookback re-tries every still-unenriched call so cron is
+    // self-healing. In full mode the caller controls fromDate already.
+    const enrichRes = await runStep(
+      "enrich-telephony-leads",
+      () =>
+        incremental
+          ? enrichTelephonyLeads(opts.fromDate, opts.toDate, { lookbackDays: 7 })
+          : enrichTelephonyLeads(opts.fromDate, opts.toDate),
+      {
+        scannedRows: 0,
+        phonesQueried: 0,
+        phonesResolved: 0,
+        rowsLinked: 0,
+        rowsFannedOut: 0,
+        unresolvedPhones: [] as string[],
+        backlogRemaining: 0,
+      },
+      stepErrors,
+    );
+    telephonyRowsLinked = enrichRes.rowsLinked;
+    telephonyRowsFannedOut = enrichRes.rowsFannedOut;
+    // Capture the leads that just got linked so the SLA step picks them up
+    // even if their lead_created_at is outside this window. In incremental
+    // mode the enrichment swept 7 days back, so widen the lookup too —
+    // otherwise SLA misses leads enriched from older windows.
+    if (enrichRes.rowsLinked > 0 || enrichRes.rowsFannedOut > 0) {
+      const linkedFromDate = incremental
+        ? new Date(opts.toDate.getTime() - 7 * 24 * 60 * 60 * 1000)
+        : opts.fromDate;
+      // Inline try/catch — runStep's generic signature can't carry Neon's
+      // full QueryResult type cleanly, and we only need `.rows` here.
+      try {
         const linked = await analyticsDb.execute<{ lead_id: number | string }>(sql`
           SELECT DISTINCT lead_id
           FROM analytics.communications
@@ -203,11 +289,11 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
             AND created_at <= ${opts.toDate}
         `);
         for (const r of linked.rows) enrichmentLeadIds.push(Number(r.lead_id));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("[ETL] collect-linked-ids failed (non-fatal):", err);
+        stepErrors.push({ step: "enrich-telephony-leads:collect-linked-ids", message });
       }
-    } catch (err) {
-      console.error(
-        `[ETL] enrich-telephony-leads failed (non-fatal): ${err instanceof Error ? err.message : err}`,
-      );
     }
   }
 
@@ -223,7 +309,12 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
 
   const slaRows = skip.has("sla")
     ? 0
-    : await computeSla(opts.fromDate, opts.toDate, filterLeadIds);
+    : await runStep(
+        "compute-sla",
+        () => computeSla(opts.fromDate, opts.toDate, filterLeadIds),
+        0,
+        stepErrors,
+      );
 
   const result: SyncResult = {
     leads: leadsCount,
@@ -235,6 +326,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     telephonyRowsLinked,
     telephonyRowsFannedOut,
     durationMs: Date.now() - t0,
+    stepErrors,
   };
 
   console.log(
@@ -247,6 +339,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `linked=${result.telephonyRowsLinked}`,
     `fannedOut=${result.telephonyRowsFannedOut}`,
     `sla=${result.slaRows}`,
+    `stepErrors=${stepErrors.length}`,
   );
 
   return result;

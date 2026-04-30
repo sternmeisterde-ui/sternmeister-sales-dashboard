@@ -17,6 +17,7 @@ import DashboardTab from "@/components/DashboardTab";
 import ManagersTab from "@/components/ManagersTab";
 import AuditTab from "@/components/AuditTab";
 import CriteriaTab from "@/components/CriteriaTab";
+import EtlFreshnessBadge from "@/components/EtlFreshnessBadge";
 import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
@@ -723,8 +724,9 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Right-side action cluster: report bug + theme toggle */}
+          {/* Right-side action cluster: ETL freshness (admin) + report bug + theme toggle */}
           <div className="ml-auto flex items-center gap-2">
+            {isAdmin && <EtlFreshnessBadge />}
             <button
               type="button"
               onClick={() => setBugReportOpen(true)}
