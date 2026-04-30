@@ -206,10 +206,12 @@ export async function GET(req: NextRequest) {
     );
 
     // CRM (non-call) events from tracking_events. Calls are sourced separately
-    // from analytics.communications below — that's the integrator's CDR mirror
-    // and is the source of truth for all call counts (Звонки/Daily/Dashboard
-    // already read from it). Pulling calls from there keeps Активность in
-    // lockstep with those tabs and survives Kommo PBX-integration outages.
+    // from analytics.communications below — populated by our own ETL pulling
+    // CallGear+CloudTalk CDR directly (sync-telephony) plus Kommo call notes
+    // (sync-communications). It's the source of truth for all call counts
+    // (Звонки/Daily/Dashboard already read from it). Pulling calls from there
+    // keeps Активность in lockstep with those tabs and survives Kommo PBX-
+    // integration outages.
     const events = await trackingDb
       .select({
         managerId: trackingEvents.managerId,

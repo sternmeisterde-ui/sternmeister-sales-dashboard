@@ -173,8 +173,9 @@ export interface AnalyticsCallEvent {
  * Per-call rows for a department + window, attributed via NAME_ALIASES to
  * master_managers.id. Drives the Активность tab's blue segments — same
  * underlying source as Звонки/Daily/Dashboard so call counts agree across
- * tabs (and survive Kommo PBX-integration outages, since this reads from
- * the integrator's CDR mirror, not Kommo /notes).
+ * tabs (and survive Kommo PBX-integration outages, since analytics.
+ * communications is fed by direct CallGear+CloudTalk CDR pulls in our own
+ * ETL — see src/lib/etl/sync-telephony.ts — independent of Kommo /notes).
  *
  * Pattern A dedup: a single CDR call appears as N rows (one per lead the
  * caller's contact is in). DISTINCT ON (communication_id) collapses them —

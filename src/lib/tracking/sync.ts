@@ -7,11 +7,13 @@ import { fetchRawEvents } from "@/lib/kommo/client";
 import { ensureTrackingSchema } from "./init";
 import { CALL_TYPES, EVENT_TYPES } from "./event-types";
 
-// CRM (non-call) event types only. Calls are NOT synced from Kommo anymore —
-// /api/tracking now sources them from analytics.communications (the
-// integrator's CDR mirror), so Активность agrees with Звонки/Daily/Dashboard
-// and survives Kommo PBX-integration outages. The CALL_TYPES filter below
-// keeps the safety net in case the catalogue ever regains a non-PBX call type.
+// CRM (non-call) event types only. Calls are NOT synced from Kommo /notes
+// here anymore — /api/tracking now sources them from analytics.communications,
+// which is fed by our own direct-from-АТС ETL (sync-telephony pulls CallGear+
+// CloudTalk CDR; sync-communications adds Kommo-side context). So Активность
+// agrees with Звонки/Daily/Dashboard and survives Kommo PBX-integration
+// outages. The CALL_TYPES filter below keeps the safety net in case the
+// catalogue ever regains a non-PBX call type.
 const NON_CALL_EVENT_TYPES = EVENT_TYPES
   .filter((t) => !CALL_TYPES.has(t.key))
   .map((t) => t.key);
@@ -108,8 +110,10 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        attribution and were dropped. Re-backfill picks them up.
 //        (2026-04-28)
 //   v12 — calls no longer synced into tracking_events at all. /api/tracking
-//        now reads call segments from analytics.communications (integrator's
-//        CDR mirror — same source as Звонки/Daily/Dashboard). Reasons:
+//        now reads call segments from analytics.communications, fed by our
+//        own ETL (sync-telephony: direct CallGear+CloudTalk CDR pulls;
+//        sync-communications: Kommo-side notes). Same source as Звонки/
+//        Daily/Dashboard. Reasons:
 //          • Kommo /notes only sees calls when the PBX integration is
 //            healthy; CloudTalk/CallGear outages caused multi-hour gaps in
 //            Активность (incident 2026-04-29 b2b, 2026-04-30 b2g).
