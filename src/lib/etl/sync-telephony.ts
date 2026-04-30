@@ -205,6 +205,21 @@ export async function syncTelephony(
     };
   }
 
+  // Dedup by (communication_id, lead_id ?? 0) — Postgres rejects
+  // `ON CONFLICT DO UPDATE` when one statement targets the same row twice.
+  // CallGear/CloudTalk can occasionally emit two CDR entries for one leg
+  // (re-poll race, partial-then-complete writes); without this dedup the
+  // upsert below crashes with `cannot affect row a second time`.
+  // Last entry wins so the most recent leg snapshot (final duration /
+  // call_status) is what lands.
+  const telDedup = new Map<string, CommRow>();
+  for (const r of rows) {
+    const key = `${r.communicationId ?? "null"}|${r.leadId ?? 0}`;
+    telDedup.set(key, r);
+  }
+  rows.length = 0;
+  for (const r of telDedup.values()) rows.push(r);
+
   // ── Persist: legacy cleanup + idempotent upsert ─────────────────────
   // (1) Wipe legacy non-prefixed call rows (Kommo /notes era, pre-2026-04-28
   //     hard-split). They predate the cg-leg:*/ct:* prefix scheme and

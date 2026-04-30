@@ -129,6 +129,22 @@ export async function syncCommunications(
 
   for (const row of orphanRows) allRows.push(row);
 
+  // ── Deduplicate within batch by (communication_id, lead_id ?? 0) ─────
+  // Postgres rejects ON CONFLICT DO UPDATE when the same SQL statement
+  // tries to update one row twice ("cannot affect row a second time").
+  // Kommo /events can return multiple rows for the same message id when
+  // a chat thread has both a delivery and a read receipt with the same
+  // event id (rare but observed during 2026-04-30 backfill). Dedup in
+  // JS — last entry wins, so the latest event wins on contact-flag /
+  // SLA computations recomputed in the loop above.
+  const dedupMap = new Map<string, CommRow>();
+  for (const row of allRows) {
+    const key = `${row.communicationId ?? "null"}|${row.leadId ?? 0}`;
+    dedupMap.set(key, row);
+  }
+  allRows.length = 0;
+  for (const row of dedupMap.values()) allRows.push(row);
+
   // ── Legacy pre-hard-split cleanup (transitional) ─────────────────────
   // Wipe orphan call rows that landed before 2026-04-28 hard-split — they
   // have `communication_type` ∈ {call_in, call_out} but no telephony
