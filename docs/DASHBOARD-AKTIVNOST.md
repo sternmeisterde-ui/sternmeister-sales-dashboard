@@ -4,8 +4,19 @@ Last updated: 2026-04-28
 
 Per-manager activity timeline showing time on calls (blue), CRM work
 (green), and idle (grey) within a fixed 09:00–20:00 Berlin window.
-Source of truth: `tracking_events` in the dedicated tracking Neon
-project (`TRACKING_DATABASE_URL`).
+
+---
+
+## Источники данных
+
+| DB connection | Таблица | Зачем нужна тут | Ключевые колонки |
+|---|---|---|---|
+| **Tracking** (`TRACKING_DATABASE_URL`, отдельный Neon-проект) | `tracking_events` | Source of truth для каждого события (звонок-нота из `/notes` или CRM-event из `/events`) | `event_id` (`note:<id>` для калов), `event_type` (один из 41 типа), `manager_id`, `department`, `created_at`, `duration_sec`, `entity_type`, `raw` (jsonb с pbx-полями: `uniq`, `source`, `link`, `phone`, `call_status`, `call_result`) |
+| **Tracking** | `tracking_sync_state` | Маркер последнего успешного backfill-окна на (department × kind) | `department`, `kind`, `from_date`, `to_date`, `filter_version`, `synced_at` |
+| **D1** (`DATABASE_URL`) | `master_managers` | Атрибуция события менеджеру по `kommo_user_id` | `id`, `name`, `kommo_user_id`, `department`, `line`, `role`, `is_active` |
+| **Analytics** (read-only, для cross-check) | `analytics.communications.uniq` | Sanity-check PBX call ID против `tracking_events.raw->>'uniq'` (не используется в hot path) | — |
+
+> Внешний источник: **Kommo API** — `/api/v4/events` (CRM-events) и `/api/v4/notes` (звонки). См. блок «How call data flows» ниже.
 
 ---
 

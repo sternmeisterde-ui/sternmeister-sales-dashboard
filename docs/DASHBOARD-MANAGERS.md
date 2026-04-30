@@ -62,6 +62,19 @@ database `D1_roleplay`). OKK / R-копии ничего не знают про 
 человек одновременно руководит и работает на линии. Таблица расписания, фильтры
 по линиям и таблицы Звонков уважают это (см. `project_double_status` memory).
 
+#### Sync targets (записываются автоматом при POST /api/managers)
+
+`master_managers` — single source of truth, но при upsert он расходится по 4 копиям:
+
+| DB connection | Таблица | Когда пишется | Ключевые колонки |
+|---|---|---|---|
+| **D2** (`D2_OKK_DATABASE_URL`) | `managers` | `inOkk=true` AND `department='b2g'` | `id` (соответствует master_managers.id), `name`, `kommo_user_id`, `line`, `role`, `is_active`, `callgear_employee_id`, `cloudtalk_agent_id` |
+| **R2** (`R2_OKK_DATABASE_URL`) | `managers` | `inOkk=true` AND `department='b2b'` | то же |
+| **D1** (`DATABASE_URL`) | `d1_users` | `inRolevki=true` AND `department='b2g'` AND `telegramId IS NOT NULL` | `id`, `telegram_id`, `name`, `team`, `role`, `line`, `kommo_user_id`, `is_active` |
+| **R1** (`R1_DATABASE_URL`, авто-derive из D1 если не задан) | `r1_users` | `inRolevki=true` AND `department='b2b'` AND `telegramId IS NOT NULL` | то же |
+
+Soft-delete: при удалении менеджера в master_managers ставится `is_active=false` (FK в калах сохраняется), и в sync-targets также `is_active=false`. Кали из истории остаются.
+
 ### `manager_schedule` — что менеджер делает в конкретный день
 
 | Column | Type | Notes |

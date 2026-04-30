@@ -63,14 +63,17 @@ when the user opens the calendar manually.
 
 ---
 
-## Data sources
+## Источники данных
 
-| Source | What we read | Where it's filled |
-|---|---|---|
-| `analytics.leads_cohort.termin_date` | "Дата термина ДЦ" / "Дата термина" custom field on Kommo lead. | ETL `syncLeads` — resolved by name, falls back to legacy "Дата термина" if "Дата термина ДЦ" missing. |
-| `analytics.leads_cohort.aa_termin_date` | "Дата термина АА" custom field. | Same path. |
-| `analytics.leads_cohort.created_at` | Deal creation timestamp. | Existing column. |
-| `analytics.lead_status_changes` | Earliest `event_at` where `status_id = 93886075` (TERM_DC_DONE). | ETL `syncStatusChanges`. |
+Все запросы — **Analytics Neon** (`ANALYTICS_DATABASE_URL`, схема `analytics.*`). Никакие другие БД этот раздел не трогает.
+
+| DB connection | Таблица | Колонка | Зачем нужна тут | Где заполняется |
+|---|---|---|---|---|
+| **Analytics** | `analytics.leads_cohort` | `termin_date` | "Дата термина ДЦ" / legacy "Дата термина" custom field on Kommo lead | ETL `syncLeads` — resolved by name (case-insensitive), fallback на legacy если "Дата термина ДЦ" missing |
+| **Analytics** | `analytics.leads_cohort` | `aa_termin_date` | "Дата термина АА" custom field | ETL `syncLeads` |
+| **Analytics** | `analytics.leads_cohort` | `created_at` | Deal creation timestamp | Existing column |
+| **Analytics** | `analytics.leads_cohort` | `pipeline_id` | Filter `= 12154099` (Бух Бератер) — другие пайплайны эти поля не имеют | Existing |
+| **Analytics** | `analytics.lead_status_changes` | MIN(`event_at`) WHERE `status_id = 93886075` | TERM_DC_DONE → baseline для AA когда сделка прошла «Термин ДЦ состоялся» | ETL `syncStatusChanges` |
 
 Both `termin_date` and `aa_termin_date` were added in
 [`drizzle/analytics/0006_termin_dates.sql`](../drizzle/analytics/0006_termin_dates.sql)

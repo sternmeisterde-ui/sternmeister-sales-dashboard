@@ -6,6 +6,22 @@ This is the operational-architecture doc for the dashboard's «Звонки» ta
 Read alongside [`SESSION-HANDOFF.md`](./SESSION-HANDOFF.md) (current focus,
 known issues) and [`TODO.md`](./TODO.md) (next steps).
 
+> Note: «Звонки» — это label сайдбара для tab id `dashboard`. Компонент — `DashboardTab.tsx`.
+
+---
+
+## Источники данных
+
+| DB connection | Таблица | Зачем нужна тут | Ключевые колонки |
+|---|---|---|---|
+| **Analytics** (`ANALYTICS_DATABASE_URL`) | `analytics.communications` | KPI tiles + per-manager калы + trend chart | `communication_type` (filter `LIKE 'call%'`), `manager`, `pipeline_id` (filter `IN (dept) OR IS NULL`), `duration` (≥1 = connected), `created_at`, `lead_id`, `phone` (для CDR-row после `enrich-telephony-leads`), `communication_id` (для `COUNT(DISTINCT)`) |
+| **Analytics** | `analytics.leads_cohort` | Cohort status table («когортный срез по статусам сделок») | `lead_id`, `created_at` (cohort filter), `pipeline_id`, `status_id`, `category` |
+| **D1** (`DATABASE_URL`) | `master_managers` | Per-manager attribution (имя, линия, kommo_user_id) | `id`, `name`, `kommo_user_id`, `line`, `role`, `is_active`, `department`. Фильтр `is_active=true AND department=:dept`. ROPs (без `line`) исключаются из per-manager-таблиц но входят в KPI totals |
+
+> **Внешний источник**: Kommo `/leads/pipelines` API дёргается параллельно для live-имён статусов (терминальные status_id 142/143 — глобальные, имена per-pipeline). Кешируется с `v8` cache-key вместе с response.
+
+> **Не используется** этим разделом: OKK (`calls`/`evaluations`), Roleplay (`d1_calls`/`r1_calls`), `tracking_events`, `daily_plans`, `analytics.sla`. Только три таблицы выше.
+
 ---
 
 ## Layout (top → bottom)
