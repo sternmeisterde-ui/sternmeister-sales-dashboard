@@ -6,7 +6,7 @@ import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
 import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
-// 30 min ceiling. With concurrency pools (Kommo=5, AssemblyAI=4, Grok=3) and
+// 30 min ceiling. With concurrency pools (Kommo=5, Scribe=4, Grok=3) and
 // MAX_CALLS=500, worst-case ~25 min per run. Dokploy has no platform-side
 // timeout, but the SSE stream needs Next.js to keep the route alive.
 export const maxDuration = 1800;

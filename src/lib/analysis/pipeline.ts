@@ -23,7 +23,7 @@ import {
   PER_CALL_MAX_INPUT_CHARS, SUMMARY_MAX_INPUT_CHARS,
 } from "./prompts";
 
-const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
+const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const DEFAULT_MIN_DURATION = 300; // 5 min
 
@@ -32,9 +32,13 @@ const DEFAULT_MIN_DURATION = 300; // 5 min
 // these, a stalled TCP connection (rare but real on long runs) holds a
 // concurrency slot indefinitely — at 50 calls a single zombie worker doesn't
 // crash the run but quietly drops throughput by 33%.
-const ASSEMBLYAI_SUBMIT_TIMEOUT_MS = 60_000;   // POST that triggers AssemblyAI's own slow CDN fetch (1h MP3 from CloudTalk S3 can take 30-60s before they respond)
-const ASSEMBLYAI_POLL_TIMEOUT_MS = 15_000;     // single status read between 10s sleeps
-const ASSEMBLYAI_JOB_MAX_MS = 15 * 60 * 1000;  // hard wall-clock per transcription job (AssemblyAI sometimes gets stuck in 'processing' on their side; reclaim the slot)
+//
+// ElevenLabs Scribe v2 is a SYNCHRONOUS endpoint — one request returns the
+// full transcript when the job finishes. Typical timing: ~30-60s for a
+// 15-min call, ~3-5min for a 60-min call. We give it 15min headroom (same
+// wall-clock as the legacy AssemblyAI job ceiling) so a long call doesn't
+// fail spuriously.
+const SCRIBE_TIMEOUT_MS = 15 * 60 * 1000;
 const GROK_TIMEOUT_MS = 120_000;               // single-attempt timeout: 25k-char prompts on grok-beta regularly hit 45-90s
 const GROK_TOTAL_TIMEOUT_MS = 180_000;         // overall callGrok budget across retries — bounds worker-freeze cascade if xAI partially outages
 // Hard ceiling to avoid runaway cost — raised from 100 because filters with
@@ -329,64 +333,128 @@ async function transcribeAudio(audioUrl: string): Promise<{ text: string; speake
   return null;
 }
 
-async function tryTranscribe(url: string): Promise<{ text: string; speakers: string } | null> {
-  try {
-    const submitRes = await fetch("https://api.assemblyai.com/v2/transcript", {
-      method: "POST",
-      headers: { Authorization: ASSEMBLYAI_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ audio_url: url, language_code: "ru", speaker_labels: true }),
-      signal: AbortSignal.timeout(ASSEMBLYAI_SUBMIT_TIMEOUT_MS),
-    });
-    const { id, error } = await submitRes.json() as { id?: string; error?: string };
-    if (error || !id) return null;
+interface ScribeWord {
+  text: string;
+  start?: number;
+  end?: number;
+  type: "word" | "spacing" | "audio_event";
+  speaker_id?: string | null;
+}
+interface ScribeResponse {
+  text: string;
+  words?: ScribeWord[];
+  language_code?: string;
+  audio_duration_secs?: number;
+  detail?: unknown; // error envelope
+}
 
-    // Wall-clock fence — 120 × 10s = 20 min loop budget already, but a job
-    // stuck on AssemblyAI's side can sit in `processing` indefinitely. Bail
-    // at 15 min (the typical p99 for 1-hour audio is ~5 min) so a single
-    // stuck job doesn't sit on a concurrency slot for the whole pipeline.
-    const jobStartedAt = Date.now();
-
-    for (let i = 0; i < 120; i++) {
-      await sleep(10000);
-      if (Date.now() - jobStartedAt > ASSEMBLYAI_JOB_MAX_MS) {
-        console.warn(`[tryTranscribe] AssemblyAI job ${id} exceeded ${ASSEMBLYAI_JOB_MAX_MS / 60000}min — abandoning slot`);
-        return null;
-      }
-      // Per-poll timeout shorter than the 10s sleep cadence so a hanging
-      // socket doesn't burn the whole 20-min poll budget on one bad request.
-      const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-        headers: { Authorization: ASSEMBLYAI_KEY },
-        signal: AbortSignal.timeout(ASSEMBLYAI_POLL_TIMEOUT_MS),
-      }).catch((e: unknown) => {
-        // A timed-out poll isn't fatal — AssemblyAI's job continues on their
-        // side, we just retry on the next iteration. Returning null lets the
-        // loop continue so we don't lose all progress to one slow poll.
-        const isTimeout = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
-        if (!isTimeout) throw e;
-        return null;
-      });
-      if (!pollRes) continue;
-      // Same body-read-abort risk as Grok (AbortSignal stays armed after
-      // fetch resolves). For AssemblyAI it's far less likely (status payload
-      // is <500B), but skip the iteration on abort instead of letting it
-      // bubble out to the outer `catch { return null }` and discard the
-      // whole transcript.
-      let r: { status: string; text?: string; utterances?: Array<{ speaker: string; text: string }>; error?: string };
-      try {
-        r = await pollRes.json();
-      } catch {
-        continue;
-      }
-      if (r.status === "completed") {
-        const speakers = r.utterances?.map(u => `**Speaker ${u.speaker}:** ${u.text}`).join("\n\n") || r.text || "";
-        return { text: r.text || "", speakers };
-      }
-      if (r.status === "error") return null;
+/**
+ * Convert Scribe's word-level output (`words[]` with per-word `speaker_id`)
+ * into the speaker-block format the rest of the pipeline expects:
+ *
+ *   **Speaker A:** ...text...
+ *
+ *   **Speaker B:** ...text...
+ *
+ * Why this exists: AssemblyAI returned `utterances: [{speaker:"A", text}]`
+ * already grouped. Scribe returns one entry per word + spacing, with
+ * `speaker_id` like "speaker_0"/"speaker_1". We group consecutive same-speaker
+ * tokens, swallow `audio_event` tokens (we set `tag_audio_events: false` so
+ * there shouldn't be any, but defensive), and remap speaker_0→A, speaker_1→B,
+ * etc. — preserves the contract downstream code uses (manager/client speaker
+ * mapping in `pipeline.ts` callers, OKK speaker labeling in CLAUDE.md:219).
+ */
+function formatSpeakerBlocks(words: ScribeWord[] | undefined): string {
+  if (!words || words.length === 0) return "";
+  const blocks: { speaker: string; text: string }[] = [];
+  let current: { speaker: string; text: string } | null = null;
+  for (const w of words) {
+    if (w.type === "audio_event") continue;
+    const speaker: string = w.speaker_id ?? current?.speaker ?? "speaker_0";
+    if (!current || current.speaker !== speaker) {
+      if (current) blocks.push(current);
+      current = { speaker, text: "" };
     }
-    return null;
-  } catch {
+    current.text += w.text;
+  }
+  if (current) blocks.push(current);
+
+  const speakerMap = new Map<string, string>();
+  let nextLetter = 0;
+  return blocks
+    .map((b) => {
+      let label = speakerMap.get(b.speaker);
+      if (!label) {
+        label = String.fromCharCode(65 + nextLetter++);
+        speakerMap.set(b.speaker, label);
+      }
+      return `**Speaker ${label}:** ${b.text.trim()}`;
+    })
+    .filter((s) => s.length > "**Speaker A:** ".length)
+    .join("\n\n");
+}
+
+async function tryTranscribe(url: string): Promise<{ text: string; speakers: string } | null> {
+  // ElevenLabs Scribe v2 — synchronous batch transcription.
+  //   - `cloud_storage_url` instead of file upload (CloudTalk S3 mp3s are
+  //     publicly fetchable; ElevenLabs pulls the audio server-side).
+  //   - `language_code: "rus"` — ISO-639-3 (NOT "ru"; that's ISO-639-1 and
+  //     Scribe treats unknown codes as auto-detect, which on Russian-with-
+  //     German-loanwords audio sometimes mislabels as German).
+  //   - `no_verbatim: true` — drops "ээ"/"мм" filler. Cleaner transcript →
+  //     Grok analyses the actual content of what was said, not noise.
+  //   - `tag_audio_events: false` — no `[laughter]`/`[cough]` tokens in
+  //     business-call transcripts.
+  //   - `diarize: true` — multi-speaker labels per word.
+  // Single fetch with a 15-min wall-clock fence (same budget as the legacy
+  // AssemblyAI job timeout), so a stuck job releases its concurrency slot.
+  const form = new FormData();
+  form.append("model_id", "scribe_v2");
+  form.append("cloud_storage_url", url);
+  form.append("language_code", "rus");
+  form.append("diarize", "true");
+  form.append("no_verbatim", "true");
+  form.append("tag_audio_events", "false");
+  form.append("timestamps_granularity", "word");
+
+  let res: Response;
+  try {
+    res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_KEY },
+      body: form,
+      signal: AbortSignal.timeout(SCRIBE_TIMEOUT_MS),
+    });
+  } catch (err: unknown) {
+    const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[tryTranscribe] Scribe ${isTimeout ? "timeout" : "network error"}: ${msg.slice(0, 200)}`);
     return null;
   }
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.warn(`[tryTranscribe] Scribe ${res.status}: ${errText.slice(0, 300)}`);
+    return null;
+  }
+
+  let data: ScribeResponse;
+  try {
+    data = await res.json() as ScribeResponse;
+  } catch (err: unknown) {
+    // Body-read abort race — same risk as the Grok call: AbortSignal stays
+    // armed after fetch resolves, body chunks can be aborted mid-drain on
+    // long transcriptions. Treat as null result, the URL fallback in the
+    // caller (`transcribeAudio`) will attempt the S3 direct URL if applicable.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[tryTranscribe] Scribe body read failed: ${msg.slice(0, 200)}`);
+    return null;
+  }
+
+  const text = data.text || "";
+  if (!text) return null;
+  const speakers = formatSpeakerBlocks(data.words) || text;
+  return { text, speakers };
 }
 
 // ==================== GROK ANALYSIS ====================
@@ -523,7 +591,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   // ensureKommoConfig() at the first Kommo API call instead, with a clearer
   // message than "env var not set".
   const missingKeys = [];
-  if (!ASSEMBLYAI_KEY) missingKeys.push("ASSEMBLYAI_API_KEY");
+  if (!ELEVENLABS_KEY) missingKeys.push("ELEVENLABS_API_KEY");
   if (!XAI_API_KEY) missingKeys.push("XAI_API_KEY");
   if (missingKeys.length > 0) {
     const msg = `Не настроены переменные окружения: ${missingKeys.join(", ")}. Добавьте в Dokploy Environment.`;
@@ -674,8 +742,10 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     }
 
     // Concurrency is the difference between a ~30-min run and a 3-hour run.
-    // Transcription waits on AssemblyAI polling (blocking I/O), so small N
-    // parallel = big speed-up. Use the narrower of TRANSCRIBE / GROK limits.
+    // Scribe is synchronous, but a single 60-min call still takes 3-5min on
+    // their side; running N in parallel reclaims most of that wait, so a
+    // small worker pool gives a big speed-up. Use the narrower of
+    // TRANSCRIBE / GROK limits.
     let processed = analysis.processedCalls || 0;
     const perCallLimit = Math.min(TRANSCRIBE_CONCURRENCY, GROK_CONCURRENCY);
 

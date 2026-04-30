@@ -60,8 +60,14 @@ services:
       - CLOUDTALK_API_ID=${CLOUDTALK_API_ID}
       - CLOUDTALK_API_SECRET=${CLOUDTALK_API_SECRET}
 
-      # AI / transcription providers
+      # AI / transcription providers.
+      # ELEVENLABS_API_KEY is the active STT provider (Scribe v2). The legacy
+      # ASSEMBLYAI_API_KEY is kept passthrough during the migration window so
+      # `scripts/test-scribe.ts --compare` and any rollback path still work;
+      # remove once OKK + analysis-prinimaet-reshenie are also on Scribe and
+      # the run has been verified end-to-end in production.
       - XAI_API_KEY=${XAI_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY}
 
       # Telegram — MTProto for username→id resolution in manager sync,
