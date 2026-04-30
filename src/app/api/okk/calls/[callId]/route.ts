@@ -5,7 +5,7 @@ import { eq, desc } from "drizzle-orm";
 import { formatCallDate } from "@/lib/utils/date";
 
 // ─── Helper: build speaker-labelled transcript ───────────────────────────────
-// AssemblyAI returns speakers as "A", "B", etc.
+// Speakers are labelled "A", "B", etc. (set by the STT pipeline).
 // We determine who is the manager based on call direction:
 //   outbound → manager called the client → client picks up first → Speaker A = Клиент
 //   inbound  → client called the company → manager answers first → Speaker A = Менеджер

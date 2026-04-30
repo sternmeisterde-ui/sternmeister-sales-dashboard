@@ -22,6 +22,7 @@ import {
   PER_CALL_MAX_TOKENS, SUMMARY_MAX_TOKENS,
   PER_CALL_MAX_INPUT_CHARS, SUMMARY_MAX_INPUT_CHARS,
 } from "./prompts";
+import { captureAnalysisException, captureAnalysisMessage } from "./sentry";
 
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY || "";
 const XAI_API_KEY = process.env.XAI_API_KEY || "";
@@ -35,9 +36,8 @@ const DEFAULT_MIN_DURATION = 300; // 5 min
 //
 // ElevenLabs Scribe v2 is a SYNCHRONOUS endpoint — one request returns the
 // full transcript when the job finishes. Typical timing: ~30-60s for a
-// 15-min call, ~3-5min for a 60-min call. We give it 15min headroom (same
-// wall-clock as the legacy AssemblyAI job ceiling) so a long call doesn't
-// fail spuriously.
+// 15-min call, ~3-5min for a 60-min call. We give it 15min headroom so a
+// long call doesn't fail spuriously.
 const SCRIBE_TIMEOUT_MS = 15 * 60 * 1000;
 const GROK_TIMEOUT_MS = 120_000;               // single-attempt timeout: 25k-char prompts on grok-beta regularly hit 45-90s
 const GROK_TOTAL_TIMEOUT_MS = 180_000;         // overall callGrok budget across retries — bounds worker-freeze cascade if xAI partially outages
@@ -46,7 +46,7 @@ const GROK_TOTAL_TIMEOUT_MS = 180_000;         // overall callGrok budget across
 // the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
 const MAX_CALLS = 500;
 // Concurrency limits per external service. Kommo is the strictest
-// (7 req/s per docs, we stay well under). AssemblyAI tolerates 10+ parallel.
+// (7 req/s per docs, we stay well under). Scribe tolerates 10+ parallel.
 const KOMMO_CONCURRENCY = 5;
 const TRANSCRIBE_CONCURRENCY = 4;
 const GROK_CONCURRENCY = 3;
@@ -323,13 +323,25 @@ async function transcribeAudio(audioUrl: string): Promise<{ text: string; speake
   if (result) return result;
 
   // Fallback: if CloudTalk play URL, try S3 direct
+  let s3Url: string | undefined;
   if (audioUrl.includes("cloudtalk.io/r/play/")) {
     const id = audioUrl.split("/").pop();
-    const s3Url = `https://s3-nl.hostkey.com/be7f6465-cloudtalknl/cloudtalk-recordings/${id}.mp3`;
+    s3Url = `https://s3-nl.hostkey.com/be7f6465-cloudtalknl/cloudtalk-recordings/${id}.mp3`;
     result = await tryTranscribe(s3Url);
     if (result) return result;
   }
 
+  // Fatal: both primary and (when applicable) S3 fallback failed. The call
+  // will save with `⚠️ Не удалось транскрибировать запись.` and Grok will
+  // skip analysing it. Send one error-level event per missed call so the
+  // Sentry dashboard surfaces a clear count of dropped transcriptions —
+  // tryTranscribe already sent per-attempt warnings with HTTP/network
+  // diagnostics, this one bundles them as the "definitively lost" signal.
+  captureAnalysisMessage("Transcription failed for both primary and fallback URL", "error", {
+    step: "transcription",
+    severity: "fatal",
+    extra: { primaryUrl: audioUrl, s3FallbackUrl: s3Url ?? "(not applicable — non-CloudTalk URL)" },
+  });
   return null;
 }
 
@@ -356,13 +368,12 @@ interface ScribeResponse {
  *
  *   **Speaker B:** ...text...
  *
- * Why this exists: AssemblyAI returned `utterances: [{speaker:"A", text}]`
- * already grouped. Scribe returns one entry per word + spacing, with
- * `speaker_id` like "speaker_0"/"speaker_1". We group consecutive same-speaker
- * tokens, swallow `audio_event` tokens (we set `tag_audio_events: false` so
- * there shouldn't be any, but defensive), and remap speaker_0→A, speaker_1→B,
- * etc. — preserves the contract downstream code uses (manager/client speaker
- * mapping in `pipeline.ts` callers, OKK speaker labeling in CLAUDE.md:219).
+ * Scribe returns one entry per word + spacing token, with `speaker_id` like
+ * "speaker_0"/"speaker_1". We group consecutive same-speaker tokens, swallow
+ * `audio_event` tokens (we set `tag_audio_events: false` so there shouldn't
+ * be any, but defensive), and remap speaker_0→A, speaker_1→B, etc. — the
+ * downstream code (manager/client mapping in callers, OKK speaker labelling
+ * in CLAUDE.md:219) reads the resulting blocks unchanged.
  */
 function formatSpeakerBlocks(words: ScribeWord[] | undefined): string {
   if (!words || words.length === 0) return "";
@@ -406,8 +417,8 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
   //   - `tag_audio_events: false` — no `[laughter]`/`[cough]` tokens in
   //     business-call transcripts.
   //   - `diarize: true` — multi-speaker labels per word.
-  // Single fetch with a 15-min wall-clock fence (same budget as the legacy
-  // AssemblyAI job timeout), so a stuck job releases its concurrency slot.
+  // Single fetch with a 15-min wall-clock fence so a stuck job releases its
+  // concurrency slot rather than wedging the worker.
   const form = new FormData();
   form.append("model_id", "scribe_v2");
   form.append("cloud_storage_url", url);
@@ -429,12 +440,25 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
     const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[tryTranscribe] Scribe ${isTimeout ? "timeout" : "network error"}: ${msg.slice(0, 200)}`);
+    captureAnalysisException(err, {
+      step: "transcription",
+      severity: "non_fatal",
+      extra: { url, kind: isTimeout ? "timeout" : "network_error", timeoutMs: SCRIBE_TIMEOUT_MS },
+    });
     return null;
   }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
     console.warn(`[tryTranscribe] Scribe ${res.status}: ${errText.slice(0, 300)}`);
+    // 5xx is ElevenLabs-side; 4xx is usually our fault (bad URL, quota, auth).
+    // Both useful but split severity so the dashboard can route 5xx to ops
+    // and 4xx to engineering without an alert storm cross-pollinating them.
+    captureAnalysisMessage(`Scribe HTTP ${res.status}`, res.status >= 500 ? "error" : "warning", {
+      step: "transcription",
+      severity: "non_fatal",
+      extra: { url, status: res.status, body: errText.slice(0, 1000) },
+    });
     return null;
   }
 
@@ -448,11 +472,26 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
     // caller (`transcribeAudio`) will attempt the S3 direct URL if applicable.
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[tryTranscribe] Scribe body read failed: ${msg.slice(0, 200)}`);
+    captureAnalysisException(err, {
+      step: "transcription",
+      severity: "non_fatal",
+      extra: { url, kind: "body_read_aborted" },
+    });
     return null;
   }
 
   const text = data.text || "";
-  if (!text) return null;
+  if (!text) {
+    // Empty transcript on a 200 response — Scribe accepted but produced nothing.
+    // Usually means the audio is silent or unintelligible; still worth a
+    // signal so we can spot a pattern (e.g. a CDN serving a 0-byte file).
+    captureAnalysisMessage("Scribe returned empty transcript", "warning", {
+      step: "transcription",
+      severity: "non_fatal",
+      extra: { url, audioDurationSecs: data.audio_duration_secs, languageCode: data.language_code },
+    });
+    return null;
+  }
   const speakers = formatSpeakerBlocks(data.words) || text;
   return { text, speakers };
 }
