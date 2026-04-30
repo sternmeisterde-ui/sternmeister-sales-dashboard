@@ -5,7 +5,11 @@
  *   - PER_CALL: analyze individual call transcript
  *   - SUMMARY: aggregate patterns across all analyzed calls
  *
- * Model: grok-4-1 (full reasoning) for summary, grok-4-1-fast for per-call
+ * Models:
+ *   - PER_CALL: grok-4-1-fast-reasoning (cheap, templated per-transcript work)
+ *   - SUMMARY:  grok-4.20-reasoning (latest, deeper synthesis across many calls)
+ *               Multi-agent variant gives even better results but xAI rejects
+ *               it on /v1/chat/completions, so we use single-agent reasoning.
  */
 
 // ==================== FAILURE MODE (Почему не получилось) ====================
@@ -148,8 +152,19 @@ export const SUCCESS_SUMMARY_PROMPT = `Ты директор по продажа
 /** Per-call analysis — fast model, many calls */
 export const PER_CALL_MODEL = "grok-4-1-fast-reasoning";
 
-/** Summary analysis — same model, larger context for pattern detection */
-export const SUMMARY_MODEL = "grok-4-1-fast-reasoning";
+/** Summary analysis — latest full-reasoning model. Synthesis across many
+ *  per-call discrete analyses benefits from deeper reasoning; this stage runs
+ *  exactly once per pipeline run, so the cost delta vs. fast model is small. */
+export const SUMMARY_MODEL = "grok-4.20-reasoning";
 
 export const PER_CALL_MAX_TOKENS = 4096;
-export const SUMMARY_MAX_TOKENS = 8192;
+/** Doubled vs. legacy 8192 so summary across 100+ calls isn't truncated mid-section. */
+export const SUMMARY_MAX_TOKENS = 16_384;
+
+/** Per-call input cap — single transcript + analysis fit comfortably. */
+export const PER_CALL_MAX_INPUT_CHARS = 25_000;
+/** Summary input cap — must fit ALL per-call analyses concatenated.
+ *  Sized for the worst case (MAX_CALLS=500, ~3k chars per analysis = ~1.5M chars
+ *  ≈ 375k tokens), well inside grok-4.20's context window. Without this cap
+ *  the legacy 25k-char limit silently dropped everything past ~5-7 calls. */
+export const SUMMARY_MAX_INPUT_CHARS = 1_500_000;

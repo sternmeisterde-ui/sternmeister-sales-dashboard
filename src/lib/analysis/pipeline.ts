@@ -20,6 +20,7 @@ import {
   FAILURE_SUMMARY_PROMPT, SUCCESS_SUMMARY_PROMPT,
   PER_CALL_MODEL, SUMMARY_MODEL,
   PER_CALL_MAX_TOKENS, SUMMARY_MAX_TOKENS,
+  PER_CALL_MAX_INPUT_CHARS, SUMMARY_MAX_INPUT_CHARS,
 } from "./prompts";
 
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || "";
@@ -396,7 +397,13 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
 // error by ~10 seconds and adds noise to logs.
 const QUOTA_EXHAUSTED_RE = /spending limit|out of credit|insufficient[_ ]?(?:credit|funds|quota)|exhausted/i;
 
-async function callGrok(systemPrompt: string, userContent: string, model: string, maxTokens: number): Promise<string> {
+async function callGrok(
+  systemPrompt: string,
+  userContent: string,
+  model: string,
+  maxTokens: number,
+  maxInputChars: number = PER_CALL_MAX_INPUT_CHARS,
+): Promise<string> {
   // Two-level timeout strategy:
   //   • Per-fetch (GROK_TIMEOUT_MS = 120s): bounds a single attempt against
   //     a stuck connection.
@@ -416,7 +423,7 @@ async function callGrok(systemPrompt: string, userContent: string, model: string
     temperature: 0.1,
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: userContent.substring(0, 25000) },
+      { role: "user", content: userContent.substring(0, maxInputChars) },
     ],
   });
 
@@ -733,6 +740,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       `Всего проанализировано ${processed} звонков.\n\n${allAnalysesText}`,
       SUMMARY_MODEL,
       SUMMARY_MAX_TOKENS,
+      SUMMARY_MAX_INPUT_CHARS,
     );
 
     // Save summary file
