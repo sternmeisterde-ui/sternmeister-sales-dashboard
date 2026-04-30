@@ -35,7 +35,7 @@ const PICKER_OPTIONS: Array<{
   { value: "-", label: "Выходной",        symbol: "—",   colorClass: "bg-slate-700/50 text-slate-400" },
   { value: "о", label: "Отпуск",          symbol: "🌴",  colorClass: "bg-blue-500/20 text-blue-400" },
   { value: "н", label: "Онбординг",       symbol: "🚀",  colorClass: "bg-cyan-500/20 text-cyan-400" },
-  { value: "у", label: "День увольнения", symbol: "УВ",  colorClass: "bg-rose-500/20 text-rose-400" },
+  { value: "у", label: "День увольнения", symbol: "🔴",  colorClass: "bg-rose-500/20 text-rose-400" },
 ];
 
 function cellStyle(val: ScheduleVal): string {
@@ -45,7 +45,7 @@ function cellStyle(val: ScheduleVal): string {
     case "-": return "bg-slate-700/50 text-slate-500";
     case "о": return "bg-blue-500/20 text-blue-400 font-bold";
     case "н": return "bg-cyan-500/20 text-cyan-400 font-bold";
-    case "у": return "bg-rose-500/20 text-rose-400 font-bold !text-[9px]";
+    case "у": return "bg-rose-500/20 text-rose-400 font-bold";
     default:  return "text-slate-700";
   }
 }
@@ -57,7 +57,7 @@ function cellLabel(val: ScheduleVal): string {
     case "-": return "—";
     case "о": return "🌴";
     case "н": return "🚀";
-    case "у": return "УВ";
+    case "у": return "🔴";
     default:  return "";
   }
 }
