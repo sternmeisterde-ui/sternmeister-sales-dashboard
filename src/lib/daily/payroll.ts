@@ -8,7 +8,7 @@
 // Caller passes period as 'YYYY-MM' string; we operate in calendar-day terms
 // (the schedule table stores YYYY-MM-DD strings, no TZ math needed here).
 
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, lte, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { masterManagers, managerSchedule, managerBonuses } from "@/lib/db/schema-existing";
 import { SCHEDULE_STATUSES, payrollFactorFor, type ScheduleCode } from "./schedule-payroll";
@@ -70,7 +70,11 @@ export async function computePayroll(
     .orderBy(masterManagers.name);
 
   if (managers.length === 0) return [];
+  const managerIds = managers.map((m) => m.id);
 
+  // Filter schedule rows by manager id list — defends against cross-department
+  // collisions if a manager is ever transferred (same UUID, new department),
+  // and also lets Postgres skip rows from the other department's managers.
   const scheduleRows = await db
     .select({
       userId: managerSchedule.userId,
@@ -81,6 +85,7 @@ export async function computePayroll(
       and(
         gte(managerSchedule.scheduleDate, from),
         lte(managerSchedule.scheduleDate, to),
+        inArray(managerSchedule.userId, managerIds),
       ),
     );
 
@@ -92,7 +97,12 @@ export async function computePayroll(
       note: managerBonuses.note,
     })
     .from(managerBonuses)
-    .where(eq(managerBonuses.periodMonth, periodMonth));
+    .where(
+      and(
+        eq(managerBonuses.periodMonth, periodMonth),
+        inArray(managerBonuses.userId, managerIds),
+      ),
+    );
   const bonusByUser = new Map<string, { amount: number; note: string | null }>();
   for (const b of bonusRows) {
     const n = Number.parseFloat(b.amount);
@@ -159,24 +169,25 @@ export async function computePayroll(
  * Default period for cron runs: the calendar month that just closed in
  * Europe/Berlin. Called on or after the 1st of the new month → returns
  * previous month. Called on the 1st itself → also returns previous month.
+ *
+ * Uses formatToParts (not regex on the formatted string) so locale / ICU
+ * formatting changes can't silently break the parse.
  */
 export function previousMonthBerlin(now: Date = new Date()): string {
-  // Anchor on Berlin local components so a UTC-midnight-1st cron run still
-  // resolves to the right period when Berlin is already in the new month.
-  const berlinNow = new Date(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "Europe/Berlin",
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-    }).format(now).replace(
-      /(\d+)\/(\d+)\/(\d+),?\s+(\d+):(\d+):(\d+)/,
-      "$3-$1-$2T$4:$5:$6",
-    ),
-  );
-  const y = berlinNow.getUTCFullYear();
-  const m = berlinNow.getUTCMonth();   // 0-based
-  // m=0 (January) → previous = December of y-1
-  const prevY = m === 0 ? y - 1 : y;
-  const prevM = m === 0 ? 12 : m;      // already 1-based for previous
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "numeric",
+  }).formatToParts(now);
+  const yPart = parts.find((p) => p.type === "year")?.value;
+  const mPart = parts.find((p) => p.type === "month")?.value;
+  const y = yPart ? Number.parseInt(yPart, 10) : NaN;
+  const m = mPart ? Number.parseInt(mPart, 10) : NaN; // 1..12
+  if (!Number.isFinite(y) || !Number.isFinite(m)) {
+    throw new Error("Failed to read Berlin date components");
+  }
+  // m=1 (January) → previous = December of y-1
+  const prevY = m === 1 ? y - 1 : y;
+  const prevM = m === 1 ? 12 : m - 1;
   return `${prevY}-${pad2(prevM)}`;
 }

@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
 import { and, eq, or, sql } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
   try {
@@ -44,6 +45,14 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  // Admin-only: this endpoint writes payroll-sensitive fields (dailyRate)
+  // alongside per-day shift overrides. Without this gate any unauthenticated
+  // caller could rewrite a manager's daily rate.
+  const session = await getSession();
+  if (!session || session.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   try {
     const body = (await req.json()) as {
       id?: string;

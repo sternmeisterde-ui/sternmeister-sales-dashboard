@@ -4,6 +4,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getFullScheduleForDate, getScheduleForMonth, setSchedule } from "@/lib/db/queries-daily";
 import { clearCache } from "@/lib/kommo/cache";
+import { getSession } from "@/lib/auth";
+import { db } from "@/lib/db";
+import { managerSchedule } from "@/lib/db/schema-existing";
+import { sql } from "drizzle-orm";
 
 export async function GET(req: NextRequest) {
   try {
@@ -34,25 +38,69 @@ function scheduleValueToIsOnLine(val: string | null | undefined): boolean {
 }
 
 export async function PUT(req: NextRequest) {
+  // Admin-only: bulk schedule writes affect SLA / payroll calculations across
+  // a whole month, and any caller could pass an arbitrary userId.
+  const session = await getSession();
+  if (!session || session.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   try {
     const body = await req.json();
 
     // Bulk update: { entries: [{ userId, date, scheduleValue, shiftStartTime?, shiftEndTime? }] }
-    // Shift fields are tri-state: omitted = preserve DB value; null = clear; string = set.
+    //
+    // Implemented as a single multi-row INSERT … ON CONFLICT DO UPDATE so the
+    // whole batch is atomic at the Postgres level — Neon HTTP doesn't expose
+    // transactions, but a single statement is. Either every row writes or
+    // none does (and the response count reflects reality, not the request).
+    //
+    // Shift fields are tri-state. We snapshot whether each row's caller
+    // explicitly passed shiftStartTime / shiftEndTime; on conflict we only
+    // overwrite those columns when the caller wanted to. Mixed-shape batches
+    // are rejected — every row in a single PUT must use the same shape.
     if (body.entries && Array.isArray(body.entries)) {
-      for (const entry of body.entries) {
-        const isOnLine = scheduleValueToIsOnLine(entry.scheduleValue);
-        await setSchedule(
-          entry.userId,
-          entry.date,
-          isOnLine,
-          entry.scheduleValue ?? null,
-          entry.shiftStartTime,
-          entry.shiftEndTime,
-        );
+      const entries = body.entries as Array<{
+        userId: string;
+        date: string;
+        scheduleValue?: string | null;
+        shiftStartTime?: string | null;
+        shiftEndTime?: string | null;
+      }>;
+      if (entries.length === 0) {
+        return NextResponse.json({ ok: true, count: 0 });
       }
+
+      const someHasShiftStart = entries.some((e) => e.shiftStartTime !== undefined);
+      const someHasShiftEnd = entries.some((e) => e.shiftEndTime !== undefined);
+
+      const values = entries.map((e) => ({
+        userId: e.userId,
+        scheduleDate: e.date,
+        isOnLine: scheduleValueToIsOnLine(e.scheduleValue),
+        scheduleValue: e.scheduleValue ?? null,
+        shiftStartTime: e.shiftStartTime ?? null,
+        shiftEndTime: e.shiftEndTime ?? null,
+      }));
+
+      const setClause: Record<string, unknown> = {
+        isOnLine: sql.raw("EXCLUDED.is_on_line"),
+        scheduleValue: sql.raw("EXCLUDED.schedule_value"),
+        updatedAt: new Date(),
+      };
+      if (someHasShiftStart) setClause.shiftStartTime = sql.raw("EXCLUDED.shift_start_time");
+      if (someHasShiftEnd) setClause.shiftEndTime = sql.raw("EXCLUDED.shift_end_time");
+
+      await db
+        .insert(managerSchedule)
+        .values(values)
+        .onConflictDoUpdate({
+          target: [managerSchedule.userId, managerSchedule.scheduleDate],
+          set: setClause,
+        });
+
       clearCache();
-      return NextResponse.json({ ok: true, count: body.entries.length });
+      return NextResponse.json({ ok: true, count: entries.length });
     }
 
     // Single update: { userId, date, isOnLine, scheduleValue?, shiftStartTime?, shiftEndTime? }

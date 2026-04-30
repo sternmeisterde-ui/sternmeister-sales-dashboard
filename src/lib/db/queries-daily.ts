@@ -237,42 +237,39 @@ export async function setSchedule(
   shiftStartTime?: string | null,
   shiftEndTime?: string | null,
 ): Promise<void> {
-  const existing = await db
-    .select({ id: managerSchedule.id })
-    .from(managerSchedule)
-    .where(
-      and(
-        eq(managerSchedule.userId, userId),
-        eq(managerSchedule.scheduleDate, dateStr)
-      )
-    )
-    .limit(1);
+  // Atomic upsert via the existing UNIQUE INDEX on (user_id, schedule_date).
+  // The `set` clause omits shift fields when the caller passed them as
+  // `undefined` so we don't accidentally null out a historical snapshot.
+  // (For multi-row bulk writes, see /api/daily/schedule's PUT handler — it
+  // builds a single multi-row upsert directly.)
+  const setOnUpdate: {
+    isOnLine: boolean;
+    scheduleValue: string | null;
+    shiftStartTime?: string | null;
+    shiftEndTime?: string | null;
+    updatedAt: Date;
+  } = {
+    isOnLine,
+    scheduleValue: scheduleValue ?? null,
+    updatedAt: new Date(),
+  };
+  if (shiftStartTime !== undefined) setOnUpdate.shiftStartTime = shiftStartTime;
+  if (shiftEndTime !== undefined) setOnUpdate.shiftEndTime = shiftEndTime;
 
-  if (existing.length > 0) {
-    const patch: {
-      isOnLine: boolean;
-      scheduleValue: string | null;
-      shiftStartTime?: string | null;
-      shiftEndTime?: string | null;
-      updatedAt: Date;
-    } = {
-      isOnLine,
-      scheduleValue: scheduleValue ?? null,
-      updatedAt: new Date(),
-    };
-    if (shiftStartTime !== undefined) patch.shiftStartTime = shiftStartTime;
-    if (shiftEndTime !== undefined) patch.shiftEndTime = shiftEndTime;
-    await db.update(managerSchedule).set(patch).where(eq(managerSchedule.id, existing[0].id));
-  } else {
-    await db.insert(managerSchedule).values({
+  await db
+    .insert(managerSchedule)
+    .values({
       userId,
       scheduleDate: dateStr,
       isOnLine,
       scheduleValue: scheduleValue ?? null,
       shiftStartTime: shiftStartTime ?? null,
       shiftEndTime: shiftEndTime ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [managerSchedule.userId, managerSchedule.scheduleDate],
+      set: setOnUpdate,
     });
-  }
 }
 
 /**

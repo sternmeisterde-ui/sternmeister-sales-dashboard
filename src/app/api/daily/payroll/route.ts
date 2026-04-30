@@ -9,11 +9,9 @@
 // right master_managers slice; auth is admin-only because rates are sensitive.
 
 import { type NextRequest, NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
-import { db } from "@/lib/db";
-import { payrollRuns } from "@/lib/db/schema-existing";
-import { computePayroll, type PayrollRow } from "@/lib/daily/payroll";
+import { computePayroll } from "@/lib/daily/payroll";
+import { persistPayrollRows } from "@/lib/daily/payroll-persist";
 
 function isValidMonth(s: string | null): s is string {
   return !!s && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
@@ -21,50 +19,6 @@ function isValidMonth(s: string | null): s is string {
 
 function isDept(s: string | null): s is "b2g" | "b2b" {
   return s === "b2g" || s === "b2b";
-}
-
-async function persistRun(
-  rows: PayrollRow[],
-  department: "b2g" | "b2b",
-  periodMonth: string,
-): Promise<number> {
-  let written = 0;
-  for (const r of rows) {
-    // Upsert by (department, periodMonth, userId): re-running the cron must
-    // overwrite the prior snapshot, not append.
-    const existing = await db
-      .select({ id: payrollRuns.id })
-      .from(payrollRuns)
-      .where(
-        and(
-          eq(payrollRuns.department, department),
-          eq(payrollRuns.periodMonth, periodMonth),
-          eq(payrollRuns.userId, r.userId),
-        ),
-      )
-      .limit(1);
-
-    const values = {
-      department,
-      periodMonth,
-      userId: r.userId,
-      managerName: r.managerName,
-      dailyRate: r.dailyRate !== null ? r.dailyRate.toFixed(2) : null,
-      statusBreakdown: r.statusBreakdown,
-      equivFullDays: r.equivFullDays.toFixed(2),
-      bonusAmount: r.bonusAmount.toFixed(2),
-      grossAmount: r.grossAmount.toFixed(2),
-      computedAt: new Date(),
-    };
-
-    if (existing.length > 0) {
-      await db.update(payrollRuns).set(values).where(eq(payrollRuns.id, existing[0].id));
-    } else {
-      await db.insert(payrollRuns).values(values);
-    }
-    written++;
-  }
-  return written;
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -88,7 +42,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const rows = await computePayroll(dept, month);
     let persisted = 0;
-    if (persist) persisted = await persistRun(rows, dept, month);
+    if (persist) persisted = await persistPayrollRows(rows, dept, month);
 
     return NextResponse.json({
       success: true,
@@ -125,7 +79,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   try {
     const rows = await computePayroll(dept, month);
-    const persisted = await persistRun(rows, dept, month);
+    const persisted = await persistPayrollRows(rows, dept, month);
     return NextResponse.json({ success: true, department: dept, month, rows, persisted });
   } catch (err) {
     console.error("[payroll POST]", err);

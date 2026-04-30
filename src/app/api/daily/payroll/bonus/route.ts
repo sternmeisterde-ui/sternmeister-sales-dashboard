@@ -55,31 +55,26 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ ok: true, cleared: true });
     }
 
-    // Upsert by (user_id, period_month) using the unique index on the table.
-    const existing = await db
-      .select({ id: managerBonuses.id })
-      .from(managerBonuses)
-      .where(and(eq(managerBonuses.userId, userId), eq(managerBonuses.periodMonth, periodMonth)))
-      .limit(1);
+    // Atomic upsert via the UNIQUE INDEX on (user_id, period_month). When the
+    // caller omits `note`, we preserve the stored note; passing null clears it.
+    const setOnUpdate: { amount: string; note?: string | null; updatedAt: Date } = {
+      amount: amountNum.toFixed(2),
+      updatedAt: new Date(),
+    };
+    if (note !== undefined) setOnUpdate.note = note;
 
-    if (existing.length > 0) {
-      await db
-        .update(managerBonuses)
-        .set({
-          amount: amountNum.toFixed(2),
-          // note is tri-state: undefined = preserve, null = clear, string = set
-          ...(note !== undefined ? { note } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(managerBonuses.id, existing[0].id));
-    } else {
-      await db.insert(managerBonuses).values({
+    await db
+      .insert(managerBonuses)
+      .values({
         userId,
         periodMonth,
         amount: amountNum.toFixed(2),
         note: note ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [managerBonuses.userId, managerBonuses.periodMonth],
+        set: setOnUpdate,
       });
-    }
 
     return NextResponse.json({ ok: true, amount: amountNum, note: note ?? null });
   } catch (err) {

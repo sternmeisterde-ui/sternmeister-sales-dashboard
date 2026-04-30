@@ -82,6 +82,7 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
 
   const [data, setData] = useState<YearPayload | null>(null);
   const [loading, setLoading] = useState(false);
+  const [accessError, setAccessError] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   // Local override for the rate input so a mid-edit value doesn't get wiped
   // when the parent state still holds the old number.
@@ -111,12 +112,18 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
 
   const fetchYear = useCallback(async () => {
     setLoading(true);
+    setAccessError(null);
     try {
       const res = await fetch(`/api/daily/payroll/year?year=${year}&department=${department}`);
+      // Distinguish "no permission" from "no data" — 403 ≠ empty department.
+      if (res.status === 403) {
+        setAccessError("Доступ только для администратора");
+        setData(null);
+        return;
+      }
       const json = (await res.json()) as YearPayload | { error: string };
       if ("success" in json && json.success) {
         setData(json);
-        // Reset drafts so saved rates show up cleanly.
         const drafts: Record<string, string> = {};
         for (const r of json.rows) drafts[r.userId] = r.dailyRate !== null ? String(r.dailyRate) : "";
         setRateDraft(drafts);
@@ -280,6 +287,10 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
           {loading && !data ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+            </div>
+          ) : accessError ? (
+            <div className="flex items-center justify-center py-12 text-rose-400 text-sm">
+              {accessError}
             </div>
           ) : !data || data.rows.length === 0 ? (
             <div className="flex items-center justify-center py-12 text-slate-500 text-sm">
