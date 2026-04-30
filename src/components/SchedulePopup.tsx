@@ -33,8 +33,8 @@ const PICKER_OPTIONS: Array<{
   { value: "8", label: "Полный день",     symbol: "☀",   colorClass: "bg-emerald-500/20 text-emerald-400" },
   { value: "4", label: "Половина дня",    symbol: "◑",   colorClass: "bg-amber-500/20 text-amber-400" },
   { value: "-", label: "Выходной",        symbol: "—",   colorClass: "bg-slate-700/50 text-slate-400" },
-  { value: "о", label: "Отпуск",          symbol: "ОТП", colorClass: "bg-blue-500/20 text-blue-400" },
-  { value: "н", label: "Онбординг",       symbol: "ОНБ", colorClass: "bg-cyan-500/20 text-cyan-400" },
+  { value: "о", label: "Отпуск",          symbol: "🌴",  colorClass: "bg-blue-500/20 text-blue-400" },
+  { value: "н", label: "Онбординг",       symbol: "🚀",  colorClass: "bg-cyan-500/20 text-cyan-400" },
   { value: "у", label: "День увольнения", symbol: "УВ",  colorClass: "bg-rose-500/20 text-rose-400" },
 ];
 
@@ -43,8 +43,8 @@ function cellStyle(val: ScheduleVal): string {
     case "8": return "bg-emerald-500/20 text-emerald-400 font-bold";
     case "4": return "bg-amber-500/20 text-amber-400 font-bold";
     case "-": return "bg-slate-700/50 text-slate-500";
-    case "о": return "bg-blue-500/20 text-blue-400 font-bold !text-[8px]";
-    case "н": return "bg-cyan-500/20 text-cyan-400 font-bold !text-[8px]";
+    case "о": return "bg-blue-500/20 text-blue-400 font-bold";
+    case "н": return "bg-cyan-500/20 text-cyan-400 font-bold";
     case "у": return "bg-rose-500/20 text-rose-400 font-bold !text-[9px]";
     default:  return "text-slate-700";
   }
@@ -55,8 +55,8 @@ function cellLabel(val: ScheduleVal): string {
     case "8": return "☀";
     case "4": return "◑";
     case "-": return "—";
-    case "о": return "ОТП";
-    case "н": return "ОНБ";
+    case "о": return "🌴";
+    case "н": return "🚀";
     case "у": return "УВ";
     default:  return "";
   }
