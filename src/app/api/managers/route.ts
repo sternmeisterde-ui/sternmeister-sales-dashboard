@@ -169,6 +169,9 @@ interface ManagerInput {
   callgearEmployeeId?: string | null;
   cloudtalkAgentId?: string | null;
   shiftStartTime?: string | null;
+  // Per-day payroll rate. Stringified to match drizzle's numeric serialisation
+  // (we never do arithmetic on it client-side). null = not set.
+  dailyRate?: string | null;
   role: string;
   line: string | null;
   inOkk: boolean;
@@ -220,6 +223,7 @@ export async function POST(request: NextRequest) {
       callgearEmployeeId: string | null;
       cloudtalkAgentId: string | null;
       shiftStartTime: string | null;
+      dailyRate: string | null;
     }>();
     const existingRows = await db
       .select({
@@ -231,6 +235,7 @@ export async function POST(request: NextRequest) {
         callgearEmployeeId: masterManagers.callgearEmployeeId,
         cloudtalkAgentId: masterManagers.cloudtalkAgentId,
         shiftStartTime: masterManagers.shiftStartTime,
+        dailyRate: masterManagers.dailyRate,
       })
       .from(masterManagers)
       .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
@@ -435,6 +440,17 @@ export async function POST(request: NextRequest) {
         callgearEmployeeId,
         cloudtalkAgentId,
         shiftStartTime: mgr.shiftStartTime ?? existing?.shiftStartTime ?? null,
+        // dailyRate semantics:
+        //   undefined in payload → preserve existing (don't accidentally null
+        //                          out a saved rate when an older client posts)
+        //   null / ""            → explicit clear
+        //   "1234.50"            → set
+        dailyRate:
+          mgr.dailyRate === undefined
+            ? existing?.dailyRate ?? null
+            : mgr.dailyRate === null || mgr.dailyRate === ""
+              ? null
+              : String(mgr.dailyRate),
         inOkk: mgr.inOkk,
         inRolevki: mgr.inRolevki,
         isActive: true,

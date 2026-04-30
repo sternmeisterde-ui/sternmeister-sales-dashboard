@@ -14,6 +14,8 @@ interface ManagerRow {
   kommoUserId: number | null;
   cloudtalkAgentId: string | null;
   shiftStartTime: string | null;
+  // Daily payroll rate (numeric string from drizzle, null when unset).
+  dailyRate: string | null;
   inOkk: boolean;
   inRolevki: boolean;
   isNew?: boolean;
@@ -96,6 +98,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
         kommoUserId: null,
         cloudtalkAgentId: null,
         shiftStartTime: null,
+        dailyRate: null,
         inOkk: true,
         inRolevki: true,
         isNew: true,
@@ -134,6 +137,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             role: m.role,
             line: m.line,
             shiftStartTime: m.shiftStartTime,
+            dailyRate: m.dailyRate,
             inOkk: m.inOkk,
             inRolevki: m.inRolevki,
           })),
@@ -236,6 +240,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">TG ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">Kommo ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">CloudTalk ID</th>
+                <th className="text-right px-4 py-2 font-semibold" title="Дневная ставка для расчёта табеля">Ставка/день</th>
                 <th className="w-10" />
               </tr>
             </thead>
@@ -333,6 +338,18 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                       <span className={`text-xs font-mono ${mgr.cloudtalkAgentId ? "text-slate-400" : "text-slate-600"}`}>
                         {mgr.cloudtalkAgentId || "—"}
                       </span>
+                    </td>
+                    <td className="px-4 py-2 text-right">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.01"
+                        min="0"
+                        value={mgr.dailyRate ?? ""}
+                        onChange={(e) => updateField(i, "dailyRate", e.target.value || null)}
+                        placeholder="0"
+                        className={`${inputClass} text-right font-mono`}
+                      />
                     </td>
                     <td className="px-4 py-2 text-center">
                       <button

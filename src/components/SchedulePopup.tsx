@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X, Save, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
+import { SCHEDULE_STATUSES, type ScheduleCode } from "@/lib/daily/schedule-payroll";
 
 interface Manager {
   id: string;
@@ -21,45 +22,33 @@ interface SchedulePopupProps {
   onSaved: () => void;
 }
 
-const SCHEDULE_VALUES = ["8", "4", "-", "о", "н", "у"] as const;
-type ScheduleVal = (typeof SCHEDULE_VALUES)[number] | "";
+type ScheduleVal = ScheduleCode | "";
 
-const PICKER_OPTIONS: Array<{
-  value: Exclude<ScheduleVal, "">;
-  label: string;
-  symbol: string;
-  colorClass: string;
-}> = [
-  { value: "8", label: "Полный день",     symbol: "☀",   colorClass: "bg-emerald-500/20 text-emerald-400" },
-  { value: "4", label: "Половина дня",    symbol: "◑",   colorClass: "bg-amber-500/20 text-amber-400" },
-  { value: "-", label: "Выходной",        symbol: "—",   colorClass: "bg-slate-700/50 text-slate-400" },
-  { value: "о", label: "Отпуск",          symbol: "🌴",  colorClass: "bg-blue-500/20 text-blue-400" },
-  { value: "н", label: "Онбординг",       symbol: "🚀",  colorClass: "bg-cyan-500/20 text-cyan-400" },
-  { value: "у", label: "День увольнения", symbol: "🔴",  colorClass: "bg-rose-500/20 text-rose-400" },
-];
+// Picker rows derive directly from the shared registry so any new status added
+// in src/lib/daily/schedule-payroll.ts shows up here automatically. Cell style
+// reuses the registry's colorClass (with a font-bold modifier) so we only need
+// one place to update visuals.
+const PICKER_OPTIONS = SCHEDULE_STATUSES.map((s) => ({
+  value: s.code,
+  label: s.label,
+  symbol: s.symbol,
+  colorClass: s.colorClass,
+}));
+
+const STATUS_BY_CODE: Record<string, (typeof SCHEDULE_STATUSES)[number]> = Object.fromEntries(
+  SCHEDULE_STATUSES.map((s) => [s.code, s]),
+);
 
 function cellStyle(val: ScheduleVal): string {
-  switch (val) {
-    case "8": return "bg-emerald-500/20 text-emerald-400 font-bold";
-    case "4": return "bg-amber-500/20 text-amber-400 font-bold";
-    case "-": return "bg-slate-700/50 text-slate-500";
-    case "о": return "bg-blue-500/20 text-blue-400 font-bold";
-    case "н": return "bg-cyan-500/20 text-cyan-400 font-bold";
-    case "у": return "bg-rose-500/20 text-rose-400 font-bold";
-    default:  return "text-slate-700";
-  }
+  if (!val) return "text-slate-700";
+  const s = STATUS_BY_CODE[val];
+  if (!s) return "text-slate-700";
+  if (val === "-") return `${s.colorClass} text-slate-500`;
+  return `${s.colorClass} font-bold`;
 }
 
 function cellLabel(val: ScheduleVal): string {
-  switch (val) {
-    case "8": return "☀";
-    case "4": return "◑";
-    case "-": return "—";
-    case "о": return "🌴";
-    case "н": return "🚀";
-    case "у": return "🔴";
-    default:  return "";
-  }
+  return STATUS_BY_CODE[val]?.symbol ?? "";
 }
 
 function getDaysInMonth(date: Date): number {

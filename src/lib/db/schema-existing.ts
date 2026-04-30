@@ -1,4 +1,4 @@
-import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb, date } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb, date, numeric } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 // ==================== D1 TABLES (Госники - B2G) ====================
@@ -142,6 +142,10 @@ export const masterManagers = pgTable("master_managers", {
   isActive: boolean("is_active").default(true),
   shiftStartTime: text("shift_start_time"),           // "09:00", "10:00", etc. (null = default 09:00)
   shiftEndTime: text("shift_end_time"),               // "18:00", "17:00", etc. (null = default 18:00)
+  // Per-day base rate used by the payroll calculator. Currency is project-wide
+  // (not stored per-row); the cron multiplies this by the schedule status's
+  // payrollFactor (see src/lib/daily/schedule-payroll.ts).
+  dailyRate: numeric("daily_rate", { precision: 12, scale: 2 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
@@ -185,6 +189,24 @@ export const managerSchedule = pgTable("manager_schedule", {
   shiftEndTime: text("shift_end_time"),               // snapshot of shift end on this date, "HH:MM"
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+// Snapshot of one month's payroll for one manager. Cron writes these at
+// month-end (or on-demand via the API). One row per (department, periodMonth,
+// userId) — re-runs upsert. statusBreakdown is a {code: dayCount} JSON; the
+// gross amount is recomputed from the breakdown × snapshot dailyRate so a
+// later rate change doesn't silently mutate historical timesheets.
+export const payrollRuns = pgTable("payroll_runs", {
+  id: serial("id").primaryKey(),
+  department: text("department").notNull(),                // 'b2g' | 'b2b'
+  periodMonth: text("period_month").notNull(),             // 'YYYY-MM'
+  userId: uuid("user_id").notNull().references(() => masterManagers.id),
+  managerName: text("manager_name").notNull(),             // snapshot at run time
+  dailyRate: numeric("daily_rate", { precision: 12, scale: 2 }), // snapshot at run time, may be NULL
+  statusBreakdown: jsonb("status_breakdown").notNull(),    // { "8": 18, "4": 2, "о": 5, ... }
+  equivFullDays: numeric("equiv_full_days", { precision: 8, scale: 2 }).notNull(), // Σ payrollFactor
+  grossAmount: numeric("gross_amount", { precision: 14, scale: 2 }).notNull(),     // equivFullDays * dailyRate
+  computedAt: timestamp("computed_at", { withTimezone: true }).defaultNow(),
 });
 
 export const kommoTokens = pgTable("kommo_tokens", {
