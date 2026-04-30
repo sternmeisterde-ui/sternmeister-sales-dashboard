@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Loader2, Plus, Trash2, Save, AlertTriangle, Calendar } from "lucide-react";
+import { Loader2, Plus, Trash2, Save, AlertTriangle, Calendar, Wallet } from "lucide-react";
 import SchedulePopup from "@/components/SchedulePopup";
+import TabelPopup from "@/components/TabelPopup";
 
 interface ManagerRow {
   id?: string;
@@ -41,6 +42,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
   // Defaults to the current calendar month — SchedulePopup has its own
   // month-shift arrows so the user can navigate freely after opening.
   const [scheduleMonth, setScheduleMonth] = useState<Date>(() => new Date());
+  const [showTabel, setShowTabel] = useState(false);
 
   const fetchManagers = useCallback(async () => {
     setLoading(true);
@@ -146,7 +148,9 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             role: m.role,
             line: m.line,
             shiftStartTime: m.shiftStartTime,
-            dailyRate: m.dailyRate,
+            // dailyRate intentionally NOT sent in the bulk save — that field
+            // is owned by the «Табель» popup (PATCH /api/daily/managers).
+            // Bulk save with dailyRate undefined preserves the stored value.
             inOkk: m.inOkk,
             inRolevki: m.inRolevki,
           })),
@@ -213,6 +217,13 @@ export default function ManagersTab({ department }: ManagersTabProps) {
               <Calendar className="w-3.5 h-3.5" />
               Календарь
             </button>
+            <button
+              onClick={() => setShowTabel(true)}
+              className="flex items-center gap-1.5 text-xs uppercase tracking-wider px-3 py-1.5 rounded-lg text-emerald-400 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors border border-emerald-500/20 font-medium"
+            >
+              <Wallet className="w-3.5 h-3.5" />
+              Табель
+            </button>
           </div>
         </div>
       </div>
@@ -258,7 +269,6 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">TG ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">Kommo ID</th>
                 <th className="text-center px-4 py-2 font-semibold text-slate-600">CloudTalk ID</th>
-                <th className="text-right px-4 py-2 font-semibold" title="Дневная ставка для расчёта табеля">Ставка/день</th>
                 <th className="w-10" />
               </tr>
             </thead>
@@ -357,18 +367,6 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                         {mgr.cloudtalkAgentId || "—"}
                       </span>
                     </td>
-                    <td className="px-4 py-2 text-right">
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.01"
-                        min="0"
-                        value={mgr.dailyRate ?? ""}
-                        onChange={(e) => updateField(i, "dailyRate", e.target.value || null)}
-                        placeholder="0"
-                        className={`${inputClass} text-right font-mono`}
-                      />
-                    </td>
                     <td className="px-4 py-2 text-center">
                       <button
                         onClick={() => removeManager(i)}
@@ -431,6 +429,12 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             shiftEndTime: m.shiftEndTime,
           }))}
         onSaved={() => { setShowSchedule(false); fetchManagers(); }}
+      />
+
+      <TabelPopup
+        isOpen={showTabel}
+        onClose={() => setShowTabel(false)}
+        department={department}
       />
     </div>
   );

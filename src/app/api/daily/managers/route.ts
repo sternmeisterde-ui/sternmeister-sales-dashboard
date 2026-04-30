@@ -1,5 +1,5 @@
 // GET  /api/daily/managers?department=b2g
-// PATCH /api/daily/managers  body: { id: string, shiftStartTime?: string|null, shiftEndTime?: string|null }
+// PATCH /api/daily/managers  body: { id: string, shiftStartTime?: string|null, shiftEndTime?: string|null, dailyRate?: string|number|null }
 // Returns active managers + "working ROPs" (role=rop with a line assigned) from
 // master_managers for the given department. A ROP with line='2' is a double-status
 // user — counted both as a ROP (access control) and as a line-2 team member
@@ -49,16 +49,35 @@ export async function PATCH(req: NextRequest) {
       id?: string;
       shiftStartTime?: string | null;
       shiftEndTime?: string | null;
+      dailyRate?: string | number | null;
     };
     if (!body.id) {
       return NextResponse.json({ error: "Missing id" }, { status: 400 });
     }
 
-    const patch: { shiftStartTime?: string | null; shiftEndTime?: string | null; updatedAt: Date } = {
-      updatedAt: new Date(),
-    };
+    const patch: {
+      shiftStartTime?: string | null;
+      shiftEndTime?: string | null;
+      dailyRate?: string | null;
+      updatedAt: Date;
+    } = { updatedAt: new Date() };
+
     if (body.shiftStartTime !== undefined) patch.shiftStartTime = body.shiftStartTime?.trim() || null;
     if (body.shiftEndTime !== undefined) patch.shiftEndTime = body.shiftEndTime?.trim() || null;
+    if (body.dailyRate !== undefined) {
+      // null / "" / 0 → clear (treat zero rate as "не задано" semantically; the
+      // calculator anyway multiplies by 0 in that case so this is consistent).
+      // Otherwise accept any positive number/string and store as 2-decimal text.
+      if (body.dailyRate === null || body.dailyRate === "") {
+        patch.dailyRate = null;
+      } else {
+        const n = typeof body.dailyRate === "number" ? body.dailyRate : Number.parseFloat(String(body.dailyRate));
+        if (!Number.isFinite(n) || n < 0) {
+          return NextResponse.json({ error: "Invalid dailyRate" }, { status: 400 });
+        }
+        patch.dailyRate = n.toFixed(2);
+      }
+    }
 
     await db.update(masterManagers).set(patch).where(eq(masterManagers.id, body.id));
 
