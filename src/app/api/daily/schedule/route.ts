@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
 
 function scheduleValueToIsOnLine(val: string | null | undefined): boolean {
   if (!val || val === "-" || val === "о" || val === "О") return false;
-  return true; // "8", "4", any number = working
+  return true; // "8", "4", "н" (онбординг), "у" (день увольнения), any number = working
 }
 
 export async function PUT(req: NextRequest) {
