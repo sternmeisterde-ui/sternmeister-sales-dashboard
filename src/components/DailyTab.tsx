@@ -18,10 +18,8 @@ import {
   Megaphone,
   Globe,
   Pencil,
-  Calendar,
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
-import SchedulePopup from "@/components/SchedulePopup";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import {
   todayBerlinDate,
@@ -867,9 +865,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [showSchedule, setShowSchedule] = useState(false);
   const [selectedDayIdx, setSelectedDayIdx] = useState<number | null>(null);
-  const [scheduleManagers, setScheduleManagers] = useState<Array<{ id: string; name: string; line: string | null; shiftStartTime: string | null; shiftEndTime: string | null }>>([]);
   // Preload months-of-year for Managers tab dropdown (so user can pick any month
   // of the year in parallel with days-of-month).
   const [monthsOfYear, setMonthsOfYear] = useState<RangeResponse | null>(null);
@@ -879,20 +875,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   // Per-manager таблицы и refusal cards вынесены в отдельные табы чтобы
   // Показатели страница не была перегружена.
   const [subTab, setSubTab] = useState<"metrics" | "managers" | "refusals" | "rating">("metrics");
-
-  useEffect(() => {
-    let abort = false;
-    (async () => {
-      try {
-        const res = await fetch(`/api/daily/managers?department=${department}`);
-        const json = await res.json();
-        if (!abort && Array.isArray(json.managers)) setScheduleManagers(json.managers);
-      } catch (e) {
-        console.error("Failed to load schedule managers:", e);
-      }
-    })();
-    return () => { abort = true; };
-  }, [department]);
 
   // Parallel fetch: months-of-year for Managers tab "По датам" dropdown.
   // Runs when department or year changes — independent of mode.
@@ -1089,13 +1071,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
           >
             Сейчас
-          </button>
-          <button
-            onClick={() => setShowSchedule(true)}
-            className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-purple-400 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 transition-colors border border-purple-500/20"
-          >
-            <Calendar className="w-3.5 h-3.5" />
-            Расписание
           </button>
           <button
             onClick={() => fetchData()}
@@ -1312,15 +1287,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         </>
       )}
 
-      {/* Schedule popup */}
-      <SchedulePopup
-        isOpen={showSchedule}
-        onClose={() => setShowSchedule(false)}
-        month={selectedMonth}
-        department={department}
-        managers={scheduleManagers}
-        onSaved={() => { setShowSchedule(false); fetchData(); }}
-      />
     </div>
   );
 }

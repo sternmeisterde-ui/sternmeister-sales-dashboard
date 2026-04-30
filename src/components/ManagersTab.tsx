@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Loader2, Plus, Trash2, Save, AlertTriangle } from "lucide-react";
+import { Loader2, Plus, Trash2, Save, AlertTriangle, Calendar } from "lucide-react";
+import SchedulePopup from "@/components/SchedulePopup";
 
 interface ManagerRow {
   id?: string;
@@ -14,6 +15,9 @@ interface ManagerRow {
   kommoUserId: number | null;
   cloudtalkAgentId: string | null;
   shiftStartTime: string | null;
+  // shiftEndTime is read-only here (edited via the calendar popup); kept on the
+  // row so we can pass it into SchedulePopup without a second fetch.
+  shiftEndTime: string | null;
   // Daily payroll rate (numeric string from drizzle, null when unset).
   dailyRate: string | null;
   inOkk: boolean;
@@ -33,6 +37,10 @@ export default function ManagersTab({ department }: ManagersTabProps) {
   const [dirty, setDirty] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  // Defaults to the current calendar month — SchedulePopup has its own
+  // month-shift arrows so the user can navigate freely after opening.
+  const [scheduleMonth, setScheduleMonth] = useState<Date>(() => new Date());
 
   const fetchManagers = useCallback(async () => {
     setLoading(true);
@@ -98,6 +106,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
         kommoUserId: null,
         cloudtalkAgentId: null,
         shiftStartTime: null,
+        shiftEndTime: null,
         dailyRate: null,
         inOkk: true,
         inRolevki: true,
@@ -191,11 +200,20 @@ export default function ManagersTab({ department }: ManagersTabProps) {
               Управление менеджерами. Изменения синхронизируются в ОКК и Ролевки.
             </p>
           </div>
-          {dirty && (
-            <span className="text-xs text-amber-400 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 font-medium">
-              Есть несохранённые изменения
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            {dirty && (
+              <span className="text-xs text-amber-400 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 font-medium">
+                Есть несохранённые изменения
+              </span>
+            )}
+            <button
+              onClick={() => { setScheduleMonth(new Date()); setShowSchedule(true); }}
+              className="flex items-center gap-1.5 text-xs uppercase tracking-wider px-3 py-1.5 rounded-lg text-purple-400 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 transition-colors border border-purple-500/20 font-medium"
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              Календарь
+            </button>
+          </div>
         </div>
       </div>
 
@@ -395,6 +413,25 @@ export default function ManagersTab({ department }: ManagersTabProps) {
           </button>
         </div>
       </div>
+
+      {/* Schedule popup — opens with current calendar list, edits go straight
+          to manager_schedule and reload happens via onSaved. */}
+      <SchedulePopup
+        isOpen={showSchedule}
+        onClose={() => setShowSchedule(false)}
+        month={scheduleMonth}
+        department={department}
+        managers={managers
+          .filter((m) => !!m.id)
+          .map((m) => ({
+            id: m.id as string,
+            name: m.name,
+            line: m.line,
+            shiftStartTime: m.shiftStartTime,
+            shiftEndTime: m.shiftEndTime,
+          }))}
+        onSaved={() => { setShowSchedule(false); fetchManagers(); }}
+      />
     </div>
   );
 }
