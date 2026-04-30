@@ -1,6 +1,6 @@
-# Session Handoff — Calls / Daily / Dashboard / Tracking / Looker / Термин
+# Session Handoff — Calls / Daily / Dashboard / Tracking / Looker / Термин / MCP
 
-Last updated: 2026-04-28 (post Активность audit + 41-type trim + perf fix)
+Last updated: 2026-04-30 (added MCP plan + full per-tab table-source map)
 
 This doc is for the next Claude Code session. Read it first.
 
@@ -8,15 +8,44 @@ This doc is for the next Claude Code session. Read it first.
 
 ## Per-tab architecture docs
 
+**Master index** (start here для table×tab discovery — entry-point будущего MCP-агента):
+- [`DASHBOARD-INDEX.md`](./DASHBOARD-INDEX.md) — single карта tab→component→doc + 6 БД + cross-reference таблиц (added 2026-04-30)
+
+**Per-tab operational docs** (все теперь имеют explicit таблицу источников в верхней секции):
 - [`DASHBOARD-ZVONKI.md`](./DASHBOARD-ZVONKI.md) — Звонки tab
-- [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) — Термин tab (added 2026-04-28)
-- [`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) — Активность tab (added 2026-04-28)
-- [`daily-commerce-spec.md`](./daily-commerce-spec.md) — Daily commerce metrics
+- [`DASHBOARD-DAILY.md`](./DASHBOARD-DAILY.md) — Дейли tab (added 2026-04-30)
+- [`DASHBOARD-ANALITIKA.md`](./DASHBOARD-ANALITIKA.md) — Аналитика tab (added 2026-04-30)
+- [`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) — Активность tab
+- [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) — Термин tab
+- [`DASHBOARD-LOOKER.md`](./DASHBOARD-LOOKER.md) — Looker tab (added 2026-04-30)
+- [`DASHBOARD-OKK.md`](./DASHBOARD-OKK.md) — ОКК tab (added 2026-04-30)
+- [`DASHBOARD-AI-ROLEVKI.md`](./DASHBOARD-AI-ROLEVKI.md) — AI Ролевки tab (added 2026-04-30)
+- [`DASHBOARD-MANAGERS.md`](./DASHBOARD-MANAGERS.md) — Менеджеры tab
+- [`DASHBOARD-ANALIZ.md`](./DASHBOARD-ANALIZ.md) — Анализ tab (added 2026-04-30)
+- [`DASHBOARD-KRITERII.md`](./DASHBOARD-KRITERII.md) — Критерии tab (added 2026-04-30)
+- [`DASHBOARD-SKRIPTY.md`](./DASHBOARD-SKRIPTY.md) — Скрипты tab (added 2026-04-30)
+- [`DASHBOARD-AUDIT.md`](./DASHBOARD-AUDIT.md) — Аудит tab (added 2026-04-30)
+
+**Initiatives / specs**:
+- [`MCP-IMPLEMENTATION-PLAN.md`](./MCP-IMPLEMENTATION-PLAN.md) — детальный архитектурный план MCP-сервера (added 2026-04-30)
+- [`daily-commerce-spec.md`](./daily-commerce-spec.md) — Daily commerce business spec
 - [`mysql-analytics.md`](./mysql-analytics.md) — analytics.* schema reference
 
 ---
 
 ## TL;DR — what's the current focus
+
+**MCP server initiative kicked off 2026-04-30.** Цель — РОПы подключают Claude Desktop к `mcp.sternmeister.de`, агент видит curated domain tools и отвечает на бизнес-вопросы без знания SQL. Полный план в [`MCP-IMPLEMENTATION-PLAN.md`](./MCP-IMPLEMENTATION-PLAN.md): TS sub-package в Dashbord/mcp-server/, HTTP+stdio дуальный транспорт, bearer-token auth, отдельные read-only Postgres роли per-DB, 8 доменных tools-наборов (managers/okk/roleplay/daily/analytics/looker/tracking/termin) + admin-only SQL escape hatch + RAG (Phase 5).
+
+**Phase 0 (pg COMMENTS backfill) можно начать прямо сейчас** — окупается даже без MCP (drizzle-studio покажет комментарии). См. P0 секцию в [`TODO.md`](./TODO.md).
+
+**Per-tab docs landed 2026-04-30** (commit `8775d4c`): 9 новых docs для tabs без покрытия + patches на 4 существующих, чтобы у каждого doc была единая «Источники данных» таблица в верх. + master `DASHBOARD-INDEX.md` как entry-point для будущего MCP-агента.
+
+**Open question перед стартом MCP Phase 1**: кто первый РОП-tester — Дмитрий (B2G) или Рузанна (B2B)? Это определяет какой dept-набор tools полировать первым.
+
+---
+
+## Earlier focus (call-count accuracy — landed)
 
 **Активность tab fully audited and corrected 2026-04-28.** End-to-end
 review found and fixed 11 issues across event-type names, attribution,

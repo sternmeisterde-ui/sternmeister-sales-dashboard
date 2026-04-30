@@ -6,6 +6,67 @@ Ordered by priority. Mark with `- [x]` when done; commit the change with the dif
 
 ---
 
+## P0 — MCP server (new initiative, 2026-04-30)
+
+**Goal**: дать РОПам и админу single-tool интерфейс к данным дашборда через Claude Desktop. Curated domain tools поверх read-only Postgres ролей. Полный архитектурный план — [`MCP-IMPLEMENTATION-PLAN.md`](./MCP-IMPLEMENTATION-PLAN.md).
+
+**Architecture** (резюме): TS sub-package `Dashbord/mcp-server/` — отдельный workspace в монорепо, отдельный Dokploy-сервис на `mcp.sternmeister.de`, bearer-token auth, 6 read-only DB connections, 8 доменных tools-наборов (managers / okk / roleplay / daily / analytics / looker / tracking / termin) + admin-only SQL escape hatch + RAG (Phase 5).
+
+**Phase 0 — pg COMMENTS backfill** (1–2 дня, decoupled, можно начинать сразу — окупается даже без MCP):
+
+- [ ] Написать `scripts/generate-pg-comments.ts` — парсит DASHBOARD-*.md (секции «Источники данных» + per-table tables) + schema-*.ts → эмитит SQL миграции `00XX_comments.sql` per-DB
+- [ ] Применить через Neon SQL editor (HTTP timeout-safe), сохранить в `drizzle/<db>/`
+- [ ] Smoke-test: `SELECT obj_description('public.master_managers'::regclass)` возвращает строку
+
+**Phase 1 — scaffold + 2 домена** (3–4 дня):
+
+- [ ] `mcp-server/` workspace — package.json, tsconfig, Dockerfile, README с инструкцией для РОПа
+- [ ] Stdio entry-point (для local dev) + HTTP entry-point (для прод)
+- [ ] DB layer: 6 read-only connections + statement_timeout/idle_in_tx/work_mem caps + row-limit guard
+- [ ] Auth middleware: bearer-token → `{userId, role, depts}`, role/dept gates
+- [ ] Migration `mcp_audit_log` table в D1 + audit middleware
+- [ ] Discovery layer: `list_domains`, `describe_domain`, `glossary` + 3 markdown resources
+- [ ] Domain `managers` (5 tools) — full ([§5.1](./MCP-IMPLEMENTATION-PLAN.md#51-domain-managers-опора-для-всех-остальных))
+- [ ] Domain `okk` (6 tools) — full ([§5.2](./MCP-IMPLEMENTATION-PLAN.md#52-domain-okk-реальные-звонки--аудит))
+- [ ] Локальный тест через Claude Code (stdio) — DoD: «как у Маши конверсия в апреле?» отвечает корректно без галлюцинаций
+
+**Phase 2 — деплой + 2 домена** (2–3 дня):
+
+- [ ] `docker-compose.yml` — mcp-сервис на порт 3009, общий .env
+- [ ] Dokploy сервис: `mcp.sternmeister.de` через Traefik с TLS
+- [ ] Sentry project `sternmeister-mcp-server`
+- [ ] Domain `daily` (5 tools) — reuse `buildDailyResponse` из `src/lib/daily/`
+- [ ] Domain `analytics` (4 tools) — reuse `processBlocks`, `funnelLabelForOkk/Roleplay`
+- [ ] **First РОП-test**: Дмитрий (B2G) на 5–10 типовых вопросов. Audit log читать ежедневно
+
+**Phase 3 — оставшиеся домены** (2 дня):
+
+- [ ] Domain `looker` (6 tools)
+- [ ] Domain `tracking` (3 tools)
+- [ ] Domain `termin` (2 tools)
+- [ ] Domain `roleplay` (4 tools)
+
+**Phase 4 — escape hatch + golden tests** (2 дня):
+
+- [ ] `sql.run_readonly` (admin only) — EXPLAIN-guard на cost > 1e6, hard row limit 5000
+- [ ] Golden eval suite в `mcp-server/tests/golden/` — 30 канонических Q&A пар
+- [ ] CI integration: `npm run mcp:test` + `npm run mcp:eval`
+
+**Phase 5 — RAG для transcripts** (3–4 дня, отдельная инициатива):
+
+- [ ] `pgvector` extension в Analytics Neon
+- [ ] `analytics.transcripts_embeddings` таблица + embedding-pipeline
+- [ ] Domain `search` (3 tools): transcripts / feedback / evaluations
+- [ ] Cron `/api/embeddings/sync/cron` — incremental
+
+**Open questions** (см. [§13 в плане](./MCP-IMPLEMENTATION-PLAN.md#13-open-questions-нужно-решить-до-старта-phase-1)):
+
+- [ ] Кто первый РОП-tester — Дмитрий (B2G) или Рузанна (B2B)?
+- [ ] Бюджет на embedding API (Voyage / OpenAI / Anthropic)?
+- [ ] Нужен веб-UI для просмотра mcp_audit_log админом?
+
+---
+
 ## P0 — Looker frontend follow-up (2026-04-29) — DONE
 
 User-requested polish after the phone→lead enrichment audit confirmed the
@@ -209,6 +270,16 @@ drill-down works. All four merged + the "two TLT tables → one" follow-up.
 ---
 
 ## DONE recently (for grep'ability when reviewing what changed)
+
+- [x] **Per-tab table-source map (MCP groundwork)** — full inventory pass over all 13 dashboard tabs. (2026-04-30, commit `8775d4c`)
+  - 9 new docs: `DASHBOARD-{AUDIT,KRITERII,SKRIPTY,ANALIZ,OKK,AI-ROLEVKI,ANALITIKA,LOOKER,DAILY}.md`. Каждый открывается явной таблицей «Источники данных» (DB connection × table × ключевые колонки × зачем).
+  - Patched 4 existing: `DASHBOARD-{AKTIVNOST,MANAGERS,TERMIN,ZVONKI}.md` — добавлена та же explicit-таблица в верх. В MANAGERS добавлена секция «Sync targets» (4 копии master_managers).
+  - New `DASHBOARD-INDEX.md` — single entry-point карта: tab→component→doc, карта 6 БД (D1/R1/D2/R2/Analytics/Tracking), cross-reference «какая таблица в каких разделах используется», known gotchas (orphan-фильтр, ROP+line, Berlin civil-day, name-aliases, sub-line collapse, override metadata).
+  - Цель — будущий MCP-агент должен иметь explicit table catalog без чтения исходников.
+
+- [x] **MCP architecture plan** — детальный архитектурный план MCP-сервера. (2026-04-30)
+  - `docs/MCP-IMPLEMENTATION-PLAN.md`: 15 секций — цели/не-цели, architectural decisions с обоснованием, топология, файловая раскладка, connection-плоскость, tool taxonomy (4 слоя), доменный каталог (8 доменов × 30+ tools), 3-слойная markup-стратегия (pg COMMENTS + MD resources + tool descriptions), security model (read-only роли + bearer-token + PII handling + audit log), 6 phases с DoD каждой, versioning/testing/monitoring, risks и open questions.
+  - Решено: TypeScript sub-package в Dashbord, HTTP+stdio дуальный транспорт, bearer-token auth, отдельные read-only роли per-DB, pgvector для RAG (v2), деплой как 2-й сервис в существующем Dokploy compose.
 
 - [x] **Termin dashboard tab** — new admin-only section showing cohort line chart of avg days from deal creation → assigned «Дата термина» / «Дата термина АА» for Бух Бератер pipeline. (2026-04-28)
   - Migration `drizzle/analytics/0006_termin_dates.sql` — adds `termin_date` + `aa_termin_date` columns + partial index `idx_lc_termin_cohort` on `leads_cohort`. Applied via Neon MCP.
