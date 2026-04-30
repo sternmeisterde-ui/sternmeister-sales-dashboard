@@ -318,11 +318,21 @@ async function fetchCallNotes(leadId: number): Promise<KommoNote[]> {
 // ==================== TRANSCRIPTION ====================
 
 async function transcribeAudio(audioUrl: string): Promise<{ text: string; speakers: string } | null> {
-  // Try primary URL
+  // Three outcomes for tryTranscribe:
+  //   - non-null result with non-empty text → success, return immediately
+  //   - non-null result with empty text     → Scribe responded but audio
+  //                                           is silent / unintelligible.
+  //                                           Don't trigger fallback (the
+  //                                           network worked), don't fire
+  //                                           a fatal — the per-attempt
+  //                                           warning was already sent by
+  //                                           tryTranscribe. Return as-is.
+  //   - null                                → genuine failure (network /
+  //                                           HTTP / body-read). Try S3
+  //                                           fallback if applicable.
   let result = await tryTranscribe(audioUrl);
   if (result) return result;
 
-  // Fallback: if CloudTalk play URL, try S3 direct
   let s3Url: string | undefined;
   if (audioUrl.includes("cloudtalk.io/r/play/")) {
     const id = audioUrl.split("/").pop();
@@ -331,16 +341,17 @@ async function transcribeAudio(audioUrl: string): Promise<{ text: string; speake
     if (result) return result;
   }
 
-  // Fatal: both primary and (when applicable) S3 fallback failed. The call
-  // will save with `⚠️ Не удалось транскрибировать запись.` and Grok will
-  // skip analysing it. Send one error-level event per missed call so the
-  // Sentry dashboard surfaces a clear count of dropped transcriptions —
-  // tryTranscribe already sent per-attempt warnings with HTTP/network
-  // diagnostics, this one bundles them as the "definitively lost" signal.
+  // Both primary and (when applicable) S3 fallback failed at the network /
+  // HTTP layer. One error-level event per missed call so the Sentry
+  // dashboard surfaces dropped-transcription count cleanly — per-attempt
+  // warnings with HTTP/network diagnostics were already sent by tryTranscribe.
   captureAnalysisMessage("Transcription failed for both primary and fallback URL", "error", {
     step: "transcription",
     severity: "fatal",
-    extra: { primaryUrl: audioUrl, s3FallbackUrl: s3Url ?? "(not applicable — non-CloudTalk URL)" },
+    extra: {
+      primaryUrl: audioUrl,
+      s3FallbackUrl: s3Url ?? "(not applicable — non-CloudTalk URL)",
+    },
   });
   return null;
 }
@@ -482,15 +493,23 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
 
   const text = data.text || "";
   if (!text) {
-    // Empty transcript on a 200 response — Scribe accepted but produced nothing.
-    // Usually means the audio is silent or unintelligible; still worth a
-    // signal so we can spot a pattern (e.g. a CDN serving a 0-byte file).
+    // Empty transcript on a 200 response — Scribe accepted but produced
+    // nothing (silent audio, unintelligible, or 0-byte file). Fire a
+    // warning so a pattern (e.g. a CDN bucket misconfig) becomes visible,
+    // but RETURN the empty result rather than null — the caller treats
+    // null as a network/HTTP failure and would (a) try the S3 fallback
+    // unnecessarily, doubling the bill, and (b) raise a misleading
+    // "both URLs failed" fatal event when the network was actually fine.
     captureAnalysisMessage("Scribe returned empty transcript", "warning", {
       step: "transcription",
       severity: "non_fatal",
-      extra: { url, audioDurationSecs: data.audio_duration_secs, languageCode: data.language_code },
+      extra: {
+        url,
+        audioDurationSecs: data.audio_duration_secs,
+        languageCode: data.language_code,
+      },
     });
-    return null;
+    return { text: "", speakers: "" };
   }
   const speakers = formatSpeakerBlocks(data.words) || text;
   return { text, speakers };
@@ -809,7 +828,13 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       md += `- **Lead:** ${call.leadName}\n\n`;
 
       if (!transcript) {
+        // Network/HTTP failure for both primary and fallback URL.
         md += `## Транскрипт\n\n⚠️ Не удалось транскрибировать запись.\n`;
+      } else if (!transcript.text) {
+        // Scribe responded but the audio is silent or unintelligible. Skip
+        // Grok analysis on empty content — saves the API call and avoids a
+        // misleading "patterns of failure" entry in the summary.
+        md += `## Транскрипт\n\n⚠️ Запись транскрибирована, но текст пустой (тишина / неразборчивый звук).\n`;
       } else {
         md += `## Транскрипт\n\n${transcript.speakers}\n\n`;
         console.log(`[Analysis ${analysisId}] [${num}] Analyzing with Grok...`);
