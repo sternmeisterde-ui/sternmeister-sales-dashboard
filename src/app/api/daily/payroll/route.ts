@@ -52,6 +52,7 @@ async function persistRun(
       dailyRate: r.dailyRate !== null ? r.dailyRate.toFixed(2) : null,
       statusBreakdown: r.statusBreakdown,
       equivFullDays: r.equivFullDays.toFixed(2),
+      bonusAmount: r.bonusAmount.toFixed(2),
       grossAmount: r.grossAmount.toFixed(2),
       computedAt: new Date(),
     };

@@ -196,6 +196,9 @@ export const managerSchedule = pgTable("manager_schedule", {
 // userId) — re-runs upsert. statusBreakdown is a {code: dayCount} JSON; the
 // gross amount is recomputed from the breakdown × snapshot dailyRate so a
 // later rate change doesn't silently mutate historical timesheets.
+//
+// bonusAmount is the manager_bonuses row at the time the snapshot ran;
+// grossAmount already includes it (= equivFullDays × dailyRate + bonusAmount).
 export const payrollRuns = pgTable("payroll_runs", {
   id: serial("id").primaryKey(),
   department: text("department").notNull(),                // 'b2g' | 'b2b'
@@ -205,8 +208,22 @@ export const payrollRuns = pgTable("payroll_runs", {
   dailyRate: numeric("daily_rate", { precision: 12, scale: 2 }), // snapshot at run time, may be NULL
   statusBreakdown: jsonb("status_breakdown").notNull(),    // { "8": 18, "4": 2, "о": 5, ... }
   equivFullDays: numeric("equiv_full_days", { precision: 8, scale: 2 }).notNull(), // Σ payrollFactor
-  grossAmount: numeric("gross_amount", { precision: 14, scale: 2 }).notNull(),     // equivFullDays * dailyRate
+  bonusAmount: numeric("bonus_amount", { precision: 12, scale: 2 }).notNull().default("0"), // manual premium snapshot
+  grossAmount: numeric("gross_amount", { precision: 14, scale: 2 }).notNull(),     // equivFullDays * dailyRate + bonusAmount
   computedAt: timestamp("computed_at", { withTimezone: true }).defaultNow(),
+});
+
+// Manual monthly premium per manager. Set in the Табель popup, summed into
+// the payroll calculator's gross. One row per (user_id, period_month);
+// amount = 0/null clears (we delete the row to keep the table clean).
+export const managerBonuses = pgTable("manager_bonuses", {
+  id: serial("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => masterManagers.id),
+  periodMonth: text("period_month").notNull(),             // 'YYYY-MM'
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  note: text("note"),                                       // optional "за что"
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
 export const kommoTokens = pgTable("kommo_tokens", {

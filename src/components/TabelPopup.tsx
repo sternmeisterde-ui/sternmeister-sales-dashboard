@@ -15,12 +15,15 @@
 // Read-only for non-admin sessions on the server side; this component
 // assumes the caller has gated access.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X, Loader2, ChevronLeft, ChevronRight, Save } from "lucide-react";
 
 interface MonthEntry {
   equivFullDays: number;
+  baseAmount: number;
+  bonusAmount: number;
+  bonusNote: string | null;
   grossAmount: number;
   statusBreakdown: Record<string, number>;
 }
@@ -84,6 +87,28 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
   // when the parent state still holds the old number.
   const [rateDraft, setRateDraft] = useState<Record<string, string>>({});
 
+  // Bonus popover state — fixed-position panel anchored to the clicked cell.
+  const [bonusEditor, setBonusEditor] = useState<{
+    userId: string;
+    periodMonth: string;
+    amount: string;
+    note: string;
+    style: React.CSSProperties;
+  } | null>(null);
+  const bonusRef = useRef<HTMLDivElement>(null);
+  const [bonusSaving, setBonusSaving] = useState(false);
+
+  useEffect(() => {
+    if (!bonusEditor) return;
+    const h = (e: MouseEvent) => {
+      if (bonusRef.current && !bonusRef.current.contains(e.target as Node)) {
+        setBonusEditor(null);
+      }
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [bonusEditor]);
+
   const fetchYear = useCallback(async () => {
     setLoading(true);
     try {
@@ -125,6 +150,75 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
     }
   };
 
+  const openBonusEditor = (userId: string, periodMonth: string, cell: HTMLElement) => {
+    const row = data?.rows.find((r) => r.userId === userId);
+    const entry = row?.monthly[periodMonth];
+    const rect = cell.getBoundingClientRect();
+    const PANEL_W = 240;
+    const PANEL_H = 180;
+    const GAP = 6;
+    let left = rect.left + rect.width / 2 - PANEL_W / 2;
+    left = Math.max(GAP, Math.min(left, window.innerWidth - PANEL_W - GAP));
+    let top: number;
+    if (rect.bottom + GAP + PANEL_H <= window.innerHeight) {
+      top = rect.bottom + GAP;
+    } else {
+      top = rect.top - PANEL_H - GAP;
+    }
+    setBonusEditor({
+      userId,
+      periodMonth,
+      amount: entry?.bonusAmount ? String(entry.bonusAmount) : "",
+      note: entry?.bonusNote ?? "",
+      style: { position: "fixed", top, left, zIndex: 9999, width: PANEL_W },
+    });
+  };
+
+  const saveBonus = async () => {
+    if (!bonusEditor) return;
+    setBonusSaving(true);
+    try {
+      await fetch("/api/daily/payroll/bonus", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: bonusEditor.userId,
+          periodMonth: bonusEditor.periodMonth,
+          amount: bonusEditor.amount === "" ? null : bonusEditor.amount,
+          note: bonusEditor.note === "" ? null : bonusEditor.note,
+        }),
+      });
+      await fetchYear();
+      setBonusEditor(null);
+    } catch (e) {
+      console.error("[Tabel] save bonus failed:", e);
+    } finally {
+      setBonusSaving(false);
+    }
+  };
+
+  const clearBonus = async () => {
+    if (!bonusEditor) return;
+    setBonusSaving(true);
+    try {
+      await fetch("/api/daily/payroll/bonus", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: bonusEditor.userId,
+          periodMonth: bonusEditor.periodMonth,
+          amount: null,
+        }),
+      });
+      await fetchYear();
+      setBonusEditor(null);
+    } catch (e) {
+      console.error("[Tabel] clear bonus failed:", e);
+    } finally {
+      setBonusSaving(false);
+    }
+  };
+
   if (!isOpen || !mounted) return null;
 
   // Department total (sum of all rows' yearGrossTotal) — small footer roll-up.
@@ -140,6 +234,7 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
   }
 
   return createPortal(
+    <>
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
@@ -238,12 +333,29 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
                       {data.months.map((m) => {
                         const entry = r.monthly[m];
                         const gross = entry?.grossAmount ?? 0;
+                        const base = entry?.baseAmount ?? 0;
+                        const bonus = entry?.bonusAmount ?? 0;
                         const days = entry?.equivFullDays ?? 0;
+                        const hasBonus = bonus > 0;
                         return (
-                          <td key={m} className={`px-2 py-1.5 text-right font-mono ${gross ? "text-slate-200" : "text-slate-700"}`}>
-                            <div>{fmtMoney(gross)}</div>
+                          <td
+                            key={m}
+                            onClick={(e) => openBonusEditor(r.userId, m, e.currentTarget)}
+                            title={entry?.bonusNote ? `Премия: ${entry.bonusNote}` : "Клик — задать премию"}
+                            className={`px-2 py-1.5 text-right font-mono cursor-pointer hover:bg-white/[0.04] transition-colors ${
+                              gross ? "text-slate-200" : "text-slate-700"
+                            } ${hasBonus ? "bg-amber-500/[0.04]" : ""}`}
+                          >
+                            <div className={hasBonus ? "text-emerald-400 font-semibold" : ""}>
+                              {fmtMoney(gross)}
+                            </div>
                             {days > 0 && (
                               <div className="text-[9px] text-slate-500">{fmtDays(days)} дн</div>
+                            )}
+                            {hasBonus && (
+                              <div className="text-[9px] text-amber-400">
+                                +{fmtMoney(bonus)} прем
+                              </div>
                             )}
                           </td>
                         );
@@ -283,15 +395,80 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
         {/* Footer hint */}
         <div className="flex items-center justify-between px-6 py-3 border-t border-white/10 shrink-0 text-[10px] text-slate-500">
           <span>
-            Сумма = эквивалент полных дней × ставка. Коэффициенты статусов:
-            ☀ 1.0 · ◑ 0.5 · — 0.0 · 🌴 1.0 · 🚀 1.0 · 🔴 1.0
+            Сумма = эквивалент полных дней × ставка + премия (клик по ячейке).
+            Коэффициенты: ☀ 1.0 · ◑ 0.5 · — 0.0 · 🌴 1.0 · 🚀 1.0 · 🔴 1.0
           </span>
           <span className="flex items-center gap-1 text-slate-400">
-            <Save className="w-3 h-3" /> ставка сохраняется по выходу из поля
+            <Save className="w-3 h-3" /> ставка по blur, премия в попапе
           </span>
         </div>
       </div>
-    </div>,
+    </div>
+
+    {/* Bonus editor popover — rendered as a sibling of the modal so the
+        backdrop click-handler doesn't close it. Anchored to the cell via
+        fixed coords. */}
+    {bonusEditor && (
+      <div
+        ref={bonusRef}
+        style={bonusEditor.style}
+        className="bg-slate-800 border border-white/15 rounded-xl shadow-2xl p-3 flex flex-col gap-2"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+          Премия — {bonusEditor.periodMonth}
+        </div>
+        <input
+          type="number"
+          inputMode="decimal"
+          step="0.01"
+          min="0"
+          autoFocus
+          value={bonusEditor.amount}
+          onChange={(e) =>
+            setBonusEditor((prev) => (prev ? { ...prev, amount: e.target.value } : prev))
+          }
+          placeholder="Сумма"
+          className="w-full bg-transparent border border-white/15 rounded px-2 py-1.5 text-[12px] font-mono text-white focus:border-blue-500/60 focus:outline-none placeholder-slate-600"
+        />
+        <input
+          type="text"
+          value={bonusEditor.note}
+          onChange={(e) =>
+            setBonusEditor((prev) => (prev ? { ...prev, note: e.target.value } : prev))
+          }
+          placeholder="Заметка (за что)"
+          className="w-full bg-transparent border border-white/15 rounded px-2 py-1.5 text-[11px] text-white focus:border-blue-500/60 focus:outline-none placeholder-slate-600"
+        />
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={clearBonus}
+            disabled={bonusSaving}
+            className="text-[10px] uppercase tracking-wider px-2 py-1 rounded text-rose-400 hover:bg-rose-500/10 transition-colors disabled:opacity-50"
+          >
+            Очистить
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setBonusEditor(null)}
+              disabled={bonusSaving}
+              className="text-[10px] uppercase tracking-wider px-2 py-1 rounded text-slate-400 hover:bg-white/5 transition-colors disabled:opacity-50"
+            >
+              Отмена
+            </button>
+            <button
+              onClick={saveBonus}
+              disabled={bonusSaving}
+              className="flex items-center gap-1 text-[10px] uppercase tracking-wider px-3 py-1 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors disabled:opacity-50 font-bold"
+            >
+              {bonusSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+              Сохранить
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>,
     document.body,
   );
 }

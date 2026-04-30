@@ -10,7 +10,7 @@
 
 import { and, eq, gte, lte } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
+import { masterManagers, managerSchedule, managerBonuses } from "@/lib/db/schema-existing";
 import { SCHEDULE_STATUSES, payrollFactorFor, type ScheduleCode } from "./schedule-payroll";
 
 export interface PayrollRow {
@@ -20,7 +20,10 @@ export interface PayrollRow {
   dailyRate: number | null;          // null = rate not set yet
   statusBreakdown: Record<string, number>;
   equivFullDays: number;             // Σ (count × payrollFactor)
-  grossAmount: number;               // equivFullDays × dailyRate (0 if rate is null)
+  baseAmount: number;                // equivFullDays × dailyRate (0 if rate is null)
+  bonusAmount: number;               // manager_bonuses.amount for this month, 0 if none
+  bonusNote: string | null;          // optional "за что"
+  grossAmount: number;               // baseAmount + bonusAmount
 }
 
 function pad2(n: number): string {
@@ -81,6 +84,24 @@ export async function computePayroll(
       ),
     );
 
+  // Manual monthly premiums for this period — at most one row per manager.
+  const bonusRows = await db
+    .select({
+      userId: managerBonuses.userId,
+      amount: managerBonuses.amount,
+      note: managerBonuses.note,
+    })
+    .from(managerBonuses)
+    .where(eq(managerBonuses.periodMonth, periodMonth));
+  const bonusByUser = new Map<string, { amount: number; note: string | null }>();
+  for (const b of bonusRows) {
+    const n = Number.parseFloat(b.amount);
+    bonusByUser.set(b.userId, {
+      amount: Number.isFinite(n) ? n : 0,
+      note: b.note ?? null,
+    });
+  }
+
   // userId → { code: count }
   const breakdownByUser = new Map<string, Record<string, number>>();
   for (const s of SCHEDULE_STATUSES) {
@@ -110,9 +131,14 @@ export async function computePayroll(
     equivFullDays = Math.round(equivFullDays * 100) / 100;
 
     const rate = m.dailyRate !== null ? Number.parseFloat(m.dailyRate) : null;
-    const gross = rate !== null && Number.isFinite(rate)
+    const base = rate !== null && Number.isFinite(rate)
       ? Math.round(equivFullDays * rate * 100) / 100
       : 0;
+
+    const bonus = bonusByUser.get(m.id);
+    const bonusAmount = bonus ? Math.round(bonus.amount * 100) / 100 : 0;
+    const bonusNote = bonus?.note ?? null;
+    const gross = Math.round((base + bonusAmount) * 100) / 100;
 
     return {
       userId: m.id,
@@ -121,6 +147,9 @@ export async function computePayroll(
       dailyRate: rate,
       statusBreakdown: breakdown,
       equivFullDays,
+      baseAmount: base,
+      bonusAmount,
+      bonusNote,
       grossAmount: gross,
     };
   });

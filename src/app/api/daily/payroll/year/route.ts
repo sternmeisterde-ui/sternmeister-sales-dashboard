@@ -16,6 +16,9 @@ export const dynamic = "force-dynamic";
 
 interface MonthEntry {
   equivFullDays: number;
+  baseAmount: number;
+  bonusAmount: number;
+  bonusNote: string | null;
   grossAmount: number;
   statusBreakdown: Record<string, number>;
 }
@@ -86,6 +89,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         if (r.dailyRate !== null) row.dailyRate = r.dailyRate;
         row.monthly[monthStr] = {
           equivFullDays: r.equivFullDays,
+          baseAmount: r.baseAmount,
+          bonusAmount: r.bonusAmount,
+          bonusNote: r.bonusNote,
           grossAmount: r.grossAmount,
           statusBreakdown: r.statusBreakdown,
         };

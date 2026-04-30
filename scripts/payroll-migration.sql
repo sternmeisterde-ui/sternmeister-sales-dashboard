@@ -28,3 +28,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS payroll_runs_uniq
 
 CREATE INDEX IF NOT EXISTS payroll_runs_period_idx
   ON payroll_runs (period_month);
+
+-- 3. payroll_runs.bonus_amount — manual premium amount included in the
+--    snapshot's gross. Default 0 so existing rows stay coherent.
+ALTER TABLE payroll_runs
+  ADD COLUMN IF NOT EXISTS bonus_amount NUMERIC(12, 2) NOT NULL DEFAULT 0;
+
+-- 4. manager_bonuses — live state for monthly premiums. The Табель popup
+--    upserts here (one row per user × month). amount = 0 / NULL is stored
+--    as "no row" — clearing simply deletes the row.
+CREATE TABLE IF NOT EXISTS manager_bonuses (
+  id           SERIAL PRIMARY KEY,
+  user_id      UUID NOT NULL REFERENCES master_managers(id),
+  period_month TEXT NOT NULL,
+  amount       NUMERIC(12, 2) NOT NULL,
+  note         TEXT,
+  created_at   TIMESTAMPTZ DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS manager_bonuses_uniq
+  ON manager_bonuses (user_id, period_month);
