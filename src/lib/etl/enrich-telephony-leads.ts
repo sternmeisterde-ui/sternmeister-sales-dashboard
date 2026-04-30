@@ -140,17 +140,19 @@ interface InsertRecord {
 const BULK_BATCH_SIZE = 500;
 
 /**
- * Per-tick scan cap. Without it the unenriched-row backlog can grow
- * unbounded: at one point we observed 1822 rows / 613 phones in a single
- * tick. Kommo /contacts is rate-limited to ~1 rps per token, so a 10-min
- * cron tick can realistically enrich ~600 distinct phones before the next
- * tick wants the lock.
+ * Per-tick scan cap. Bounded by the Kommo /contacts rate limit (~1 rps per
+ * token) and the cron route's `maxDuration = 300s` and the 6-min lease.
+ * 300 distinct phones × 1 sec ≈ 5 min — fits inside maxDuration with
+ * headroom for the bulk INSERT/UPDATE. Going higher (we tried 800) risks
+ * the tick hitting the lease ceiling on a backlog of unresolvable phones.
  *
  * Oldest rows first (ORDER BY created_at) so backfill / replay work
- * doesn't starve fresh tick rows. Backlog size is reported so an alert
- * can fire if it stops shrinking across ticks.
+ * doesn't starve fresh tick rows. Backlog size is reported separately so
+ * /api/health/etl can fire `degraded` when it stops shrinking across ticks
+ * — the long-term fix for that case is the unresolvable-phone decoupling
+ * tracked in follow-up #10.
  */
-const MAX_ROWS_PER_TICK = 800;
+const MAX_ROWS_PER_TICK = 300;
 
 /**
  * Run phone→lead enrichment for the [fromDate, toDate] window. Department-
