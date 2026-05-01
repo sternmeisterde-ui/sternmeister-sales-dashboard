@@ -46,17 +46,29 @@ async function tryAcquireLock(): Promise<string | null> {
       SET token       = EXCLUDED.token,
           acquired_at = EXCLUDED.acquired_at,
           expires_at  = EXCLUDED.expires_at
-      WHERE analytics.etl_locks.expires_at < now()
+      WHERE analytics.etl_locks.expires_at <= now()
     RETURNING token
   `);
   const row = res.rows[0];
   return row && row.token === token ? token : null;
 }
 
-/** Release the lease. Token-scoped so we never release someone else's lease. */
+/** Release the lease, mark the run as cleanly completed, and stamp
+ *  last_completed_at so /api/health/etl can prove the cron is alive even
+ *  when no Kommo events landed in this tick (night hours / quiet periods).
+ *
+ *  We UPDATE rather than DELETE so the row survives as a heartbeat record:
+ *    - `expires_at <= now()`  → released
+ *    - `last_completed_at`    → most recent successful run
+ *    - `token` cleared        → can be acquired again immediately
+ *
+ *  Token-scoped WHERE so we never release someone else's lease. */
 async function releaseLock(token: string): Promise<void> {
   await analyticsDb.execute(sql`
-    DELETE FROM analytics.etl_locks
+    UPDATE analytics.etl_locks
+    SET token             = '',
+        expires_at        = now(),
+        last_completed_at = now()
     WHERE name = ${LOCK_NAME} AND token = ${token}
   `);
 }

@@ -1,17 +1,24 @@
 // GET /api/health/etl
 //
-// Freshness probe for the analytics.* mirror that powers Dashboard / Daily /
-// Looker. Returns 200 when the most recent row in each ETL-fed table is
-// younger than `STALE_THRESHOLD_MIN`, 503 otherwise.
+// Liveness probe for the ETL cron. Returns 200 when the cron heartbeat
+// (analytics.etl_locks.last_completed_at, written by cron route on each
+// successful runSync) is younger than `STALE_THRESHOLD_MIN`, 503 otherwise.
 //
-// Also surfaces unenriched-telephony backlog so a stuck queue (e.g., Kommo
-// /contacts rate-limit storm) is visible without tailing logs.
+// Also surfaces unenriched-telephony backlog and per-table data freshness
+// so a stuck queue or partial outage is visible.
 //
 // Why this exists: 2026-04-30 13:57Z the cron crashed in syncCommunications
 // and the only signal was a stack trace in container logs. Dashboard kept
 // rendering yesterday's numbers without any indication. This endpoint is
 // the dashboard's "data is fresh through HH:MM" badge source AND the page
 // target for an external uptime check.
+//
+// Why heartbeat instead of MAX(created_at) on data tables: the latter false-
+// positives every night around 02–06 Berlin when Kommo has 0 events for
+// the window. Cron ticks fine, comms=0 telephony=0, but MAX stays frozen
+// from yesterday's last event and the health probe screams "stale". Using
+// the cron's own completion timestamp removes that ambiguity — if the
+// heartbeat is fresh, the cron is alive regardless of how quiet Kommo is.
 
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
@@ -59,11 +66,32 @@ async function latestTimestamp(
   return { source, latestAt, ageSec };
 }
 
+async function fetchHeartbeat(): Promise<{ ageSec: number | null; lastCompletedAt: string | null }> {
+  const res = await analyticsDb.execute<{
+    last_completed_at: string | null;
+    acquired_at: string | null;
+  }>(sql`
+    SELECT last_completed_at::text AS last_completed_at,
+           acquired_at::text       AS acquired_at
+    FROM analytics.etl_locks
+    WHERE name = 'cron'
+  `);
+  const row = res.rows[0];
+  if (!row || !row.last_completed_at) {
+    return { ageSec: null, lastCompletedAt: null };
+  }
+  const ageSec = Math.floor(
+    (Date.now() - new Date(row.last_completed_at).getTime()) / 1000,
+  );
+  return { ageSec, lastCompletedAt: row.last_completed_at };
+}
+
 export async function GET(): Promise<NextResponse> {
   try {
-    // Run all freshness probes in parallel — they're independent.
-    const [communications, leadsCohort, statusChanges, sla, backlogRes] =
+    // Run heartbeat + per-table freshness + backlog in parallel.
+    const [heartbeat, communications, leadsCohort, statusChanges, sla, backlogRes] =
       await Promise.all([
+        fetchHeartbeat(),
         latestTimestamp("communications", "analytics.communications", "created_at"),
         latestTimestamp("leads_cohort", "analytics.leads_cohort", "created_at"),
         latestTimestamp(
@@ -73,9 +101,8 @@ export async function GET(): Promise<NextResponse> {
         ),
         // SLA table has no row-level recompute timestamp — `last_contact_at`
         // is the most-recently-updated field across the table, so it's the
-        // closest proxy. If SLA recompute is stuck while communications are
-        // still landing, last_contact_at will lag behind communications and
-        // we'll catch it through both probes drifting apart.
+        // closest proxy. Surfaced for diagnostics only; not used in the
+        // health verdict (heartbeat is ground truth).
         latestTimestamp("sla", "analytics.sla", "last_contact_at"),
         analyticsDb.execute<{ n: string | number }>(sql`
           SELECT COUNT(*) AS n
@@ -88,29 +115,28 @@ export async function GET(): Promise<NextResponse> {
       ]);
 
     const sources = [communications, leadsCohort, statusChanges, sla];
-    // Three-state classification:
-    //   • ageSec === null       → table is empty (fresh deploy, never synced).
-    //                              Not an error — return "no_data" with 200.
-    //   • ageSec > threshold    → real staleness — 503.
-    //   • ageSec <= threshold   → fresh.
-    // Without the no-data branch a freshly-deployed instance returns 503
-    // before the first cron tick lands and panics any uptime check.
     const noDataSources = sources.filter((s) => s.ageSec === null);
-    const staleSources = sources.filter(
-      (s) => s.ageSec !== null && s.ageSec > STALE_THRESHOLD_MIN * 60,
-    );
     const enrichmentBacklog = Number(backlogRes.rows[0]?.n ?? 0);
 
-    // Health verdict — 503 only on actual staleness. Backlog alone is
-    // "degraded" not "down": OKK / Roleplay tabs still render fine. Empty
-    // tables are "no_data" — 200 with a hint, so a fresh deploy doesn't
-    // page anyone.
-    const stale = staleSources.length > 0;
-    const noData = !stale && noDataSources.length > 0;
+    // Liveness verdict — based on the heartbeat row, NOT on per-table
+    // MAX(created_at). This avoids the night-quiet false positive where
+    // Kommo has 0 events and analytics MAX freezes at yesterday's last
+    // event. The cron writes last_completed_at after every successful
+    // runSync, so a fresh heartbeat means the pipeline is alive even when
+    // every step processed 0 rows.
+    const heartbeatStale =
+      heartbeat.ageSec !== null && heartbeat.ageSec > STALE_THRESHOLD_MIN * 60;
+    const heartbeatMissing = heartbeat.ageSec === null;
+    const stale = heartbeatStale;
+    // No-data covers the fresh-deploy case: heartbeat row hasn't been
+    // written yet (cron has never completed). Treat as 200 with a hint,
+    // not as 503 — uptime checks shouldn't page on a clean deploy.
+    const noData = !stale && heartbeatMissing;
     const degraded = !stale && !noData && enrichmentBacklog > BACKLOG_DEGRADED_THRESHOLD;
 
     const status = stale ? "stale" : noData ? "no_data" : degraded ? "degraded" : "ok";
     const httpStatus = stale ? 503 : 200;
+    const staleSources: { source: string }[] = stale ? [{ source: "cron-heartbeat" }] : [];
 
     // Send a Sentry signal on unhealthy state — but throttle. Badge polls
     // every 60s; without throttling a stale episode of 1 h would fire 60
@@ -124,23 +150,22 @@ export async function GET(): Promise<NextResponse> {
         now - lastSentryReportAt.at >= SENTRY_COOLDOWN_MS;
 
       if (statusChanged || cooldownPassed) {
-        const worstSource = staleSources[0]?.source ?? "enrichment-backlog";
         const ages = sources
           .map((s) => `${s.source}=${s.ageSec ?? "null"}s`)
           .join(", ");
         captureEtlMessage(
           stale
-            ? `analytics.* stale: ${staleSources.map((s) => s.source).join(", ")}`
+            ? `cron heartbeat stale: ${heartbeat.ageSec ?? "null"}s since last_completed_at`
             : `enrichment backlog ${enrichmentBacklog} > ${BACKLOG_DEGRADED_THRESHOLD}`,
           stale ? "error" : "warning",
           {
-            step: `health:${worstSource}`,
+            step: stale ? "health:cron-heartbeat" : "health:enrichment-backlog",
             severity: stale ? "fatal" : "warning",
             extra: {
-              ages,
+              heartbeat_age_sec: heartbeat.ageSec,
+              heartbeat_last_completed_at: heartbeat.lastCompletedAt,
+              data_ages: ages,
               enrichmentBacklog,
-              stale_sources: staleSources.map((s) => s.source),
-              no_data_sources: noDataSources.map((s) => s.source),
               statusChanged,
             },
           },
@@ -160,6 +185,10 @@ export async function GET(): Promise<NextResponse> {
         thresholds: {
           stale_min: STALE_THRESHOLD_MIN,
           backlog_degraded: BACKLOG_DEGRADED_THRESHOLD,
+        },
+        heartbeat: {
+          last_completed_at: heartbeat.lastCompletedAt,
+          age_sec: heartbeat.ageSec,
         },
         freshness: {
           communications,

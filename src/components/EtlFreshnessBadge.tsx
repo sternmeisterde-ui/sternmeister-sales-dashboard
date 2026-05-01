@@ -24,6 +24,7 @@ interface FreshnessRow {
 interface HealthResp {
   status: "ok" | "degraded" | "stale" | "no_data" | "error";
   timestamp: string;
+  heartbeat?: { last_completed_at: string | null; age_sec: number | null };
   freshness?: {
     communications: FreshnessRow;
     leads_cohort: FreshnessRow;
@@ -118,14 +119,10 @@ export default function EtlFreshnessBadge() {
           ? { dot: "bg-amber-500", border: "border-amber-400/30", text: "text-amber-400", Icon: AlertTriangle, label: "ETL: backlog" }
           : { dot: "bg-rose-500", border: "border-rose-400/30", text: "text-rose-400", Icon: AlertCircle, label: "ETL: устарело" };
 
-  const oldestAge = data.freshness
-    ? Math.max(
-        data.freshness.communications.ageSec ?? 0,
-        data.freshness.leads_cohort.ageSec ?? 0,
-        data.freshness.status_changes.ageSec ?? 0,
-        data.freshness.sla.ageSec ?? 0,
-      )
-    : null;
+  // Show cron heartbeat age — that's the ground-truth liveness signal.
+  // Per-table MAX(created_at) freezes overnight when Kommo has 0 events,
+  // which made the badge go red even though cron was healthy.
+  const heartbeatAge = data.heartbeat?.age_sec ?? null;
 
   return (
     <div className="relative" ref={containerRef}>
@@ -138,24 +135,28 @@ export default function EtlFreshnessBadge() {
       >
         <span className={`w-2 h-2 rounded-full ${tone.dot}`} />
         <tone.Icon className="w-3.5 h-3.5" />
-        <span className="hidden md:inline">{formatAge(oldestAge)}</span>
+        <span className="hidden md:inline">{formatAge(heartbeatAge)}</span>
       </button>
 
       {open && data.freshness && (
         <div
           className="absolute right-0 top-full mt-2 w-72 rounded-xl border border-white/10 bg-slate-900/95 backdrop-blur-md shadow-xl p-3 z-50 text-xs"
         >
-          <div className="text-slate-300 font-semibold mb-2">Свежесть analytics.*</div>
+          <div className="text-slate-300 font-semibold mb-2">ETL heartbeat</div>
+          <div className="flex justify-between items-baseline mb-3 text-slate-400">
+            <span className="font-mono text-[11px]">cron last run</span>
+            <span className={data.status === "stale" ? "text-rose-400 font-semibold" : "text-slate-300"}>
+              {formatAge(heartbeatAge)}
+            </span>
+          </div>
+          <div className="text-slate-300 font-semibold mb-2 pt-2 border-t border-white/10">Данные (для справки)</div>
           <ul className="space-y-1.5 text-slate-400">
             {(["communications", "leads_cohort", "status_changes", "sla"] as const).map((k) => {
               const f = data.freshness![k];
-              const stale = data.stale_sources?.includes(k) ?? false;
               return (
                 <li key={k} className="flex justify-between items-baseline">
                   <span className="font-mono text-[11px]">{k}</span>
-                  <span className={stale ? "text-rose-400 font-semibold" : "text-slate-300"}>
-                    {formatAge(f.ageSec)}
-                  </span>
+                  <span className="text-slate-300">{formatAge(f.ageSec)}</span>
                 </li>
               );
             })}
