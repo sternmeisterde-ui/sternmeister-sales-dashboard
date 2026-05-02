@@ -135,6 +135,17 @@ export function registerTool<I extends ZodRawShape>(
         // log keeps a 500-char head + 250-char tail because Postgres
         // errors put the cause at the start and position/line at the end.
         process.stderr.write(`[mcp-tool-error] ${def.name}: ${rawMsg}\n`);
+        // Walk the cause chain — Drizzle's "Failed query:" wraps the real
+        // network/SSL/permission error one level deep; without printing
+        // .cause we'd never see DB connection issues.
+        let walker: unknown = (err as Error & { cause?: unknown }).cause;
+        let depth = 0;
+        while (walker && depth < 4) {
+          const m = walker instanceof Error ? walker.message : String(walker);
+          process.stderr.write(`[mcp-tool-error]   cause[${depth}]: ${m}\n`);
+          walker = (walker as Error & { cause?: unknown }).cause;
+          depth++;
+        }
         const msg =
           rawMsg.length > 750
             ? `${rawMsg.slice(0, 500)}…[truncated ${rawMsg.length - 750}ch]…${rawMsg.slice(-250)}`
