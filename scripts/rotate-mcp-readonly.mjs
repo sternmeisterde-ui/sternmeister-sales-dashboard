@@ -37,12 +37,24 @@ if (!pwd || pwd.length < 32) {
   process.exit(1);
 }
 
-// Admin-level URLs — one per Neon project. Reused from dashboard's .env.local.
+// Admin-level URLs — one per Neon BRANCH (not project). Neon roles live
+// on each branch's compute endpoint independently — creating mcp_readonly
+// on the SM project's D1 branch does NOT propagate it to R1 branch (R1 is
+// a separate compute endpoint with its own pg_authid). So ALTER must run
+// on all 6 endpoints, not 4 projects.
+const D1_ENDPOINT = "ep-withered-recipe-ai1ea97w-pooler";
+const R1_ENDPOINT = "ep-shiny-recipe-aio8wyp2-pooler";
+const r1Url =
+  process.env.R1_DATABASE_URL ??
+  process.env.DATABASE_URL?.replace(D1_ENDPOINT, R1_ENDPOINT);
+
 const ALTER_TARGETS = [
-  { name: "SM (D1+R1)", url: process.env.DATABASE_URL },
-  { name: "OKK (D2+R2)", url: process.env.D2_OKK_DATABASE_URL },
-  { name: "looker (Analytics)", url: process.env.ANALYTICS_DATABASE_URL },
-  { name: "tracking", url: process.env.TRACKING_DATABASE_URL },
+  { name: "D1 branch", url: process.env.DATABASE_URL },
+  { name: "R1 branch", url: r1Url },
+  { name: "D2 branch", url: process.env.D2_OKK_DATABASE_URL },
+  { name: "R2 branch", url: process.env.R2_OKK_DATABASE_URL },
+  { name: "Analytics", url: process.env.ANALYTICS_DATABASE_URL },
+  { name: "Tracking", url: process.env.TRACKING_DATABASE_URL },
 ];
 
 for (const t of ALTER_TARGETS) {
