@@ -279,10 +279,50 @@ const server = http.createServer(async (req, res) => {
 server.keepAliveTimeout = 65_000;
 server.headersTimeout = 70_000;
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   process.stderr.write(
     `[mcp-http] listening on :${PORT} — ${loadTokens().size} bearer tokens loaded\n`,
   );
+  // Startup connectivity probe — ping each of the 6 RO connections so any
+  // env/credentials/network issue surfaces in logs IMMEDIATELY, instead of
+  // mysteriously breaking the first tool call. Doesn't fail startup;
+  // service stays up so /health responds and user can debug.
+  try {
+    const probes = [
+      { name: "D1", env: "MCP_D1_RO_URL", fallback: "DATABASE_URL" },
+      { name: "R1", env: "MCP_R1_RO_URL", fallback: "R1_DATABASE_URL" },
+      { name: "D2", env: "MCP_D2_RO_URL", fallback: "D2_OKK_DATABASE_URL" },
+      { name: "R2", env: "MCP_R2_RO_URL", fallback: "R2_OKK_DATABASE_URL" },
+      { name: "Analytics", env: "MCP_ANALYTICS_RO_URL", fallback: "ANALYTICS_DATABASE_URL" },
+      { name: "Tracking", env: "MCP_TRACKING_RO_URL", fallback: "TRACKING_DATABASE_URL" },
+    ];
+    const { neon: neonClient } = await import("@neondatabase/serverless");
+    for (const p of probes) {
+      const url = process.env[p.env] ?? process.env[p.fallback];
+      if (!url) {
+        process.stderr.write(`[mcp-probe] ${p.name}: ${p.env} not set\n`);
+        continue;
+      }
+      // Sanity-check URL shape — flag markdown autocorrect / brackets.
+      if (/[\[\]()]/.test(url) || url.includes("mailto:")) {
+        process.stderr.write(
+          `[mcp-probe] ${p.name}: URL CONTAINS BRACKETS / mailto: — likely markdown autocorrect. Strip them in Dokploy env.\n`,
+        );
+        continue;
+      }
+      try {
+        const sql = neonClient(url);
+        const r = await sql`SELECT 1 AS ok`;
+        process.stderr.write(`[mcp-probe] ${p.name}: ok (${JSON.stringify(r)})\n`);
+      } catch (err) {
+        const msg = (err as Error).message;
+        const cause = (err as Error & { cause?: Error }).cause?.message;
+        process.stderr.write(`[mcp-probe] ${p.name}: FAIL — ${msg}${cause ? " | " + cause : ""}\n`);
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`[mcp-probe] probe loop crashed: ${(err as Error).message}\n`);
+  }
 });
 
 const sweepTimer = setInterval(evictStaleSessions, SESSION_SWEEP_MS);
