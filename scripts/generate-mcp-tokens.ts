@@ -58,7 +58,7 @@ process.stderr.write("\n=== Distribution snippets (Discord DM) ===\n");
 for (const t of tokens) {
   process.stderr.write(
     `\n[${t.name} / ${t.userId}]\nClaude Desktop config:\n` +
-      `{\n  "mcpServers": {\n    "sternmeister": {\n      "url": "https://mcp.sternmeister.de/mcp",\n      "headers": {\n        "Authorization": "Bearer ${t.token}"\n      }\n    }\n  }\n}\n`,
+      `{\n  "mcpServers": {\n    "sternmeister": {\n      "url": "https://mcp.sternmeister.online/mcp",\n      "headers": {\n        "Authorization": "Bearer ${t.token}"\n      }\n    }\n  }\n}\n`,
   );
 }
 process.stderr.write("\n=== End ===\n");

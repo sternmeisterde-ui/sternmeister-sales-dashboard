@@ -81,7 +81,7 @@ services:
       - dokploy-network
 
   # MCP server — exposes curated dashboard tools to Claude Desktop / Claude Code
-  # at https://mcp.sternmeister.de. Bearer-token auth, read-only Neon access,
+  # at https://mcp.sternmeister.online. Bearer-token auth, read-only Neon access,
   # all calls audited to D1.mcp_audit_log. See docs/MCP-IMPLEMENTATION-PLAN.md.
   mcp:
     build:
@@ -113,6 +113,11 @@ services:
       - MCP_TRACKING_RO_URL=${MCP_TRACKING_RO_URL}
       # Sentry — optional (set DSN to enable).
       - SENTRY_DSN=${MCP_SENTRY_DSN}
+      # CORS / DNS-rebinding guard — comma-separated list of allowed Origin
+      # headers for browser clients. Empty/missing Origin (Claude Desktop,
+      # curl, native MCP clients) is always allowed. Default applied in
+      # src/index.ts: 'https://mcp.sternmeister.online,https://claude.ai'.
+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS}
     restart: unless-stopped
     networks:
       - sternmeister-network

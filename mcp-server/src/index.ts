@@ -23,7 +23,7 @@
  *   it via the Mcp-Session-Id response header. Subsequent requests must echo
  *   the same header. DELETE ends a session.
  *
- * Phase 2 deploy: Dokploy → Traefik TLS at mcp.sternmeister.de. Single
+ * Phase 2 deploy: Dokploy → Traefik TLS at mcp.sternmeister.online. Single
  * replica is fine for 5–15 РОПов; horizontal scale (later) requires moving
  * session state to Redis / sticky routing.
  */
@@ -98,7 +98,7 @@ function evictStaleSessions(): void {
 // or accept the default which covers production + claude.ai.
 const allowedOrigins = new Set(
   (process.env.MCP_ALLOWED_ORIGINS ??
-    "https://mcp.sternmeister.de,https://claude.ai")
+    "https://mcp.sternmeister.online,https://claude.ai")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),

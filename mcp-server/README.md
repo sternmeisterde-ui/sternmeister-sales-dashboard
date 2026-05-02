@@ -98,18 +98,18 @@ curl -s -X POST http://localhost:3009/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"managers.find_by_name","arguments":{"name":"Дмитрий","dept":"b2g"}}}'
 ```
 
-## Production deploy (Dokploy → mcp.sternmeister.de)
+## Production deploy (Dokploy → mcp.sternmeister.online)
 
 The `mcp` service is added to the existing `docker-compose.yml`. Provision
 in Dokploy:
 
-1. **Domain**: `mcp.sternmeister.de` → port 3009 with TLS (Traefik does the cert).
+1. **Domain**: `mcp.sternmeister.online` → port 3009 with TLS (Traefik does the cert).
 2. **Env vars** (Dokploy UI):
    - `MCP_BEARER_TOKENS` — JSON array of token objects (see schema in `src/auth/tokens.ts`). One entry per user.
    - **Read-only DB URLs (REQUIRED for production)**: `MCP_D1_RO_URL`, `MCP_R1_RO_URL`, `MCP_D2_RO_URL`, `MCP_R2_RO_URL`, `MCP_ANALYTICS_RO_URL`, `MCP_TRACKING_RO_URL` — connect strings for dedicated `mcp_readonly` Postgres roles per Neon project. Without them, the server falls back to the dashboard's write-capable `DATABASE_URL` etc., which is **a security blocker for prod-deploy** — a compromised tool would have INSERT/UPDATE/DELETE on production. Provision the roles BEFORE pointing real users at this server.
    - `DATABASE_URL` — required for audit-log writes (`mcp_audit_log` lives in D1 and needs INSERT). Even with `MCP_*_RO_URL` in place, the audit path needs a write path. Use a dedicated `mcp_audit_writer` role with INSERT-only on `public.mcp_audit_log` if you want to lock this down further.
    - `MCP_SENTRY_DSN` — separate Sentry project `sternmeister-mcp-server` (optional but recommended).
-   - `MCP_ALLOWED_ORIGINS` — comma-separated whitelist for browser-originated requests. Default: `https://mcp.sternmeister.de,https://claude.ai`. Non-browser clients (Claude Desktop, curl) skip this check entirely.
+   - `MCP_ALLOWED_ORIGINS` — comma-separated whitelist for browser-originated requests. Default: `https://mcp.sternmeister.online,https://claude.ai`. Non-browser clients (Claude Desktop, curl) skip this check entirely.
 3. **Health**: GET `/health` returns 200 with status / uptime / session count / token count. Dokploy probes this.
 4. **Auth**: every `/mcp` request needs `Authorization: Bearer <token>`. 401 otherwise.
 
@@ -127,7 +127,7 @@ Settings → Developer → Edit Config → add:
 {
   "mcpServers": {
     "sternmeister": {
-      "url": "https://mcp.sternmeister.de/mcp",
+      "url": "https://mcp.sternmeister.online/mcp",
       "headers": {
         "Authorization": "Bearer sk-mcp-<your-token>"
       }
