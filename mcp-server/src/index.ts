@@ -44,6 +44,36 @@ import { initSentry } from "./utils/trace.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
+
+// Sanitize env URLs that some clipboards markdown-autocorrect into
+// `[user@host](mailto:user@host)` — strip the wrapper, keep the inner
+// reference. Applies to every connection-string env we read; the regex is
+// no-op on already-clean values.
+const SANITIZE_KEYS = [
+  "MCP_D1_RO_URL",
+  "MCP_R1_RO_URL",
+  "MCP_D2_RO_URL",
+  "MCP_R2_RO_URL",
+  "MCP_ANALYTICS_RO_URL",
+  "MCP_TRACKING_RO_URL",
+  "DATABASE_URL",
+  "R1_DATABASE_URL",
+  "D2_OKK_DATABASE_URL",
+  "R2_OKK_DATABASE_URL",
+  "ANALYTICS_DATABASE_URL",
+  "TRACKING_DATABASE_URL",
+];
+for (const key of SANITIZE_KEYS) {
+  const v = process.env[key];
+  if (!v) continue;
+  // Pattern: [<inner>](mailto:<duplicate>) — keep <inner>.
+  const cleaned = v.replace(/\[([^\]]+)\]\(mailto:[^)]+\)/g, "$1");
+  if (cleaned !== v) {
+    process.env[key] = cleaned;
+    process.stderr.write(`[mcp-sanitize] ${key}: stripped markdown autocorrect\n`);
+  }
+}
+
 initSentry();
 
 const PORT = Number(process.env.PORT ?? 3009);
