@@ -16,10 +16,26 @@
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 
-import * as dashSchema from "../../../src/lib/db/schema-existing.js";
-import * as okkSchema from "../../../src/lib/db/schema-okk.js";
-import * as analyticsSchema from "../../../src/lib/db/schema-analytics.js";
-import * as trackingSchema from "../../../src/lib/db/schema-tracking.js";
+// Mode-mismatch trap: dashboard root is CJS (no "type":"module" in
+// package.json), so tsx wraps these .ts schema files as `module.exports = {…}`
+// at runtime. From our ESM workspace, star-import yields just `{ default,
+// 'module.exports' }`; named imports get nothing. The runtime-extractor
+// below pulls the actual exports out of `.default` if present, falling back
+// to the namespace itself for the case where root is later flipped to ESM.
+import * as dashSchemaModule from "../../../src/lib/db/schema-existing.js";
+import * as okkSchemaModule from "../../../src/lib/db/schema-okk.js";
+import * as analyticsSchemaModule from "../../../src/lib/db/schema-analytics.js";
+import * as trackingSchemaModule from "../../../src/lib/db/schema-tracking.js";
+
+function unwrap<T>(mod: T): T {
+  const anyMod = mod as { default?: T };
+  return (anyMod.default ?? mod) as T;
+}
+
+const dashSchema = unwrap(dashSchemaModule);
+const okkSchema = unwrap(okkSchemaModule);
+const analyticsSchema = unwrap(analyticsSchemaModule);
+const trackingSchema = unwrap(trackingSchemaModule);
 
 type DashDb = ReturnType<typeof drizzle<typeof dashSchema>>;
 type OkkDb = ReturnType<typeof drizzle<typeof okkSchema>>;

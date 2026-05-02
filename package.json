@@ -2,6 +2,7 @@
   "name": "tmpapp",
   "version": "0.1.0",
   "private": true,
+  "workspaces": ["mcp-server"],
   "scripts": {
     "dev": "next dev -p 3008",
     "build": "next build",

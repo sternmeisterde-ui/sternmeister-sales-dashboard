@@ -23,6 +23,10 @@ export interface AuditEntry {
 
 export async function recordAudit(entry: AuditEntry): Promise<void> {
   try {
+    // user_depts is text[] — Drizzle's parameterizer stringifies arrays
+    // into a comma-joined value, which Postgres rejects ("malformed array
+    // literal"). Cast through string_to_array to coerce reliably.
+    const deptsCsv = entry.ctx.depts.join(",");
     await d1.execute(sql`
       INSERT INTO mcp_audit_log (
         user_id, user_role, user_depts, transport,
@@ -31,7 +35,7 @@ export async function recordAudit(entry: AuditEntry): Promise<void> {
       ) VALUES (
         ${entry.ctx.userId},
         ${entry.ctx.role},
-        ${entry.ctx.depts as unknown as string[]},
+        string_to_array(${deptsCsv}, ','),
         ${entry.ctx.transport},
         ${entry.toolName},
         ${JSON.stringify(entry.toolInput)}::jsonb,
