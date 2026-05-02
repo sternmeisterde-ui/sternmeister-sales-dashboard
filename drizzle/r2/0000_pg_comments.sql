@@ -8,15 +8,20 @@
 BEGIN;
 
 -- ─── public.calls ───
-COMMENT ON TABLE public.calls IS 'Источник звонка (запись, транскрипт, направление, длительность, Kommo-связи). Used by tabs: Аналитика, Дейли, ОКК.';
+COMMENT ON TABLE public.calls IS '[R2 / B2B OKK] Источник звонка (запись, транскрипт, направление, длительность, Kommo-связи). Used by tabs: Аналитика, Дейли, ОКК.';
+COMMENT ON COLUMN public.calls.manager_id IS 'FK → managers.id (UUID, OKK-локальный). NULL → orphan; UI/MCP такие звонки скрывают.';
 COMMENT ON COLUMN public.calls.contact_phone IS 'PII: телефон контакта. MCP маскирует до ''+7***1234'' независимо от роли (см. utils/pii.ts когда landed).';
+COMMENT ON COLUMN public.calls.duration_seconds IS 'Длительность звонка. Только evaluated calls с длительностью ≥10s попадают в OKK; короткие фильтруются.';
 COMMENT ON COLUMN public.calls.direction IS '''inbound'' | ''outbound''. Драйвит speaker labelling: outbound → Speaker A = клиент; inbound → Speaker A = менеджер. NULL → raw labels.';
 COMMENT ON COLUMN public.calls.transcript_speakers IS 'JSONB массив сегментов { speaker, text, start, end }. NULL на старых звонках — UI fall-back на plain transcript.';
+COMMENT ON COLUMN public.calls.kommo_lead_id IS 'Kommo lead.id. JOIN-ключ в analytics.leads_cohort.lead_id и tracking_events.entity_id (entity_type=''lead''). NULL → звонок не привязан к лиду (orphan, UI скрывает).';
 COMMENT ON COLUMN public.calls.kommo_lead_url IS 'Полный URL лида в Kommo. Используется UI для deep-link.';
 COMMENT ON COLUMN public.calls.status IS '''pending'' | ''evaluated'' | ''error''. UI/MCP показывают только evaluated.';
 
 -- ─── public.evaluations ───
-COMMENT ON TABLE public.evaluations IS 'Оценка с разбивкой по блокам/критериям. Used by tabs: Аналитика, Аудит, ОКК.';
+COMMENT ON TABLE public.evaluations IS '[R2 / B2B OKK] AI-оценка звонка с разбиением по блокам и критериям. Used by tabs: Аналитика, Аудит, ОКК.';
+COMMENT ON COLUMN public.evaluations.call_id IS 'FK → calls.id. 1:1 — один evaluation на звонок.';
+COMMENT ON COLUMN public.evaluations.manager_id IS 'FK → managers.id. Дублирует calls.manager_id для прямых per-manager агрегаций без JOIN.';
 COMMENT ON COLUMN public.evaluations.prompt_type IS 'Тип промпта (определяет каноничный набор блоков/критериев). Используется Аналитикой для группировки.';
 COMMENT ON COLUMN public.evaluations.total_score IS 'Итоговый балл оценки (0-100). NULL → оценка не завершена; UI/MCP такие звонки прячут.';
 COMMENT ON COLUMN public.evaluations.evaluation_json IS 'Полная структура оценки: { blocks[], total_score, total_max_score, summary, client_scoring }. Каждый block: { name, score|block_score, max_score|max_block_score, criteria[] }, каждый criterion: { name, score, max_score, feedback, quote? }. Поддерживает legacy (score/max_score) и новый (block_score/max_block_score) форматы.';
@@ -24,23 +29,29 @@ COMMENT ON COLUMN public.evaluations.call_number IS 'Порядковый ном
 COMMENT ON COLUMN public.evaluations.override_metadata IS 'JSON метаданные программных корректировок AI-оценки. Ключи: is_followup, followup_signal_source (lead_id|phone_fallback|phone_fallback_no_crm|null), prior_count, call_type (primary|followup|interrupted|unqualified|transfer|deferred_start|unknown), overrides_applied (массив правил), score_before_override, score_after_override.';
 
 -- ─── public.managers ───
-COMMENT ON TABLE public.managers IS 'Имя/линия/команда менеджера для фильтра и подписи. Used by tabs: Аналитика, ОКК.';
-COMMENT ON COLUMN public.managers.role IS '''manager'' | ''rop'' | ''admin''. ROP с непустой line — линейный сотрудник.';
-COMMENT ON COLUMN public.managers.line IS 'B2G линия: ''1''=квалификатор, ''2''=бератер, ''3''=доведение. ROP с непустой line — double-status, включается как линейный.';
+COMMENT ON TABLE public.managers IS '[R2 / B2B OKK] Имя/линия/команда менеджера для фильтра и подписи. Used by tabs: Аналитика, ОКК.';
+COMMENT ON COLUMN public.managers.role IS '''manager'' | ''rop'' | ''admin''. В B2B нет line, поэтому double-status (rop+line) тут не применяется — ROP это всегда не-линейный.';
+COMMENT ON COLUMN public.managers.line IS 'B2B не использует line-конвенцию — всегда NULL. (В D2 значение драйвит B2G линии 1=квалификатор, 2=бератер, 3=доведение.)';
 COMMENT ON COLUMN public.managers.is_active IS 'Soft-delete (синкается из master_managers.is_active).';
+COMMENT ON COLUMN public.managers.kommo_user_id IS 'Kommo user ID. Резолвится из master_managers.kommo_user_id при синке.';
 
 -- ─── public.phantom_history ───
-COMMENT ON TABLE public.phantom_history IS 'Дневной аггрегат покрытия webhook''ом телефонии. Used by tabs: Аудит.';
+COMMENT ON TABLE public.phantom_history IS '[R2 / B2B OKK] Дневной аггрегат покрытия webhook''ом телефонии. Used by tabs: Аудит.';
+COMMENT ON COLUMN public.phantom_history.date IS 'Civil-date в Europe/Berlin. PK (department, manager_id, date).';
 COMMENT ON COLUMN public.phantom_history.phantom_count IS 'Кол-во CDR-звонков, не попавших в OKK (= не оценённых, например короткие <10s).';
 COMMENT ON COLUMN public.phantom_history.coverage_pct IS '% звонков менеджера из telephony_cdr, которые попали в OKK calls на этот день. Heatmap в Аудит-tab.';
 
 -- ─── public.telephony_cdr ───
-COMMENT ON TABLE public.telephony_cdr IS '[INTERNAL — OKK] Phase 2 webhook coverage tracking: сырой CDR для proof-of-coverage. Источник для phantom_history. Не для прямых запросов.';
+COMMENT ON TABLE public.telephony_cdr IS '[R2 / B2B OKK] [INTERNAL — OKK] Phase 2 webhook coverage tracking: сырой CDR для proof-of-coverage. Источник для phantom_history. Не для прямых запросов.';
 
 -- ─── public.voice_feedback ───
-COMMENT ON TABLE public.voice_feedback IS 'Голосовой ответ менеджера на оценку (если был). Used by tabs: ОКК.';
+COMMENT ON TABLE public.voice_feedback IS '[R2 / B2B OKK] Голосовой ответ менеджера на оценку (если был). Used by tabs: ОКК.';
 
 -- ─── public.worst_calls ───
-COMMENT ON TABLE public.worst_calls IS 'Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). Связан с calls/evaluations/voice_feedback по FK.';
+COMMENT ON TABLE public.worst_calls IS '[R2 / B2B OKK] Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). FK: call_id → calls.id, evaluation_id → evaluations.id, manager_id → managers.id.';
+COMMENT ON COLUMN public.worst_calls.call_id IS 'FK → calls.id. Какой именно звонок попал в топ-N худших.';
+COMMENT ON COLUMN public.worst_calls.evaluation_id IS 'FK → evaluations.id (snapshot оценки на момент включения в worst).';
+COMMENT ON COLUMN public.worst_calls.period IS '''morning'' | ''afternoon'' — слот уведомления (14:00 / 17:00 Europe/Berlin).';
+COMMENT ON COLUMN public.worst_calls.responded IS 'Менеджер ответил голосом на уведомление. Драйвит response_adequate (после Grok adequacy check).';
 
 COMMIT;

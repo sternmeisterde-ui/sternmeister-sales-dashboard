@@ -125,7 +125,11 @@ const SECTION_HEADER_RE = /^##\s+Источники\s+данных\s*$/m;
 
 async function loadDocsMentions(repoRoot: string): Promise<DocsTableMention[]> {
   const dir = path.join(repoRoot, DOCS_DIR);
-  const entries = await fs.readdir(dir);
+  // Sort alphabetically so generator output is deterministic across OSes
+  // (macOS APFS returns creation-order, Linux ext4 hash-order). Without sort,
+  // mergeDocsMentions's "longest wins" rule could produce different SQL on
+  // different machines from identical inputs.
+  const entries = (await fs.readdir(dir)).sort();
   const mentions: DocsTableMention[] = [];
   for (const entry of entries) {
     if (!DOC_FILE_GLOB.test(entry)) continue;
@@ -187,8 +191,11 @@ function mergeDocsMentions(rows: DocsTableMention[]): Map<string, MergedTableDoc
     if (!existing) {
       merged.set(key, { table: r.table, narrative: r.narrative, mentionedIn: [r.doc] });
     } else {
-      // First narrative wins; if the new mention is meaningfully longer, prefer it.
-      if (r.narrative.length > existing.narrative.length * 1.5) {
+      // Longest narrative wins (deterministic). Caveat: if curated rich docs
+      // and a terse-but-authoritative one disagree, terse loses — but in
+      // practice the authoritative narrative ALSO lives in TABLE_NARRATIVES,
+      // which overrides this map entirely.
+      if (r.narrative.length > existing.narrative.length) {
         existing.narrative = r.narrative;
       }
       if (!existing.mentionedIn.includes(r.doc)) {
@@ -217,7 +224,7 @@ function mergeDocsMentions(rows: DocsTableMention[]): Map<string, MergedTableDoc
 const TABLE_NARRATIVES: Record<string, string> = {
   // D1 — single-source-of-truth cluster
   master_managers:
-    "Single source of truth для всех менеджеров обоих отделов (B2G + B2B). При сохранении синкается в D2.managers / R2.managers / D1.d1_users / R1.r1_users по флагам in_okk / in_rolevki. Soft-delete (is_active=false) сохраняет FK в исторических звонках.",
+    "Single source of truth для всех менеджеров обоих отделов (B2G + B2B). При сохранении синкается в D2.managers / R2.managers / D1.d1_users / R1.r1_users по флагам in_okk / in_rolevki. Soft-delete (is_active=false) сохраняет FK в исторических звонках. JOINs: → manager_schedule.user_id, → daily_plans.user_id, → manager_bonuses.user_id, → payroll_runs.user_id; sync targets D2.managers.id / R2.managers.id / D1.d1_users.id / R1.r1_users.id; Kommo via kommo_user_id ↔ analytics.leads_cohort.responsible_user_id.",
   manager_schedule:
     "Per-day расписание менеджера: что он делает в конкретный день (8/4/-/о/н/у). Драйвит is_on_line для Звонков и payrollFactor для Табеля. Один день = одна строка; пустые дни в БД отсутствуют.",
   payroll_runs:
@@ -253,7 +260,7 @@ const TABLE_NARRATIVES: Record<string, string> = {
     "[INTERNAL — OKK] Phase 2 webhook coverage tracking: сырой CDR для proof-of-coverage. Источник для phantom_history. Не для прямых запросов.",
   // OKK worst-calls (notification popup, не в основной выдаче)
   worst_calls:
-    "Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). Связан с calls/evaluations/voice_feedback по FK.",
+    "Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). FK: call_id → calls.id, evaluation_id → evaluations.id, manager_id → managers.id.",
   // Tracking
   tracking_sync_state:
     "[INTERNAL — Tracking] Маркер последнего синка: cursor (last_event_ts), backfill watermark (earliest_event_ts), filter version. Используется ensureRangeCached.",
@@ -277,7 +284,7 @@ const TABLE_NARRATIVES: Record<string, string> = {
   custom_report:
     "[INTERNAL] Универсальная metric_name × dt таблица — copy интеграторской. Зеркало report_sternmeister_custom_report. Не используется в нашем UI; реплицируется для возможной обратной сверки с их Looker.",
   refusal_enums:
-    "Кеш Kommo enum-options для custom-fields категории refusal (например field 879824 «Причина закрытия Госники»). enum_id → human-readable value. Заполняется ETL lookups; читается getRefusalReasons() для Daily refusals.",
+    "Кеш Kommo enum-options для custom-fields категории refusal. Известные field_id: 879824 «Причина закрытия Госники» (B2G non-qual), 876383 «B2B close reason» (Бух Комм 10631243 / Мед Комм 13209983, обязательное на статусе 143). enum_id → human-readable value. Заполняется ETL lookups; читается getRefusalReasons() для Daily refusals.",
   funnel:
     "[RESERVE] Зеркало report_sternmeister_funnel — operational metrics (dt_operational vs dt_cohort). Не surfaced в UI напрямую; cross-check с интегратором.",
 };
@@ -411,7 +418,7 @@ const COLUMN_COMMENTS: Record<string, string> = {
 
   // analytics.sla
   "sla.sla_first_call_seconds":
-    "BH-time от создания лида до первого outbound-звонка ответственного менеджера. NULL → ни одного звонка.",
+    "BH-time от создания лида до первого outbound-звонка ОТВЕТСТВЕННОГО менеджера. NULL когда: (а) ни одного outbound-звонка вообще, ИЛИ (б) outbound-звонки были, но не от responsible. Inbound-звонки игнорируются.",
   "sla.sla_first_call_calendar_seconds":
     "Calendar-time (без BH adjustment) — для оптимистичных метрик и cross-check с интегратором.",
   "sla.sla_first_call_from_shift_seconds":
@@ -425,13 +432,89 @@ const COLUMN_COMMENTS: Record<string, string> = {
 
   // tracking_events (Tracking DB)
   "tracking_events.event_type":
-    "Kommo event type, normalized (см. EVENT_TYPES в tracking/sync.ts). 41 verified-firing типов после v9 audit (2026-04-28).",
+    "Kommo event type, normalized. 41 verified-firing типов после v9 audit (2026-04-28). Группы: outgoing_call, incoming_call, lead_added, lead_status_changed, custom_field_*_value_changed, entity_*, task_*, note_*.",
   "tracking_events.duration_sec":
     "Resolved для звонков (из call note params), 0 для всех остальных событий.",
   "tracking_events.raw":
     "Original event payload (минимальный). С v10 содержит full Kommo call params: uniq, pbx_source, link, phone, call_status, call_result.",
   "tracking_events.created_at":
     "Время события в Kommo (UTC, конвертится в Europe/Berlin при рендере).",
+  "tracking_events.entity_id":
+    "Kommo entity.id (lead/contact/company/customer/unsorted в зависимости от entity_type). Для entity_type='lead' это JOIN-ключ к analytics.leads_cohort.lead_id и okk.calls.kommo_lead_id.",
+  "tracking_events.entity_type":
+    "'lead' | 'contact' | 'company' | 'customer' | 'unsorted'. Драйвит интерпретацию entity_id.",
+  "tracking_events.manager_id":
+    "master_managers.id (UUID stored as text — cross-DB JOIN).",
+
+  // analytics.leads_cohort — additional critical columns (review HIGH)
+  "leads_cohort.status_id":
+    "Kommo status_id текущего статуса лида. Известные ID: 93886075=TERM_DC_DONE (B2G ДЦ-термин). См. lead_status_changes для истории переходов.",
+  "leads_cohort.pipeline_id":
+    "Kommo pipeline_id. B2B-пайплайны: 10631243=Бух Комм, 13209983=Мед Комм (используются в b2b_close_reason gate). B2G — отдельный набор; 12154099=Бух Бератер (Termin tab). См. docs/DASHBOARD-DAILY.md.",
+  "leads_cohort.lead_id":
+    "Kommo lead.id. PK когорты. ← lead_status_changes.lead_id, ← communications.lead_id, ← sla.lead_id, ← tasks.lead_id. Также tracking_events.entity_id (where entity_type='lead') и okk.calls.kommo_lead_id.",
+  "leads_cohort.manager":
+    "Имя ответственного менеджера строкой. WARN: known name-drift с master_managers.name (Maksim/Latin-C/Ukrainian-Є) — JOIN через alias-таблицу в src/lib/daily/name-aliases.ts, не прямо.",
+  "leads_cohort.responsible_user_id":
+    "Kommo user ID ответственного менеджера. JOIN с master_managers.kommo_user_id для resolved name (минует name-drift).",
+
+  // analytics.communications — JOIN keys (review CRITICAL)
+  "communications.lead_id":
+    "Kommo lead.id после enrich-telephony-leads. NULL → телефонный leg не сматчился ни с одним лидом. Composite UNIQUE(communication_id, COALESCE(lead_id,0)) → никогда не JOIN-ить только по communication_id.",
+  "communications.manager":
+    "Имя менеджера строкой как у интегратора. WARN: 3 known name-drifts vs master_managers.name (Maksim/Latin-C/Ukrainian-Є) — JOIN через alias-таблицу в src/lib/daily/name-aliases.ts. См. project_analytics_name_aliases memory.",
+  "communications.first_call_at":
+    "Время первого звонка по этому лиду (denormalized из CDR). Используется Looker для cohort SLA.",
+  "communications.entity_id":
+    "Kommo entity.id (lead/contact/company), на котором висит коммуникация.",
+
+  // analytics.sla — gaps from review
+  "sla.sla_status":
+    "Категориальный SLA-статус: 'green' (≤9 мин) | 'yellow' (10–29 мин) | 'red' (≥30 мин) | NULL (звонка не было).",
+  "sla.first_call_out_at":
+    "Время первого outbound-звонка ответственного менеджера. Драйвит sla_first_call_seconds. NULL ↔ звонка не было ИЛИ был только inbound.",
+  "sla.lead_id":
+    "Kommo lead.id. PK SLA-таблицы (один ряд = один лид). JOIN с leads_cohort, communications, lead_status_changes, tasks.",
+
+  // analytics.tasks
+  "tasks.lead_id":
+    "Kommo lead.id, на котором висит задача.",
+  "tasks.is_completed":
+    "smallint 0/1. Daily overdue tasks = is_completed=0 AND deadline < NOW().",
+  "tasks.deadline":
+    "Дедлайн задачи (UTC). Используется для overdue-фильтра.",
+
+  // okk.calls — JOIN keys (review CRITICAL)
+  "calls.kommo_lead_id":
+    "Kommo lead.id. JOIN-ключ в analytics.leads_cohort.lead_id и tracking_events.entity_id (entity_type='lead'). NULL → звонок не привязан к лиду (orphan, UI скрывает).",
+  "calls.manager_id":
+    "FK → managers.id (UUID, OKK-локальный). NULL → orphan; UI/MCP такие звонки скрывают.",
+  "calls.duration_seconds":
+    "Длительность звонка. Только evaluated calls с длительностью ≥10s попадают в OKK; короткие фильтруются.",
+
+  // okk.evaluations
+  "evaluations.call_id":
+    "FK → calls.id. 1:1 — один evaluation на звонок.",
+  "evaluations.manager_id":
+    "FK → managers.id. Дублирует calls.manager_id для прямых per-manager агрегаций без JOIN.",
+
+  // okk.worst_calls
+  "worst_calls.call_id":
+    "FK → calls.id. Какой именно звонок попал в топ-N худших.",
+  "worst_calls.evaluation_id":
+    "FK → evaluations.id (snapshot оценки на момент включения в worst).",
+  "worst_calls.period":
+    "'morning' | 'afternoon' — слот уведомления (14:00 / 17:00 Europe/Berlin).",
+  "worst_calls.responded":
+    "Менеджер ответил голосом на уведомление. Драйвит response_adequate (после Grok adequacy check).",
+
+  // okk.managers
+  "managers.kommo_user_id":
+    "Kommo user ID. Резолвится из master_managers.kommo_user_id при синке.",
+
+  // okk.phantom_history
+  "phantom_history.date":
+    "Civil-date в Europe/Berlin. PK (department, manager_id, date).",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -496,6 +579,19 @@ function parseSchemaFile(content: string, schemaFile: string): TableSpec[] {
   return out;
 }
 
+/**
+ * Walks `s` from `openIdx` (must point at `{`) and returns index of the
+ * matching `}` accounting for string literals and comments.
+ *
+ * KNOWN LIMITATION: does NOT track `${ ... }` interpolation inside template
+ * literals. If a column body ever introduces a default value via template
+ * literal with interpolation (e.g. `.$default(() => `${x}`)`), the `}` of
+ * the interpolation will decrement depth incorrectly. None of the current
+ * schemas exercise this — Drizzle defaults are usually `.$defaultFn(...)`
+ * with object literals, not template strings. If this constraint becomes
+ * limiting, switch to a real TS AST parser (ts-morph / typescript compiler
+ * API) instead of regex.
+ */
 function findMatchingBrace(s: string, openIdx: number): number {
   if (s[openIdx] !== "{") return -1;
   let depth = 0;
@@ -602,6 +698,25 @@ function camelToSnake(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
+/**
+ * Known D1-only shared tables in schema-existing.ts (no `d1_*` / `r1_*`
+ * prefix). Anything else without prefix triggers a console.warn so a future
+ * dev who adds a shared-by-design table doesn't get silent misrouting.
+ */
+const D1_SHARED_TABLES = new Set([
+  "master_managers",
+  "bug_reports",
+  "daily_plans",
+  "manager_schedule",
+  "payroll_runs",
+  "manager_bonuses",
+  "kommo_tokens",
+  "scripts",
+  "daily_snapshots",
+  "call_analyses",
+  "call_analysis_files",
+]);
+
 function computeTargets(schemaFile: string, tableName: string): DbTarget[] {
   if (schemaFile.endsWith("schema-okk.ts")) return ["d2", "r2"];
   if (schemaFile.endsWith("schema-analytics.ts")) return ["analytics"];
@@ -609,7 +724,11 @@ function computeTargets(schemaFile: string, tableName: string): DbTarget[] {
   // schema-existing.ts:
   if (tableName.startsWith("d1_")) return ["d1"];
   if (tableName.startsWith("r1_")) return ["r1"];
-  // master_managers + общие — D1 only (R1 их не имеет).
+  if (D1_SHARED_TABLES.has(tableName)) return ["d1"];
+  console.warn(
+    `[warn] unrecognised non-prefixed table in schema-existing.ts: ${tableName}. ` +
+      `Defaulting to D1-only. If this table should also live in R1, add explicit handling in computeTargets.`,
+  );
   return ["d1"];
 }
 
@@ -650,7 +769,50 @@ const TAB_LABELS: Record<string, string> = {
   "DASHBOARD-ZVONKI": "Звонки",
 };
 
-function resolveTableNarrative(spec: TableSpec, docs: Map<string, MergedTableDoc>): string | null {
+/**
+ * Per-DB prefix for TABLE comments. Resolves the D2/R2 collision flagged by
+ * the database-architect review: both share schema-okk.ts and got byte-
+ * identical comments, leaving the agent unable to tell which department a
+ * row belonged to. Also lets us swap B2G-line semantics for B2B-correct
+ * copy in R2 (e.g. "B2B has no line conventions, line is always NULL").
+ */
+const DB_PREFIX: Record<DbTarget, string> = {
+  d1: "[D1 / B2G + общее]",
+  r1: "[R1 / B2B ролевки]",
+  d2: "[D2 / B2G OKK]",
+  r2: "[R2 / B2B OKK]",
+  analytics: "[Analytics — mirror интегратора]",
+  tracking: "[Tracking — Kommo activity cache]",
+};
+
+/**
+ * Per-(db, column) overrides. Wins over COLUMN_COMMENTS for the same
+ * spec.name when target matches. Used to give R2 (B2B) different semantics
+ * for `managers.line` / `managers.role` than D2 (B2G).
+ */
+const COLUMN_COMMENTS_BY_TARGET: Record<DbTarget, Record<string, string>> = {
+  d1: {},
+  r1: {
+    "r1_calls.score": "См. d1_calls.score (та же семантика, B2B ролевки).",
+    "r1_users.telegram_id":
+      "JOIN-ключ к master_managers.telegram_id (department='b2b'). UNIQUE.",
+  },
+  d2: {},
+  r2: {
+    "managers.line":
+      "B2B не использует line-конвенцию — всегда NULL. (В D2 значение драйвит B2G линии 1=квалификатор, 2=бератер, 3=доведение.)",
+    "managers.role":
+      "'manager' | 'rop' | 'admin'. В B2B нет line, поэтому double-status (rop+line) тут не применяется — ROP это всегда не-линейный.",
+  },
+  analytics: {},
+  tracking: {},
+};
+
+function resolveTableNarrative(
+  spec: TableSpec,
+  target: DbTarget,
+  docs: Map<string, MergedTableDoc>,
+): string | null {
   const curated = TABLE_NARRATIVES[spec.name];
   // Look up doc mention by either bare name or qualified name.
   const doc = docs.get(spec.name) ?? docs.get(spec.qualifiedName);
@@ -663,19 +825,26 @@ function resolveTableNarrative(spec: TableSpec, docs: Map<string, MergedTableDoc
   const trimmed = base.replace(/\s+$/, "");
   const sep = /[.!?]$/.test(trimmed) ? " " : ". ";
   const usedBySuffix = usedBy ? `${sep}Used by tabs: ${usedBy}.` : "";
-  return trimmed + usedBySuffix;
+  const prefix = `${DB_PREFIX[target]} `;
+  return prefix + trimmed + usedBySuffix;
 }
 
-function buildTableComment(spec: TableSpec, docs: Map<string, MergedTableDoc>): string | null {
-  const text = resolveTableNarrative(spec, docs);
+function buildTableComment(
+  spec: TableSpec,
+  target: DbTarget,
+  docs: Map<string, MergedTableDoc>,
+): string | null {
+  const text = resolveTableNarrative(spec, target, docs);
   if (!text) return null;
   return `COMMENT ON TABLE ${spec.qualifiedName} IS '${escapeSqlLiteral(text)}';`;
 }
 
-function buildColumnComments(spec: TableSpec): string[] {
+function buildColumnComments(spec: TableSpec, target: DbTarget): string[] {
   const out: string[] = [];
+  const targetOverrides = COLUMN_COMMENTS_BY_TARGET[target] ?? {};
   for (const col of spec.columns) {
-    const text = COLUMN_COMMENTS[`${spec.name}.${col}`];
+    const key = `${spec.name}.${col}`;
+    const text = targetOverrides[key] ?? COLUMN_COMMENTS[key];
     if (!text) continue;
     out.push(
       `COMMENT ON COLUMN ${spec.qualifiedName}.${col} IS '${escapeSqlLiteral(text)}';`,
@@ -705,8 +874,8 @@ function emitMigrationFor(
   let columnCount = 0;
   const missing: string[] = [];
   for (const spec of sorted) {
-    const tableLine = buildTableComment(spec, docs);
-    const columnLines = buildColumnComments(spec);
+    const tableLine = buildTableComment(spec, target, docs);
+    const columnLines = buildColumnComments(spec, target);
     if (!tableLine && columnLines.length === 0) {
       missing.push(spec.qualifiedName);
       continue;
@@ -744,6 +913,12 @@ async function main() {
   console.log(
     `[parse] ${docsRows.length} doc-row mentions across ${docs.size} unique tables; ${specs.length} table specs from schema.`,
   );
+
+  // Schema-drift self-test: every key in COLUMN_COMMENTS / COLUMN_COMMENTS_BY_TARGET
+  // must reference a column that actually exists in the parsed TableSpec[].
+  // Catches stale entries (column rename, typo) BEFORE they fail at apply time
+  // with `ERROR: column "x" of relation "y" does not exist`.
+  validateColumnCommentKeys(specs);
 
   // Group specs by target. D2/R2 specs duplicate (same schema-okk.ts → both).
   const byTarget = new Map<DbTarget, TableSpec[]>();
@@ -794,6 +969,40 @@ async function main() {
     );
   }
   console.log(`[done] total: ${totalTables} TABLE + ${totalColumns} COLUMN comments emitted.`);
+}
+
+function validateColumnCommentKeys(specs: TableSpec[]): void {
+  // Build (table → Set<column>) index from parsed specs.
+  const known = new Map<string, Set<string>>();
+  for (const spec of specs) {
+    const set = known.get(spec.name) ?? new Set<string>();
+    for (const c of spec.columns) set.add(c);
+    known.set(spec.name, set);
+  }
+  const stale: string[] = [];
+  const checkKey = (key: string, where: string) => {
+    const dot = key.indexOf(".");
+    if (dot < 0) return;
+    const t = key.slice(0, dot);
+    const c = key.slice(dot + 1);
+    const cols = known.get(t);
+    if (!cols) {
+      stale.push(`${where} → ${key} (table not found)`);
+    } else if (!cols.has(c)) {
+      stale.push(`${where} → ${key} (column not found)`);
+    }
+  };
+  for (const k of Object.keys(COLUMN_COMMENTS)) checkKey(k, "COLUMN_COMMENTS");
+  for (const [t, m] of Object.entries(COLUMN_COMMENTS_BY_TARGET)) {
+    for (const k of Object.keys(m)) checkKey(k, `COLUMN_COMMENTS_BY_TARGET[${t}]`);
+  }
+  if (stale.length) {
+    console.error(
+      `[error] ${stale.length} COLUMN_COMMENTS keys reference unknown tables/columns:\n  ` +
+        stale.join("\n  "),
+    );
+    process.exit(2);
+  }
 }
 
 main().catch((err) => {

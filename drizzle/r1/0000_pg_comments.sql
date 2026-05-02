@@ -8,12 +8,14 @@
 BEGIN;
 
 -- ─── public.r1_avatars ───
-COMMENT ON TABLE public.r1_avatars IS 'AI-аватары для B2B ролевок (та же схема что d1_avatars, но физически в R1 БД).';
+COMMENT ON TABLE public.r1_avatars IS '[R1 / B2B ролевки] AI-аватары для B2B ролевок (та же схема что d1_avatars, но физически в R1 БД).';
 
 -- ─── public.r1_calls ───
-COMMENT ON TABLE public.r1_calls IS 'AI-ролевки B2B: та же схема что d1_calls. user_id → r1_users; avatar_id → r1_avatars. Used by tabs: Дейли.';
+COMMENT ON TABLE public.r1_calls IS '[R1 / B2B ролевки] AI-ролевки B2B: та же схема что d1_calls. user_id → r1_users; avatar_id → r1_avatars. Used by tabs: Дейли.';
+COMMENT ON COLUMN public.r1_calls.score IS 'См. d1_calls.score (та же семантика, B2B ролевки).';
 
 -- ─── public.r1_users ───
-COMMENT ON TABLE public.r1_users IS 'Ролевочные пользователи B2B (зеркало master_managers с in_rolevki=true, department=''b2b''). team=''ruzanna''.';
+COMMENT ON TABLE public.r1_users IS '[R1 / B2B ролевки] Ролевочные пользователи B2B (зеркало master_managers с in_rolevki=true, department=''b2b''). team=''ruzanna''.';
+COMMENT ON COLUMN public.r1_users.telegram_id IS 'JOIN-ключ к master_managers.telegram_id (department=''b2b''). UNIQUE.';
 
 COMMIT;

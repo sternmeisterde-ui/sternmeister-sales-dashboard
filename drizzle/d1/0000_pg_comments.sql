@@ -8,43 +8,43 @@
 BEGIN;
 
 -- ─── public.bug_reports ───
-COMMENT ON TABLE public.bug_reports IS '[INTERNAL] Сообщения «Сообщить об ошибке» из попапа дашборда; mirror в Discord. Не для аналитики.';
+COMMENT ON TABLE public.bug_reports IS '[D1 / B2G + общее] [INTERNAL] Сообщения «Сообщить об ошибке» из попапа дашборда; mirror в Discord. Не для аналитики.';
 
 -- ─── public.call_analyses ───
-COMMENT ON TABLE public.call_analyses IS 'Запросы на батч-анализ звонков по Kommo URL (Анализ tab). Прогресс отслеживается через progress / total_calls / processed_calls. resultSummary — Grok markdown итог. Used by tabs: Анализ.';
+COMMENT ON TABLE public.call_analyses IS '[D1 / B2G + общее] Запросы на батч-анализ звонков по Kommo URL (Анализ tab). Прогресс отслеживается через progress / total_calls / processed_calls. resultSummary — Grok markdown итог. Used by tabs: Анализ.';
 
 -- ─── public.call_analysis_files ───
-COMMENT ON TABLE public.call_analysis_files IS 'Файлы результата call_analyses (transcript / summary / index). cascade-delete вместе с parent analysis. callScore = Grok-assigned релевантность. Used by tabs: Анализ.';
+COMMENT ON TABLE public.call_analysis_files IS '[D1 / B2G + общее] Файлы результата call_analyses (transcript / summary / index). cascade-delete вместе с parent analysis. callScore = Grok-assigned релевантность. Used by tabs: Анализ.';
 
 -- ─── public.d1_avatars ───
-COMMENT ON TABLE public.d1_avatars IS 'AI-аватары роли клиента, используются в B2G ролевках. JSONB data описывает personality/scenarios. Used by tabs: AI Ролевки.';
+COMMENT ON TABLE public.d1_avatars IS '[D1 / B2G + общее] AI-аватары роли клиента, используются в B2G ролевках. JSONB data описывает personality/scenarios. Used by tabs: AI Ролевки.';
 
 -- ─── public.d1_calls ───
-COMMENT ON TABLE public.d1_calls IS 'AI-ролевки B2G: транскрипт + JSONB evaluation (blocks/criteria/scores). score 0-100. user_id → d1_users; avatar_id → d1_avatars. Used by tabs: AI Ролевки, Аналитика, Дейли.';
+COMMENT ON TABLE public.d1_calls IS '[D1 / B2G + общее] AI-ролевки B2G: транскрипт + JSONB evaluation (blocks/criteria/scores). score 0-100. user_id → d1_users; avatar_id → d1_avatars. Used by tabs: AI Ролевки, Аналитика, Дейли.';
 
 -- ─── public.d1_users ───
-COMMENT ON TABLE public.d1_users IS 'Ролевочные пользователи B2G (зеркало master_managers с in_rolevki=true). Линкуются по telegram_id. team=''dima'' для всех B2G. Used by tabs: AI Ролевки, Аналитика.';
+COMMENT ON TABLE public.d1_users IS '[D1 / B2G + общее] Ролевочные пользователи B2G (зеркало master_managers с in_rolevki=true). Линкуются по telegram_id. team=''dima'' для всех B2G. Used by tabs: AI Ролевки, Аналитика.';
 
 -- ─── public.daily_plans ───
-COMMENT ON TABLE public.daily_plans IS 'Сохранённые план-значения для Daily-метрик. Поддерживает 3 уровня: monthly → weekly → daily (cascade c пропорциональным делением если daily не задан). Edit-in-place карандашиком в UI. Used by tabs: Дейли.';
+COMMENT ON TABLE public.daily_plans IS '[D1 / B2G + общее] Сохранённые план-значения для Daily-метрик. Поддерживает 3 уровня: monthly → weekly → daily (cascade c пропорциональным делением если daily не задан). Edit-in-place карандашиком в UI. Used by tabs: Дейли.';
 
 -- ─── public.daily_snapshots ───
-COMMENT ON TABLE public.daily_snapshots IS '[LEGACY, deprecated 2026-04-24] Старый кеш Daily ответов. Может ещё читаться как fallback. Заменён analytics.* зеркалом.';
+COMMENT ON TABLE public.daily_snapshots IS '[D1 / B2G + общее] [LEGACY, deprecated 2026-04-24] Старый кеш Daily ответов. Может ещё читаться как fallback. Заменён analytics.* зеркалом.';
 
 -- ─── public.kommo_tokens ───
-COMMENT ON TABLE public.kommo_tokens IS '[INTERNAL] Кеш Kommo OAuth-токенов (access + refresh). Используется kommo/client.ts. Не для аналитических запросов.';
+COMMENT ON TABLE public.kommo_tokens IS '[D1 / B2G + общее] [INTERNAL] Кеш Kommo OAuth-токенов (access + refresh). Используется kommo/client.ts. Не для аналитических запросов.';
 
 -- ─── public.manager_bonuses ───
-COMMENT ON TABLE public.manager_bonuses IS 'Ручная ежемесячная премия менеджера (Табель popup). Один ряд на (user_id, period_month); удаляется при amount=0. Плюсуется к gross в payroll_runs.';
+COMMENT ON TABLE public.manager_bonuses IS '[D1 / B2G + общее] Ручная ежемесячная премия менеджера (Табель popup). Один ряд на (user_id, period_month); удаляется при amount=0. Плюсуется к gross в payroll_runs.';
 
 -- ─── public.manager_schedule ───
-COMMENT ON TABLE public.manager_schedule IS 'Per-day расписание менеджера: что он делает в конкретный день (8/4/-/о/н/у). Драйвит is_on_line для Звонков и payrollFactor для Табеля. Один день = одна строка; пустые дни в БД отсутствуют. Used by tabs: Дейли.';
+COMMENT ON TABLE public.manager_schedule IS '[D1 / B2G + общее] Per-day расписание менеджера: что он делает в конкретный день (8/4/-/о/н/у). Драйвит is_on_line для Звонков и payrollFactor для Табеля. Один день = одна строка; пустые дни в БД отсутствуют. Used by tabs: Дейли.';
 COMMENT ON COLUMN public.manager_schedule.schedule_date IS '''YYYY-MM-DD'' civil-date в Europe/Berlin.';
 COMMENT ON COLUMN public.manager_schedule.is_on_line IS 'Derived из schedule_value: ''-''/''о'' → false, остальные → true. Драйвит фильтрацию Звонков и SLA-окна.';
 COMMENT ON COLUMN public.manager_schedule.schedule_value IS 'Канонический код дня: ''8'' (полный), ''4'' (половина), ''-'' (выходной), ''о'' (отпуск), ''н'' (онбординг), ''у'' (день увольнения). См. SCHEDULE_STATUSES в schedule-payroll.ts.';
 
 -- ─── public.master_managers ───
-COMMENT ON TABLE public.master_managers IS 'Single source of truth для всех менеджеров обоих отделов (B2G + B2B). При сохранении синкается в D2.managers / R2.managers / D1.d1_users / R1.r1_users по флагам in_okk / in_rolevki. Soft-delete (is_active=false) сохраняет FK в исторических звонках. Used by tabs: Активность, Дейли, Звонки.';
+COMMENT ON TABLE public.master_managers IS '[D1 / B2G + общее] Single source of truth для всех менеджеров обоих отделов (B2G + B2B). При сохранении синкается в D2.managers / R2.managers / D1.d1_users / R1.r1_users по флагам in_okk / in_rolevki. Soft-delete (is_active=false) сохраняет FK в исторических звонках. JOINs: → manager_schedule.user_id, → daily_plans.user_id, → manager_bonuses.user_id, → payroll_runs.user_id; sync targets D2.managers.id / R2.managers.id / D1.d1_users.id / R1.r1_users.id; Kommo via kommo_user_id ↔ analytics.leads_cohort.responsible_user_id. Used by tabs: Активность, Дейли, Звонки.';
 COMMENT ON COLUMN public.master_managers.department IS '''b2g'' | ''b2b''. Драйвит роутинг в OKK/ролевочные БД.';
 COMMENT ON COLUMN public.master_managers.team IS '''dima'' (B2G) | ''ruzanna'' (B2B). Дублирует department, оставлен для совместимости с d1_users/r1_users.';
 COMMENT ON COLUMN public.master_managers.role IS '''manager'' | ''rop'' | ''admin''. ROP с непустой line одновременно работает на линии (double-status, см. project_double_status memory).';
@@ -60,13 +60,13 @@ COMMENT ON COLUMN public.master_managers.shift_end_time IS '''HH:MM'' конец
 COMMENT ON COLUMN public.master_managers.daily_rate IS 'Дневная ставка для Табеля. Drizzle numeric → string на чтение (parseFloat). Currency project-wide.';
 
 -- ─── public.payroll_runs ───
-COMMENT ON TABLE public.payroll_runs IS 'Snapshot закрытого месяца Табеля: equiv_full_days × daily_rate + bonus_amount = gross_amount. Upsert по (department, period_month, user_id). Cron записывает 0 2 1 * * Europe/Berlin.';
+COMMENT ON TABLE public.payroll_runs IS '[D1 / B2G + общее] Snapshot закрытого месяца Табеля: equiv_full_days × daily_rate + bonus_amount = gross_amount. Upsert по (department, period_month, user_id). Cron записывает 0 2 1 * * Europe/Berlin.';
 COMMENT ON COLUMN public.payroll_runs.status_breakdown IS 'JSONB { ''8'': 18, ''4'': 2, ''о'': 5, ... } — счётчики дней по канонам. Snapshot, не пересчитывается.';
 COMMENT ON COLUMN public.payroll_runs.equiv_full_days IS 'Σ count[code] × payrollFactor[code]. Snapshot.';
 COMMENT ON COLUMN public.payroll_runs.bonus_amount IS 'Snapshot manager_bonuses.amount на момент cron. Включён в gross_amount.';
 COMMENT ON COLUMN public.payroll_runs.gross_amount IS '= equiv_full_days × daily_rate + bonus_amount. Frozen на момент cron-записи.';
 
 -- ─── public.scripts ───
-COMMENT ON TABLE public.scripts IS 'Канонические скрипты продаж по линиям/пайплайнам. JSONB content = { sections: [{ id, title, items: [...] }] }. Версионируется через увеличение `version`. Used by tabs: Скрипты.';
+COMMENT ON TABLE public.scripts IS '[D1 / B2G + общее] Канонические скрипты продаж по линиям/пайплайнам. JSONB content = { sections: [{ id, title, items: [...] }] }. Версионируется через увеличение `version`. Used by tabs: Скрипты.';
 
 COMMIT;

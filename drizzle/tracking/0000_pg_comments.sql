@@ -8,13 +8,16 @@
 BEGIN;
 
 -- ─── public.tracking_events ───
-COMMENT ON TABLE public.tracking_events IS 'Source of truth для каждого события (звонок-нота из `/notes` или CRM-event из `/events`). Used by tabs: Активность.';
-COMMENT ON COLUMN public.tracking_events.event_type IS 'Kommo event type, normalized (см. EVENT_TYPES в tracking/sync.ts). 41 verified-firing типов после v9 audit (2026-04-28).';
+COMMENT ON TABLE public.tracking_events IS '[Tracking — Kommo activity cache] Source of truth для каждого события (звонок-нота из `/notes` или CRM-event из `/events`). Used by tabs: Активность.';
+COMMENT ON COLUMN public.tracking_events.manager_id IS 'master_managers.id (UUID stored as text — cross-DB JOIN).';
+COMMENT ON COLUMN public.tracking_events.event_type IS 'Kommo event type, normalized. 41 verified-firing типов после v9 audit (2026-04-28). Группы: outgoing_call, incoming_call, lead_added, lead_status_changed, custom_field_*_value_changed, entity_*, task_*, note_*.';
 COMMENT ON COLUMN public.tracking_events.created_at IS 'Время события в Kommo (UTC, конвертится в Europe/Berlin при рендере).';
 COMMENT ON COLUMN public.tracking_events.duration_sec IS 'Resolved для звонков (из call note params), 0 для всех остальных событий.';
+COMMENT ON COLUMN public.tracking_events.entity_type IS '''lead'' | ''contact'' | ''company'' | ''customer'' | ''unsorted''. Драйвит интерпретацию entity_id.';
+COMMENT ON COLUMN public.tracking_events.entity_id IS 'Kommo entity.id (lead/contact/company/customer/unsorted в зависимости от entity_type). Для entity_type=''lead'' это JOIN-ключ к analytics.leads_cohort.lead_id и okk.calls.kommo_lead_id.';
 COMMENT ON COLUMN public.tracking_events.raw IS 'Original event payload (минимальный). С v10 содержит full Kommo call params: uniq, pbx_source, link, phone, call_status, call_result.';
 
 -- ─── public.tracking_sync_state ───
-COMMENT ON TABLE public.tracking_sync_state IS '[INTERNAL — Tracking] Маркер последнего синка: cursor (last_event_ts), backfill watermark (earliest_event_ts), filter version. Используется ensureRangeCached. Used by tabs: Активность.';
+COMMENT ON TABLE public.tracking_sync_state IS '[Tracking — Kommo activity cache] [INTERNAL — Tracking] Маркер последнего синка: cursor (last_event_ts), backfill watermark (earliest_event_ts), filter version. Используется ensureRangeCached. Used by tabs: Активность.';
 
 COMMIT;

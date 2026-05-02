@@ -8,30 +8,38 @@
 BEGIN;
 
 -- ─── analytics.ads_report ───
-COMMENT ON TABLE analytics.ads_report IS '[RESERVE] Mirror интеграторской ads-таблицы (Yandex/Google ads + UTM-разрезы). Пока не подключено к UI — reserved for будущего рекламного отчёта.';
+COMMENT ON TABLE analytics.ads_report IS '[Analytics — mirror интегратора] [RESERVE] Mirror интеграторской ads-таблицы (Yandex/Google ads + UTM-разрезы). Пока не подключено к UI — reserved for будущего рекламного отчёта.';
 
 -- ─── analytics.communications ───
-COMMENT ON TABLE analytics.communications IS 'Все коммуникации лидов (звонки + сообщения). communication_type LIKE ''call%'' для звонков. Источники: Kommo /notes (legacy ''note:N'' до 2026-04-28 hard-split) + CallGear (''cg-leg:N'') + CloudTalk (''ct:N''). Composite unique (communication_id, COALESCE(lead_id,0)) поддерживает Pattern A: один CDR → N rows (по числу matched лидов после enrich-telephony-leads). Used by tabs: Дейли, Looker, Звонки.';
+COMMENT ON TABLE analytics.communications IS '[Analytics — mirror интегратора] Все коммуникации лидов (звонки + сообщения). communication_type LIKE ''call%'' для звонков. Источники: Kommo /notes (legacy ''note:N'' до 2026-04-28 hard-split) + CallGear (''cg-leg:N'') + CloudTalk (''ct:N''). Composite unique (communication_id, COALESCE(lead_id,0)) поддерживает Pattern A: один CDR → N rows (по числу matched лидов после enrich-telephony-leads). Used by tabs: Дейли, Looker, Звонки.';
 COMMENT ON COLUMN analytics.communications.communication_id IS 'Уникальный ID источника: ''note:N'' (Kommo notes — устарело после hard-split 2026-04-28), ''cg-leg:N'' (CallGear leg), ''ct:N'' (CloudTalk). Composite unique с COALESCE(lead_id,0) — Pattern A позволяет один CDR → N rows (по числу matched лидов).';
 COMMENT ON COLUMN analytics.communications.communication_type IS 'Префикс источника: ''call_*'' (звонок), ''note'' (текст), ''message_*'' (мессенджер). MCP/Looker фильтруют LIKE ''call%''.';
+COMMENT ON COLUMN analytics.communications.entity_id IS 'Kommo entity.id (lead/contact/company), на котором висит коммуникация.';
+COMMENT ON COLUMN analytics.communications.lead_id IS 'Kommo lead.id после enrich-telephony-leads. NULL → телефонный leg не сматчился ни с одним лидом. Composite UNIQUE(communication_id, COALESCE(lead_id,0)) → никогда не JOIN-ить только по communication_id.';
 COMMENT ON COLUMN analytics.communications.pipeline_id IS 'Kommo pipeline. NULL до прохода enrich-telephony-leads (телефонные строки приходят без линка на лида).';
 COMMENT ON COLUMN analytics.communications.duration IS 'Длительность звонка в секундах. NULL для не-call записей.';
+COMMENT ON COLUMN analytics.communications.manager IS 'Имя менеджера строкой как у интегратора. WARN: 3 known name-drifts vs master_managers.name (Maksim/Latin-C/Ukrainian-Є) — JOIN через alias-таблицу в src/lib/daily/name-aliases.ts. См. project_analytics_name_aliases memory.';
 COMMENT ON COLUMN analytics.communications.first_contact_flg IS 'smallint 0/1 — это первый контакт лида с менеджером. Используется Looker для cohort SLA.';
 COMMENT ON COLUMN analytics.communications.last_contact_flg IS 'smallint 0/1 — это последний контакт. TLT использует для разрезания истории.';
+COMMENT ON COLUMN analytics.communications.first_call_at IS 'Время первого звонка по этому лиду (denormalized из CDR). Используется Looker для cohort SLA.';
 COMMENT ON COLUMN analytics.communications.phone IS 'Номер с PBX (CallGear/CloudTalk). NULL → строка пришла из Kommo notes. Используется enrich-telephony-leads ETL для резолва lead_id.';
 
 -- ─── analytics.custom_report ───
-COMMENT ON TABLE analytics.custom_report IS '[INTERNAL] Универсальная metric_name × dt таблица — copy интеграторской. Зеркало report_sternmeister_custom_report. Не используется в нашем UI; реплицируется для возможной обратной сверки с их Looker.';
+COMMENT ON TABLE analytics.custom_report IS '[Analytics — mirror интегратора] [INTERNAL] Универсальная metric_name × dt таблица — copy интеграторской. Зеркало report_sternmeister_custom_report. Не используется в нашем UI; реплицируется для возможной обратной сверки с их Looker.';
 
 -- ─── analytics.funnel ───
-COMMENT ON TABLE analytics.funnel IS '[RESERVE] Зеркало report_sternmeister_funnel — operational metrics (dt_operational vs dt_cohort). Не surfaced в UI напрямую; cross-check с интегратором.';
+COMMENT ON TABLE analytics.funnel IS '[Analytics — mirror интегратора] [RESERVE] Зеркало report_sternmeister_funnel — operational metrics (dt_operational vs dt_cohort). Не surfaced в UI напрямую; cross-check с интегратором.';
 
 -- ─── analytics.lead_status_changes ───
-COMMENT ON TABLE analytics.lead_status_changes IS 'Переходы лидов между статусами Kommo. Используется для cohort-status, conversion view, qual-leads count, TERM_DC_DONE baseline в Termin. Used by tabs: Дейли, Looker, Термин.';
+COMMENT ON TABLE analytics.lead_status_changes IS '[Analytics — mirror интегратора] Переходы лидов между статусами Kommo. Используется для cohort-status, conversion view, qual-leads count, TERM_DC_DONE baseline в Termin. Used by tabs: Дейли, Looker, Термин.';
 
 -- ─── analytics.leads_cohort ───
-COMMENT ON TABLE analytics.leads_cohort IS 'Когорта лидов: pipeline / status / manager / UTM / payment fields / termin dates / non_qual + b2b_close_reason enum_id. Single source-of-truth для Daily, Looker, Termin, Звонки. Заполняется ETL sync-leads.ts из Kommo /leads incremental по filter[updated_at]; closed/payment/termin поля резолвятся по name из custom_fields_values. Used by tabs: Дейли, Looker, Термин, Звонки.';
-COMMENT ON COLUMN analytics.leads_cohort.responsible_user_id IS 'Kommo user ID ответственного менеджера. JOIN с master_managers.kommo_user_id для resolved name.';
+COMMENT ON TABLE analytics.leads_cohort IS '[Analytics — mirror интегратора] Когорта лидов: pipeline / status / manager / UTM / payment fields / termin dates / non_qual + b2b_close_reason enum_id. Single source-of-truth для Daily, Looker, Termin, Звонки. Заполняется ETL sync-leads.ts из Kommo /leads incremental по filter[updated_at]; closed/payment/termin поля резолвятся по name из custom_fields_values. Used by tabs: Дейли, Looker, Термин, Звонки.';
+COMMENT ON COLUMN analytics.leads_cohort.lead_id IS 'Kommo lead.id. PK когорты. ← lead_status_changes.lead_id, ← communications.lead_id, ← sla.lead_id, ← tasks.lead_id. Также tracking_events.entity_id (where entity_type=''lead'') и okk.calls.kommo_lead_id.';
+COMMENT ON COLUMN analytics.leads_cohort.pipeline_id IS 'Kommo pipeline_id. B2B-пайплайны: 10631243=Бух Комм, 13209983=Мед Комм (используются в b2b_close_reason gate). B2G — отдельный набор; 12154099=Бух Бератер (Termin tab). См. docs/DASHBOARD-DAILY.md.';
+COMMENT ON COLUMN analytics.leads_cohort.status_id IS 'Kommo status_id текущего статуса лида. Известные ID: 93886075=TERM_DC_DONE (B2G ДЦ-термин). См. lead_status_changes для истории переходов.';
+COMMENT ON COLUMN analytics.leads_cohort.manager IS 'Имя ответственного менеджера строкой. WARN: known name-drift с master_managers.name (Maksim/Latin-C/Ukrainian-Є) — JOIN через alias-таблицу в src/lib/daily/name-aliases.ts, не прямо.';
+COMMENT ON COLUMN analytics.leads_cohort.responsible_user_id IS 'Kommo user ID ответственного менеджера. JOIN с master_managers.kommo_user_id для resolved name (минует name-drift).';
 COMMENT ON COLUMN analytics.leads_cohort.first_payment_date IS 'Дата первой оплаты лида (Kommo custom field, B2B-pipelines). Драйвит Daily Commerce R24 секции «Продажи».';
 COMMENT ON COLUMN analytics.leads_cohort.first_payment_amount IS 'Сумма первой оплаты (B2B). NULL до факта оплаты.';
 COMMENT ON COLUMN analytics.leads_cohort.prepayment_date IS 'Дата предоплаты лида (Kommo custom field, B2B). Аналог first_payment_date для предоплаты.';
@@ -42,21 +50,27 @@ COMMENT ON COLUMN analytics.leads_cohort.termin_date IS 'Custom field ''Дата
 COMMENT ON COLUMN analytics.leads_cohort.aa_termin_date IS 'Custom field ''Дата термина АА'' (B2G). Baseline switches to MIN(event_at WHERE status_id=TERM_DC_DONE 93886075) when present, else falls back to created_at.';
 
 -- ─── analytics.refusal_enums ───
-COMMENT ON TABLE analytics.refusal_enums IS 'Кеш Kommo enum-options для custom-fields категории refusal (например field 879824 «Причина закрытия Госники»). enum_id → human-readable value. Заполняется ETL lookups; читается getRefusalReasons() для Daily refusals.';
+COMMENT ON TABLE analytics.refusal_enums IS '[Analytics — mirror интегратора] Кеш Kommo enum-options для custom-fields категории refusal. Известные field_id: 879824 «Причина закрытия Госники» (B2G non-qual), 876383 «B2B close reason» (Бух Комм 10631243 / Мед Комм 13209983, обязательное на статусе 143). enum_id → human-readable value. Заполняется ETL lookups; читается getRefusalReasons() для Daily refusals.';
 
 -- ─── analytics.sales_report ───
-COMMENT ON TABLE analytics.sales_report IS '[RESERVE] Mirror интеграторской sales-таблицы per-manager-per-day агрегатов (calls_cnt, success_calls, payment_sum, sales_plan, quality). Не подключено к UI; cross-check резерв.';
+COMMENT ON TABLE analytics.sales_report IS '[Analytics — mirror интегратора] [RESERVE] Mirror интеграторской sales-таблицы per-manager-per-day агрегатов (calls_cnt, success_calls, payment_sum, sales_plan, quality). Не подключено к UI; cross-check резерв.';
 
 -- ─── analytics.sla ───
-COMMENT ON TABLE analytics.sla IS 'Per-lead SLA метрики: first_call (BH/calendar/from-shift seconds), TLT (Time between Latest Touches), статус. *_integrator колонки — frozen snapshot интегратора на момент cutoff 2026-04-29; COALESCE(integrator, computed) для исторической parity. compute-sla.ts в ETL ничего не пишет в *_integrator. Used by tabs: Дейли, Looker.';
-COMMENT ON COLUMN analytics.sla.sla_first_call_seconds IS 'BH-time от создания лида до первого outbound-звонка ответственного менеджера. NULL → ни одного звонка.';
+COMMENT ON TABLE analytics.sla IS '[Analytics — mirror интегратора] Per-lead SLA метрики: first_call (BH/calendar/from-shift seconds), TLT (Time between Latest Touches), статус. *_integrator колонки — frozen snapshot интегратора на момент cutoff 2026-04-29; COALESCE(integrator, computed) для исторической parity. compute-sla.ts в ETL ничего не пишет в *_integrator. Used by tabs: Дейли, Looker.';
+COMMENT ON COLUMN analytics.sla.lead_id IS 'Kommo lead.id. PK SLA-таблицы (один ряд = один лид). JOIN с leads_cohort, communications, lead_status_changes, tasks.';
+COMMENT ON COLUMN analytics.sla.first_call_out_at IS 'Время первого outbound-звонка ответственного менеджера. Драйвит sla_first_call_seconds. NULL ↔ звонка не было ИЛИ был только inbound.';
+COMMENT ON COLUMN analytics.sla.sla_first_call_seconds IS 'BH-time от создания лида до первого outbound-звонка ОТВЕТСТВЕННОГО менеджера. NULL когда: (а) ни одного outbound-звонка вообще, ИЛИ (б) outbound-звонки были, но не от responsible. Inbound-звонки игнорируются.';
 COMMENT ON COLUMN analytics.sla.sla_first_call_calendar_seconds IS 'Calendar-time (без BH adjustment) — для оптимистичных метрик и cross-check с интегратором.';
 COMMENT ON COLUMN analytics.sla.sla_first_call_from_shift_seconds IS 'Время от начала смены ответственного менеджера в day-of-call (учитывает manager_schedule).';
 COMMENT ON COLUMN analytics.sla.tlt_seconds IS 'Time between Latest Touches: BH-time между двумя последними outbound-звонками. NULL когда у менеджера 0–1 звонок на лиде.';
 COMMENT ON COLUMN analytics.sla.sla_first_call_seconds_integrator IS 'Snapshot значения интегратора на момент cutoff 2026-04-29 (commit 81ce2c8). COALESCE(integrator_col, computed_col) — исторические лиды совпадают с интеграторским дашбордом, новые с нашим compute.';
 COMMENT ON COLUMN analytics.sla.tlt_integrator IS 'Аналог sla_first_call_seconds_integrator для TLT. Frozen mirror.';
+COMMENT ON COLUMN analytics.sla.sla_status IS 'Категориальный SLA-статус: ''green'' (≤9 мин) | ''yellow'' (10–29 мин) | ''red'' (≥30 мин) | NULL (звонка не было).';
 
 -- ─── analytics.tasks ───
-COMMENT ON TABLE analytics.tasks IS 'Per-lead Kommo-задачи: создание, дедлайн, completed_flg. Используется Daily для overdue tasks per manager. Used by tabs: Дейли.';
+COMMENT ON TABLE analytics.tasks IS '[Analytics — mirror интегратора] Per-lead Kommo-задачи: создание, дедлайн, completed_flg. Используется Daily для overdue tasks per manager. Used by tabs: Дейли.';
+COMMENT ON COLUMN analytics.tasks.lead_id IS 'Kommo lead.id, на котором висит задача.';
+COMMENT ON COLUMN analytics.tasks.is_completed IS 'smallint 0/1. Daily overdue tasks = is_completed=0 AND deadline < NOW().';
+COMMENT ON COLUMN analytics.tasks.deadline IS 'Дедлайн задачи (UTC). Используется для overdue-фильтра.';
 
 COMMIT;

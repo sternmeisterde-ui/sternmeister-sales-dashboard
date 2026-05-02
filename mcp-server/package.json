@@ -1,0 +1,30 @@
+{
+  "name": "@sm/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing the SternMeister sales-dashboard data to Claude Desktop / Claude Code via curated domain tools.",
+  "scripts": {
+    "dev:stdio": "tsx watch src/stdio.ts",
+    "dev:http": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start:stdio": "node dist/stdio.js",
+    "start:http": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "eval": "tsx tests/golden/run.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.1",
+    "@neondatabase/serverless": "^1.0.2",
+    "drizzle-orm": "^0.45.1",
+    "dotenv": "^17.3.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "vitest": "^2.1.8"
+  }
+}
