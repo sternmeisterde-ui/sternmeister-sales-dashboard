@@ -34,7 +34,7 @@
     "sternmeister": {
       "url": "https://mcp.sternmeister.online/mcp",
       "headers": {
-        "Authorization": "Bearer <ВСТАВЬ_ТОКЕН_ОТ_АДМИНА>"
+        "Authorization": "Bearer sk-mcp-5791da27499fd6f4d10e0fee6900821f79a301aadca61a67"
       }
     }
   }
