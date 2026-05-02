@@ -139,11 +139,21 @@ export function registerManagersDomain(server: McpServer): void {
         return { error: `Manager not found: ${id}` };
       }
 
-      const today = new Date();
-      const monthStr = `${today.getUTCFullYear()}-${String(today.getUTCMonth() + 1).padStart(2, "0")}`;
-      const weekStart = new Date(today);
-      weekStart.setUTCDate(today.getUTCDate() - 7);
-      const weekStartStr = weekStart.toISOString().slice(0, 10);
+      // Berlin civil-month, not UTC — payroll_runs.period_month is written
+      // in Berlin time, so at last 30 min of last day of month UTC is still
+      // showing the wrong month relative to what the cron stored.
+      const monthStr = new Date()
+        .toLocaleString("en-CA", { timeZone: "Europe/Berlin" })
+        .slice(0, 7); // "YYYY-MM"
+      // Same for the 7-day window: anchor to Berlin civil-day.
+      const todayBerlin = new Date()
+        .toLocaleString("en-CA", { timeZone: "Europe/Berlin" })
+        .slice(0, 10);
+      const weekStart = new Date(`${todayBerlin}T00:00:00+01:00`);
+      weekStart.setDate(weekStart.getDate() - 7);
+      const weekStartStr = weekStart
+        .toLocaleString("en-CA", { timeZone: "Europe/Berlin" })
+        .slice(0, 10);
 
       const [schedule, bonus, lastPayroll] = await Promise.all([
         d1

@@ -55,16 +55,29 @@ export function registerDailyDomain(server: McpServer): void {
   // ─── daily.plan_vs_fact ────────────────────────────────────────────────────
   registerTool(server, {
     name: "daily.plan_vs_fact",
-    description: `План vs факт для одной метрики из daily_plans. Возвращает: plans[] (все строки плана для метрики/периода), fact (value+how) если metric_key ∈ {qual_leads, qualLeads, leads, leads_count}, иначе fact: null с notes-полем. Используй после daily.list_metrics чтобы убедиться что metric_key реально существует.`,
+    description: `План vs факт для одной метрики из daily_plans. Возвращает: plans[] (все строки плана для метрики/периода), fact (value+how) если metric_key ∈ {qual_leads, qualLeads, leads, leads_count}, иначе fact: null с notes-полем. Используй после daily.list_metrics чтобы убедиться что metric_key реально существует. period_date format ОБЯЗАТЕЛЬНО match'ит period_type: 'YYYY-MM-DD' для day, 'YYYY-WNN' для week, 'YYYY-MM' для month — иначе tool throw'ит invalid input ошибку.`,
     inputShape: {
       dept: Dept,
       metric_key: z.string().describe("Имя метрики (см. daily.list_metrics)"),
       period_type: PeriodType,
-      period_date: z.string().describe("Дата периода: 'YYYY-MM-DD' (day), 'YYYY-WNN' (week), 'YYYY-MM' (month)"),
+      period_date: z.string().describe("Дата периода: 'YYYY-MM-DD' (day), 'YYYY-WNN' (week), 'YYYY-MM' (month) — должна match'ить period_type"),
     },
     policy: {},
     deptArg: ({ dept }) => dept,
     handler: async ({ dept, metric_key, period_type, period_date }) => {
+      // Validate period_date format matches period_type — silent null-fact
+      // returns from format-mismatch are confusing for the agent.
+      const fmtRe: Record<typeof period_type, RegExp> = {
+        day: /^\d{4}-\d{2}-\d{2}$/,
+        week: /^\d{4}-W\d{2}$/,
+        month: /^\d{4}-\d{2}$/,
+      };
+      if (!fmtRe[period_type].test(period_date)) {
+        const expected = period_type === "day" ? "YYYY-MM-DD" : period_type === "week" ? "YYYY-WNN" : "YYYY-MM";
+        throw new Error(
+          `period_date='${period_date}' does not match period_type='${period_type}' (expected ${expected})`,
+        );
+      }
       // Pull plan rows (line-level + per-manager).
       const plans = await d1
         .select({

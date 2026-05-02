@@ -63,7 +63,27 @@ export function registerAnalizDomain(server: McpServer): void {
     },
     policy: {},
     handler: async ({ id }) => {
-      const a = await d1.select().from(callAnalyses).where(eq(callAnalyses.id, id)).limit(1);
+      // Explicit projection — guard against future internal columns leaking
+      // (raw webhook payloads, API keys) to the agent context.
+      const a = await d1
+        .select({
+          id: callAnalyses.id,
+          department: callAnalyses.department,
+          kommo_url: callAnalyses.kommoUrl,
+          mode: callAnalyses.mode,
+          status: callAnalyses.status,
+          progress: callAnalyses.progress,
+          total_calls: callAnalyses.totalCalls,
+          processed_calls: callAnalyses.processedCalls,
+          error_message: callAnalyses.errorMessage,
+          result_summary: callAnalyses.resultSummary,
+          created_by: callAnalyses.createdBy,
+          created_at: callAnalyses.createdAt,
+          expires_at: callAnalyses.expiresAt,
+        })
+        .from(callAnalyses)
+        .where(eq(callAnalyses.id, id))
+        .limit(1);
       if (a.length === 0) return { error: `analiz not found: ${id}` };
       const files = await d1
         .select({

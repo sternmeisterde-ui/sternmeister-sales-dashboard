@@ -115,9 +115,41 @@ in Dokploy:
 
 ### Token rotation
 
-Manual, quarterly. Generate with `openssl rand -hex 24` (prepend `sk-mcp-`),
-update `MCP_BEARER_TOKENS` in Dokploy, restart `mcp` service. Old token
-becomes invalid immediately on restart.
+Manual, quarterly. Calendar trigger: set a recurring reminder in Dokploy
+(or wherever your team's runbooks live) for the 1st of Jan/Apr/Jul/Oct.
+
+**Procedure:**
+
+```bash
+# 1. Mint new tokens (script overwrites all USERS — re-run if user list changed)
+npx tsx /Users/user/Dashbord/scripts/generate-mcp-tokens.ts > /tmp/mcp-tokens.json
+
+# 2. Minify for Dokploy env
+cat /tmp/mcp-tokens.json | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)))'
+
+# 3. Paste output into Dokploy → mcp service → Environment → MCP_BEARER_TOKENS
+# 4. Restart the mcp service
+# 5. Verify
+curl https://mcp.sternmeister.online/health
+# → expects {"status":"ok","sessions":0,"version":"0.1.0",...}
+# Check Dokploy logs:
+#   [mcp-http] listening on :3009 — N bearer tokens loaded ← N matches USERS array length
+#   [mcp-probe] D1: ok ([{"ok":1}]) ← all 6 must say "ok"
+
+# 6. Distribute new snippets via Discord DM (script's stderr already prints them per user)
+```
+
+Old tokens become invalid immediately on restart — there is no overlap window.
+
+**DB role rotation** is a separate concern — `mcp_readonly` Postgres password
+rotation (different from bearer-token rotation). Run when the role's password
+must be cycled (also quarterly, or after any leak):
+
+```bash
+node /Users/user/Dashbord/scripts/rotate-mcp-readonly.mjs --gen
+# → Updates pwd on all 6 Neon branches + writes 6 fresh URLs to /tmp/mcp-ro-urls.env
+cat /tmp/mcp-ro-urls.env  # 6 MCP_*_RO_URL lines → paste into Dokploy → restart
+```
 
 ### Wiring into Claude Desktop (РОП setup)
 

@@ -24,10 +24,12 @@ interface UserSpec {
   depts: ReadonlyArray<"b2g" | "b2b" | "*">;
 }
 
+// Один company-wide токен. Видит все departments, все 35 tools. Подходит
+// для использования любым сотрудником компании — admin, ROP, manager.
+// Распространяется внутри компании. При компрометации — re-run generator
+// + update Dokploy + restart mcp + redistribute в команде.
 const USERS: ReadonlyArray<UserSpec> = [
-  { userId: "antares", name: "Антон", role: "admin", depts: ["*"] },
-  { userId: "dima", name: "Дмитрий", role: "rop", depts: ["b2g"] },
-  { userId: "ruzanna", name: "Рузанна", role: "rop", depts: ["b2b"] },
+  { userId: "sternmeister", name: "SternMeister Team", role: "admin", depts: ["*"] },
 ];
 
 const today = new Date().toISOString().slice(0, 10);

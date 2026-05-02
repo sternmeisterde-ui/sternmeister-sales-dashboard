@@ -14,6 +14,7 @@ import { and, desc, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import {
+  d1,
   okkForDept,
   okkSchema,
   roleplayForDept,
@@ -156,7 +157,6 @@ export function registerRoleplayDomain(server: McpServer): void {
     policy: {},
     handler: async ({ master_id, from, to }) => {
       // 1) Resolve master_manager → dept + name + telegram_id
-      const { d1 } = await import("../../db/connections.js");
       const profile = await d1
         .select({
           id: masterManagers.id,
