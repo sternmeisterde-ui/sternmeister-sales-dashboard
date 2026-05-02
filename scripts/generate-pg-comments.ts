@@ -255,9 +255,28 @@ const TABLE_NARRATIVES: Record<string, string> = {
     "[INTERNAL] Сообщения «Сообщить об ошибке» из попапа дашборда; mirror в Discord. Не для аналитики.",
   daily_snapshots:
     "[LEGACY, deprecated 2026-04-24] Старый кеш Daily ответов. Может ещё читаться как fallback. Заменён analytics.* зеркалом.",
+  // ETL distributed lock (analytics)
+  etl_locks:
+    "[INTERNAL — ETL] Distributed lock per-job для предотвращения параллельных ETL syncs (Postgres advisory-style). Не для аналитики. Колонки: name (lock id), token (holder UUID), acquired_at, expires_at, last_completed_at.",
   // OKK служебные
   telephony_cdr:
     "[INTERNAL — OKK] Phase 2 webhook coverage tracking: сырой CDR для proof-of-coverage. Источник для phantom_history. Не для прямых запросов.",
+  // Neon platform auto-provisioned tables (Analytics project) — NOT our data
+  dashboard_events:
+    "[NEON PLATFORM — игнорируй] Auto-provisioned Neon dashboard events table. Не наши данные, всегда пустая.",
+  dashboard_projects:
+    "[NEON PLATFORM — игнорируй] Auto-provisioned Neon dashboard projects table. Не наши данные, всегда пустая.",
+  // Backup snapshots в OKK (manual snapshots before risky migrations)
+  "_backup_calls_20260429":
+    "[BACKUP — заморозка 2026-04-29 перед mass re-eval] НЕ ИСПОЛЬЗОВАТЬ для аналитики; используй public.calls.",
+  "_backup_managers_20260429":
+    "[BACKUP — заморозка 2026-04-29] НЕ ИСПОЛЬЗОВАТЬ; используй public.managers.",
+  "_backup_pre_reeval_20260429":
+    "[BACKUP — заморозка 2026-04-29 перед re-eval] НЕ ИСПОЛЬЗОВАТЬ.",
+  "_backup_kristina_pre_oneshot_20260429":
+    "[BACKUP — заморозка 2026-04-29 для one-shot Кристины] НЕ ИСПОЛЬЗОВАТЬ.",
+  reeval_before:
+    "[BACKUP — снимок до re-eval] НЕ ИСПОЛЬЗОВАТЬ; используй public.evaluations.",
   // OKK worst-calls (notification popup, не в основной выдаче)
   worst_calls:
     "Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). FK: call_id → calls.id, evaluation_id → evaluations.id, manager_id → managers.id.",
@@ -515,6 +534,224 @@ const COLUMN_COMMENTS: Record<string, string> = {
   // okk.phantom_history
   "phantom_history.date":
     "Civil-date в Europe/Berlin. PK (department, manager_id, date).",
+
+  // ─── analytics.lead_status_changes (полное покрытие) ───
+  "lead_status_changes.lead_id":
+    "Kommo lead.id. JOIN с leads_cohort.lead_id, communications.lead_id.",
+  "lead_status_changes.pipeline_id":
+    "Kommo pipeline_id (на момент перехода). См. leads_cohort.pipeline_id для известных значений.",
+  "lead_status_changes.pipeline":
+    "Имя пайплайна строкой (при создании события). Для cross-check с pipeline_id.",
+  "lead_status_changes.status_id":
+    "Kommo status_id куда переходит лид. 93886075=TERM_DC_DONE (B2G ДЦ-термин). См. leads_cohort.status_id.",
+  "lead_status_changes.status":
+    "Имя статуса строкой (на момент перехода). Может расходиться с текущим именем в Kommo.",
+  "lead_status_changes.event_at":
+    "Время перехода в данный статус (UTC).",
+  "lead_status_changes.last_event_at":
+    "Время последнего события в lead_status_changes для этого лида (denormalized).",
+  "lead_status_changes.next_status_id":
+    "Kommo status_id куда лид перешёл следующим. NULL если этот статус — последний.",
+  "lead_status_changes.next_event_at":
+    "Время следующего перехода (NULL для последнего ряда). Используется для time-in-status расчётов.",
+  "lead_status_changes.manager":
+    "Ответственный менеджер на момент перехода. WARN: name-drift с master_managers (Maksim/Latin-C/Ukrainian-Є).",
+  "lead_status_changes.sort":
+    "Порядковый номер статуса в pipeline (Kommo sort).",
+  "lead_status_changes.amo_domain":
+    "Kommo subdomain (legacy field name 'amo' = AmoCRM old name). Всегда 'sternmeister' для нас.",
+
+  // ─── analytics.tasks (полное покрытие) ───
+  "tasks.task_id":
+    "Kommo task.id. PK задачи.",
+  "tasks.task_created_at": "Время создания задачи (UTC).",
+  "tasks.completed_at": "Время выполнения. NULL если задача активна.",
+  "tasks.task_manager":
+    "Менеджер-исполнитель задачи. WARN: name-drift, см. communications.manager.",
+  "tasks.lead_manager":
+    "Ответственный менеджер лида (может отличаться от task_manager — задача переназначена).",
+  "tasks.closed_flg":
+    "smallint 0/1. Лид закрыт.",
+
+  // ─── analytics.sla (доп. колонки) ───
+  "sla.lead_created_at":
+    "Время создания лида (UTC). База для sla_first_call_seconds.",
+  "sla.manager":
+    "Ответственный менеджер. WARN: name-drift.",
+  "sla.sla_start":
+    "Точка отсчёта SLA (обычно lead_created_at, но может сдвигаться при переходе в qual).",
+  "sla.first_contact_at":
+    "Время первого контакта (любого: звонок in/out, сообщение).",
+  "sla.last_contact_at":
+    "Время последнего контакта.",
+  "sla.first_message_at":
+    "Время первого исходящего сообщения. Для лидов которые не звонили.",
+  "sla.is_waiting":
+    "smallint 0/1. Лид ждёт первого касания.",
+  "sla.is_waiting_call":
+    "smallint 0/1. Лид ждёт первого звонка.",
+  "sla.business_hours_since_last_contact":
+    "BH-time с последнего касания. Используется для freeze-leads warnings.",
+  "sla.sla_first_contact_seconds":
+    "SLA первого контакта (любого, не только звонка). Шире чем sla_first_call_seconds.",
+  "sla.sla_first_call_calendar_seconds_integrator":
+    "Calendar variant integrator-snapshot. См. sla_first_call_seconds_integrator.",
+  "sla.pipeline_id":
+    "Kommo pipeline на момент создания SLA-row.",
+  "sla.status_id":
+    "Текущий status_id (denormalized из leads_cohort).",
+  "sla.utm_source":
+    "UTM source лида (denormalized из leads_cohort).",
+  "sla.category":
+    "Категория лида (A-E классификация).",
+  "sla.loss_reason_name":
+    "Текст причины потери (если closed). Не enum — freeform.",
+
+  // ─── analytics.leads_cohort (доп. колонки) ───
+  "leads_cohort.created_at":
+    "Время создания лида (UTC). PK когорты по дате — drives daily/period фильтры.",
+  "leads_cohort.contact_date":
+    "Custom field 'Дата термина' / contact follow-up. Используется в специфичных pipelines.",
+  "leads_cohort.closed_at":
+    "Время закрытия лида (победа или потеря). NULL если активный.",
+  "leads_cohort.pipeline":
+    "Имя пайплайна строкой (на момент чтения).",
+  "leads_cohort.status":
+    "Имя текущего статуса строкой.",
+  "leads_cohort.status_order":
+    "Порядковый номер статуса в pipeline (для UI sort).",
+  "leads_cohort.category":
+    "Категория лида (A/B/C/D/E классификация менеджером).",
+  "leads_cohort.utm_source":
+    "UTM source — откуда пришёл лид (Yandex/Google/тд).",
+  "leads_cohort.utm_medium":
+    "UTM medium (cpc/organic/social/etc).",
+  "leads_cohort.utm_campaign":
+    "UTM campaign — конкретная кампания.",
+  "leads_cohort.utm_content":
+    "UTM content — variant креатива.",
+  "leads_cohort.utm_term":
+    "UTM term — keyword (для search ads).",
+  "leads_cohort.budget":
+    "Custom field 'Бюджет' (если заполнен менеджером).",
+  "leads_cohort.loss_reason":
+    "Текст причины потери (freeform, не enum).",
+  "leads_cohort.loss_reason_id":
+    "Kommo loss_reason_id (стандартный, не путать с non_qual_enum_id и b2b_close_reason_enum_id).",
+
+  // ─── analytics.communications (доп. колонки) ───
+  "communications.created_at":
+    "Время коммуникации (UTC). Drives period фильтры.",
+  "communications.lead_created_at":
+    "Время создания лида (denormalized из leads_cohort).",
+  "communications.lead_day_start":
+    "Начало civil-day создания лида в Berlin TZ (denormalized для bucketing).",
+  "communications.call_status":
+    "smallint Kommo call status: 1=call_in, 2=call_out, 3=missed_in, 4=successful, 5=missed_out_*. См. https://www.amocrm.com/developers/content/crm_platform/notes-api.",
+  "communications.status_id":
+    "status_id лида на момент коммуникации.",
+  "communications.status_name":
+    "имя статуса лида на момент коммуникации.",
+  "communications.business_hours_sla":
+    "BH-time от создания лида до этой коммуникации (для SLA-расчётов).",
+  "communications.business_hours_since_communication":
+    "BH-time от ПРЕДЫДУЩЕЙ коммуникации лида (TLT-расчёт).",
+  "communications.utm_source":
+    "UTM source лида (denormalized).",
+  "communications.category":
+    "Категория лида (A-E, denormalized).",
+
+  // ─── analytics.refusal_enums (полное покрытие) ───
+  "refusal_enums.enum_id":
+    "Kommo enum option ID. PK. Уникален в пределах поля и (у нас) глобально.",
+  "refusal_enums.value":
+    "Человеко-читаемая строка (например 'Неквал лид', 'Спам').",
+  "refusal_enums.field_id":
+    "Kommo custom_field.id. 879824=Госники non_qual, 876383=B2B close_reason. WARN: B2B field 876383 пока не синкается ETL'ом (см. src/lib/etl/lookups.ts:14).",
+  "refusal_enums.updated_at":
+    "Когда последний раз перетянули значение из Kommo.",
+
+  // ─── okk.voice_feedback (PII flag) ───
+  "voice_feedback.call_id":
+    "FK → calls.id. К какому звонку относится голос-ответ менеджера.",
+  "voice_feedback.manager_id":
+    "FK → managers.id (который ответил).",
+  "voice_feedback.voice_file_id":
+    "ID файла в Telegram storage (file_id для resend).",
+  "voice_feedback.transcript":
+    "[PII] Транскрипт голос-ответа менеджера. MCP tools НЕ возвращают этот текст — приватный feedback.",
+  "voice_feedback.ai_response":
+    "AI-парафраз ответа (если был сгенерирован). Может быть менее sensitive чем raw transcript.",
+
+  // ─── okk.telephony_cdr ───
+  "telephony_cdr.department": "'b2g' | 'b2b'.",
+  "telephony_cdr.telephony": "'callgear' | 'cloudtalk' — провайдер CDR.",
+  "telephony_cdr.external_call_id":
+    "ID звонка в провайдере. Combined с telephony provides global uniqueness.",
+  "telephony_cdr.call_started_at": "Время начала звонка (UTC).",
+  "telephony_cdr.direction": "'in' | 'out' (CDR-уровень, до Kommo).",
+  "telephony_cdr.is_in_okk":
+    "true → CDR попал в OKK calls (был оценён). false → phantom (короткий <10s или filtered).",
+  "telephony_cdr.okk_call_id":
+    "FK → calls.id когда is_in_okk=true. NULL для phantom.",
+
+  // ─── tracking_sync_state ───
+  "tracking_sync_state.department": "'b2g' | 'b2b'. PK.",
+  "tracking_sync_state.last_synced_at":
+    "Время последнего успешного sync (для UI badge / health).",
+  "tracking_sync_state.last_event_ts":
+    "Cursor вперёд: max(events.created_at) что мы видели. Дельта-инкремент base.",
+  "tracking_sync_state.earliest_event_ts":
+    "Watermark назад: min(events.created_at) в кеше. ensureRangeCached сравнивает с request range.",
+  "tracking_sync_state.filter_version":
+    "Bumped когда Kommo fetch-логика меняется (см. CURRENT_FILTER_VERSION в tracking/sync.ts). Mismatch → re-backfill.",
+  "tracking_sync_state.last_error":
+    "Последняя ошибка sync (для debug).",
+
+  // ─── analytics.ads_report (key columns only — full report rarely queried directly) ───
+  "ads_report.date": "Date рекламного дня (UTC).",
+  "ads_report.spend": "Расход в валюте проекта.",
+  "ads_report.impressions": "Кол-во показов.",
+  "ads_report.clicks": "Кол-во кликов.",
+  "ads_report.leads_count": "Кол-во лидов с этого UTM-набора.",
+  "ads_report.qual_leads_count": "Qual лидов из этого UTM-набора.",
+  "ads_report.payment_cnt": "Кол-во платежей.",
+  "ads_report.payment_amount": "Сумма платежей.",
+
+  // ─── analytics.sales_report (key columns only) ───
+  "sales_report.date": "Date.",
+  "sales_report.manager":
+    "Имя менеджера. WARN: name-drift.",
+  "sales_report.payment_cnt": "Кол-во платежей.",
+  "sales_report.payment_sum": "Сумма платежей.",
+  "sales_report.calls_cnt": "Кол-во звонков.",
+  "sales_report.success_calls": "Кол-во успешных звонков (≥10s).",
+  "sales_report.outgoing_calls": "Кол-во исходящих звонков.",
+  "sales_report.sales_plan": "Sales plan на день.",
+
+  // ─── D1 daily_plans (полное покрытие) ───
+  "daily_plans.department": "'b2g' | 'b2b'.",
+  "daily_plans.line":
+    "B2G: '1' (квалификатор), '2' (бератер), '3' (доведение), 'funnel' (общая воронка). B2B: 'salesTotal' / 'salesBuh' / 'salesMed' / 'calls'.",
+  "daily_plans.user_id":
+    "NULL = line-level дефолт (применяется ко всем менеджерам линии). Иначе → master_managers.id (per-manager override).",
+  "daily_plans.metric_key":
+    "Имя метрики из metrics-config.ts (qualLeads, payments, calls, etc).",
+  "daily_plans.plan_value":
+    "Целевое значение (text, парсится consumer'ом).",
+  "daily_plans.period_type": "'day' | 'week' | 'month'.",
+  "daily_plans.period_date":
+    "'YYYY-MM-DD' (day) | 'YYYY-WNN' (week) | 'YYYY-MM' (month).",
+
+  // ─── D1 manager_bonuses ───
+  "manager_bonuses.user_id":
+    "FK → master_managers.id.",
+  "manager_bonuses.period_month":
+    "'YYYY-MM' Berlin civil-month. Composite UNIQUE (user_id, period_month).",
+  "manager_bonuses.amount":
+    "Положительная сумма премии (или 0 = нет; в БД мы удаляем строку при amount=0).",
+  "manager_bonuses.note":
+    "Опциональное «за что» — freeform.",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -716,6 +953,47 @@ const D1_SHARED_TABLES = new Set([
   "call_analyses",
   "call_analysis_files",
 ]);
+
+/**
+ * Tables that exist physically in a DB but aren't in our Drizzle schema
+ * files — Neon platform auto-provisioned tables, manual backup snapshots
+ * created before risky migrations, and tables migrated outside Drizzle.
+ *
+ * Generator picks up TABLE_NARRATIVES for these by name; columns get no
+ * COMMENT (we don't track their schema). Goal: an MCP agent doing
+ * `\dt` discovery sees a clear "[BACKUP]" / "[INTERNAL]" prefix and
+ * doesn't try to query them.
+ */
+const EXTRA_TABLES_PER_TARGET: Record<DbTarget, ReadonlyArray<{ name: string; qualified: string }>> = {
+  d1: [
+    // R1 schema is physically present in D1 branch via Neon copy-on-write.
+    // We comment them here so D1-side `\dt` shows narratives too.
+    { name: "r1_users", qualified: "public.r1_users" },
+    { name: "r1_avatars", qualified: "public.r1_avatars" },
+    { name: "r1_calls", qualified: "public.r1_calls" },
+  ],
+  r1: [],
+  d2: [
+    { name: "_backup_calls_20260429", qualified: "public._backup_calls_20260429" },
+    {
+      name: "_backup_kristina_pre_oneshot_20260429",
+      qualified: "public._backup_kristina_pre_oneshot_20260429",
+    },
+    { name: "_backup_managers_20260429", qualified: "public._backup_managers_20260429" },
+    { name: "_backup_pre_reeval_20260429", qualified: "public._backup_pre_reeval_20260429" },
+    { name: "reeval_before", qualified: "public.reeval_before" },
+  ],
+  r2: [
+    { name: "_backup_calls_20260429", qualified: "public._backup_calls_20260429" },
+    { name: "_backup_managers_20260429", qualified: "public._backup_managers_20260429" },
+  ],
+  analytics: [
+    { name: "etl_locks", qualified: "analytics.etl_locks" },
+    { name: "dashboard_events", qualified: "public.dashboard_events" },
+    { name: "dashboard_projects", qualified: "public.dashboard_projects" },
+  ],
+  tracking: [],
+};
 
 function computeTargets(schemaFile: string, tableName: string): DbTarget[] {
   if (schemaFile.endsWith("schema-okk.ts")) return ["d2", "r2"];
@@ -928,6 +1206,25 @@ async function main() {
       list.push(spec);
       byTarget.set(t, list);
     }
+  }
+
+  // Inject "extra" tables not captured by schema-*.ts (Neon platform tables,
+  // manual backups, etl_locks). They have no column list — only TABLE comment.
+  for (const [target, extras] of Object.entries(EXTRA_TABLES_PER_TARGET) as Array<
+    [DbTarget, ReadonlyArray<{ name: string; qualified: string }>]
+  >) {
+    if (extras.length === 0) continue;
+    const list = byTarget.get(target) ?? [];
+    for (const e of extras) {
+      list.push({
+        qualifiedName: e.qualified,
+        name: e.name,
+        columns: [],
+        targets: [target],
+        schemaFile: "<extra>",
+      });
+    }
+    byTarget.set(target, list);
   }
 
   let totalTables = 0;

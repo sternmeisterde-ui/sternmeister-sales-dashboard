@@ -7,6 +7,18 @@
 
 BEGIN;
 
+-- ─── public._backup_calls_20260429 ───
+COMMENT ON TABLE public._backup_calls_20260429 IS '[D2 / B2G OKK] [BACKUP — заморозка 2026-04-29 перед mass re-eval] НЕ ИСПОЛЬЗОВАТЬ для аналитики; используй public.calls.';
+
+-- ─── public._backup_kristina_pre_oneshot_20260429 ───
+COMMENT ON TABLE public._backup_kristina_pre_oneshot_20260429 IS '[D2 / B2G OKK] [BACKUP — заморозка 2026-04-29 для one-shot Кристины] НЕ ИСПОЛЬЗОВАТЬ.';
+
+-- ─── public._backup_managers_20260429 ───
+COMMENT ON TABLE public._backup_managers_20260429 IS '[D2 / B2G OKK] [BACKUP — заморозка 2026-04-29] НЕ ИСПОЛЬЗОВАТЬ; используй public.managers.';
+
+-- ─── public._backup_pre_reeval_20260429 ───
+COMMENT ON TABLE public._backup_pre_reeval_20260429 IS '[D2 / B2G OKK] [BACKUP — заморозка 2026-04-29 перед re-eval] НЕ ИСПОЛЬЗОВАТЬ.';
+
 -- ─── public.calls ───
 COMMENT ON TABLE public.calls IS '[D2 / B2G OKK] Источник звонка (запись, транскрипт, направление, длительность, Kommo-связи). Used by tabs: Аналитика, Дейли, ОКК.';
 COMMENT ON COLUMN public.calls.manager_id IS 'FK → managers.id (UUID, OKK-локальный). NULL → orphan; UI/MCP такие звонки скрывают.';
@@ -41,11 +53,26 @@ COMMENT ON COLUMN public.phantom_history.date IS 'Civil-date в Europe/Berlin. P
 COMMENT ON COLUMN public.phantom_history.phantom_count IS 'Кол-во CDR-звонков, не попавших в OKK (= не оценённых, например короткие <10s).';
 COMMENT ON COLUMN public.phantom_history.coverage_pct IS '% звонков менеджера из telephony_cdr, которые попали в OKK calls на этот день. Heatmap в Аудит-tab.';
 
+-- ─── public.reeval_before ───
+COMMENT ON TABLE public.reeval_before IS '[D2 / B2G OKK] [BACKUP — снимок до re-eval] НЕ ИСПОЛЬЗОВАТЬ; используй public.evaluations.';
+
 -- ─── public.telephony_cdr ───
 COMMENT ON TABLE public.telephony_cdr IS '[D2 / B2G OKK] [INTERNAL — OKK] Phase 2 webhook coverage tracking: сырой CDR для proof-of-coverage. Источник для phantom_history. Не для прямых запросов.';
+COMMENT ON COLUMN public.telephony_cdr.department IS '''b2g'' | ''b2b''.';
+COMMENT ON COLUMN public.telephony_cdr.telephony IS '''callgear'' | ''cloudtalk'' — провайдер CDR.';
+COMMENT ON COLUMN public.telephony_cdr.external_call_id IS 'ID звонка в провайдере. Combined с telephony provides global uniqueness.';
+COMMENT ON COLUMN public.telephony_cdr.call_started_at IS 'Время начала звонка (UTC).';
+COMMENT ON COLUMN public.telephony_cdr.direction IS '''in'' | ''out'' (CDR-уровень, до Kommo).';
+COMMENT ON COLUMN public.telephony_cdr.is_in_okk IS 'true → CDR попал в OKK calls (был оценён). false → phantom (короткий <10s или filtered).';
+COMMENT ON COLUMN public.telephony_cdr.okk_call_id IS 'FK → calls.id когда is_in_okk=true. NULL для phantom.';
 
 -- ─── public.voice_feedback ───
 COMMENT ON TABLE public.voice_feedback IS '[D2 / B2G OKK] Голосовой ответ менеджера на оценку (если был). Used by tabs: ОКК.';
+COMMENT ON COLUMN public.voice_feedback.call_id IS 'FK → calls.id. К какому звонку относится голос-ответ менеджера.';
+COMMENT ON COLUMN public.voice_feedback.manager_id IS 'FK → managers.id (который ответил).';
+COMMENT ON COLUMN public.voice_feedback.voice_file_id IS 'ID файла в Telegram storage (file_id для resend).';
+COMMENT ON COLUMN public.voice_feedback.transcript IS '[PII] Транскрипт голос-ответа менеджера. MCP tools НЕ возвращают этот текст — приватный feedback.';
+COMMENT ON COLUMN public.voice_feedback.ai_response IS 'AI-парафраз ответа (если был сгенерирован). Может быть менее sensitive чем raw transcript.';
 
 -- ─── public.worst_calls ───
 COMMENT ON TABLE public.worst_calls IS '[D2 / B2G OKK] Топ-N худших звонков менеджера за день/период. Drives WorstCallsPanel popup в ОКК-разделе + Telegram-уведомления (14:00/17:00). FK: call_id → calls.id, evaluation_id → evaluations.id, manager_id → managers.id.';

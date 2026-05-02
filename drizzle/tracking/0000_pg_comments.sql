@@ -19,5 +19,11 @@ COMMENT ON COLUMN public.tracking_events.raw IS 'Original event payload (мин�
 
 -- ─── public.tracking_sync_state ───
 COMMENT ON TABLE public.tracking_sync_state IS '[Tracking — Kommo activity cache] [INTERNAL — Tracking] Маркер последнего синка: cursor (last_event_ts), backfill watermark (earliest_event_ts), filter version. Используется ensureRangeCached. Used by tabs: Активность.';
+COMMENT ON COLUMN public.tracking_sync_state.department IS '''b2g'' | ''b2b''. PK.';
+COMMENT ON COLUMN public.tracking_sync_state.last_synced_at IS 'Время последнего успешного sync (для UI badge / health).';
+COMMENT ON COLUMN public.tracking_sync_state.last_event_ts IS 'Cursor вперёд: max(events.created_at) что мы видели. Дельта-инкремент base.';
+COMMENT ON COLUMN public.tracking_sync_state.earliest_event_ts IS 'Watermark назад: min(events.created_at) в кеше. ensureRangeCached сравнивает с request range.';
+COMMENT ON COLUMN public.tracking_sync_state.filter_version IS 'Bumped когда Kommo fetch-логика меняется (см. CURRENT_FILTER_VERSION в tracking/sync.ts). Mismatch → re-backfill.';
+COMMENT ON COLUMN public.tracking_sync_state.last_error IS 'Последняя ошибка sync (для debug).';
 
 COMMIT;
