@@ -378,7 +378,23 @@ export async function enrichTelephonyLeads(
     }
     phonesResolved++;
 
-    for (const row of rows) {
+    // Dedup raw rows by communication_id — sync-telephony's prefix-scoped
+    // DELETE-then-INSERT can leave 2+ physical rows sharing one communication_id
+    // when an upstream retry races (sync ran twice on the same window).
+    // Without this dedup, the bulk UPDATE produces N updates with the same
+    // (communication_id, lead_id) pair → second one violates
+    // communications_comm_lead_unique constraint and the whole batch aborts.
+    const seenCommId = new Set<string>();
+    const dedupedRows = rows.filter((r) => {
+      // Rows without a communication_id can't violate the
+      // (communication_id, lead_id) unique constraint, so let them all through.
+      if (!r.communicationId) return true;
+      if (seenCommId.has(r.communicationId)) return false;
+      seenCommId.add(r.communicationId);
+      return true;
+    });
+
+    for (const row of dedupedRows) {
       const [primary, ...secondary] = matchingLeads;
 
       // UPDATE the original row with primary lead's metadata.
