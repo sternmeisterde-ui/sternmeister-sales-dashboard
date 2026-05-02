@@ -8,11 +8,13 @@ writing SQL.
 domains landed (`managers` 5 tools, `okk` 6 tools). See
 `../docs/MCP-IMPLEMENTATION-PLAN.md` for the full roadmap (Phases 3–5).
 
-## Tools (live)
+## Tools (live — 20 total)
 
-- **discovery** — `list_domains`, `describe_domain`, `glossary` (auto-loaded by Claude on connect)
-- **managers** — `managers.{list, find_by_name, get_profile, compare, find_outliers}`
-- **okk** — `okk.{summarise_quality, get_call, find_calls, top_problems, audit_overrides, coverage_heatmap}`
+- **discovery (3)** — `list_domains`, `describe_domain`, `glossary` (auto-loaded by Claude on connect)
+- **managers (5)** — `managers.{list, find_by_name, get_profile, compare, find_outliers}`
+- **okk (6)** — `okk.{summarise_quality, get_call, find_calls, top_problems, audit_overrides, coverage_heatmap}`
+- **daily (3)** — `daily.{list_metrics, plan_vs_fact, refusals}`
+- **analytics (3)** — `analytics.{scores_by_period, scores_by_manager, criterion_drift}`
 
 ## Local dev (stdio, no auth)
 
@@ -104,8 +106,10 @@ in Dokploy:
 1. **Domain**: `mcp.sternmeister.de` → port 3009 with TLS (Traefik does the cert).
 2. **Env vars** (Dokploy UI):
    - `MCP_BEARER_TOKENS` — JSON array of token objects (see schema in `src/auth/tokens.ts`). One entry per user.
-   - `DATABASE_URL`, `R1_DATABASE_URL`, `D2_OKK_DATABASE_URL`, `R2_OKK_DATABASE_URL`, `ANALYTICS_DATABASE_URL`, `TRACKING_DATABASE_URL` — same as dashboard's (Phase 2 reuse). Phase 3 swaps to `MCP_*_RO_URL` against dedicated `mcp_readonly_*` Postgres roles.
+   - **Read-only DB URLs (REQUIRED for production)**: `MCP_D1_RO_URL`, `MCP_R1_RO_URL`, `MCP_D2_RO_URL`, `MCP_R2_RO_URL`, `MCP_ANALYTICS_RO_URL`, `MCP_TRACKING_RO_URL` — connect strings for dedicated `mcp_readonly` Postgres roles per Neon project. Without them, the server falls back to the dashboard's write-capable `DATABASE_URL` etc., which is **a security blocker for prod-deploy** — a compromised tool would have INSERT/UPDATE/DELETE on production. Provision the roles BEFORE pointing real users at this server.
+   - `DATABASE_URL` — required for audit-log writes (`mcp_audit_log` lives in D1 and needs INSERT). Even with `MCP_*_RO_URL` in place, the audit path needs a write path. Use a dedicated `mcp_audit_writer` role with INSERT-only on `public.mcp_audit_log` if you want to lock this down further.
    - `MCP_SENTRY_DSN` — separate Sentry project `sternmeister-mcp-server` (optional but recommended).
+   - `MCP_ALLOWED_ORIGINS` — comma-separated whitelist for browser-originated requests. Default: `https://mcp.sternmeister.de,https://claude.ai`. Non-browser clients (Claude Desktop, curl) skip this check entirely.
 3. **Health**: GET `/health` returns 200 with status / uptime / session count / token count. Dokploy probes this.
 4. **Auth**: every `/mcp` request needs `Authorization: Bearer <token>`. 401 otherwise.
 
@@ -142,7 +146,7 @@ src/
 ├── auth/         bearer-token store, per-request context (ALS), role/dept gates
 ├── db/           6 read-only Neon connections + audit-log middleware + query guards
 ├── registry/     discovery (list_domains, describe_domain, glossary) + tool wrapper
-├── domains/      curated tool sets (managers, okk; daily/analytics in Phase 3)
+├── domains/      curated tool sets (managers, okk, daily, analytics; looker/tracking/termin/roleplay in Phase 3)
 ├── resources/    auto-loaded MD resources (glossary, playbook-rop)
 ├── utils/        Sentry init, error capture
 ├── server.ts     factory: assembles registry + auth + audit + 2 markdown resources

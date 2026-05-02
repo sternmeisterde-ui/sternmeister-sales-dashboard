@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { registerDiscovery } from "./registry/discovery.js";
 import { registerManagersDomain } from "./domains/managers/tools.js";
 import { registerOkkDomain } from "./domains/okk/tools.js";
+import { registerDailyDomain } from "./domains/daily/tools.js";
+import { registerAnalyticsDomain } from "./domains/analytics/tools.js";
 
 const SERVER_INFO = {
   name: "sternmeister-mcp-server",
@@ -31,6 +33,8 @@ export function createMcpServer(): McpServer {
   registerDiscovery(server);
   registerManagersDomain(server);
   registerOkkDomain(server);
+  registerDailyDomain(server);
+  registerAnalyticsDomain(server);
 
   // Bundle markdown resources (auto-loaded by Claude Desktop on connect).
   registerResource(server, "mcp://glossary", "glossary.md", "text/markdown",

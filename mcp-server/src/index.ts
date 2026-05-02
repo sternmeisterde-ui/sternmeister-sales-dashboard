@@ -52,11 +52,57 @@ const VERSION = "0.1.0";
 
 interface SessionEntry {
   transport: StreamableHTTPServerTransport;
-  /** When the session was created — for idle eviction (TODO Phase 2b). */
+  server: import("@modelcontextprotocol/sdk/server/mcp.js").McpServer;
   createdAt: number;
+  /** Bumped on every successful handleRequest call — drives idle TTL eviction. */
+  lastActivityAt: number;
 }
 
 const sessions = new Map<string, SessionEntry>();
+
+// ─── eviction config ────────────────────────────────────────────────────────
+// Idle TTL: clients that close their laptop / drop network never trigger
+// transport.onclose, so we sweep them periodically. 2h is generous for РОПа
+// who steps away mid-conversation.
+const SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
+const SESSION_MAX = 200;
+const SESSION_SWEEP_MS = 10 * 60 * 1000;
+
+function evictStaleSessions(): void {
+  const now = Date.now();
+  for (const [sid, entry] of sessions) {
+    if (now - entry.lastActivityAt > SESSION_IDLE_MS) {
+      // Delete from the Map directly — don't rely on transport.onclose to
+      // fire (it may not, if the transport is already half-dead from a
+      // dropped network). transport.close() is fire-and-forget cleanup.
+      sessions.delete(sid);
+      void entry.transport.close().catch(() => undefined);
+      void entry.server.close().catch(() => undefined);
+    }
+  }
+  if (sessions.size > SESSION_MAX) {
+    const sorted = [...sessions.entries()].sort(
+      (a, b) => a[1].lastActivityAt - b[1].lastActivityAt,
+    );
+    for (const [sid, entry] of sorted.slice(0, sessions.size - SESSION_MAX)) {
+      sessions.delete(sid);
+      void entry.transport.close().catch(() => undefined);
+      void entry.server.close().catch(() => undefined);
+    }
+  }
+}
+
+// ─── Origin allowlist (CORS / DNS-rebinding defense) ───────────────────────
+// Empty/missing Origin is allowed (Claude Desktop, curl). Browser-origin
+// requests must be on the whitelist — set MCP_ALLOWED_ORIGINS=a,b,c via env
+// or accept the default which covers production + claude.ai.
+const allowedOrigins = new Set(
+  (process.env.MCP_ALLOWED_ORIGINS ??
+    "https://mcp.sternmeister.de,https://claude.ai")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
 function readBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -88,16 +134,27 @@ function authHeader(req: http.IncomingMessage): string | null {
 }
 
 async function handleHealth(res: http.ServerResponse): Promise<void> {
+  // tokens_loaded omitted — count is itself a useful enumeration signal for
+  // an attacker. Move to authed /admin/status if we ever need it visible.
   sendJson(res, 200, {
     status: "ok",
     version: VERSION,
     uptime_seconds: Math.floor((Date.now() - STARTED_AT) / 1000),
     sessions: sessions.size,
-    tokens_loaded: loadTokens().size,
   });
 }
 
 async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  // ── origin guard ────────────────────────────────────────────────────────
+  // Browsers always send Origin; server-side clients (Claude Desktop, curl)
+  // typically don't. Reject only browser-originated calls outside whitelist
+  // — protects against DNS-rebinding and stray cross-origin attempts.
+  const origin = req.headers.origin;
+  if (origin && !allowedOrigins.has(origin)) {
+    sendJson(res, 403, { error: `origin '${origin}' not allowed` });
+    return;
+  }
+
   // ── auth ────────────────────────────────────────────────────────────────
   const token = authHeader(req);
   const claims = verify(token);
@@ -127,19 +184,40 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
     if (sessionId && sessions.has(sessionId)) {
       entry = sessions.get(sessionId);
     } else if (!sessionId && isInitializeRequest(body)) {
-      // Mint a new session.
+      // Mint a new session. The Map insertion happens inside
+      // onsessioninitialized — that callback is the SOLE write path for
+      // sessions[]. We capture `transport` and `server` in the closure so
+      // onclose can call server.close() to free Drizzle handles.
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid: string) => {
-          sessions.set(sid, { transport, createdAt: Date.now() });
+          sessions.set(sid, {
+            transport,
+            server,
+            createdAt: Date.now(),
+            lastActivityAt: Date.now(),
+          });
         },
       });
+      const server = createMcpServer();
       transport.onclose = () => {
         if (transport.sessionId) sessions.delete(transport.sessionId);
+        void server.close().catch(() => undefined);
       };
-      const server = createMcpServer();
       await server.connect(transport);
-      entry = { transport, createdAt: Date.now() };
+      // Don't construct a separate entry object here — onsessioninitialized
+      // will populate sessions[] when the SDK is ready. For the FIRST
+      // request (this one), we pass the body directly and rely on the
+      // transport's internal state.
+      await runWithContext(ctx, async () => {
+        await transport.handleRequest(req, res, body);
+      });
+      // After the initialize call returns, the session is registered.
+      const justCreated = transport.sessionId
+        ? sessions.get(transport.sessionId)
+        : undefined;
+      if (justCreated) justCreated.lastActivityAt = Date.now();
+      return;
     } else {
       sendJson(res, 400, {
         error: "no Mcp-Session-Id header and not an initialize request",
@@ -154,6 +232,7 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
     await runWithContext(ctx, async () => {
       await e.transport.handleRequest(req, res, body);
     });
+    e.lastActivityAt = Date.now();
     return;
   }
 
@@ -166,6 +245,7 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
     await runWithContext(ctx, async () => {
       await e.transport.handleRequest(req, res);
     });
+    e.lastActivityAt = Date.now();
     return;
   }
 
@@ -194,11 +274,19 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// keepAliveTimeout > Traefik's default 60s so Node closes idle sockets
+// before the proxy does (avoids the spurious "client disconnected" race).
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 70_000;
+
 server.listen(PORT, () => {
   process.stderr.write(
     `[mcp-http] listening on :${PORT} — ${loadTokens().size} bearer tokens loaded\n`,
   );
 });
+
+const sweepTimer = setInterval(evictStaleSessions, SESSION_SWEEP_MS);
+sweepTimer.unref();
 
 const shutdown = (signal: string): void => {
   process.stderr.write(`[mcp-http] ${signal} received — closing\n`);

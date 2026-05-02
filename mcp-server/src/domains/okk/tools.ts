@@ -6,28 +6,18 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { and, asc, desc, eq, gte, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { okkForDept, okkSchema } from "../../db/connections.js";
 import { registerTool } from "../../registry/builder.js";
+import { berlinDayBoundaryHalfOpen } from "../../utils/berlin.js";
 
 const { okkCalls, okkEvaluations, okkManagers, okkPhantomHistory } = okkSchema;
 
 const Dept = z.enum(["b2g", "b2b"]);
 const Line = z.enum(["all", "1", "2", "3"]).default("all");
 const ISODate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-
-// Berlin civil-day boundary helper. UTC offset is +1 / +2 (DST). To stay
-// simple we treat input dates as Berlin civil-day and convert to UTC by
-// subtracting 1h (winter) — close enough for daily aggregates; if cross-DST
-// boundaries matter we'll use a real TZ library later.
-function berlinDayStart(date: string): Date {
-  return new Date(`${date}T00:00:00+01:00`);
-}
-function berlinDayEnd(date: string): Date {
-  return new Date(`${date}T23:59:59+01:00`);
-}
 
 export function registerOkkDomain(server: McpServer): void {
   // ─── okk.summarise_quality ─────────────────────────────────────────────────
@@ -45,14 +35,14 @@ export function registerOkkDomain(server: McpServer): void {
     deptArg: ({ dept }) => dept,
     handler: async ({ dept, from, to, line, manager_id }) => {
       const db = okkForDept(dept);
-      const fromTs = berlinDayStart(from);
-      const toTs = berlinDayEnd(to);
+      const range = berlinDayBoundaryHalfOpen(from, to);
 
       const conds = [
         isNotNull(okkEvaluations.totalScore),
         isNotNull(okkCalls.managerId),
-        gte(okkCalls.callCreatedAt, fromTs),
-        lte(okkCalls.callCreatedAt, toTs),
+        isNotNull(okkCalls.callCreatedAt),
+        gte(okkCalls.callCreatedAt, range.fromExpr),
+        lt(okkCalls.callCreatedAt, range.toExclusiveExpr),
       ];
       if (manager_id) conds.push(eq(okkCalls.managerId, manager_id));
       if (dept === "b2g" && line !== "all") {
@@ -163,15 +153,17 @@ export function registerOkkDomain(server: McpServer): void {
     deptArg: ({ dept }) => dept,
     handler: async ({ dept, from, to, manager_id, score_min, score_max, line, limit }) => {
       const db = okkForDept(dept);
+      const range = berlinDayBoundaryHalfOpen(from, to);
       const conds = [
         isNotNull(okkEvaluations.totalScore),
         isNotNull(okkCalls.managerId),
-        gte(okkCalls.callCreatedAt, berlinDayStart(from)),
-        lte(okkCalls.callCreatedAt, berlinDayEnd(to)),
+        isNotNull(okkCalls.callCreatedAt),
+        gte(okkCalls.callCreatedAt, range.fromExpr),
+        lt(okkCalls.callCreatedAt, range.toExclusiveExpr),
       ];
       if (manager_id) conds.push(eq(okkCalls.managerId, manager_id));
       if (typeof score_min === "number") conds.push(gte(okkEvaluations.totalScore, score_min));
-      if (typeof score_max === "number") conds.push(lte(okkEvaluations.totalScore, score_max));
+      if (typeof score_max === "number") conds.push(sql`${okkEvaluations.totalScore} <= ${score_max}`);
       if (dept === "b2g" && line !== "all") conds.push(eq(okkManagers.line, line));
 
       const rows = await db
@@ -217,6 +209,7 @@ export function registerOkkDomain(server: McpServer): void {
     deptArg: ({ dept }) => dept,
     handler: async ({ dept, from, to, limit }) => {
       const db = okkForDept(dept);
+      const range = berlinDayBoundaryHalfOpen(from, to);
       const rows = await db
         .select({
           mistakes: okkEvaluations.mistakes,
@@ -228,8 +221,9 @@ export function registerOkkDomain(server: McpServer): void {
           and(
             isNotNull(okkEvaluations.mistakes),
             isNotNull(okkCalls.managerId),
-            gte(okkCalls.callCreatedAt, berlinDayStart(from)),
-            lte(okkCalls.callCreatedAt, berlinDayEnd(to)),
+            isNotNull(okkCalls.callCreatedAt),
+            gte(okkCalls.callCreatedAt, range.fromExpr),
+            lt(okkCalls.callCreatedAt, range.toExclusiveExpr),
           ),
         )
         .groupBy(okkEvaluations.mistakes)
@@ -258,6 +252,7 @@ export function registerOkkDomain(server: McpServer): void {
     deptArg: ({ dept }) => dept,
     handler: async ({ dept, from, to }) => {
       const db = okkForDept(dept);
+      const range = berlinDayBoundaryHalfOpen(from, to);
       const rows = await db
         .select({
           override_metadata: okkEvaluations.overrideMetadata,
@@ -268,8 +263,9 @@ export function registerOkkDomain(server: McpServer): void {
           and(
             isNotNull(okkEvaluations.overrideMetadata),
             isNotNull(okkCalls.managerId),
-            gte(okkCalls.callCreatedAt, berlinDayStart(from)),
-            lte(okkCalls.callCreatedAt, berlinDayEnd(to)),
+            isNotNull(okkCalls.callCreatedAt),
+            gte(okkCalls.callCreatedAt, range.fromExpr),
+            lt(okkCalls.callCreatedAt, range.toExclusiveExpr),
           ),
         )
         .limit(5000);

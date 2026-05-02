@@ -68,8 +68,27 @@ export function loadTokens(): Map<string, TokenClaims> {
   return cache;
 }
 
-/** Verify a bearer string and return claims, or null if not found. */
+import { timingSafeEqual } from "node:crypto";
+
+/**
+ * Verify a bearer string and return claims, or null if not found.
+ * Uses constant-time comparison to close timing-oracle attacks (an attacker
+ * can otherwise distinguish "wrong from byte 1" vs "wrong from byte 20"
+ * via response-time deltas and brute-force the token char by char). For
+ * 5–15 tokens the linear scan is negligible.
+ */
 export function verify(token: string | undefined | null): TokenClaims | null {
   if (!token) return null;
-  return loadTokens().get(token) ?? null;
+  const map = loadTokens();
+  const candidate = Buffer.from(token);
+  for (const [stored, claims] of map) {
+    const storedBuf = Buffer.from(stored);
+    if (
+      candidate.length === storedBuf.length &&
+      timingSafeEqual(candidate, storedBuf)
+    ) {
+      return claims;
+    }
+  }
+  return null;
 }

@@ -130,18 +130,29 @@ export function registerTool<I extends ZodRawShape>(
           structuredContent: out as Record<string, unknown>,
         };
       } catch (err) {
-        const msg = (err as Error).message;
+        const rawMsg = (err as Error).message ?? String(err);
+        // Full message goes to stderr (and Sentry) for debugging; audit
+        // log keeps a 500-char head + 250-char tail because Postgres
+        // errors put the cause at the start and position/line at the end.
+        process.stderr.write(`[mcp-tool-error] ${def.name}: ${rawMsg}\n`);
+        const msg =
+          rawMsg.length > 750
+            ? `${rawMsg.slice(0, 500)}…[truncated ${rawMsg.length - 750}ch]…${rawMsg.slice(-250)}`
+            : rawMsg.slice(0, 750);
+        const durationMs = Date.now() - t0;
         captureError(err, {
           tool: def.name,
           user_id: ctx.userId,
           user_role: ctx.role,
           transport: ctx.transport,
+          dept: dept ?? "",
+          duration_ms: durationMs,
         });
         void recordAudit({
           ctx,
           toolName: def.name,
           toolInput: input,
-          durationMs: Date.now() - t0,
+          durationMs,
           rowsReturned: null,
           status: "error",
           errorMsg: msg,

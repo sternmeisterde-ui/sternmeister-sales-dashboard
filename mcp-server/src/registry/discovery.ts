@@ -39,13 +39,25 @@ const CATALOG: ReadonlyArray<DomainCatalogEntry> = [
     scope: "b2g+b2b",
     ui_counterpart: "ОКК + Аудит",
   },
-  // Phase 2 onwards:
-  // { domain: "roleplay", ... },
-  // { domain: "daily", ... },
-  // { domain: "analytics", ... },
+  {
+    domain: "daily",
+    summary: "План-факт-отчёт + рефузалы. Phase 2b: список метрик + plan_vs_fact для известных + топ причин закрытия.",
+    tool_count: 3,
+    scope: "b2g+b2b",
+    ui_counterpart: "Дейли",
+  },
+  {
+    domain: "analytics",
+    summary: "Аналитика AI-оценок (OKK + ролевки) по периодам, менеджерам, критериям.",
+    tool_count: 3,
+    scope: "b2g+b2b",
+    ui_counterpart: "Аналитика",
+  },
+  // Phase 3 onwards:
   // { domain: "looker", ... },
   // { domain: "tracking", ... },
   // { domain: "termin", ... },
+  // { domain: "roleplay", ... },
 ];
 
 interface DomainDescription {
@@ -105,6 +117,45 @@ const DESCRIPTIONS: Record<string, DomainDescription> = {
       "evaluation_json структура: { blocks[], total_score, total_max_score, summary, client_scoring }; поддерживает legacy и новый форматы блоков.",
       "override_metadata кодирует follow-up детектирование, prior_count, call_type и применённые правила.",
       "voice_feedback (PII) намеренно исключён из MCP-tools — голосовые ответы менеджеров приватны.",
+    ],
+  },
+  daily: {
+    domain: "daily",
+    summary: "План-факт + рефузалы. Phase 2b — упрощённая модель: list_metrics + plan_vs_fact для известных метрик + refusals топ.",
+    scope: "b2g+b2b",
+    tools: [
+      { name: "daily.list_metrics", verb: "list", summary: "Какие metric_key есть в daily_plans для отдела." },
+      { name: "daily.plan_vs_fact", verb: "compare", summary: "План vs факт для метрики (factor только для qual_leads, leads — Phase 3 расширит)." },
+      { name: "daily.refusals", verb: "aggregate", summary: "Топ причин закрытия (B2G non_qual_enum_id, B2B b2b_close_reason_enum_id) с резолвом через refusal_enums." },
+    ],
+    key_tables: [
+      "D1.daily_plans",
+      "Analytics.leads_cohort",
+      "Analytics.refusal_enums",
+    ],
+    notes: [
+      "metric_key — string из dashboard configuration (см. metrics-config.ts). Phase 2b считает фактом только qual_leads / leads_count.",
+      "B2G refusals = non_qual_enum_id (field 879824). B2B = b2b_close_reason_enum_id (field 876383, B2B pipelines 10631243/13209983).",
+      "period_date формат: 'YYYY-MM-DD' (day) | 'YYYY-WNN' (ISO week) | 'YYYY-MM' (month).",
+    ],
+  },
+  analytics: {
+    domain: "analytics",
+    summary: "Тренды и срезы AI-оценок (OKK реальные звонки + AI-ролевки) по периоду / менеджеру / критерию.",
+    scope: "b2g+b2b",
+    tools: [
+      { name: "analytics.scores_by_period", verb: "trend", summary: "Avg total_score по day/week/month bucket'ам." },
+      { name: "analytics.scores_by_manager", verb: "rank", summary: "Per-manager средний score за период (OKK или ролевки)." },
+      { name: "analytics.criterion_drift", verb: "drilldown", summary: "Динамика одного criterion (по name) внутри evaluation_json. Только OKK." },
+    ],
+    key_tables: [
+      "D2/R2.calls + evaluations (source=okk)",
+      "D1.d1_calls / R1.r1_calls (source=roleplay)",
+    ],
+    notes: [
+      "source='okk' — реальные оценённые звонки; source='roleplay' — AI-роли через d1_calls/r1_calls.",
+      "Применяется orphan-фильтр (total_score IS NOT NULL).",
+      "criterion_drift через jsonb_path_query_first — Postgres 12+. Возвращает avg per bucket.",
     ],
   },
 };
