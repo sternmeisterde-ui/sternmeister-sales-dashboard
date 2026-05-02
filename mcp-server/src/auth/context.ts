@@ -44,15 +44,33 @@ export function hasDept(ctx: CallContext, dept: "b2g" | "b2b"): boolean {
   return ctx.depts.includes("*") || ctx.depts.includes(dept);
 }
 
-/* Process-global context store — set once at startup by stdio.ts. Phase 2
- * (HTTP) replaces this with AsyncLocalStorage per-session. */
-let current: CallContext | null = null;
+/* Per-request context store. AsyncLocalStorage-backed so concurrent HTTP
+ * requests don't bleed into each other. Stdio (single-process, single-user)
+ * uses the same store via setProcessContext() which seeds the ALS once. */
 
-export function setCurrentContext(ctx: CallContext): void {
-  current = ctx;
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const als = new AsyncLocalStorage<CallContext>();
+let processContext: CallContext | null = null;
+
+/** Run `fn` with `ctx` bound — used by HTTP transport per-request. */
+export function runWithContext<T>(ctx: CallContext, fn: () => Promise<T> | T): Promise<T> | T {
+  return als.run(ctx, fn);
 }
 
+/** Stdio mode: set the process-global context once at startup. */
+export function setProcessContext(ctx: CallContext): void {
+  processContext = ctx;
+}
+
+/** Backwards-compatible alias for setProcessContext. */
+export const setCurrentContext = setProcessContext;
+
 export function getCurrentContext(): CallContext {
-  if (!current) throw new Error("auth context not initialised; call setCurrentContext() first");
-  return current;
+  const fromAls = als.getStore();
+  if (fromAls) return fromAls;
+  if (processContext) return processContext;
+  throw new Error(
+    "auth context not initialised; call runWithContext() (HTTP) or setProcessContext() (stdio) first",
+  );
 }

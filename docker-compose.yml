@@ -80,6 +80,44 @@ services:
       - sternmeister-network
       - dokploy-network
 
+  # MCP server — exposes curated dashboard tools to Claude Desktop / Claude Code
+  # at https://mcp.sternmeister.de. Bearer-token auth, read-only Neon access,
+  # all calls audited to D1.mcp_audit_log. See docs/MCP-IMPLEMENTATION-PLAN.md.
+  mcp:
+    build:
+      context: .
+      dockerfile: mcp-server/Dockerfile
+    ports:
+      - "${MCP_HOST_PORT:-3009}:3009"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3009
+      - TZ=${TZ:-Europe/Berlin}
+      # Bearer-token map — JSON array of { token, userId, name, role, depts, issued }.
+      # Rotation: change Dokploy env value and restart this service.
+      - MCP_BEARER_TOKENS=${MCP_BEARER_TOKENS}
+      # DB URLs — phase 2 still reuses dashboard creds; phase 3 swaps to dedicated
+      # mcp_readonly_* roles (MCP_*_RO_URL). Audit log inserts into D1, requires
+      # write on D1.mcp_audit_log only.
+      - DATABASE_URL=${DATABASE_URL}
+      - R1_DATABASE_URL=${R1_DATABASE_URL}
+      - D2_OKK_DATABASE_URL=${D2_OKK_DATABASE_URL}
+      - R2_OKK_DATABASE_URL=${R2_OKK_DATABASE_URL}
+      - ANALYTICS_DATABASE_URL=${ANALYTICS_DATABASE_URL}
+      - TRACKING_DATABASE_URL=${TRACKING_DATABASE_URL}
+      - MCP_D1_RO_URL=${MCP_D1_RO_URL}
+      - MCP_R1_RO_URL=${MCP_R1_RO_URL}
+      - MCP_D2_RO_URL=${MCP_D2_RO_URL}
+      - MCP_R2_RO_URL=${MCP_R2_RO_URL}
+      - MCP_ANALYTICS_RO_URL=${MCP_ANALYTICS_RO_URL}
+      - MCP_TRACKING_RO_URL=${MCP_TRACKING_RO_URL}
+      # Sentry — optional (set DSN to enable).
+      - SENTRY_DSN=${MCP_SENTRY_DSN}
+    restart: unless-stopped
+    networks:
+      - sternmeister-network
+      - dokploy-network
+
   # ETL cron — calls /api/analytics/sync/cron every SYNC_INTERVAL_SECONDS
   # (default 600s = 10 min). Pulls Kommo → Neon analytics incrementally.
   # Talks to `app` over the internal docker network, not the public host.

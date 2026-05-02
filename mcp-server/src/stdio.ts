@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { createAdminContext, setCurrentContext } from "./auth/context.js";
 import { createMcpServer } from "./server.js";
+import { initSentry } from "./utils/trace.js";
 
 // Load env from mcp-server/.env.local (not the default .env). For Claude
 // Desktop integration, env vars are passed via the mcpServers config and
@@ -20,6 +21,7 @@ import { createMcpServer } from "./server.js";
 // it picks up the dashboard's connection strings.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, "..", ".env.local") });
+initSentry();
 
 async function main() {
   // Stdio runs as virtual admin (single-user, local-dev). Set context BEFORE

@@ -13,6 +13,7 @@ import { getCurrentContext } from "../auth/context.js";
 import type { CallContext } from "../auth/context.js";
 import { checkPolicy } from "../auth/policy.js";
 import type { ToolPolicy } from "../auth/policy.js";
+import { captureError } from "../utils/trace.js";
 
 type ParsedInput<I extends ZodRawShape> = zInfer<ZodObject<I>>;
 
@@ -130,6 +131,12 @@ export function registerTool<I extends ZodRawShape>(
         };
       } catch (err) {
         const msg = (err as Error).message;
+        captureError(err, {
+          tool: def.name,
+          user_id: ctx.userId,
+          user_role: ctx.role,
+          transport: ctx.transport,
+        });
         void recordAudit({
           ctx,
           toolName: def.name,
