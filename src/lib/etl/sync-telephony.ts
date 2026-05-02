@@ -220,38 +220,45 @@ export async function syncTelephony(
   rows.length = 0;
   for (const r of telDedup.values()) rows.push(r);
 
-  // ── Persist: full call-row replacement in window ────────────────────
-  // Wipe EVERY call row (call_in/call_out) in the window — both legacy
-  // Kommo-sourced rows and our own prior cg-leg:*/ct:* writes including
-  // any enriched fan-out copies from enrich-telephony-leads. Then INSERT
-  // fresh raw rows. Enrich (downstream) re-fan-outs them.
+  // ── Persist: per-CDR replacement (window-agnostic) ─────────────────
+  // Wipe EVERY prior copy of each incoming communication_id — raw NULL,
+  // enriched primary, and all fan-out copies — then INSERT fresh raw
+  // rows. Enrich (downstream) re-fan-outs them.
   //
-  // Why DELETE-then-INSERT: telephony has a structural quirk that comms
-  // doesn't — raw CDR rows come in with `lead_id=NULL`, then enrichment
-  // UPDATEs them to `lead_id=primary` (and INSERTs fan-out copies for
-  // secondaries). The unique key is `(comm_id, COALESCE(lead_id, 0))`,
-  // so a raw NULL row and its enriched primary copy have *different*
-  // unique keys (0 vs primary). An ON-CONFLICT-DO-UPDATE upsert on raw
-  // NULL therefore can't see the enriched row as a conflict, ends up
-  // creating a *second* raw NULL — and the next enrich tick crashes
-  // on `bulkUpdatePrimaries` because the primary lead key is already
-  // taken by the existing fan-out.
+  // Why DELETE-by-id, not DELETE-by-window: CloudTalk/CallGear sometimes
+  // surface older CDRs in a fresh window (a call at 11:33 returned by a
+  // 13:31→13:46 sync because the provider's `lastModified` lags
+  // `startedAt`). A `created_at BETWEEN ${from} AND ${to}` filter misses
+  // those — DELETE leaves the prior raw NULL in place, INSERT then trips
+  // the unique constraint with `(ct:X, 0) already exists`. Keying off
+  // the actual incoming ids avoids the assumption entirely.
   //
-  // Race-condition safety (the original 23505 reason for switching
-  // away from DELETE+INSERT) is now handled by:
-  //   1. The lease lock in /api/analytics/sync/cron/route.ts — no two
-  //      cron ticks ever run concurrently.
-  //   2. `telDedup` above — intra-batch dupes from CallGear/CloudTalk
-  //      poll races collapse to one row.
+  // Why not ON CONFLICT DO NOTHING: the unique key is
+  // `(comm_id, COALESCE(lead_id, 0))`. A raw NULL row keys as
+  // `(X, 0)`; an already-enriched primary keys as `(X, Y)`. They don't
+  // collide — DO NOTHING would leave both rows alive, fanning a second
+  // raw NULL that the next enrich tick can't update without violating
+  // the primary's unique key.
+  //
+  // Race-condition safety: the lease lock in
+  // /api/analytics/sync/cron/route.ts guarantees only one cron tick
+  // runs at a time; `telDedup` above collapses intra-batch poll dupes.
   //
   // Message rows (chat/email/SMS) stay untouched — they have non-call
-  // types and their own append-only upsert path in sync-communications.
-  await analyticsDb.execute(
-    sql`DELETE FROM analytics.communications
-        WHERE created_at >= ${fromDate}
-          AND created_at <= ${toDate}
-          AND communication_type IN ('call_in', 'call_out')`,
-  );
+  // types and their own append-only path in sync-communications.
+  const incomingCommIds = rows
+    .map((r) => r.communicationId)
+    .filter((id): id is string => Boolean(id));
+  if (incomingCommIds.length > 0) {
+    await analyticsDb.execute(
+      sql`DELETE FROM analytics.communications
+          WHERE communication_id IN (${sql.join(
+            incomingCommIds.map((id) => sql`${id}`),
+            sql`, `,
+          )})
+            AND communication_type IN ('call_in', 'call_out')`,
+    );
+  }
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
