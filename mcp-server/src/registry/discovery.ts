@@ -53,11 +53,49 @@ const CATALOG: ReadonlyArray<DomainCatalogEntry> = [
     scope: "b2g+b2b",
     ui_counterpart: "Аналитика",
   },
-  // Phase 3 onwards:
-  // { domain: "looker", ... },
-  // { domain: "tracking", ... },
-  // { domain: "termin", ... },
-  // { domain: "roleplay", ... },
+  {
+    domain: "looker",
+    summary: "Cohort SLA / звонки на лида / outliers. Упрощённый Looker tab без integrator-snapshot fallback.",
+    tool_count: 3,
+    scope: "b2g+b2b",
+    ui_counterpart: "Looker",
+  },
+  {
+    domain: "tracking",
+    summary: "Активность менеджеров: workload, event breakdown, per-day timeline. Источник tracking_events (Kommo cache).",
+    tool_count: 3,
+    scope: "b2g+b2b",
+    ui_counterpart: "Активность",
+  },
+  {
+    domain: "termin",
+    summary: "B2G Бух Бератер: cohort chart срока от лида до termin DC/AA.",
+    tool_count: 1,
+    scope: "b2g-only",
+    ui_counterpart: "Термин",
+  },
+  {
+    domain: "roleplay",
+    summary: "AI-ролевки: тренировочные звонки с AI-аватарами клиентов. Avg score, find/compare к OKK, training_gaps.",
+    tool_count: 4,
+    scope: "b2g+b2b",
+    ui_counterpart: "AI Ролевки",
+  },
+  {
+    domain: "scripts",
+    summary: "Канонические скрипты продаж по линиям и пайплайнам. List + get полного content (jsonb sections).",
+    tool_count: 2,
+    scope: "b2g+b2b",
+    ui_counterpart: "Скрипты",
+  },
+  {
+    domain: "analiz",
+    summary: "Батч-анализ звонков по Kommo URL через Grok. List и detail (с files-summary). Phase 3c MVP — без full-content load.",
+    tool_count: 2,
+    scope: "b2g+b2b",
+    ui_counterpart: "Анализ",
+  },
+  // Phase 4: criteria (FS-based), audit overlap with okk.audit_overrides
 ];
 
 interface DomainDescription {
@@ -137,6 +175,59 @@ const DESCRIPTIONS: Record<string, DomainDescription> = {
       "metric_key — string из dashboard configuration (см. metrics-config.ts). Phase 2b считает фактом только qual_leads / leads_count.",
       "B2G refusals = non_qual_enum_id (field 879824). B2B = b2b_close_reason_enum_id (field 876383, B2B pipelines 10631243/13209983).",
       "period_date формат: 'YYYY-MM-DD' (day) | 'YYYY-WNN' (ISO week) | 'YYYY-MM' (month).",
+    ],
+  },
+  looker: {
+    domain: "looker",
+    summary: "Cohort + SLA анализ. Упрощённый — без integrator-snapshot fallback и alias-fold для имён.",
+    scope: "b2g+b2b",
+    tools: [
+      { name: "looker.all_calls", verb: "aggregate", summary: "Per-manager call summary (total/out/in/messages/success_pct)." },
+      { name: "looker.cohorts", verb: "aggregate", summary: "Per-manager lead_count + calls per lead + avg SLA первого звонка." },
+      { name: "looker.sla_outliers", verb: "rank", summary: "Менеджеры с avg SLA ≥ threshold_minutes (минимум 5 leads)." },
+    ],
+    key_tables: [
+      "Analytics.leads_cohort",
+      "Analytics.communications",
+      "Analytics.sla",
+    ],
+    notes: [
+      "Per-dept pipeline whitelist: B2G={Бух Гос, Бух Бератер}, B2B={Бух Комм, Мед Комм}.",
+      "SLA average — без integrator-snapshot fallback (Phase 4 будет COALESCE на sla_first_call_seconds_integrator).",
+      "Имена менеджеров — как в analytics.communications.manager (без folding aliases). Для exact match с master_managers — Looker UI dashboard'а.",
+    ],
+  },
+  tracking: {
+    domain: "tracking",
+    summary: "Раздел «Активность»: события Kommo (звонки, CRM-actions) per-manager. Источник tracking_events (отдельная Neon DB).",
+    scope: "b2g+b2b",
+    tools: [
+      { name: "tracking.workload_summary", verb: "aggregate", summary: "Per-manager сводка: total_events, calls, total_call_min, distinct_event_types." },
+      { name: "tracking.event_breakdown", verb: "aggregate", summary: "Распределение событий по event_type. Optional фильтр manager_id и types[]." },
+      { name: "tracking.timeline", verb: "list", summary: "Per-day хронология одного менеджера. Limit 500 events." },
+    ],
+    key_tables: ["Tracking.tracking_events"],
+    notes: [
+      "manager_id — UUID master_managers.id как text (cross-DB FK).",
+      "event_type примеры: outgoing_call, incoming_call, lead_added, lead_status_changed, custom_field_*_value_changed, task_*, note_*.",
+      "duration_sec=0 для не-звонков. Berlin-civil-day boundaries.",
+    ],
+  },
+  termin: {
+    domain: "termin",
+    summary: "B2G Бух Бератер pipeline (12154099) — cohort line chart срока от создания лида до termin DC/AA.",
+    scope: "b2g-only",
+    tools: [
+      { name: "termin.cohort_chart", verb: "trend", summary: "Per-day avg_dc_days и avg_aa_days. AA baseline = MIN(event_at WHERE status_id=93886075) когда есть, иначе created_at." },
+    ],
+    key_tables: [
+      "Analytics.leads_cohort (termin_date, aa_termin_date)",
+      "Analytics.lead_status_changes (status_id=93886075 = TERM_DC_DONE)",
+    ],
+    notes: [
+      "Только B2G (B2B не имеет termin pipeline). Pipeline_id = 12154099 (Бух Бератер).",
+      "Excluded: NULL termin'ы, отрицательные intervals.",
+      "termin_date / aa_termin_date — Kommo custom-fields, синкаются ETL'ом по name (см. project_session_20260428 memory).",
     ],
   },
   analytics: {
