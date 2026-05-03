@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   Line,
   LineChart,
@@ -228,6 +231,8 @@ export default function TerminTab() {
         }}
       />
       <QualLeadsDocsSection />
+      <FunnelTimingSection />
+      <UpcomingTerminsSection />
     </div>
   );
 }
@@ -833,16 +838,491 @@ function QualLeadsDocsSection() {
   );
 }
 
+// ── Funnel timing (E1+E2) ───────────────────────────
+
+interface FunnelStageRow {
+  from: string;
+  fromName: string;
+  to: string;
+  toName: string;
+  count: number;
+  avgDays: number | null;
+}
+
+function FunnelTimingSection() {
+  // 90d default: stage transitions take 20+ days each, so the 30d default used
+  // by the cohort sections leaves the funnel mostly empty (most leads in the
+  // window haven't completed the next transition yet). 90d shows mature data.
+  const initialRange = useMemo(() => {
+    const today = todayBerlinDate();
+    const start = new Date(today.getTime() - 89 * 86_400_000);
+    return { start, end: today };
+  }, []);
+  const [preset, setPreset] = useState<Preset>("custom");
+  const [range, setRange] = useState<{ start: Date; end: Date }>(initialRange);
+  const [data, setData] = useState<FunnelStageRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const hasDataRef = useRef(false);
+
+  const fetchData = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!hasDataRef.current) setLoading(true);
+      setError(null);
+      try {
+        const dateFrom = formatDate(range.start);
+        const dateTo = formatDate(range.end);
+        const res = await fetch(
+          `/api/dashboard/termin-funnel?dateFrom=${dateFrom}&dateTo=${dateTo}`,
+          { signal },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text}`);
+        }
+        const json = (await res.json()) as FunnelStageRow[];
+        setData(json);
+        hasDataRef.current = true;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        if (e instanceof TypeError && e.message === "Failed to fetch") return;
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [range.start, range.end],
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchData(ac.signal);
+    return () => ac.abort();
+  }, [fetchData]);
+
+  const handlePreset = (id: Preset) => {
+    setPreset(id);
+    if (id !== "custom") setRange(rangeForPreset(id));
+  };
+
+  const handleRangeChange = (r: DateRange) => {
+    if (!r.start) return;
+    setRange({ start: r.start, end: r.end ?? r.start });
+    setPreset("custom");
+  };
+
+  if (loading && !data) return <DinoLoader />;
+  if (error && !data) {
+    return (
+      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
+        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+        <p className="text-red-400 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  const isRefreshing = loading && !!data;
+  const hasData = !!data && data.length > 0 && data.some((s) => s.count > 0);
+  const dateDisplay = `${formatRu(range.start)} — ${formatRu(range.end)}`;
+
+  // Distinct hue per stage so the bar chart reads as a sequence.
+  const stageColors = ["#8b5cf6", "#06b6d4", "#10b981"];
+  const chartData = (data ?? []).map((s, i) => ({
+    label: `${s.fromName} → ${s.toName}`,
+    avgDays: s.avgDays,
+    count: s.count,
+    color: stageColors[i] ?? "#94a3b8",
+  }));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2 flex-wrap">
+          <CalendarDays className="w-4 h-4 text-violet-400 shrink-0" />
+          {PRESETS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => handlePreset(p.id)}
+              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
+                preset === p.id
+                  ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
+                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <CalendarPicker
+            mode="range"
+            value={{ start: range.start, end: range.end }}
+            onChange={handleRangeChange}
+            onClear={() => handlePreset("30d")}
+          />
+          <span className="text-xs text-slate-400 hidden sm:inline">{dateDisplay}</span>
+          <button
+            type="button"
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            title="Обновить"
+            aria-label="Обновить"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+      </div>
+
+      {isRefreshing && (
+        <div className="flex items-center justify-center">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-violet-500/10 border border-violet-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
+            <span className="text-[10px] text-violet-400 font-medium">Обновление данных...</span>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {(data ?? []).map((s, i) => (
+          <SummaryTile
+            key={s.from + s.to}
+            label={`${s.fromName} → ${s.toName}`}
+            value={
+              s.avgDays == null
+                ? "— дн."
+                : `${s.avgDays.toFixed(1)} дн.`
+            }
+            sublabel={`${s.count.toLocaleString("ru-RU")} переходов`}
+            accent={
+              i === 0
+                ? "text-violet-300"
+                : i === 1
+                  ? "text-cyan-300"
+                  : "text-emerald-300"
+            }
+          />
+        ))}
+      </div>
+
+      <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+            Воронка термин — среднее время между переходами
+          </h3>
+          <span className="text-[10px] text-slate-500 hidden sm:inline">
+            учтены лиды, чей переход состоялся в окне
+          </span>
+        </div>
+        {hasData ? (
+          <div className="h-[260px] sm:h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={chartData}
+                layout="vertical"
+                margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
+                <XAxis
+                  type="number"
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={{ stroke: "#334155" }}
+                  tickLine={false}
+                  unit=" дн"
+                />
+                <YAxis
+                  dataKey="label"
+                  type="category"
+                  tick={{ fill: "#94a3b8", fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={260}
+                />
+                <RTooltip
+                  content={({ active, payload }) => {
+                    if (!active || !payload || payload.length === 0) return null;
+                    const r = payload[0]?.payload as
+                      | { label: string; avgDays: number | null; count: number }
+                      | undefined;
+                    if (!r) return null;
+                    return (
+                      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
+                        <div className="font-semibold text-slate-200 mb-1">{r.label}</div>
+                        <div className="text-slate-300">
+                          Ср. время:{" "}
+                          <span className="font-medium text-violet-300">
+                            {r.avgDays == null ? "—" : `${r.avgDays.toFixed(1)} дн.`}
+                          </span>
+                        </div>
+                        <div className="text-slate-300">
+                          Переходов:{" "}
+                          <span className="font-medium text-slate-200">{r.count}</span>
+                        </div>
+                      </div>
+                    );
+                  }}
+                />
+                <Bar dataKey="avgDays" radius={[0, 6, 6, 0]}>
+                  {chartData.map((d) => (
+                    <Cell key={d.label} fill={d.color} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-16 text-center text-slate-500">
+            <CalendarDays className="w-8 h-8 mb-2 text-slate-600" />
+            <p className="text-sm">За выбранный период нет переходов на этих этапах.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Upcoming termins (D1) ───────────────────────────
+
+interface UpcomingRow {
+  date: string;
+  dcCount: number;
+  aaCount: number;
+  totalCount: number;
+}
+
+function UpcomingTerminsSection() {
+  const [days, setDays] = useState<number>(30);
+  const [data, setData] = useState<UpcomingRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const hasDataRef = useRef(false);
+
+  const fetchData = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!hasDataRef.current) setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`/api/dashboard/termins-upcoming?days=${days}`, {
+          signal,
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text}`);
+        }
+        const json = (await res.json()) as UpcomingRow[];
+        setData(json);
+        hasDataRef.current = true;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        if (e instanceof TypeError && e.message === "Failed to fetch") return;
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [days],
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchData(ac.signal);
+    return () => ac.abort();
+  }, [fetchData]);
+
+  const stats = useMemo(() => {
+    if (!data || data.length === 0)
+      return { totalDc: 0, totalAa: 0, peakDay: null as { date: string; n: number } | null };
+    let totalDc = 0;
+    let totalAa = 0;
+    let peakDay: { date: string; n: number } | null = null;
+    for (const r of data) {
+      totalDc += r.dcCount;
+      totalAa += r.aaCount;
+      if (peakDay == null || r.totalCount > peakDay.n) {
+        peakDay = { date: r.date, n: r.totalCount };
+      }
+    }
+    return { totalDc, totalAa, peakDay };
+  }, [data]);
+
+  if (loading && !data) return <DinoLoader />;
+  if (error && !data) {
+    return (
+      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
+        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+        <p className="text-red-400 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  const isRefreshing = loading && !!data;
+  const hasData = !!data && data.length > 0;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2 flex-wrap">
+          <CalendarDays className="w-4 h-4 text-cyan-400 shrink-0" />
+          {[7, 14, 30, 60, 90].map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => setDays(d)}
+              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
+                days === d
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
+              }`}
+            >
+              {d} дн
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            title="Обновить"
+            aria-label="Обновить"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+      </div>
+
+      {isRefreshing && (
+        <div className="flex items-center justify-center">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />
+            <span className="text-[10px] text-cyan-400 font-medium">Обновление данных...</span>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <SummaryTile
+          label="Всего ДЦ-термин на период"
+          value={stats.totalDc.toLocaleString("ru-RU")}
+          accent="text-blue-300"
+        />
+        <SummaryTile
+          label="Всего АА-термин на период"
+          value={stats.totalAa.toLocaleString("ru-RU")}
+          accent="text-emerald-300"
+        />
+        <SummaryTile
+          label="Пиковый день"
+          value={
+            stats.peakDay
+              ? `${stats.peakDay.n} (${formatRu(new Date(stats.peakDay.date))})`
+              : "—"
+          }
+          accent="text-cyan-300"
+        />
+      </div>
+
+      <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+            Запланировано термин — следующие {days} дней
+          </h3>
+          <span className="text-[10px] text-slate-500 hidden sm:inline">
+            ось X — дата термина (Берлин); исключены статус «Термин ДЦ отменен»
+          </span>
+        </div>
+        {hasData ? (
+          <div className="h-[260px] sm:h-[320px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={data ?? []}
+                margin={{ top: 5, right: 10, left: -10, bottom: 0 }}
+                stackOffset="sign"
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={{ stroke: "#334155" }}
+                  tickLine={false}
+                  tickFormatter={(v: string) => {
+                    const d = new Date(v);
+                    if (Number.isNaN(d.getTime())) return v;
+                    return d.toLocaleDateString("ru-RU", {
+                      day: "2-digit",
+                      month: "2-digit",
+                    });
+                  }}
+                />
+                <YAxis
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                  allowDecimals={false}
+                />
+                <RTooltip
+                  content={({ active, payload, label }) => {
+                    if (!active || !payload || payload.length === 0 || !label) return null;
+                    const r = payload[0]?.payload as UpcomingRow | undefined;
+                    if (!r) return null;
+                    const d = new Date(label);
+                    const dispDate = d.toLocaleDateString("ru-RU", {
+                      day: "numeric",
+                      month: "long",
+                      weekday: "long",
+                    });
+                    return (
+                      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
+                        <div className="font-semibold text-slate-200 mb-1">{dispDate}</div>
+                        <div className="flex items-center gap-2 text-slate-300">
+                          <span className="inline-block h-2 w-2 rounded-full bg-blue-400" />
+                          ДЦ: <span className="ml-auto font-medium text-blue-300">{r.dcCount}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-slate-300">
+                          <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+                          АА: <span className="ml-auto font-medium text-emerald-300">{r.aaCount}</span>
+                        </div>
+                        <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-200 font-semibold">
+                          Всего: {r.totalCount}
+                        </div>
+                      </div>
+                    );
+                  }}
+                />
+                <Legend
+                  wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
+                  iconType="circle"
+                />
+                <Bar dataKey="dcCount" name="Термин ДЦ" stackId="a" fill="#3b82f6" />
+                <Bar dataKey="aaCount" name="Термин АА" stackId="a" fill="#10b981" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-16 text-center text-slate-500">
+            <CalendarDays className="w-8 h-8 mb-2 text-slate-600" />
+            <p className="text-sm">На выбранный период нет назначенных термин.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Shared tile ─────────────────────────────────────
 
 function SummaryTile({
   label,
   value,
   accent,
+  sublabel,
 }: {
   label: string;
   value: string;
   accent: string;
+  sublabel?: string;
 }) {
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -850,6 +1330,9 @@ function SummaryTile({
         {label}
       </div>
       <div className={`text-xl font-semibold ${accent}`}>{value}</div>
+      {sublabel && (
+        <div className="text-[10px] text-slate-500 mt-1">{sublabel}</div>
+      )}
     </div>
   );
 }

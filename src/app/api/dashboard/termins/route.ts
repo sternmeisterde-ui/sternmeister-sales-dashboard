@@ -86,6 +86,10 @@ export async function GET(req: NextRequest) {
   const bucketBy =
     url.searchParams.get("bucketBy") === "termin_date" ? "termin_date" : "created_at";
 
+  // BERATER-only by design (confirmed 2026-05-03). FIRST_LINE has status_id=142
+  // ("Термин ДЦ" / closed-won) leads with termin_date populated, but those are
+  // "got termin straight away" — outside the planning workflow this dashboard
+  // tracks. Do NOT add FIRST_LINE here without an explicit ask.
   const pipelineId = B2G_PIPELINES.BERATER;
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;
   const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
