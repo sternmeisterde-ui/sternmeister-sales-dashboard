@@ -3,7 +3,6 @@
 import { cached } from "@/lib/kommo/cache";
 import { getTasks } from "@/lib/kommo/client";
 import {
-  aggregateLeadMetrics,
   aggregateLeadFunnelMetrics,
   aggregateTaskMetrics,
   sumCallMetrics,
@@ -54,7 +53,7 @@ import { okkEvaluations, okkCalls } from "@/lib/db/schema-okk";
 import { getDbForDepartment } from "@/lib/db";
 import { d1Calls, r1Calls } from "@/lib/db/schema-existing";
 import { analyticsDb } from "@/lib/db/analytics";
-import { sql as drizzleSql, and, eq, gte, lte, isNotNull } from "drizzle-orm";
+import { sql as drizzleSql } from "drizzle-orm";
 
 // ==================== Timezone helpers ====================
 
@@ -824,7 +823,6 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Analytics-backed per-master-id call map. Falls back to empty map on failure
   // (already handled upstream in trackAnalyticsError → new Map()).
   const callMetricsMap = analyticsCallMap;
-  const leadMetricsMap = aggregateLeadMetrics(snapshotLeads, from, to);
   const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
@@ -1049,7 +1047,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   let okkBuh1: number | null = null;
   let okkBuh2: number | null = null;
   let okkMed: number | null = null;
-  let slaMinutesB2B: number | null = null;
+  let slaShiftSecondsB2B: number | null = null;
   let avgWaitSecondsB2B: number | null = null;
   // Team-level call metrics for B2B — counts ALL managers in analytics.communications
   // (including ex-managers no longer in master_managers), so totals match Looker/Excel.
@@ -1097,7 +1095,7 @@ export async function buildDailyResponse(department: string, period: string, dat
     // 52.59 мин which matches sla_first_call_from_shift_seconds, not raw
     // sla_first_call_seconds (which includes evenings/nights, gives ~600 min).
     // Emitted as SECONDS — the UI renders HH:MM:SS via DURATION_SEC_KEYS.
-    slaMinutesB2B = slaFactsB2B.slaShiftSeconds ?? slaFactsB2B.slaSeconds;
+    slaShiftSecondsB2B = slaFactsB2B.slaShiftSeconds ?? slaFactsB2B.slaSeconds;
     // avgWait факт (Excel R72 "Ср. время ожидания ответа (сек)" = ring-to-answer
     // из Callgear/Cloudtalk). У нас только sla_first_call_from_shift_seconds
     // (часы до первого звонка на лиде) — это совсем другой SLA. Пока source не
@@ -1123,10 +1121,8 @@ export async function buildDailyResponse(department: string, period: string, dat
       : sumCallMetrics(sectionCallMetrics);
 
     // Overdue tasks: prefer analytics.tasks (continuously-refreshed mirror)
-    // over Kommo API. The analytics map is keyed by master_managers.id.
-    const sectionKommoUserIds = sectionManagers
-      .map((m) => m.kommoUserId)
-      .filter((id): id is number => id !== null);
+    // over Kommo API. The analytics map is keyed by master_managers.id; the
+    // taskMetricsMap fallback is keyed by kommoUserId.
     let totalOverdue = 0;
     for (const mgr of sectionManagers) {
       const fromAnalytics = overdueTasksAnalytics.get(mgr.id);
@@ -1174,7 +1170,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             getPlan,
             sectionDbLine: section.dbLine,
             okkBuh1, okkBuh2, okkMed,
-            slaMinutes: slaMinutesB2B,
+            slaShiftSeconds: slaShiftSecondsB2B,
             avgWaitSeconds: avgWaitSecondsB2B,
             frozenLeadsTotal,
           });
@@ -1199,7 +1195,7 @@ export async function buildDailyResponse(department: string, period: string, dat
           okkBuh1,
           okkBuh2,
           okkMed,
-          slaMinutes: slaMinutesB2B,
+          slaShiftSeconds: slaShiftSecondsB2B,
           avgWaitSeconds: avgWaitSecondsB2B,
           frozenLeadsTotal,
         });
@@ -1272,14 +1268,7 @@ export async function buildDailyResponse(department: string, period: string, dat
         }
       }
 
-      let percent: number | null = null;
-      if (plan && fact && Number(plan) > 0) {
-        if (metric.unit === "%") {
-          percent = null;
-        } else {
-          percent = Math.round((Number(fact) / Number(plan)) * 100);
-        }
-      }
+      const percent = computePercent(metric.key, metric.unit, fact, plan);
 
       // Computed metrics that need access to other metrics in the same section
       if (metric.key === "gutscheinPlanDone") {
@@ -1357,7 +1346,7 @@ export async function buildDailyResponse(department: string, period: string, dat
               else if (metric.key === "calls_avgWait_p") fact = "35";
               else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(avgWaitSecondsB2B) : null;
               else if (metric.key === "calls_sla_p") fact = "25";
-              else if (metric.key === "calls_sla_f") fact = slaMinutesB2B != null ? String(slaMinutesB2B) : null;
+              else if (metric.key === "calls_sla_f") fact = slaShiftSecondsB2B != null ? String(slaShiftSecondsB2B) : null;
               else if (metric.key === "calls_frozenLeads_f") fact = String(frozenLeadsMap.get(mgr.id) ?? 0);
               // ОКК per-manager — берём из общей окк-выборки (ETL пишет manager_id)
               else if (metric.key === "okk_avg_f") {
@@ -1394,10 +1383,7 @@ export async function buildDailyResponse(department: string, period: string, dat
               }
             }
 
-            let percent: number | null = null;
-            if (plan && fact && Number(plan) > 0 && metric.unit !== "%") {
-              percent = Math.round((Number(fact) / Number(plan)) * 100);
-            }
+            const percent = computePercent(metric.key, metric.unit, fact, plan);
             const planOut = metric.hasPlan ? plan : null;
             const percentOut = metric.hasPlan ? percent : null;
             return { key: metric.key, plan: planOut, fact, percent: percentOut };
@@ -1702,14 +1688,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             if (metric.key === "frozenLeads") {
               fact = String(frozenLeadsMap.get(mgr.id) ?? 0);
             }
-            let percent: number | null = null;
-            if (plan && fact && Number(plan) > 0) {
-              if (metric.unit === "%") {
-                percent = null;
-              } else {
-                percent = Math.round((Number(fact) / Number(plan)) * 100);
-              }
-            }
+            const percent = computePercent(metric.key, metric.unit, fact, plan);
             return { key: metric.key, plan, fact, percent };
           });
 
@@ -1770,7 +1749,9 @@ interface B2BFactContext {
   okkBuh1: number | null;
   okkBuh2: number | null;
   okkMed: number | null;
-  slaMinutes: number | null;
+  /** SLA "from-shift" в СЕКУНДАХ (не минутах — имя выровнено с UI
+   *  DURATION_SEC_KEYS, которое рендерит calls_sla_f как HH:MM:SS). */
+  slaShiftSeconds: number | null;
   avgWaitSeconds: number | null;
   frozenLeadsTotal: number | null;
 }
@@ -1779,6 +1760,48 @@ interface B2BFactContext {
 function pct(num: number, den: number): number {
   if (!den || den <= 0) return 0;
   return Math.round((num / den) * 100);
+}
+
+// ── Unit-aware percent (DRY) ─────────────────────────────────────────────
+// Plan/fact in Daily mix three units: integer counts, "%" (skip percent
+// entirely — fact already IS a percent), and durations.
+//
+// SLA / TLT facts are emitted in SECONDS so the UI can render HH:MM:SS, but
+// admin-entered plans (sla_p / calls_sla_p) are in MINUTES. Without this
+// normalisation the % column showed e.g. 600 sec ÷ 25 min = 2400 %, while
+// the traffic-light cell on the same row was correctly green (it does the
+// same conversion in DailyTab.getTrafficLightClass). Now both agree.
+//
+// Keep this set in sync with DailyTab DURATION_SEC_KEYS / DURATION_MIN_KEYS.
+const FACT_KEYS_IN_SECONDS = new Set<string>([
+  "sla_f", "sla_shift_f", "tlt_f", "calls_sla_f",
+]);
+const PLAN_KEYS_IN_MINUTES = new Set<string>([
+  "sla_p", "calls_sla_p",
+]);
+
+/**
+ * Plan/fact ratio expressed as %. Returns null when missing inputs or unit
+ * mismatch can't be reconciled. Unit "%" rows return null because their
+ * fact already IS a percent and the % column would be redundant.
+ */
+function computePercent(
+  metricKey: string,
+  unit: "" | "%" | "мин" | "шт" | "сек",
+  fact: string | null,
+  plan: string | null,
+): number | null {
+  if (unit === "%") return null;
+  if (!plan || !fact) return null;
+  const factNum = Number(fact);
+  let planNum = Number(plan);
+  if (!Number.isFinite(factNum) || !Number.isFinite(planNum) || planNum <= 0) return null;
+  // Plan minutes → seconds when the fact is emitted in seconds. Mirrors the
+  // same lookup table the UI uses for HH:MM:SS rendering.
+  if (FACT_KEYS_IN_SECONDS.has(metricKey) && PLAN_KEYS_IN_MINUTES.has(`${metricKey.slice(0, -2)}_p`)) {
+    planNum *= 60;
+  }
+  return Math.round((factNum / planNum) * 100);
 }
 
 function avgCheck(revenue: number, sales: number): number {
@@ -1948,7 +1971,7 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       // Defaults (ТЗ): 35 sec wait, 65 % dial, 25 min SLA, 85 % OKK.
       case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(ctx.avgWaitSeconds) : null; // R60
       case "calls_dialPercent_f":    return String(summaryCallMetrics.dialPercent); // R62
-      case "calls_sla_f":            return ctx.slaMinutes != null ? String(ctx.slaMinutes) : null; // R64
+      case "calls_sla_f":            return ctx.slaShiftSeconds != null ? String(ctx.slaShiftSeconds) : null; // R64 — секунды (UI рендерит HH:MM:SS)
       case "calls_frozenLeads_f":    return ctx.frozenLeadsTotal != null ? String(ctx.frozenLeadsTotal) : null;
       // OKK facts: prefer OKK DB; fall back to stored daily_plans for dates
       // before OKK launch (≈ 2026-03-04) where Excel has the only record.
@@ -2010,8 +2033,6 @@ function getFunnelFact(
 ): string | null {
   const flPipeline = firstLinePipeline ?? 10935879;
   const brPipeline = beraterPipeline ?? 12154099;
-  // Parse month from dateStr for month-boundary calculations (avoids UTC/TZ drift)
-  const [dsYear, dsMonth] = (dateStr ?? "2026-01-01").split("-").map(Number);
   // For historical dates without stored snapshots, snapshot-only metrics are unavailable
   if (!hasSnapshotData && SNAPSHOT_ONLY_METRICS.has(key)) {
     return null;

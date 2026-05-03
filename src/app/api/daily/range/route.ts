@@ -3,6 +3,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildDailyResponseCached, getBusinessToday } from "@/lib/daily/build-response";
 
+const ALLOWED_DEPARTMENTS = new Set(["b2g", "b2b"]);
+const ALLOWED_MODES = new Set(["days", "weeks", "months"]);
+// Mirror /api/daily — burst-dedup on server, browser/edge can serve a 30s
+// fresh copy + another 60s stale-while-revalidate window.
+const CACHE_HEADER = "private, max-age=30, stale-while-revalidate=60";
+
+function jsonOk<T>(data: T) {
+  return NextResponse.json(data, { headers: { "Cache-Control": CACHE_HEADER } });
+}
+
 // Sequential fetch with concurrency limit to avoid hammering Kommo API.
 // Past dates with DB snapshots resolve instantly; only "live" dates hit Kommo.
 async function fetchWithConcurrency<T>(
@@ -28,9 +38,16 @@ async function fetchWithConcurrency<T>(
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const department = url.searchParams.get("department") || "b2g";
-    const mode = url.searchParams.get("mode") || "days";
-    const monthParam = url.searchParams.get("month") || "";
+    const department = url.searchParams.get("department") ?? "b2g";
+    const mode = url.searchParams.get("mode") ?? "days";
+    const monthParam = url.searchParams.get("month") ?? "";
+
+    if (!ALLOWED_DEPARTMENTS.has(department)) {
+      return NextResponse.json({ error: `Invalid department: ${department}` }, { status: 400 });
+    }
+    if (!ALLOWED_MODES.has(mode)) {
+      return NextResponse.json({ error: `Invalid mode: ${mode} (expected days|weeks|months)` }, { status: 400 });
+    }
 
     if (mode === "days") {
       const [yearStr, monthStr] = monthParam.split("-");
@@ -55,7 +72,7 @@ export async function GET(req: NextRequest) {
       }
 
       if (dates.length === 0) {
-        return NextResponse.json({
+        return jsonOk({
           mode: "days",
           month: monthParam,
           days: [],
@@ -78,7 +95,7 @@ export async function GET(req: NextRequest) {
         buildDailyResponseCached(department, "month", monthDate),
       ]);
 
-      return NextResponse.json({
+      return jsonOk({
         mode: "days",
         month: monthParam,
         days: results,
@@ -118,7 +135,7 @@ export async function GET(req: NextRequest) {
       }
 
       if (weekMondays.length === 0) {
-        return NextResponse.json({ mode: "weeks", month: monthParam, weeks: [] });
+        return jsonOk({ mode: "weeks", month: monthParam, weeks: [] });
       }
 
       const results = await fetchWithConcurrency(
@@ -136,7 +153,7 @@ export async function GET(req: NextRequest) {
         return { ...snap, periodDate: `${fmt(mon)}-${fmt(sun)}` };
       });
 
-      return NextResponse.json({ mode: "weeks", month: monthParam, weeks: weeksWithLabels });
+      return jsonOk({ mode: "weeks", month: monthParam, weeks: weeksWithLabels });
     }
 
     if (mode === "months") {
@@ -152,14 +169,15 @@ export async function GET(req: NextRequest) {
         4,
       );
 
-      return NextResponse.json({
+      return jsonOk({
         mode: "months",
         year,
         months: results,
       });
     }
 
-    return NextResponse.json({ error: "Invalid mode, expected days, weeks or months" }, { status: 400 });
+    // Unreachable — ALLOWED_MODES guard above prevents this branch.
+    return NextResponse.json({ error: `Invalid mode: ${mode}` }, { status: 400 });
   } catch (error) {
     console.error("Daily range API error:", error);
     return NextResponse.json({ error: String(error) }, { status: 500 });

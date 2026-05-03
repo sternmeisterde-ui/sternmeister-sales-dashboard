@@ -223,8 +223,12 @@ export function getEditableMetricKeys(): { section: string; key: string; label: 
   return result;
 }
 
-/** Get sections by department — B2G uses line-based structure, B2B uses product/channel-based */
+/** Get sections by department — B2G uses line-based structure, B2B uses product/channel-based.
+ *  Anything other than "b2g" / "b2b" was previously silently treated as B2G,
+ *  hiding typos. Routes now validate department upstream; we mirror that here
+ *  so future callers don't reintroduce the silent fallback. */
 export function getDailySections(department: string): SectionDef[] {
   if (department === "b2b") return b2bDailySections;
-  return dailySections;
+  if (department === "b2g") return dailySections;
+  throw new Error(`Unknown department: ${department} (expected b2g or b2b)`);
 }

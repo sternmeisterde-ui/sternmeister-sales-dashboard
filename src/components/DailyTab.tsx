@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import {
   TrendingUp,
   Users,
@@ -10,7 +10,6 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
-  CalendarDays,
   DollarSign,
   Heart,
   Phone,
@@ -267,21 +266,25 @@ function planKeyFor(factKey: string): string {
   return `${factKey}_p`;
 }
 
+// Section accent — full-cell solid colour fill (no left border stripe).
+// Mirrors AnalyticsTab's getCriteriaBg() pattern: tint the entire cell, let
+// globals.css repaint the same Tailwind opacity utilities to a 200-shade
+// pastel under .theme-light so the colour reads on white. The sky/violet/
+// emerald hues (per line 1/2/3) keep the visual line-coding intact.
 function getSectionAccent(dbLine: string): {
   rowBg: string;
   cellBg: string;
-  border: string;
   text: string;
 } {
   switch (dbLine) {
     case "1":
-      return { rowBg: "bg-sky-900/30", cellBg: "bg-sky-900/30", border: "border-l-4 border-sky-500/60", text: "text-sky-200" };
+      return { rowBg: "bg-sky-500/15", cellBg: "bg-sky-500/15", text: "text-sky-200" };
     case "2":
-      return { rowBg: "bg-violet-900/30", cellBg: "bg-violet-900/30", border: "border-l-4 border-violet-500/60", text: "text-violet-200" };
+      return { rowBg: "bg-violet-500/15", cellBg: "bg-violet-500/15", text: "text-violet-200" };
     case "3":
-      return { rowBg: "bg-emerald-900/30", cellBg: "bg-emerald-900/30", border: "border-l-4 border-emerald-500/60", text: "text-emerald-200" };
+      return { rowBg: "bg-emerald-500/15", cellBg: "bg-emerald-500/15", text: "text-emerald-200" };
     default:
-      return { rowBg: "bg-blue-900/30", cellBg: "bg-blue-900/30", border: "border-l-4 border-blue-500/60", text: "text-blue-200" };
+      return { rowBg: "bg-blue-500/15", cellBg: "bg-blue-500/15", text: "text-blue-200" };
   }
 }
 
@@ -403,7 +406,6 @@ function SummaryTimeTable({
   columnSubLabels,
   selectedCol,
   onSelectCol,
-  department,
   monthPeriodDate,
   onPlanSave,
 }: {
@@ -412,7 +414,6 @@ function SummaryTimeTable({
   columnSubLabels: string[];
   selectedCol: number | null;
   onSelectCol: (idx: number) => void;
-  department: string;
   monthPeriodDate?: string;
   onPlanSave?: (dbLine: string, metricKey: string, value: string, periodType: string, periodDate: string) => Promise<void>;
 }) {
@@ -503,7 +504,8 @@ function SummaryTimeTable({
                 return (
                   <tr
                     key={m.metricKey}
-                    className={`light-panel-header cursor-pointer select-none border-t-2 border-white/10 ${accent.rowBg}`}
+                    data-section-line={m.sectionDbLine}
+                    className={`daily-section-header cursor-pointer select-none border-t-2 border-white/10 ${accent.rowBg}`}
                     onClick={() => toggleSection(m.sectionKey)}
                   >
                     {/* First cell is sticky-left with the label; remaining N
@@ -515,7 +517,7 @@ function SummaryTimeTable({
                         pattern as the first column of data rows, which has
                         worked reliably across browsers. */}
                     <td
-                      className={`sticky left-0 z-10 px-4 py-2.5 light-panel-header ${accent.cellBg} ${accent.border} min-w-[220px]`}
+                      className={`daily-section-header sticky left-0 z-10 px-4 py-2.5 ${accent.cellBg} min-w-[220px]`}
                     >
                       <div className="flex items-center gap-2">
                         {getSectionIcon(m.sectionIcon)}
@@ -530,7 +532,7 @@ function SummaryTimeTable({
                     </td>
                     <td
                       colSpan={columnLabels.length}
-                      className={`light-panel-header ${accent.cellBg} ${accent.border} p-0`}
+                      className={`daily-section-header ${accent.cellBg} p-0`}
                     />
                   </tr>
                 );
@@ -647,212 +649,8 @@ function SummaryTimeTable({
   );
 }
 
-// ====================== MANAGER METRICS TABLE ======================
-// Rows = managers, Columns = metrics
-
-function ManagerMetricsTable({
-  snapshot,
-  title,
-  department,
-  defaultCollapsed = false,
-}: {
-  snapshot: DailySnapshot | undefined;
-  title: string;
-  department: "b2g" | "b2b";
-  defaultCollapsed?: boolean;
-}) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
-  const managers = useMemo(() => collectManagers(snapshot), [snapshot]);
-
-  // Group by line for B2G; B2B stays flat (no line concept)
-  const groupedManagers = useMemo(() => {
-    if (department !== "b2g") return [{ line: null as string | null, managers }];
-    const order = ["1", "2", "3"];
-    const groups: Array<{ line: string | null; managers: ManagerData[] }> = [];
-    for (const line of order) {
-      const bucket = managers.filter((m) => m.line === line);
-      if (bucket.length > 0) groups.push({ line, managers: bucket });
-    }
-    const orphans = managers.filter((m) => !m.line || !order.includes(m.line));
-    if (orphans.length > 0) groups.push({ line: null, managers: orphans });
-    return groups;
-  }, [managers, department]);
-
-  // Build flat metric columns from all sections (non-header only)
-  const metricColumns = useMemo(() => {
-    if (!snapshot) return [];
-    const cols: Array<{
-      sectionKey: string;
-      sectionTitle: string;
-      sectionIcon: string;
-      metricKey: string;
-      metricLabel: string;
-    }> = [];
-    for (const sec of snapshot.sections) {
-      for (const m of sec.metrics) {
-        if (!m.isGroupHeader) {
-          cols.push({
-            sectionKey: sec.key,
-            sectionTitle: sec.title,
-            sectionIcon: sec.icon,
-            metricKey: m.key,
-            metricLabel: m.label,
-          });
-        }
-      }
-    }
-    return cols;
-  }, [snapshot]);
-
-  if (!snapshot || managers.length === 0) return null;
-
-  // Compute totals and averages
-  const totals = metricColumns.map((col) => {
-    let sum = 0;
-    let count = 0;
-    for (const mgr of managers) {
-      const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
-      if (val !== null) {
-        const num = Number(val);
-        if (!Number.isNaN(num)) {
-          sum += num;
-          count++;
-        }
-      }
-    }
-    return { sum, count, avg: count > 0 ? Math.round((sum / count) * 10) / 10 : 0 };
-  });
-
-  // Use summary fact from sections for totals (more accurate than summing per-manager)
-  const summaryTotals = metricColumns.map((col) => {
-    const section = snapshot.sections.find((s) => s.key === col.sectionKey);
-    const metric = section?.metrics.find((m) => m.key === col.metricKey);
-    return metric?.fact ?? null;
-  });
-
-  return (
-    // NOT glass-panel / overflow-hidden — both break position: sticky on the
-    // thead and first-column cells (backdrop-filter creates a containing
-    // block, overflow-hidden clips sticky). Plain bg + border reproduces the
-    // same visual and keeps sticky working. Matches the main Daily table.
-    <div className="text-slate-200 rounded-2xl border border-white/5 shadow-2xl bg-slate-900/40">
-      <div
-        className="px-4 py-3 border-b border-white/5 bg-slate-900/40 cursor-pointer hover:bg-slate-800/50 transition-colors flex items-center justify-between rounded-t-2xl"
-        onClick={() => setCollapsed((v) => !v)}
-      >
-        <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">
-          {title}
-        </span>
-        {collapsed
-          ? <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
-          : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
-        }
-      </div>
-      {!collapsed && <div className="w-full overflow-x-auto rounded-b-2xl">
-        <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
-          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
-            <tr className="border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[160px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
-                Менеджер
-              </th>
-              {metricColumns.map((col, i) => (
-                <th
-                  key={`${col.sectionKey}-${col.metricKey}-${i}`}
-                  className="px-2 py-2 text-center min-w-[80px]"
-                >
-                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold leading-tight">
-                    {col.metricLabel}
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="text-sm">
-            {/* Manager rows grouped by line (B2G) or flat (B2B) */}
-            {groupedManagers.map((group) => (
-              <Fragment key={group.line ?? "_flat"}>
-                {group.line !== null && (
-                  <tr className="light-panel-header border-t-2 border-white/10">
-                    {/* Split-td pattern: first cell sticky with the label,
-                        second cell fills the rest of the row with the accent. */}
-                    <td
-                      className={`sticky left-0 z-10 px-4 py-2 text-[11px] uppercase tracking-widest font-bold min-w-[160px] ${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} ${getSectionAccent(group.line).text}`}
-                    >
-                      {LINE_TITLES[group.line] ?? `Линия ${group.line}`}
-                      <span className="ml-2 text-slate-400 normal-case font-medium tracking-normal">
-                        · {group.managers.length} менеджер{group.managers.length === 1 ? "" : group.managers.length < 5 ? "а" : "ов"}
-                      </span>
-                    </td>
-                    <td
-                      colSpan={metricColumns.length}
-                      className={`${getSectionAccent(group.line).cellBg} ${getSectionAccent(group.line).border} p-0`}
-                    />
-                  </tr>
-                )}
-                {group.managers.map((mgr) => (
-                  <tr
-                    key={mgr.id}
-                    className="hover:bg-white/[0.02] transition-colors border-b border-white/[0.03]"
-                  >
-                    <td className="px-4 py-2 font-medium text-slate-300 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
-                      {mgr.name}
-                      {!mgr.kommoUserId && (
-                        <span className="ml-1 text-[9px] text-amber-500">! Kommo</span>
-                      )}
-                    </td>
-                    {metricColumns.map((col, i) => {
-                      const val = getManagerMetricFact(snapshot, col.sectionKey, col.metricKey, mgr.id);
-                      return (
-                        <td
-                          key={`${col.sectionKey}-${col.metricKey}-${i}`}
-                          className={`px-2 py-2 text-right font-mono text-[12px] ${getCellColor(val)}`}
-                        >
-                          {formatCell(val, col.metricKey)}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </Fragment>
-            ))}
-
-            {/* Итого row */}
-            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
-              <td className="px-4 py-2 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
-                Итого команда:
-              </td>
-              {summaryTotals.map((val, i) => (
-                <td
-                  key={i}
-                  className="px-2 py-2 text-right font-mono text-[12px] font-bold text-white"
-                >
-                  {formatCell(val, metricColumns[i]?.metricKey ?? "")}
-                </td>
-              ))}
-            </tr>
-
-            {/* Среднее row */}
-            <tr className="bg-slate-800/30">
-              <td className="px-4 py-2 text-slate-400 text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
-                Среднее:
-              </td>
-              {totals.map((t, i) => (
-                <td
-                  key={i}
-                  className="px-2 py-2 text-right font-mono text-[12px] text-slate-400"
-                >
-                  {t.count > 0 ? formatCellNumber(t.avg) : "—"}
-                </td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      </div>}
-    </div>
-  );
-}
-
-// ActiveManagersPanel removed — replaced by SchedulePopup
+// ManagerMetricsTable removed (superseded by ManagersCompareView).
+// ActiveManagersPanel removed — replaced by SchedulePopup.
 
 // ====================== MAIN COMPONENT ======================
 
@@ -892,9 +690,16 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     return () => { abort = true; };
   }, [department, selectedMonth]);
 
+  // Tracks whether we've ever loaded data — used to decide between the
+  // full-screen loader (first load) and the silent background-refresh
+  // pill (subsequent loads). A ref keeps fetchData stable; using `data`
+  // directly would re-create fetchData after every load and re-fire the
+  // useEffect that depends on it.
+  const hasLoadedRef = useRef(false);
+
   const fetchData = useCallback(
     async (signal?: AbortSignal) => {
-      if (!data) setLoading(true);
+      if (!hasLoadedRef.current) setLoading(true);
       setError(null);
       try {
         let url: string;
@@ -918,6 +723,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         }
         const json = await res.json();
         setData(json);
+        hasLoadedRef.current = true;
 
         // Auto-select today if in current month — Berlin civil comparison.
         if (mode === "days" && json.days) {
@@ -1005,18 +811,8 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
   // Monthly summary for per-manager table
   const monthlySnapshot = data?.monthlySummary;
 
-  // Schedule from today's snapshot (for active managers panel)
-  const todaySchedule = useMemo(() => {
-    if (mode !== "days" || !data?.days) return undefined;
-    // Berlin civil today — `new Date()` + browser-local getters bucketed
-    // around the user's local midnight, missing today's row in non-Berlin zones.
-    const today = berlinCivilComponents(todayBerlinDate());
-    const todayIdx = data.days.findIndex((d) => {
-      const dd = berlinCivilComponents(new Date(d.date));
-      return dd.d === today.d && dd.m === today.m && dd.y === today.y;
-    });
-    return todayIdx >= 0 ? data.days[todayIdx] : undefined;
-  }, [data, mode]);
+  // todaySchedule lookup removed — SchedulePopup queries the schedule
+  // directly via /api/managers/schedule, no need to derive from snapshots.
 
   const dateDisplay = mode === "days"
     ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
@@ -1218,7 +1014,6 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             columnSubLabels={columnSubLabels}
             selectedCol={selectedDayIdx}
             onSelectCol={setSelectedDayIdx}
-            department={department}
             monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
             onPlanSave={async (dbLine, metricKey, value, periodType, periodDate) => {
               // Optimistic UI — flip the edited metric's plan value in place
@@ -1403,7 +1198,14 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
   // Date-range filter (замена списка чекбоксов). CalendarPicker выдаёт start/end.
   const [dateRange, setDateRange] = useState<DateRange>({ start: null, end: null });
 
-  const effectiveSelected = selectedManagerIds ?? new Set(allManagers.map((m) => m.id));
+  // Memoised so the visibleManagers useMemo below doesn't re-run on every
+  // parent render: a fresh Set instance every render → fresh dep → re-filter
+  // → 100s of cells re-render. The Set instance now only changes when the
+  // user actually toggles a manager (or allManagers is reloaded).
+  const effectiveSelected = useMemo(
+    () => selectedManagerIds ?? new Set(allManagers.map((m) => m.id)),
+    [selectedManagerIds, allManagers],
+  );
   const effectiveSingle = selectedSingleMgr ?? (allManagers[0]?.id ?? null);
   // Filter allDateOptions by calendar range (if set) AND/OR by manual selection.
   // If both are set, prefer explicit selection. If neither is set, show all.

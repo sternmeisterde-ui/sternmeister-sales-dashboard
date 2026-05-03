@@ -212,13 +212,11 @@ body {
 
 /* ─────────────────────────────────────────────────────────────
    Plan-vs-Fact Traffic Light (Daily summary table)
-   Color band on the LEFT edge of a fact cell, tinted text.
-   Per UX research (NN Group, Harley 2016): full-cell backgrounds on
-   every numeric cell create a "christmas tree" effect and scan
-   fatigue beyond ~6 columns. The 4px edge bar preserves numeric
-   scanning while making outliers pop peripherally.
+   Full-cell colour fill — mirrors AnalyticsTab's `getCriteriaBg()` so
+   Daily and Аналитика scan identically. Earlier 3-px left-edge bar was
+   easy to miss; per user request the entire cell is now tinted.
 
-   Thresholds (set in getTrafficLightClass):
+   Thresholds (set in DailyTab.getTrafficLightClass):
      green  — fact ≥ 80% of plan (close-to-plan or over-achieved)
      yellow — 40–80% of plan
      red    — below 40% of plan
@@ -228,34 +226,23 @@ body {
 td.traffic-green,
 td.traffic-yellow,
 td.traffic-red {
-  position: relative;
   font-weight: 600;
 }
-td.traffic-green::before,
-td.traffic-yellow::before,
-td.traffic-red::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 3px;
-  border-radius: 2px;
-}
-td.traffic-green::before  { background-color: #22c55e; }   /* emerald-500 */
-td.traffic-yellow::before { background-color: #eab308; }   /* yellow-500  */
-td.traffic-red::before    { background-color: #ef4444; }   /* red-500     */
+/* Dark mode — translucent tint over the dark page bg. Matches Analytics
+   bg-emerald-500/5 / amber/5 / rose/5 visual weight. */
+td.traffic-green  { background-color: rgba(34, 197, 94, 0.18) !important; color: #86efac !important; }
+td.traffic-yellow { background-color: rgba(234, 179, 8, 0.18) !important; color: #fde047 !important; }
+td.traffic-red    { background-color: rgba(239, 68, 68, 0.18) !important; color: #fca5a5 !important; }
 
-/* Tint the text lightly too so the signal is readable when the
-   sticky left column scrolls across and covers the bar for a tick. */
-td.traffic-green  { color: #86efac !important; }   /* emerald-300 */
-td.traffic-yellow { color: #fde047 !important; }   /* yellow-300  */
-td.traffic-red    { color: #fca5a5 !important; }   /* red-300     */
+/* Sticky-cell override removed — traffic-light cells are never sticky
+   (sticky cells are the leftmost label column), so the generic td.sticky
+   fallback doesn't compete here. */
 
-/* Light theme: darker tints for contrast on white bg. */
-.theme-light td.traffic-green  { color: #166534 !important; }   /* emerald-800 */
-.theme-light td.traffic-yellow { color: #854d0e !important; }   /* yellow-800  */
-.theme-light td.traffic-red    { color: #991b1b !important; }   /* red-800     */
+/* Light theme — solid pastel fills + dark text, same palette as
+   AnalyticsTab's repaint (lines 544-552). */
+.theme-light td.traffic-green  { background-color: #a7f3d0 !important; color: #166534 !important; } /* emerald-200 / 800 */
+.theme-light td.traffic-yellow { background-color: #fde68a !important; color: #854d0e !important; } /* amber-200 / 800   */
+.theme-light td.traffic-red    { background-color: #fecaca !important; color: #991b1b !important; } /* rose-200  / 800   */
 
 /* Black/white overlays used as scrims */
 .theme-light .bg-black\/20,
@@ -557,6 +544,75 @@ td.traffic-red    { color: #fca5a5 !important; }   /* red-300     */
 }
 .theme-light .bg-slate-500\/10 {
   background-color: #f8fafc !important; /* slate-50 */
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Daily section headers — full-cell solid colour (Analytics style).
+   Replaces the old "border-l-4 stripe + faint /30 bg" pattern.
+   The .daily-section-header class lets us:
+     1) repaint the row in light mode WITHOUT the generic
+        `tr.light-panel-header td` blue (#bedcff) wiping it out;
+     2) override the sticky-cell fallback (#f0f9ff sky-50) so the
+        first sticky column matches the rest of the row.
+   Per-line colour comes from data-section-line="1|2|3" so we can
+   pick the same hue for both sticky and non-sticky cells.
+   ───────────────────────────────────────────────────────────── */
+
+/* Dark theme — Tailwind paints `bg-{hue}-500/15` directly; nothing
+   to override. Light theme remaps the same opacity utilities to
+   200-shade pastels — bright enough to read on white, tinted enough
+   to identify the line at a glance. */
+.theme-light .bg-sky-500\/15 {
+  background-color: #bae6fd !important; /* sky-200 */
+}
+.theme-light .bg-violet-500\/15 {
+  background-color: #ddd6fe !important; /* violet-200 */
+}
+.theme-light .bg-emerald-500\/15 {
+  background-color: #a7f3d0 !important; /* emerald-200 */
+}
+.theme-light .bg-blue-500\/15 {
+  background-color: #bfdbfe !important; /* blue-200 */
+}
+
+/* Light-theme readable text on those pastels — the dark `text-{hue}-200`
+   utilities used in dark mode would disappear on a pastel of the same hue. */
+.theme-light .daily-section-header .text-sky-200 {
+  color: #075985 !important; /* sky-800 */
+}
+.theme-light .daily-section-header .text-violet-200 {
+  color: #5b21b6 !important; /* violet-800 */
+}
+.theme-light .daily-section-header .text-emerald-200 {
+  color: #065f46 !important; /* emerald-800 */
+}
+.theme-light .daily-section-header .text-blue-200 {
+  color: #1e40af !important; /* blue-800 */
+}
+
+/* Sticky-cell override — beats the generic `td.sticky → sky-50` rule so
+   the first column inside a section header keeps the line accent. */
+.theme-light tr.daily-section-header td.sticky,
+.theme-light tr.daily-section-header td {
+  /* Per-line repaint via data-section-line attribute — matches the
+     non-sticky cells repainted above. */
+}
+.theme-light tr.daily-section-header[data-section-line="1"] td.sticky,
+.theme-light tr.daily-section-header[data-section-line="1"] td {
+  background-color: #bae6fd !important;
+}
+.theme-light tr.daily-section-header[data-section-line="2"] td.sticky,
+.theme-light tr.daily-section-header[data-section-line="2"] td {
+  background-color: #ddd6fe !important;
+}
+.theme-light tr.daily-section-header[data-section-line="3"] td.sticky,
+.theme-light tr.daily-section-header[data-section-line="3"] td {
+  background-color: #a7f3d0 !important;
+}
+/* Default / no line — fallback blue. */
+.theme-light tr.daily-section-header:not([data-section-line]) td.sticky,
+.theme-light tr.daily-section-header:not([data-section-line]) td {
+  background-color: #bfdbfe !important;
 }
 
 /* Login page — solid blue canvas, no gradient (per design direction). */
