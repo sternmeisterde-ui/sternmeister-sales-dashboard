@@ -150,6 +150,50 @@ export async function syncLeads(
   const rows: typeof leadsCohort.$inferInsert[] = [];
   const cache: LeadCacheEntry[] = [];
 
+  // B1: pre-fetch existing termin_date_first / aa_termin_date_first so the
+  // upcoming DELETE+INSERT doesn't drop the original commitment dates. Once
+  // a first-observed value is in DB it never changes — we only seed it for
+  // leads that don't have one yet.
+  const incomingLeadIds = raw
+    .map((l) => l.id)
+    .filter((id): id is number => typeof id === "number" && Number.isFinite(id));
+  const existingFirstDates = new Map<
+    number,
+    { terminDateFirst: Date | null; aaTerminDateFirst: Date | null }
+  >();
+  if (incomingLeadIds.length > 0) {
+    const FETCH_CHUNK = 5000;
+    for (let i = 0; i < incomingLeadIds.length; i += FETCH_CHUNK) {
+      const slice = incomingLeadIds.slice(i, i + FETCH_CHUNK);
+      const existing = await analyticsDb.execute<{
+        lead_id: number | string;
+        termin_date_first: string | Date | null;
+        aa_termin_date_first: string | Date | null;
+      }>(sql`
+        SELECT lead_id, termin_date_first, aa_termin_date_first
+        FROM analytics.leads_cohort
+        WHERE lead_id IN (${sql.join(slice.map((id) => sql`${id}`), sql`, `)})
+          AND (termin_date_first IS NOT NULL OR aa_termin_date_first IS NOT NULL)
+      `);
+      for (const r of existing.rows) {
+        existingFirstDates.set(Number(r.lead_id), {
+          terminDateFirst:
+            r.termin_date_first == null
+              ? null
+              : r.termin_date_first instanceof Date
+                ? r.termin_date_first
+                : new Date(r.termin_date_first),
+          aaTerminDateFirst:
+            r.aa_termin_date_first == null
+              ? null
+              : r.aa_termin_date_first instanceof Date
+                ? r.aa_termin_date_first
+                : new Date(r.aa_termin_date_first),
+        });
+      }
+    }
+  }
+
   for (const lead of raw) {
     const pipeline = lookups.pipelines.get(lead.pipeline_id);
     const status = pipeline?.statuses.get(lead.status_id);
@@ -196,6 +240,13 @@ export async function syncLeads(
       findByFieldId(cf, B2G_CUSTOM_FIELD_IDS.terminDateAA),
     );
 
+    // B1: write-once. Keep the existing first-date if any; otherwise seed
+    // with the current value (this becomes the FIRST observed date for new
+    // leads or for leads that just had their first termin set).
+    const existing = existingFirstDates.get(lead.id);
+    const terminDateFirst = existing?.terminDateFirst ?? terminDate;
+    const aaTerminDateFirst = existing?.aaTerminDateFirst ?? aaTerminDate;
+
     rows.push({
       leadId: lead.id,
       createdAt,
@@ -227,6 +278,8 @@ export async function syncLeads(
       b2bCloseReasonEnumId,
       terminDate,
       aaTerminDate,
+      terminDateFirst,
+      aaTerminDateFirst,
     });
   }
 

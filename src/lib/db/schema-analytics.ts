@@ -62,11 +62,19 @@ export const leadsCohort = analyticsSchema.table(
     // {740587 Неквал лид, 740593 Спам, 740595 Предложение сотрудничества}
     // drop a lead-call pair from the SLA AVG. See migration 0007.
     b2bCloseReasonEnumId: bigint("b2b_close_reason_enum_id", { mode: "number" }),
-    // Termin dashboard (Бух Бератер pipeline). Looked up by field NAME in
-    // sync-leads — see B2G_CUSTOM_FIELD_NAMES.terminDate / aaTerminDate.
+    // Termin dashboard (Бух Бератер pipeline). Looked up by field_id in
+    // sync-leads — see B2G_CUSTOM_FIELD_IDS.terminDateDC / terminDateAA.
     // Added in migration 0006_termin_dates.sql.
     terminDate: timestamp("termin_date"),
     aaTerminDate: timestamp("aa_termin_date"),
+    // FIRST observed value of each termin date (write-once at the row level
+    // — sync-leads.ts pre-fetches existing values on every resync and only
+    // writes them if currently NULL). Powers the planning dashboard's
+    // "первая запланированная дата" metric — termin_date itself drifts on
+    // every reschedule, so the original commitment would otherwise be lost.
+    // Added in migration 0013_termin_first_dates.sql.
+    terminDateFirst: timestamp("termin_date_first"),
+    aaTerminDateFirst: timestamp("aa_termin_date_first"),
   },
   (t) => [
     index().on(t.leadId),

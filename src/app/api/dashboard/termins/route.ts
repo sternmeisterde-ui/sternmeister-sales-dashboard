@@ -1,4 +1,4 @@
-// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week&bucketBy=created_at|termin_date
+// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week&bucketBy=created_at|termin_date&useFirst=1|0
 //
 // Cohort-style aggregation for the Termin dashboard tab. For every cohort
 // bucket (day or week, depending on `granularity`) returns:
@@ -10,8 +10,18 @@
 //
 // `bucketBy` controls both the cohort axis AND the date-window filter:
 //   - "created_at" (default): bucket and filter by deal creation date.
-//   - "termin_date": bucket and filter by COALESCE(termin_date, aa_termin_date)
-//     — i.e., the deal's primary termin (DC if present, else AA).
+//   - "termin_date": bucket and filter by the deal's primary termin (DC if
+//     present, else AA).
+//
+// `useFirst` controls which termin date is used in metrics and the
+// `bucketBy=termin_date` axis:
+//   - 1 (default): the FIRST observed termin date (`termin_date_first` /
+//     `aa_termin_date_first`). Captures the original commitment, so the
+//     "avg days to termin" metric reflects how long it took to schedule
+//     the *first* termin — not whatever is currently scheduled after
+//     N reschedules. This matches B1=A from the planning spec.
+//   - 0: current `termin_date` / `aa_termin_date`, mirrors what's in Kommo
+//     right now (post-reschedules).
 //
 // granularity=week: GROUP BY DATE_TRUNC('week', <bucket source>). Postgres
 // weeks are Monday-aligned (ISO 8601), so the returned `date` is the Monday
@@ -86,6 +96,10 @@ export async function GET(req: NextRequest) {
   const bucketBy =
     url.searchParams.get("bucketBy") === "termin_date" ? "termin_date" : "created_at";
 
+  // useFirst defaults to 1 (first observed termin date). Pass 0 to use the
+  // current rescheduled value.
+  const useFirst = url.searchParams.get("useFirst") !== "0";
+
   // BERATER-only by design (confirmed 2026-05-03). FIRST_LINE has status_id=142
   // ("Термин ДЦ" / closed-won) leads with termin_date populated, but those are
   // "got termin straight away" — outside the planning workflow this dashboard
@@ -94,12 +108,17 @@ export async function GET(req: NextRequest) {
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;
   const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
 
+  // Termin column references — chosen by useFirst once and reused everywhere
+  // so the metric, bucket, and filter all refer to the same value.
+  const dcCol = useFirst ? sql`lc.termin_date_first` : sql`lc.termin_date`;
+  const aaCol = useFirst ? sql`lc.aa_termin_date_first` : sql`lc.aa_termin_date`;
+
   // Bucket source: created_at OR the deal's primary termin (DC if set, else AA).
   // The same expression drives both the GROUP BY axis and the date-window filter,
   // so the cohort always matches what the user sees on the X axis.
   const bucketSource =
     bucketBy === "termin_date"
-      ? sql`COALESCE(lc.termin_date, lc.aa_termin_date)`
+      ? sql`COALESCE(${dcCol}, ${aaCol})`
       : sql`lc.created_at`;
 
   // Bucket in Europe/Berlin. PG stores `created_at` / `termin_date` as
@@ -145,8 +164,8 @@ export async function GET(req: NextRequest) {
         ${cohortBucketExpr} AS cohort_date,
         lc.lead_id,
         lc.created_at,
-        lc.termin_date,
-        lc.aa_termin_date,
+        ${dcCol} AS dc_termin,
+        ${aaCol} AS aa_termin,
         dd.dc_done_at,
         COALESCE(c.cancel_events, 0) AS cancel_events,
         -- B3: lead is "cancelled-not-rescheduled" if its CURRENT status is
@@ -160,24 +179,24 @@ export async function GET(req: NextRequest) {
       WHERE lc.pipeline_id = ${pipelineId}
         AND ${bucketSource} >= ${fromDate}
         AND ${bucketSource} <= ${toDateEnd}
-        AND (lc.termin_date IS NOT NULL OR lc.aa_termin_date IS NOT NULL)
+        AND (${dcCol} IS NOT NULL OR ${aaCol} IS NOT NULL)
         AND lc.status_id <> ${cancelledStatusId}
     )
     SELECT
       cohort_date::text AS cohort_date,
       ROUND(AVG(
-        EXTRACT(EPOCH FROM (termin_date - created_at)) / 86400.0
+        EXTRACT(EPOCH FROM (dc_termin - created_at)) / 86400.0
       ) FILTER (
-        WHERE termin_date IS NOT NULL
-          AND termin_date >= created_at
+        WHERE dc_termin IS NOT NULL
+          AND dc_termin >= created_at
       )::numeric, 1) AS dc_avg_days,
       ROUND(AVG(
         EXTRACT(EPOCH FROM (
-          aa_termin_date - COALESCE(dc_done_at, created_at)
+          aa_termin - COALESCE(dc_done_at, created_at)
         )) / 86400.0
       ) FILTER (
-        WHERE aa_termin_date IS NOT NULL
-          AND aa_termin_date >= COALESCE(dc_done_at, created_at)
+        WHERE aa_termin IS NOT NULL
+          AND aa_termin >= COALESCE(dc_done_at, created_at)
       )::numeric, 1) AS aa_avg_days,
       COUNT(*)::int AS cnt,
       COUNT(*) FILTER (WHERE cancel_events > 0)::int AS rescheduled_cnt

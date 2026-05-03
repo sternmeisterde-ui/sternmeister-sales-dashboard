@@ -255,6 +255,9 @@ function TerminDashboardSection({
     rangeForPreset("30d"),
   );
   const [granularity, setGranularity] = useState<Granularity>("day");
+  // useFirst defaults to TRUE per B1=A: original committed termin date, not
+  // whatever's been rescheduled to. Toggle exposed in the filter row.
+  const [useFirst, setUseFirst] = useState<boolean>(true);
   const [data, setData] = useState<TerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -267,8 +270,9 @@ function TerminDashboardSection({
       try {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
+        const useFirstParam = useFirst ? "1" : "0";
         const res = await fetch(
-          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}`,
+          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}`,
           { signal },
         );
         if (!res.ok) {
@@ -286,7 +290,7 @@ function TerminDashboardSection({
         setLoading(false);
       }
     },
-    [range.start, range.end, granularity, bucketBy],
+    [range.start, range.end, granularity, bucketBy, useFirst],
   );
 
   useEffect(() => {
@@ -403,6 +407,34 @@ function TerminDashboardSection({
                 {g === "day" ? "День" : "Неделя"}
               </button>
             ))}
+          </div>
+          <div
+            className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5"
+            title="Какая дата термина учитывается: первая назначенная или текущая (после переносов)"
+          >
+            {(
+              [
+                ["first", "Первая"],
+                ["latest", "Текущая"],
+              ] as const
+            ).map(([key, label]) => {
+              const active = (key === "first") === useFirst;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setUseFirst(key === "first")}
+                  className={`text-[10px] uppercase tracking-wider px-3 py-1 rounded-md transition-colors ${
+                    active
+                      ? "bg-blue-500/20 text-blue-300"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                  aria-pressed={active}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
           <CalendarPicker
             mode="range"
