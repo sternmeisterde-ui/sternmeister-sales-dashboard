@@ -107,7 +107,10 @@ export async function GET(req: NextRequest) {
         AND lc.created_at <= ${toDateEnd}
         AND (
           lc.non_qual_enum_id IS NULL
-          OR lc.non_qual_enum_id <> ALL(${NON_QUAL_EXCLUDED_ENUM_IDS})
+          OR lc.non_qual_enum_id NOT IN (${sql.join(
+            NON_QUAL_EXCLUDED_ENUM_IDS.map((id) => sql`${id}`),
+            sql`, `,
+          )})
         )
     )
     SELECT
