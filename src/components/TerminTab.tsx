@@ -233,6 +233,8 @@ export default function TerminTab() {
       <QualLeadsDocsSection />
       <FunnelTimingSection />
       <UpcomingTerminsSection />
+      <PreTerminSection />
+      <PlanVsFactSection />
     </div>
   );
 }
@@ -1307,6 +1309,493 @@ function UpcomingTerminsSection() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Pre-termin (D2) ─────────────────────────────────
+
+interface PreTerminApiRow {
+  bucket: "pre_dc" | "post_dc" | "limbo";
+  statusId: number;
+  statusName: string;
+  count: number;
+  avgDaysInStatus: number | null;
+}
+
+const BUCKET_META: Record<
+  PreTerminApiRow["bucket"],
+  { label: string; accent: string; barColor: string }
+> = {
+  pre_dc: {
+    label: "До термина ДЦ",
+    accent: "text-blue-300",
+    barColor: "#3b82f6",
+  },
+  post_dc: {
+    label: "Между ДЦ и Гутшайном",
+    accent: "text-emerald-300",
+    barColor: "#10b981",
+  },
+  limbo: {
+    label: "В отмене (ждут переноса)",
+    accent: "text-amber-300",
+    barColor: "#f59e0b",
+  },
+};
+
+function PreTerminSection() {
+  const [data, setData] = useState<PreTerminApiRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const hasDataRef = useRef(false);
+
+  const fetchData = useCallback(async (signal?: AbortSignal) => {
+    if (!hasDataRef.current) setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/dashboard/pre-termin`, { signal });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`API error ${res.status}: ${text}`);
+      }
+      const json = (await res.json()) as PreTerminApiRow[];
+      setData(json);
+      hasDataRef.current = true;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof TypeError && e.message === "Failed to fetch") return;
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchData(ac.signal);
+    return () => ac.abort();
+  }, [fetchData]);
+
+  const buckets = useMemo(() => {
+    if (!data)
+      return { pre_dc: 0, post_dc: 0, limbo: 0 } as Record<
+        PreTerminApiRow["bucket"],
+        number
+      >;
+    const sums = { pre_dc: 0, post_dc: 0, limbo: 0 } as Record<
+      PreTerminApiRow["bucket"],
+      number
+    >;
+    for (const r of data) sums[r.bucket] += r.count;
+    return sums;
+  }, [data]);
+
+  if (loading && !data) return <DinoLoader />;
+  if (error && !data) {
+    return (
+      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
+        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+        <p className="text-red-400 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  const isRefreshing = loading && !!data;
+  const hasData = !!data && data.some((r) => r.count > 0);
+
+  // Sort by bucket order (pre_dc, post_dc, limbo) then by count desc within
+  // each — so the chart reads as a funnel timeline.
+  const sortedRows = (data ?? [])
+    .slice()
+    .sort((a, b) => {
+      const order = { pre_dc: 0, post_dc: 1, limbo: 2 };
+      if (order[a.bucket] !== order[b.bucket])
+        return order[a.bucket] - order[b.bucket];
+      return b.count - a.count;
+    })
+    .filter((r) => r.count > 0);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <CalendarDays className="w-4 h-4 text-cyan-400" />
+          <span className="text-xs text-slate-300 font-semibold tracking-wide uppercase">
+            Ожидающие термин (snapshot)
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => fetchData()}
+          disabled={loading}
+          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+          title="Обновить"
+          aria-label="Обновить"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
+
+      {isRefreshing && (
+        <div className="flex items-center justify-center">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />
+            <span className="text-[10px] text-cyan-400 font-medium">
+              Обновление данных...
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {(["pre_dc", "post_dc", "limbo"] as const).map((b) => (
+          <SummaryTile
+            key={b}
+            label={BUCKET_META[b].label}
+            value={buckets[b].toLocaleString("ru-RU")}
+            accent={BUCKET_META[b].accent}
+          />
+        ))}
+      </div>
+
+      <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+            Распределение по статусам
+          </h3>
+          <span className="text-[10px] text-slate-500 hidden sm:inline">
+            avg-дней — среднее время с последнего перехода
+          </span>
+        </div>
+        {hasData ? (
+          <div className="h-[400px] sm:h-[440px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={sortedRows}
+                layout="vertical"
+                margin={{ top: 5, right: 30, left: 0, bottom: 0 }}
+              >
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="#1e293b"
+                  horizontal={false}
+                />
+                <XAxis
+                  type="number"
+                  tick={{ fill: "#64748b", fontSize: 11 }}
+                  axisLine={{ stroke: "#334155" }}
+                  tickLine={false}
+                  allowDecimals={false}
+                />
+                <YAxis
+                  dataKey="statusName"
+                  type="category"
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={280}
+                />
+                <RTooltip
+                  content={({ active, payload }) => {
+                    if (!active || !payload || payload.length === 0) return null;
+                    const r = payload[0]?.payload as PreTerminApiRow | undefined;
+                    if (!r) return null;
+                    return (
+                      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
+                        <div className="font-semibold text-slate-200 mb-1">
+                          {r.statusName}
+                        </div>
+                        <div className="text-slate-300">
+                          В статусе:{" "}
+                          <span className="font-medium text-cyan-300">
+                            {r.count}
+                          </span>
+                        </div>
+                        <div className="text-slate-300">
+                          Ср. время с последнего перехода:{" "}
+                          <span className="font-medium text-slate-200">
+                            {r.avgDaysInStatus == null
+                              ? "—"
+                              : `${r.avgDaysInStatus.toFixed(1)} дн.`}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">
+                          Группа: {BUCKET_META[r.bucket].label}
+                        </div>
+                      </div>
+                    );
+                  }}
+                />
+                <Bar dataKey="count" radius={[0, 6, 6, 0]}>
+                  {sortedRows.map((r) => (
+                    <Cell key={r.statusId} fill={BUCKET_META[r.bucket].barColor} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-16 text-center text-slate-500">
+            <CalendarDays className="w-8 h-8 mb-2 text-slate-600" />
+            <p className="text-sm">Нет лидов в pre-termin статусах.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Plan vs fact + forecast (D3 + D4) ───────────────
+
+interface PlanVsFactResp {
+  month: string;
+  monthStart: string;
+  monthEnd: string;
+  isCurrentMonth: boolean;
+  dc: {
+    plan: number;
+    fact: number;
+    completionRate: number | null;
+    scheduledFuture: number;
+    forecast: number | null;
+  };
+  aa: {
+    plan: number;
+    fact: number;
+    completionRate: number | null;
+    scheduledFuture: number;
+    forecast: number | null;
+  };
+}
+
+function shiftMonth(month: string, delta: number): string {
+  const y = Number(month.slice(0, 4));
+  const m = Number(month.slice(5, 7));
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${d.getUTCFullYear()}`.padStart(4, "0") +
+    "-" + `${d.getUTCMonth() + 1}`.padStart(2, "0");
+}
+
+function PlanVsFactSection() {
+  const initialMonth = useMemo(() => {
+    const today = todayBerlinDate();
+    const { y, m } = berlinCivilComponents(today);
+    return `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}`;
+  }, []);
+  const [month, setMonth] = useState<string>(initialMonth);
+  const [data, setData] = useState<PlanVsFactResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const hasDataRef = useRef(false);
+
+  const fetchData = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!hasDataRef.current) setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(
+          `/api/dashboard/termin-plan-vs-fact?month=${month}`,
+          { signal },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error ${res.status}: ${text}`);
+        }
+        const json = (await res.json()) as PlanVsFactResp;
+        setData(json);
+        hasDataRef.current = true;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        if (e instanceof TypeError && e.message === "Failed to fetch") return;
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [month],
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchData(ac.signal);
+    return () => ac.abort();
+  }, [fetchData]);
+
+  if (loading && !data) return <DinoLoader />;
+  if (error && !data) {
+    return (
+      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
+        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
+        <p className="text-red-400 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  const isRefreshing = loading && !!data;
+
+  const monthLabel = (() => {
+    const [y, m] = month.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("ru-RU", {
+      month: "long",
+      year: "numeric",
+    });
+  })();
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <CalendarDays className="w-4 h-4 text-violet-400" />
+          <button
+            type="button"
+            onClick={() => setMonth(shiftMonth(month, -1))}
+            className="text-[10px] uppercase tracking-wider px-2 py-1.5 rounded-lg bg-slate-800/40 text-slate-400 border border-white/5 hover:text-white"
+          >
+            ◀ предыдущий
+          </button>
+          <span className="text-sm font-semibold text-slate-200 px-2 capitalize">
+            {monthLabel}
+          </span>
+          <button
+            type="button"
+            onClick={() => setMonth(shiftMonth(month, +1))}
+            className="text-[10px] uppercase tracking-wider px-2 py-1.5 rounded-lg bg-slate-800/40 text-slate-400 border border-white/5 hover:text-white"
+            disabled={month >= initialMonth}
+          >
+            следующий ▶
+          </button>
+          <button
+            type="button"
+            onClick={() => setMonth(initialMonth)}
+            className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg bg-violet-500/20 text-violet-300 border border-violet-500/40 ml-2"
+          >
+            текущий
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={() => fetchData()}
+          disabled={loading}
+          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+          title="Обновить"
+          aria-label="Обновить"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
+
+      {isRefreshing && (
+        <div className="flex items-center justify-center">
+          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-violet-500/10 border border-violet-500/20">
+            <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
+            <span className="text-[10px] text-violet-400 font-medium">
+              Обновление данных...
+            </span>
+          </div>
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="glass-panel rounded-2xl border border-white/5 p-4 sm:p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+                Термин ДЦ — план vs факт
+              </h3>
+              {data.dc.completionRate != null && (
+                <span className="text-[10px] text-slate-500">
+                  истор. конверсия план→факт за 90 дн = {data.dc.completionRate}%
+                </span>
+              )}
+            </div>
+            <PlanVsFactGrid
+              plan={data.dc.plan}
+              fact={data.dc.fact}
+              future={data.dc.scheduledFuture}
+              forecast={data.dc.forecast}
+              accentBlue
+              isCurrentMonth={data.isCurrentMonth}
+            />
+          </div>
+
+          <div className="glass-panel rounded-2xl border border-white/5 p-4 sm:p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
+                Термин АА — план vs факт
+              </h3>
+              {data.aa.completionRate != null && (
+                <span className="text-[10px] text-slate-500">
+                  истор. конверсия план→факт за 90 дн = {data.aa.completionRate}%
+                </span>
+              )}
+            </div>
+            <PlanVsFactGrid
+              plan={data.aa.plan}
+              fact={data.aa.fact}
+              future={data.aa.scheduledFuture}
+              forecast={data.aa.forecast}
+              accentBlue={false}
+              isCurrentMonth={data.isCurrentMonth}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PlanVsFactGrid({
+  plan,
+  fact,
+  future,
+  forecast,
+  accentBlue,
+  isCurrentMonth,
+}: {
+  plan: number;
+  fact: number;
+  future: number;
+  forecast: number | null;
+  accentBlue: boolean;
+  isCurrentMonth: boolean;
+}) {
+  const planFulfilled = plan > 0 ? Math.round((fact / plan) * 100) : null;
+  const factColor = accentBlue ? "text-blue-300" : "text-emerald-300";
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <SummaryTile label="План на месяц" value={plan.toLocaleString("ru-RU")} accent="text-slate-200" />
+      <SummaryTile
+        label={isCurrentMonth ? "Факт на сегодня" : "Факт"}
+        value={fact.toLocaleString("ru-RU")}
+        accent={factColor}
+        sublabel={
+          planFulfilled != null
+            ? `${planFulfilled}% от плана`
+            : undefined
+        }
+      />
+      <SummaryTile
+        label={isCurrentMonth ? "Запланировано до конца месяца" : "—"}
+        value={isCurrentMonth ? future.toLocaleString("ru-RU") : "—"}
+        accent="text-slate-200"
+      />
+      <SummaryTile
+        label={isCurrentMonth ? "Прогноз на конец месяца" : "—"}
+        value={
+          !isCurrentMonth
+            ? "—"
+            : forecast == null
+              ? "—"
+              : forecast.toLocaleString("ru-RU")
+        }
+        accent="text-violet-300"
+        sublabel={
+          isCurrentMonth && forecast != null && plan > 0
+            ? `${Math.round((forecast / plan) * 100)}% от плана`
+            : undefined
+        }
+      />
     </div>
   );
 }
