@@ -68,13 +68,22 @@ export async function GET(req: NextRequest) {
   const granularity =
     url.searchParams.get("granularity") === "week" ? "week" : "day";
 
-  const pipelineId = B2G_PIPELINES.FIRST_LINE;
+  // FIRST_LINE only (option A). Verified empirically (2026-05-03) that BERATER
+  // is an independent intake — of 729 BERATER leads in 90d, 723 originated in
+  // BERATER directly, only 1 transferred from FIRST_LINE. Including BERATER
+  // would add 253 qual leads / 0 docs events to the cohort = noise that drags
+  // conversion down without reflecting any real flow. Ever-in-FIRST_LINE via
+  // status_changes (option C) is the marginally cleaner alternative if/when
+  // it matters (gives 8.4% vs 8.5% — same in practice).
+  const firstLineId = B2G_PIPELINES.FIRST_LINE;
   const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
 
+  // Bucket in Europe/Berlin (see termins/route.ts for rationale).
+  const berlinCreated = sql`(lc.created_at) AT TIME ZONE 'Europe/Berlin'`;
   const cohortBucketExpr =
     granularity === "week"
-      ? sql`DATE_TRUNC('week', lc.created_at)::date`
-      : sql`DATE(lc.created_at)`;
+      ? sql`DATE_TRUNC('week', ${berlinCreated})::date`
+      : sql`DATE(${berlinCreated})`;
 
   const result = await (
     analyticsDb as {
@@ -90,7 +99,7 @@ export async function GET(req: NextRequest) {
       -- Earliest moment each lead entered "Документы отправлены в ДЦ".
       SELECT lead_id, MIN(event_at) AS docs_sent_at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id = ${firstLineId}
         AND status_id = ${docsSentStatusId}
       GROUP BY lead_id
     ),
@@ -102,7 +111,7 @@ export async function GET(req: NextRequest) {
         ds.docs_sent_at
       FROM analytics.leads_cohort lc
       LEFT JOIN docs_sent ds ON ds.lead_id = lc.lead_id
-      WHERE lc.pipeline_id = ${pipelineId}
+      WHERE lc.pipeline_id = ${firstLineId}
         AND lc.created_at >= ${fromDate}
         AND lc.created_at <= ${toDateEnd}
         AND (

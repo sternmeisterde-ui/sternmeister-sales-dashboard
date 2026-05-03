@@ -6,7 +6,10 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { sql } from "drizzle-orm";
 import type { KommoLookups } from "./lookups";
-import { B2B_CUSTOM_FIELD_NAMES, B2G_CUSTOM_FIELD_NAMES } from "@/lib/kommo/pipeline-config";
+import {
+  B2B_CUSTOM_FIELD_NAMES,
+  B2G_CUSTOM_FIELD_IDS,
+} from "@/lib/kommo/pipeline-config";
 
 // Custom field IDs in Kommo for this account
 const CF = {
@@ -79,6 +82,14 @@ function findByName(fields: CustomFields, names: readonly string[]): unknown | u
     }
   }
   return undefined;
+}
+
+/** Locate a custom field by its EXACT Kommo field_id and return its first
+ *  value. Preferred over findByName when the field's intent is unique (e.g.
+ *  "Дата термина ДЦ" 887026 vs "Дата термина" 885996 — distinct purposes,
+ *  must not be conflated). */
+function findByFieldId(fields: CustomFields, fieldId: number): unknown | undefined {
+  return fields?.find((f) => f?.field_id === fieldId)?.values?.[0]?.value;
 }
 
 export interface LeadCacheEntry {
@@ -173,11 +184,17 @@ export async function syncLeads(
       lead.custom_fields_values as Array<{ field_id: number; values: Array<{ enum_id?: number }> }> | null,
       CF.B2B_CLOSE_REASON,
     );
-    // Termin dashboard fields — Бух Бератер pipeline (12154099). Other
-    // pipelines simply don't have these fields, so findByName returns
-    // undefined and parseDate yields NULL — no extra guard needed.
-    const terminDate = parseDate(findByName(cf, B2G_CUSTOM_FIELD_NAMES.terminDate));
-    const aaTerminDate = parseDate(findByName(cf, B2G_CUSTOM_FIELD_NAMES.aaTerminDate));
+    // Termin dashboard fields — Бух Бератер pipeline (12154099). Read by
+    // explicit field_id so the priority is unambiguous: prefer the specific
+    // "Дата термина ДЦ" (887026), fall back to the legacy generic
+    // "Дата термина" (885996) ONLY when the specific one is unset (older
+    // leads predating the DC/AA split). AA has no legacy counterpart.
+    const terminDate =
+      parseDate(findByFieldId(cf, B2G_CUSTOM_FIELD_IDS.terminDateDC)) ??
+      parseDate(findByFieldId(cf, B2G_CUSTOM_FIELD_IDS.terminDateGeneric));
+    const aaTerminDate = parseDate(
+      findByFieldId(cf, B2G_CUSTOM_FIELD_IDS.terminDateAA),
+    );
 
     rows.push({
       leadId: lead.id,

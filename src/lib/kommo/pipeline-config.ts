@@ -456,20 +456,35 @@ export const B2B_CUSTOM_FIELD_NAMES = {
 } as const;
 
 // ==================== B2G CUSTOM FIELDS (Бух Бератер leads) ====================
-// Resolved by field NAME (case-insensitive, trimmed) — same approach as B2B
-// payment fields, since Kommo field IDs differ between accounts/pipelines.
+// Resolved by field_id (NOT name) — names can be renamed in Kommo, and the
+// previous name-based findByName lost priority order through Set semantics:
+// when both "Дата термина ДЦ" and "Дата термина" were present, whichever
+// Kommo emitted first won. Field IDs are stable and disambiguate by intent.
 //
 // Termin dates power /api/dashboard/termins (cohort chart of avg days from
 // deal creation → assigned termin).
 //
 // Verified live (2026-04-28) on Бух Бератер leads via inspect-one-lead.ts:
 //   ┌─ field_id ─┬─ field_name ─────────┬─ when populated ─────────────────┐
-//   │ 885996     │ "Дата термина"       │ generic (almost every termin lead)
-//   │ 887026     │ "Дата термина ДЦ"    │ newer/specific — sometimes only this
+//   │ 885996     │ "Дата термина"       │ legacy generic (older leads)
+//   │ 887026     │ "Дата термина ДЦ"    │ NEWER specific — primary source
 //   │ 887028     │ "Дата термина АА"    │ AA-specific
 //   └────────────┴──────────────────────┴──────────────────────────────────┘
-// findByName takes the FIRST match in the lead's custom_fields_values, so
-// "Дата термина ДЦ" goes first (specific), "Дата термина" is the fallback.
+// sync-leads.ts reads `terminDate` from 887026 with explicit fallback to
+// 885996 ONLY when 887026 is unset (legacy leads). `aaTerminDate` is read
+// from 887028 with no fallback.
+export const B2G_CUSTOM_FIELD_IDS = {
+  /** "Дата термина ДЦ" — primary, specific to DC appointment. */
+  terminDateDC: 887026,
+  /** "Дата термина АА" — primary, specific to AA appointment. */
+  terminDateAA: 887028,
+  /** "Дата термина" — legacy generic; fallback for older leads only. */
+  terminDateGeneric: 885996,
+} as const;
+
+/** @deprecated Kept only to avoid breaking external imports during transition.
+ *  New code reads from `B2G_CUSTOM_FIELD_IDS`. Will be removed after the
+ *  termin backfill rewrites every row using field-id matching. */
 export const B2G_CUSTOM_FIELD_NAMES = {
   terminDate: [
     "Дата термина ДЦ",

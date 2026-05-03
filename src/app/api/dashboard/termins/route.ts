@@ -41,6 +41,7 @@ interface TerminRow {
   dcAvgDays: number | null;
   aaAvgDays: number | null;
   count: number;
+  rescheduledCount: number;
 }
 
 /** Parse a YYYY-MM-DD as a Berlin-local civil date, then resolve to the UTC
@@ -87,6 +88,7 @@ export async function GET(req: NextRequest) {
 
   const pipelineId = B2G_PIPELINES.BERATER;
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;
+  const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
 
   // Bucket source: created_at OR the deal's primary termin (DC if set, else AA).
   // The same expression drives both the GROUP BY axis and the date-window filter,
@@ -96,14 +98,15 @@ export async function GET(req: NextRequest) {
       ? sql`COALESCE(lc.termin_date, lc.aa_termin_date)`
       : sql`lc.created_at`;
 
-  // Granularity expression — pre-built SQL fragment so the main query stays
-  // parameter-only. Postgres `DATE_TRUNC('week', x)` returns the Monday of
-  // the ISO week at 00:00; ::date strips the time so the returned value
-  // matches the per-day shape (just a YYYY-MM-DD string).
+  // Bucket in Europe/Berlin. PG stores `created_at` / `termin_date` as
+  // `timestamp without time zone` carrying UTC (per ETL convention). Without
+  // `AT TIME ZONE 'Europe/Berlin'`, weeks bucket on UTC-Monday and a Sunday-
+  // night Berlin lead lands in the wrong week.
+  const berlinSource = sql`(${bucketSource}) AT TIME ZONE 'Europe/Berlin'`;
   const cohortBucketExpr =
     granularity === "week"
-      ? sql`DATE_TRUNC('week', ${bucketSource})::date`
-      : sql`DATE(${bucketSource})`;
+      ? sql`DATE_TRUNC('week', ${berlinSource})::date`
+      : sql`DATE(${berlinSource})`;
 
   const result = await (
     analyticsDb as {
@@ -114,12 +117,23 @@ export async function GET(req: NextRequest) {
     dc_avg_days: string | number | null;
     aa_avg_days: string | number | null;
     cnt: string | number;
+    rescheduled_cnt: string | number;
   }>(sql`
     WITH dc_done AS (
       SELECT lead_id, MIN(event_at) AS dc_done_at
       FROM analytics.lead_status_changes
       WHERE pipeline_id = ${pipelineId}
         AND status_id = ${dcDoneStatusId}
+      GROUP BY lead_id
+    ),
+    -- B2: count of TERM_DC_CANCELLED events per lead (each event = one
+    -- reschedule attempt — the lead either bounced into a new termin or
+    -- got dropped via B3 below).
+    cancellations AS (
+      SELECT lead_id, COUNT(*)::int AS cancel_events
+      FROM analytics.lead_status_changes
+      WHERE pipeline_id = ${pipelineId}
+        AND status_id = ${cancelledStatusId}
       GROUP BY lead_id
     ),
     deals AS (
@@ -129,13 +143,21 @@ export async function GET(req: NextRequest) {
         lc.created_at,
         lc.termin_date,
         lc.aa_termin_date,
-        dd.dc_done_at
+        dd.dc_done_at,
+        COALESCE(c.cancel_events, 0) AS cancel_events,
+        -- B3: lead is "cancelled-not-rescheduled" if its CURRENT status is
+        -- still TERM_DC_CANCELLED. Once a manager picks a new date, the
+        -- status moves out of cancelled (back to consultation prep, etc.),
+        -- so a sticky CANCELLED status means no new termin was set.
+        (lc.status_id = ${cancelledStatusId}) AS dropped_no_reschedule
       FROM analytics.leads_cohort lc
-      LEFT JOIN dc_done dd ON dd.lead_id = lc.lead_id
+      LEFT JOIN dc_done dd       ON dd.lead_id = lc.lead_id
+      LEFT JOIN cancellations c  ON c.lead_id  = lc.lead_id
       WHERE lc.pipeline_id = ${pipelineId}
         AND ${bucketSource} >= ${fromDate}
         AND ${bucketSource} <= ${toDateEnd}
         AND (lc.termin_date IS NOT NULL OR lc.aa_termin_date IS NOT NULL)
+        AND lc.status_id <> ${cancelledStatusId}
     )
     SELECT
       cohort_date::text AS cohort_date,
@@ -153,7 +175,8 @@ export async function GET(req: NextRequest) {
         WHERE aa_termin_date IS NOT NULL
           AND aa_termin_date >= COALESCE(dc_done_at, created_at)
       )::numeric, 1) AS aa_avg_days,
-      COUNT(*)::int AS cnt
+      COUNT(*)::int AS cnt,
+      COUNT(*) FILTER (WHERE cancel_events > 0)::int AS rescheduled_cnt
     FROM deals
     GROUP BY cohort_date
     ORDER BY cohort_date ASC
@@ -164,6 +187,7 @@ export async function GET(req: NextRequest) {
     dcAvgDays: r.dc_avg_days == null ? null : Number(r.dc_avg_days),
     aaAvgDays: r.aa_avg_days == null ? null : Number(r.aa_avg_days),
     count: Number(r.cnt),
+    rescheduledCount: Number(r.rescheduled_cnt),
   }));
 
   return NextResponse.json(data, {

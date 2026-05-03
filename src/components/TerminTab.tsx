@@ -88,6 +88,7 @@ interface TerminApiRow {
   dcAvgDays: number | null;
   aaAvgDays: number | null;
   count: number;
+  rescheduledCount: number;
 }
 
 interface TerminTooltipPayload {
@@ -128,8 +129,20 @@ function TerminChartTooltip({
           {row.aaAvgDays == null ? "—" : `${row.aaAvgDays.toFixed(1)} дн.`}
         </span>
       </div>
-      <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-400">
-        Сделок: <span className="font-medium text-slate-200">{row.count}</span>
+      <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-400 space-y-0.5">
+        <div>
+          Сделок: <span className="font-medium text-slate-200">{row.count}</span>
+        </div>
+        <div>
+          Из них перенесено:{" "}
+          <span className="font-medium text-amber-300">{row.rescheduledCount}</span>
+          {row.count > 0 && (
+            <span className="text-slate-500">
+              {" "}
+              ({((row.rescheduledCount / row.count) * 100).toFixed(0)}%)
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -292,16 +305,19 @@ function TerminDashboardSection({
     if (!data || data.length === 0)
       return {
         totalDeals: 0,
+        rescheduledTotal: 0,
         dcOverall: null as number | null,
         aaOverall: null as number | null,
       };
     let totalDeals = 0;
+    let rescheduledTotal = 0;
     let dcSumWeighted = 0;
     let dcWeight = 0;
     let aaSumWeighted = 0;
     let aaWeight = 0;
     for (const row of data) {
       totalDeals += row.count;
+      rescheduledTotal += row.rescheduledCount;
       if (row.dcAvgDays != null) {
         dcSumWeighted += row.dcAvgDays * row.count;
         dcWeight += row.count;
@@ -313,6 +329,7 @@ function TerminDashboardSection({
     }
     return {
       totalDeals,
+      rescheduledTotal,
       dcOverall:
         dcWeight > 0 ? Number((dcSumWeighted / dcWeight).toFixed(1)) : null,
       aaOverall:
@@ -413,7 +430,7 @@ function TerminDashboardSection({
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <SummaryTile
           label="Сделок в когорте"
           value={stats.totalDeals.toLocaleString("ru-RU")}
@@ -432,6 +449,18 @@ function TerminDashboardSection({
             stats.aaOverall == null ? "—" : `${stats.aaOverall.toFixed(1)} дн.`
           }
           accent="text-emerald-300"
+        />
+        <SummaryTile
+          label="Перенесено"
+          value={
+            stats.totalDeals > 0
+              ? `${stats.rescheduledTotal.toLocaleString("ru-RU")} (${(
+                  (stats.rescheduledTotal / stats.totalDeals) *
+                  100
+                ).toFixed(0)}%)`
+              : "—"
+          }
+          accent="text-amber-300"
         />
       </div>
 
