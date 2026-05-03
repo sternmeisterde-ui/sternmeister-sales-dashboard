@@ -7,6 +7,11 @@ import { SESSION_COOKIE_NAME, signSession, type SessionUser } from "@/lib/auth";
 
 const THIRTY_DAYS_SECONDS = 60 * 60 * 24 * 30;
 
+// Unified password for РОП / Администратор bypass — lets ROPs and admins
+// log in by username + password without requiring Telegram bot resolution.
+// Override via env (ADMIN_BYPASS_PASSWORD) if you need to rotate it.
+const ADMIN_BYPASS_PASSWORD = process.env.ADMIN_BYPASS_PASSWORD ?? "987654321";
+
 // Telegram Bot tokens for resolving username → user ID.
 // Configure at least one of these env vars. Multiple tokens let us fall back
 // if a bot has been blocked by the user (tokens tried in order).
@@ -59,9 +64,11 @@ function normaliseMasterRole(role: string | null | undefined): "admin" | "rop" |
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { username?: unknown };
+    const body = (await request.json()) as { username?: unknown; password?: unknown };
     const raw = typeof body.username === "string" ? body.username : "";
     const username = raw.replace(/^@/, "").trim().toLowerCase();
+    const password = typeof body.password === "string" ? body.password : "";
+    const usingBypassPassword = password.length > 0;
 
     if (!username) {
       return NextResponse.json(
@@ -70,8 +77,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Reject wrong password up-front so a leaked username doesn't reveal that
+    // the password field even matters (and skip the Telegram lookup below
+    // for obviously invalid attempts).
+    if (usingBypassPassword && password !== ADMIN_BYPASS_PASSWORD) {
+      return NextResponse.json({ error: "Неверный пароль" }, { status: 401 });
+    }
+
     // Step 1: Resolve Telegram username → numeric ID
-    const telegramId = await resolveTelegramId(username);
+    // Skipped for password-bypass logins — РОПы/админы должны иметь возможность
+    // войти даже если бот не настроен или их ID не резолвится.
+    const telegramId = usingBypassPassword ? null : await resolveTelegramId(username);
 
     // Step 2: Search DB by telegram_username OR telegram_id (parallel, both DBs)
     const b2gDb = getDbForDepartment("b2g");
@@ -115,6 +131,22 @@ export async function POST(request: NextRequest) {
         { error: "Пользователь не найден" },
         { status: 401 },
       );
+    }
+
+    // Password-bypass is intentionally limited to РОП и Администратор —
+    // обычным менеджерам этот канал входа недоступен. Проверяем по
+    // master_managers (источник истины), а если пользователь есть только
+    // в d1/r1 — по их полю role.
+    if (usingBypassPassword) {
+      const effectiveRole = normaliseMasterRole(
+        masterUser?.role ?? d1User?.role ?? r1User?.role ?? null,
+      );
+      if (effectiveRole !== "admin" && effectiveRole !== "rop") {
+        return NextResponse.json(
+          { error: "Вход по паролю доступен только для РОП и Администратора" },
+          { status: 403 },
+        );
+      }
     }
 
     // master_managers is the authoritative source (it's what the Managers tab

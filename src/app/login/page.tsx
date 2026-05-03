@@ -7,6 +7,8 @@ import { useRouter } from "next/navigation";
 export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,7 +21,7 @@ export default function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username }),
+        body: JSON.stringify({ username, password: password || undefined }),
       });
 
       const data = (await res.json()) as { error?: string };
@@ -109,6 +111,39 @@ export default function LoginPage() {
                   disabled={loading}
                   className="w-full rounded-2xl border border-white/5 bg-slate-950/50 pl-8 pr-4 py-3.5 text-sm font-medium text-slate-200 shadow-inner outline-none placeholder:text-slate-500 transition-all focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
                 />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="password"
+                className="flex items-center justify-between text-sm font-medium text-slate-300"
+              >
+                <span>Пароль</span>
+                <span className="text-[10px] font-normal uppercase tracking-wider text-slate-500">
+                  только для РОП / Админ
+                </span>
+              </label>
+              <div className="relative">
+                <input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="оставьте пустым для входа по Telegram"
+                  autoComplete="current-password"
+                  disabled={loading}
+                  className="w-full rounded-2xl border border-white/5 bg-slate-950/50 pl-4 pr-12 py-3.5 text-sm font-medium text-slate-200 shadow-inner outline-none placeholder:text-slate-500 transition-all focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  disabled={loading}
+                  aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 transition-colors hover:text-slate-200 disabled:opacity-50"
+                >
+                  {showPassword ? "Скрыть" : "Показать"}
+                </button>
               </div>
             </div>
 
