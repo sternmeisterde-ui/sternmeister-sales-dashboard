@@ -1,17 +1,21 @@
-// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week
+// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week&bucketBy=created_at|termin_date
 //
 // Cohort-style aggregation for the Termin dashboard tab. For every cohort
-// bucket (day or week, depending on `granularity`) that at least one Бух
-// Бератер deal was created in, returns:
+// bucket (day or week, depending on `granularity`) returns:
 //   - dcAvgDays: average days from creation → assigned Termin ДЦ
 //   - aaAvgDays: average days to Termin АА. Baseline is creation date,
 //     UNLESS the deal passed through "Термин ДЦ состоялся" — then we measure
 //     from the moment it entered that status (per ТЗ).
 //   - count: number of deals contributing to either average
 //
-// granularity=week: GROUP BY DATE_TRUNC('week', created_at). Postgres weeks
-// are Monday-aligned (ISO 8601), so the returned `date` is the Monday of
-// each week — the UI labels it as "01–07 апр" client-side.
+// `bucketBy` controls both the cohort axis AND the date-window filter:
+//   - "created_at" (default): bucket and filter by deal creation date.
+//   - "termin_date": bucket and filter by COALESCE(termin_date, aa_termin_date)
+//     — i.e., the deal's primary termin (DC if present, else AA).
+//
+// granularity=week: GROUP BY DATE_TRUNC('week', <bucket source>). Postgres
+// weeks are Monday-aligned (ISO 8601), so the returned `date` is the Monday
+// of each week — the UI labels it as "01–07 апр" client-side.
 //
 // Excluded:
 //   - deals without any termin date set
@@ -77,8 +81,20 @@ export async function GET(req: NextRequest) {
   const granularity =
     url.searchParams.get("granularity") === "week" ? "week" : "day";
 
+  // Whitelist — anything other than "termin_date" falls back to creation-cohort.
+  const bucketBy =
+    url.searchParams.get("bucketBy") === "termin_date" ? "termin_date" : "created_at";
+
   const pipelineId = B2G_PIPELINES.BERATER;
   const dcDoneStatusId = BERATER_STATUSES.TERM_DC_DONE;
+
+  // Bucket source: created_at OR the deal's primary termin (DC if set, else AA).
+  // The same expression drives both the GROUP BY axis and the date-window filter,
+  // so the cohort always matches what the user sees on the X axis.
+  const bucketSource =
+    bucketBy === "termin_date"
+      ? sql`COALESCE(lc.termin_date, lc.aa_termin_date)`
+      : sql`lc.created_at`;
 
   // Granularity expression — pre-built SQL fragment so the main query stays
   // parameter-only. Postgres `DATE_TRUNC('week', x)` returns the Monday of
@@ -86,8 +102,8 @@ export async function GET(req: NextRequest) {
   // matches the per-day shape (just a YYYY-MM-DD string).
   const cohortBucketExpr =
     granularity === "week"
-      ? sql`DATE_TRUNC('week', lc.created_at)::date`
-      : sql`DATE(lc.created_at)`;
+      ? sql`DATE_TRUNC('week', ${bucketSource})::date`
+      : sql`DATE(${bucketSource})`;
 
   const result = await (
     analyticsDb as {
@@ -117,8 +133,8 @@ export async function GET(req: NextRequest) {
       FROM analytics.leads_cohort lc
       LEFT JOIN dc_done dd ON dd.lead_id = lc.lead_id
       WHERE lc.pipeline_id = ${pipelineId}
-        AND lc.created_at >= ${fromDate}
-        AND lc.created_at <= ${toDateEnd}
+        AND ${bucketSource} >= ${fromDate}
+        AND ${bucketSource} <= ${toDateEnd}
         AND (lc.termin_date IS NOT NULL OR lc.aa_termin_date IS NOT NULL)
     )
     SELECT
