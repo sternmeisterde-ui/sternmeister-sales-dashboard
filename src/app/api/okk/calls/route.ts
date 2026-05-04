@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, okkManagers, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
-import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, or } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
 import { promptTypeForLine } from "@/lib/config/tenant";
@@ -141,9 +141,20 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .where(whereClause)
         // Order by eval createdAt DESC so first row per call is the latest evaluation
         .orderBy(desc(okkCalls.callCreatedAt), desc(okkEvaluations.createdAt))
-        .limit(400),  // Over-fetch to account for duplicates from re-evaluations
+        // Cap at 5k to bound payload — a B2G month is ~600 evaluated calls,
+        // so 5k covers ~8 months even with re-evaluation duplicates. Past
+        // that the consumer should switch to a paginated query, not silently
+        // truncate (which used to drop early-period calls from the per-manager
+        // counters and broke payroll attribution).
+        .limit(5000),
 
-      // Query 2: All managers (only role='manager', active)
+      // Query 2: Managers visible in the dropdown — active right now OR
+      // historically attributed to ≥1 evaluated call inside the selected
+      // window. Without the historical leg, anyone fired mid-period (e.g.
+      // Нина Маркелова, deactivated 2026-04-30) drops out of the dropdown
+      // and her calls become orphans for payroll attribution. The historical
+      // leg uses the same whereClause as Query 1, so the dropdown lines up
+      // with the evaluated-call set the dashboard is rendering.
       db
         .select({
           id: okkManagers.id,
@@ -154,9 +165,17 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .from(okkManagers)
         .where(
           and(
-            eq(okkManagers.isActive, true),
             sql`${okkManagers.role} IN ('manager', 'rop')`,
-          )
+            or(
+              eq(okkManagers.isActive, true),
+              sql`${okkManagers.id} IN (
+                SELECT DISTINCT ${okkCalls.managerId} FROM ${okkCalls}
+                LEFT JOIN ${okkEvaluations} ON ${okkCalls.id} = ${okkEvaluations.callId}
+                WHERE ${whereClause ?? sql`TRUE`}
+                  AND ${okkCalls.managerId} IS NOT NULL
+              )`,
+            ),
+          ),
         )
         .orderBy(okkManagers.name),
 
@@ -175,12 +194,16 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
     ]);
 
     // ── Deduplicate: keep only the first (latest eval) row per call ID ──
+    // No slice() here — we used to truncate to 200 which silently dropped
+    // early-period calls from per-manager counters in the consumer (and
+    // therefore from payroll attribution). The query's limit(5000) is the
+    // single source of truth for payload size.
     const seenCallIds = new Set<string>();
     const uniqueRows = rows.filter((row) => {
       if (seenCallIds.has(row.id)) return false;
       seenCallIds.add(row.id);
       return true;
-    }).slice(0, 200);
+    });
 
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
     const calls = uniqueRows.map((row) => {
