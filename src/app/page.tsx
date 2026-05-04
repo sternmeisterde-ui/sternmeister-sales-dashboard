@@ -996,8 +996,6 @@ export default function Dashboard() {
                       const managerNames = new Set(managers.map(m => m.name));
                       return allCalls.filter(c => managerNames.has(c.name));
                     })()}
-                    period={aiDashPeriod}
-                    customRange={aiCustomRange}
                     parseCallDate={parseCallDate}
                     type={activeTab === "real_calls" ? "real_calls" : "ai_calls"}
                   />
