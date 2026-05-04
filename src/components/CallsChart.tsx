@@ -32,32 +32,48 @@ export default function CallsChart({
   parseCallDate,
   type,
 }: CallsChartProps) {
+  const aggregation: "day" | "week" = type === "real_calls" ? "week" : "day";
+
   const chartData = useMemo(() => {
-    // Group calls by date (YYYY-MM-DD)
-    const byDay = new Map<string, { scores: number[]; count: number }>();
+    const buckets = new Map<string, { scores: number[]; count: number; sortKey: string; label: string }>();
 
     for (const call of calls) {
       const d = parseCallDate(call.date);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
-      if (!byDay.has(key)) byDay.set(key, { scores: [], count: 0 });
-      const entry = byDay.get(key)!;
+      let sortKey: string;
+      let label: string;
+
+      if (aggregation === "week") {
+        // Week starts on Monday. Bucket key = ISO date of Monday (YYYY-MM-DD).
+        const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const dow = monday.getDay(); // 0=Sun..6=Sat
+        const diff = dow === 0 ? -6 : 1 - dow;
+        monday.setDate(monday.getDate() + diff);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+
+        sortKey = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`;
+        const fmt = (x: Date) => `${String(x.getDate()).padStart(2, "0")}.${String(x.getMonth() + 1).padStart(2, "0")}`;
+        label = `${fmt(monday)}–${fmt(sunday)}`;
+      } else {
+        sortKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        label = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
+      }
+
+      if (!buckets.has(sortKey)) buckets.set(sortKey, { scores: [], count: 0, sortKey, label });
+      const entry = buckets.get(sortKey)!;
       entry.count++;
       if (call.score > 0) entry.scores.push(call.score);
     }
 
-    // Sort by date
-    const sorted = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const sorted = [...buckets.values()].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
-    return sorted.map(([dateKey, v]) => {
-      const [, m, d] = dateKey.split("-");
-      return {
-        date: `${d}.${m}`,
-        avgScore: v.scores.length > 0 ? Math.round(v.scores.reduce((s, x) => s + x, 0) / v.scores.length) : 0,
-        count: v.count,
-      };
-    });
-  }, [calls, parseCallDate]);
+    return sorted.map((v) => ({
+      date: v.label,
+      avgScore: v.scores.length > 0 ? Math.round(v.scores.reduce((s, x) => s + x, 0) / v.scores.length) : 0,
+      count: v.count,
+    }));
+  }, [calls, parseCallDate, aggregation]);
 
   if (chartData.length === 0) {
     return (
@@ -68,15 +84,17 @@ export default function CallsChart({
   }
 
   const maxCount = Math.max(...chartData.map((d) => d.count), 1);
-  const chartWidth = Math.max(chartData.length * 60, 300);
+  const tickWidth = aggregation === "week" ? 90 : 60;
+  const chartWidth = Math.max(chartData.length * tickWidth, 300);
   const needsScroll = period === "month" || (customRange.start && customRange.end);
+  const periodLabel = aggregation === "week" ? "по неделям" : "по дням";
 
   return (
     <div className="flex flex-col gap-4 h-full">
       {/* Chart 1: Average Score */}
       <div className="flex-1 min-h-0">
         <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-1">
-          Средний балл (по дням)
+          Средний балл ({periodLabel})
         </p>
         <div
           className={needsScroll ? "overflow-x-auto" : ""}
@@ -125,7 +143,7 @@ export default function CallsChart({
       {/* Chart 2: Call Count */}
       <div className="flex-1 min-h-0">
         <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-1">
-          {type === "ai_calls" ? "Кол-во ролевок" : "Кол-во звонков"} (по дням)
+          {type === "ai_calls" ? "Кол-во ролевок" : "Кол-во звонков"} ({periodLabel})
         </p>
         <div
           className={needsScroll ? "overflow-x-auto" : ""}
