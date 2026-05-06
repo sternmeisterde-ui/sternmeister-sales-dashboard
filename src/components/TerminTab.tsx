@@ -90,9 +90,13 @@ interface TerminApiRow {
   date: string;
   dcAvgDays: number | null;
   aaAvgDays: number | null;
+  combinedAvgDays: number | null;
   count: number;
+  bothCount: number;
   rescheduledCount: number;
 }
+
+type MetricMode = "split" | "combined";
 
 interface TerminTooltipPayload {
   value: number | null;
@@ -105,16 +109,70 @@ function TerminChartTooltip({
   payload,
   label,
   granularity,
+  metricMode,
 }: {
   active?: boolean;
   payload?: TerminTooltipPayload[];
   label?: string;
   granularity: Granularity;
+  metricMode: MetricMode;
 }) {
   if (!active || !payload || payload.length === 0 || !label) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
   const display = formatBucketLabel(label, granularity);
+  if (metricMode === "combined") {
+    return (
+      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
+        <div className="mb-1 font-semibold text-slate-200">{display}</div>
+        <div className="flex items-center gap-2 text-slate-300">
+          <span className="inline-block h-2 w-2 rounded-full bg-violet-400" />
+          Ср. время до термина:{" "}
+          <span className="ml-auto font-medium text-violet-300">
+            {row.combinedAvgDays == null
+              ? "—"
+              : `${row.combinedAvgDays.toFixed(1)} дн.`}
+          </span>
+        </div>
+        <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-400 space-y-0.5">
+          <div>
+            Только ДЦ (от создания):{" "}
+            <span className="font-medium text-blue-300">
+              {row.dcAvgDays == null ? "—" : `${row.dcAvgDays.toFixed(1)} дн.`}
+            </span>
+          </div>
+          <div>
+            Только АА (от создания):{" "}
+            <span className="font-medium text-emerald-300">
+              {row.aaAvgDays == null ? "—" : `${row.aaAvgDays.toFixed(1)} дн.`}
+            </span>
+          </div>
+          <div>
+            Сделок:{" "}
+            <span className="font-medium text-slate-200">{row.count}</span>
+            {row.bothCount > 0 && (
+              <span className="text-slate-500">
+                {" "}
+                (из них {row.bothCount} с двумя терминами)
+              </span>
+            )}
+          </div>
+          <div>
+            Перенесено:{" "}
+            <span className="font-medium text-amber-300">
+              {row.rescheduledCount}
+            </span>
+            {row.count > 0 && (
+              <span className="text-slate-500">
+                {" "}
+                ({((row.rescheduledCount / row.count) * 100).toFixed(0)}%)
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
       <div className="mb-1 font-semibold text-slate-200">{display}</div>
@@ -216,6 +274,7 @@ export default function TerminTab() {
     <div className="flex flex-col gap-8 fade-in">
       <TerminDashboardSection
         bucketBy="created_at"
+        metricMode="split"
         chartTitle="Среднее время до термина (Бух Бератер)"
         xAxisHint={{
           day: "дата создания сделки",
@@ -224,6 +283,7 @@ export default function TerminTab() {
       />
       <TerminDashboardSection
         bucketBy="termin_date"
+        metricMode="combined"
         chartTitle="Среднее время до термина (по дате термина)"
         xAxisHint={{
           day: "дата термина (ДЦ или АА)",
@@ -243,13 +303,16 @@ export default function TerminTab() {
 
 function TerminDashboardSection({
   bucketBy,
+  metricMode,
   chartTitle,
   xAxisHint,
 }: {
   bucketBy: BucketBy;
+  metricMode: MetricMode;
   chartTitle: string;
   xAxisHint: Record<Granularity, string>;
 }) {
+  const isCombined = metricMode === "combined";
   const [preset, setPreset] = useState<Preset>("30d");
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     rangeForPreset("30d"),
@@ -317,18 +380,24 @@ function TerminDashboardSection({
       return {
         totalDeals: 0,
         rescheduledTotal: 0,
+        bothTotal: 0,
         dcOverall: null as number | null,
         aaOverall: null as number | null,
+        combinedOverall: null as number | null,
       };
     let totalDeals = 0;
     let rescheduledTotal = 0;
+    let bothTotal = 0;
     let dcSumWeighted = 0;
     let dcWeight = 0;
     let aaSumWeighted = 0;
     let aaWeight = 0;
+    let combinedSumWeighted = 0;
+    let combinedWeight = 0;
     for (const row of data) {
       totalDeals += row.count;
       rescheduledTotal += row.rescheduledCount;
+      bothTotal += row.bothCount;
       if (row.dcAvgDays != null) {
         dcSumWeighted += row.dcAvgDays * row.count;
         dcWeight += row.count;
@@ -337,14 +406,23 @@ function TerminDashboardSection({
         aaSumWeighted += row.aaAvgDays * row.count;
         aaWeight += row.count;
       }
+      if (row.combinedAvgDays != null) {
+        combinedSumWeighted += row.combinedAvgDays * row.count;
+        combinedWeight += row.count;
+      }
     }
     return {
       totalDeals,
       rescheduledTotal,
+      bothTotal,
       dcOverall:
         dcWeight > 0 ? Number((dcSumWeighted / dcWeight).toFixed(1)) : null,
       aaOverall:
         aaWeight > 0 ? Number((aaSumWeighted / aaWeight).toFixed(1)) : null,
+      combinedOverall:
+        combinedWeight > 0
+          ? Number((combinedSumWeighted / combinedWeight).toFixed(1))
+          : null,
     };
   }, [data]);
 
@@ -475,20 +553,52 @@ function TerminDashboardSection({
           value={stats.totalDeals.toLocaleString("ru-RU")}
           accent="text-slate-200"
         />
-        <SummaryTile
-          label="Ср. до Термин ДЦ"
-          value={
-            stats.dcOverall == null ? "—" : `${stats.dcOverall.toFixed(1)} дн.`
-          }
-          accent="text-blue-300"
-        />
-        <SummaryTile
-          label="Ср. до Термин АА"
-          value={
-            stats.aaOverall == null ? "—" : `${stats.aaOverall.toFixed(1)} дн.`
-          }
-          accent="text-emerald-300"
-        />
+        {isCombined ? (
+          <>
+            <SummaryTile
+              label="Ср. время до термина"
+              value={
+                stats.combinedOverall == null
+                  ? "—"
+                  : `${stats.combinedOverall.toFixed(1)} дн.`
+              }
+              accent="text-violet-300"
+            />
+            <SummaryTile
+              label="С двумя терминами"
+              value={
+                stats.totalDeals > 0
+                  ? `${stats.bothTotal.toLocaleString("ru-RU")} (${(
+                      (stats.bothTotal / stats.totalDeals) *
+                      100
+                    ).toFixed(0)}%)`
+                  : "—"
+              }
+              accent="text-slate-200"
+            />
+          </>
+        ) : (
+          <>
+            <SummaryTile
+              label="Ср. до Термин ДЦ"
+              value={
+                stats.dcOverall == null
+                  ? "—"
+                  : `${stats.dcOverall.toFixed(1)} дн.`
+              }
+              accent="text-blue-300"
+            />
+            <SummaryTile
+              label="Ср. до Термин АА"
+              value={
+                stats.aaOverall == null
+                  ? "—"
+                  : `${stats.aaOverall.toFixed(1)} дн.`
+              }
+              accent="text-emerald-300"
+            />
+          </>
+        )}
         <SummaryTile
           label="Перенесено"
           value={
@@ -542,30 +652,49 @@ function TerminDashboardSection({
                   unit=" дн"
                 />
                 <RTooltip
-                  content={<TerminChartTooltip granularity={granularity} />}
+                  content={
+                    <TerminChartTooltip
+                      granularity={granularity}
+                      metricMode={metricMode}
+                    />
+                  }
                 />
                 <Legend
                   wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
                   iconType="circle"
                 />
-                <Line
-                  type="monotone"
-                  dataKey="dcAvgDays"
-                  name="Термин ДЦ"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  dot={{ fill: "#3b82f6", r: 3 }}
-                  connectNulls
-                />
-                <Line
-                  type="monotone"
-                  dataKey="aaAvgDays"
-                  name="Термин АА"
-                  stroke="#10b981"
-                  strokeWidth={2}
-                  dot={{ fill: "#10b981", r: 3 }}
-                  connectNulls
-                />
+                {isCombined ? (
+                  <Line
+                    type="monotone"
+                    dataKey="combinedAvgDays"
+                    name="Ср. время до термина"
+                    stroke="#a78bfa"
+                    strokeWidth={2}
+                    dot={{ fill: "#a78bfa", r: 3 }}
+                    connectNulls
+                  />
+                ) : (
+                  <>
+                    <Line
+                      type="monotone"
+                      dataKey="dcAvgDays"
+                      name="Термин ДЦ"
+                      stroke="#3b82f6"
+                      strokeWidth={2}
+                      dot={{ fill: "#3b82f6", r: 3 }}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="aaAvgDays"
+                      name="Термин АА"
+                      stroke="#10b981"
+                      strokeWidth={2}
+                      dot={{ fill: "#10b981", r: 3 }}
+                      connectNulls
+                    />
+                  </>
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>

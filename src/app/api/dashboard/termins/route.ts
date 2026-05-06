@@ -3,9 +3,17 @@
 // Cohort-style aggregation for the Termin dashboard tab. For every cohort
 // bucket (day or week, depending on `granularity`) returns:
 //   - dcAvgDays: average days from creation → assigned Termin ДЦ
-//   - aaAvgDays: average days to Termin АА. Baseline is creation date,
-//     UNLESS the deal passed through "Термин ДЦ состоялся" — then we measure
-//     from the moment it entered that status (per ТЗ).
+//   - aaAvgDays: average days to Termin АА. Baseline depends on `bucketBy`:
+//       * bucketBy=created_at (chart 1): baseline is creation date, UNLESS
+//         the deal passed through "Термин ДЦ состоялся" — then from that
+//         status (DC visit → AA appointment lead time).
+//       * bucketBy=termin_date  (chart 2): baseline is always creation date
+//         (creation → AA appointment, regardless of DC visit).
+//   - combinedAvgDays: per-lead time-to-termin in days, then averaged.
+//       per-lead = mean(dcDays, aaDays) when both set; single one if only
+//       one set; null otherwise. Both legs measured from creation_at.
+//       Used for chart 2 which displays a single combined line.
+//   - bothCount: leads in the bucket that have BOTH a DC and an AA termin.
 //   - count: number of deals contributing to either average
 //
 // `bucketBy` controls both the cohort axis AND the date-window filter:
@@ -50,7 +58,9 @@ interface TerminRow {
   date: string;
   dcAvgDays: number | null;
   aaAvgDays: number | null;
+  combinedAvgDays: number | null;
   count: number;
+  bothCount: number;
   rescheduledCount: number;
 }
 
@@ -113,6 +123,14 @@ export async function GET(req: NextRequest) {
   const dcCol = useFirst ? sql`lc.termin_date_first` : sql`lc.termin_date`;
   const aaCol = useFirst ? sql`lc.aa_termin_date_first` : sql`lc.aa_termin_date`;
 
+  // AA baseline differs by chart per spec:
+  //   chart 1 (created cohort): COALESCE(dc_done, created)  — DC→AA lead time
+  //   chart 2 (termin cohort) : created                     — full creation→AA
+  const aaBaseline =
+    bucketBy === "termin_date"
+      ? sql`created_at`
+      : sql`COALESCE(dc_done_at, created_at)`;
+
   // Bucket source: created_at OR the deal's primary termin (DC if set, else AA).
   // The same expression drives both the GROUP BY axis and the date-window filter,
   // so the cohort always matches what the user sees on the X axis.
@@ -139,7 +157,9 @@ export async function GET(req: NextRequest) {
     cohort_date: string;
     dc_avg_days: string | number | null;
     aa_avg_days: string | number | null;
+    combined_avg_days: string | number | null;
     cnt: string | number;
+    both_cnt: string | number;
     rescheduled_cnt: string | number;
   }>(sql`
     WITH dc_done AS (
@@ -192,13 +212,36 @@ export async function GET(req: NextRequest) {
       )::numeric, 1) AS dc_avg_days,
       ROUND(AVG(
         EXTRACT(EPOCH FROM (
-          aa_termin - COALESCE(dc_done_at, created_at)
+          aa_termin - ${aaBaseline}
         )) / 86400.0
       ) FILTER (
         WHERE aa_termin IS NOT NULL
-          AND aa_termin >= COALESCE(dc_done_at, created_at)
+          AND aa_termin >= ${aaBaseline}
       )::numeric, 1) AS aa_avg_days,
+      -- Combined per-lead time-to-termin in days, then averaged across the
+      -- bucket. Per spec for chart 2: when a lead has both DC and AA, the
+      -- lead's metric is the mean of (DC − created) and (AA − created); when
+      -- only one is set, that one's distance from creation. Past-dated
+      -- termins (termin < created, manual edits in Kommo) are skipped at the
+      -- per-leg level — a lead with one valid leg still contributes that leg.
+      ROUND(AVG(
+        CASE
+          WHEN dc_termin IS NOT NULL AND aa_termin IS NOT NULL
+            AND dc_termin >= created_at AND aa_termin >= created_at
+          THEN (
+            EXTRACT(EPOCH FROM (dc_termin - created_at))
+            + EXTRACT(EPOCH FROM (aa_termin - created_at))
+          ) / 86400.0 / 2
+          WHEN dc_termin IS NOT NULL AND dc_termin >= created_at
+          THEN EXTRACT(EPOCH FROM (dc_termin - created_at)) / 86400.0
+          WHEN aa_termin IS NOT NULL AND aa_termin >= created_at
+          THEN EXTRACT(EPOCH FROM (aa_termin - created_at)) / 86400.0
+        END
+      )::numeric, 1) AS combined_avg_days,
       COUNT(*)::int AS cnt,
+      COUNT(*) FILTER (
+        WHERE dc_termin IS NOT NULL AND aa_termin IS NOT NULL
+      )::int AS both_cnt,
       COUNT(*) FILTER (WHERE cancel_events > 0)::int AS rescheduled_cnt
     FROM deals
     GROUP BY cohort_date
@@ -209,7 +252,10 @@ export async function GET(req: NextRequest) {
     date: r.cohort_date,
     dcAvgDays: r.dc_avg_days == null ? null : Number(r.dc_avg_days),
     aaAvgDays: r.aa_avg_days == null ? null : Number(r.aa_avg_days),
+    combinedAvgDays:
+      r.combined_avg_days == null ? null : Number(r.combined_avg_days),
     count: Number(r.cnt),
+    bothCount: Number(r.both_cnt),
     rescheduledCount: Number(r.rescheduled_cnt),
   }));
 
