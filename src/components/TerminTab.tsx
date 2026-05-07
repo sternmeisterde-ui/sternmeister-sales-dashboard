@@ -1198,10 +1198,11 @@ function UpcomingTerminsSection() {
     const ac = new AbortController();
     fetchData(ac.signal);
 
-    // Auto-refresh: planning data turns over hourly as managers schedule and
-    // reschedule termins. Without polling the dashboard drifts from CRM
-    // truth until the user manually clicks refresh.
-    const POLL_INTERVAL_MS = 5 * 60 * 1000;
+    // Auto-refresh every 10 minutes — aligned with the ETL cron interval
+    // (SYNC_INTERVAL_SECONDS=600). Polling more often than that just hits the
+    // server with stale-from-DB results; polling slower means the dashboard
+    // lags Kommo by more than one ETL cycle.
+    const POLL_INTERVAL_MS = 10 * 60 * 1000;
     const interval = setInterval(() => {
       fetchData();
     }, POLL_INTERVAL_MS);
