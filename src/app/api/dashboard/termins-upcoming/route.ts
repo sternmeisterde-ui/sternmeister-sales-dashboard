@@ -98,7 +98,10 @@ export async function GET(req: NextRequest) {
     };
   });
 
+  // No-store: planning data turns over fast (managers schedule/reschedule
+  // termins live in CRM). Frontend polls every few minutes — let those polls
+  // hit the server, not a stale browser cache.
   return NextResponse.json(data, {
-    headers: { "Cache-Control": "private, max-age=60" },
+    headers: { "Cache-Control": "private, no-store" },
   });
 }

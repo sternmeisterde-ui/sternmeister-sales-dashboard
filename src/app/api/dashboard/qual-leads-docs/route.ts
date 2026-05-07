@@ -12,14 +12,17 @@
 //                  (numerator of the conversion).
 //   - conversion:  docsCount / qualCount, percent. Null when qualCount = 0.
 //
-// "Qualified" follows ТЗ: leads whose `non_qual_enum_id` is NOT one of:
-//   744876 Неквал лид
-//   747536 Неквал Доход
-//   747530 Неквал Образование
-//   747532 Неквал Возраст
-//   744486 Неправильный номер
-// NULL counts as qualified (no non-qual flag set). Note: 747534 "Неквал Язык"
-// is intentionally NOT in the exclusion list — TZ omitted it.
+// "Qualified" follows ROP-frozen Kommo filter (2026-05-07): allow-list mode
+// over BOTH status_id AND non_qual_enum_id (cf 879824 "Причина закрытия
+// госники"). See QUAL_FIRST_LINE_STATUS_IDS and QUAL_REASON_ENUM_IDS in
+// pipeline-config.ts for the exact frozen lists.
+//
+// In short:
+//   - status MUST be one of the 10 allow-listed FIRST_LINE statuses (excludes
+//     "Неразобранное" and "База" — pre-processing buckets)
+//   - non_qual_enum_id MUST be NULL or in the 18-value allow-list (excludes
+//     all "Неквал ..." reasons + "Неправильный номер" + any enum value not
+//     explicitly allow-listed)
 
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
@@ -27,6 +30,8 @@ import { analyticsDb } from "@/lib/db/analytics";
 import {
   B2G_PIPELINES,
   FIRST_LINE_STATUSES,
+  QUAL_FIRST_LINE_STATUS_IDS,
+  QUAL_REASON_ENUM_IDS,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 
@@ -37,8 +42,6 @@ interface QualLeadsRow {
   docsCount: number;
   conversion: number | null;
 }
-
-const NON_QUAL_EXCLUDED_ENUM_IDS = [744876, 747536, 747530, 747532, 744486];
 
 function parseBerlinDate(input: string | null, kind: "start" | "end"): Date | null {
   if (!input) return null;
@@ -114,10 +117,14 @@ export async function GET(req: NextRequest) {
       WHERE lc.pipeline_id = ${firstLineId}
         AND lc.created_at >= ${fromDate}
         AND lc.created_at <= ${toDateEnd}
+        AND lc.status_id IN (${sql.join(
+          QUAL_FIRST_LINE_STATUS_IDS.map((id) => sql`${id}`),
+          sql`, `,
+        )})
         AND (
           lc.non_qual_enum_id IS NULL
-          OR lc.non_qual_enum_id NOT IN (${sql.join(
-            NON_QUAL_EXCLUDED_ENUM_IDS.map((id) => sql`${id}`),
+          OR lc.non_qual_enum_id IN (${sql.join(
+            QUAL_REASON_ENUM_IDS.map((id) => sql`${id}`),
             sql`, `,
           )})
         )

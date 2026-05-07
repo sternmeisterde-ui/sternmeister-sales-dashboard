@@ -6,6 +6,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -90,13 +91,11 @@ interface TerminApiRow {
   date: string;
   dcAvgDays: number | null;
   aaAvgDays: number | null;
-  combinedAvgDays: number | null;
+  dcCount: number;
+  aaCount: number;
   count: number;
-  bothCount: number;
   rescheduledCount: number;
 }
-
-type MetricMode = "split" | "combined";
 
 interface TerminTooltipPayload {
   value: number | null;
@@ -109,70 +108,16 @@ function TerminChartTooltip({
   payload,
   label,
   granularity,
-  metricMode,
 }: {
   active?: boolean;
   payload?: TerminTooltipPayload[];
   label?: string;
   granularity: Granularity;
-  metricMode: MetricMode;
 }) {
   if (!active || !payload || payload.length === 0 || !label) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
   const display = formatBucketLabel(label, granularity);
-  if (metricMode === "combined") {
-    return (
-      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
-        <div className="mb-1 font-semibold text-slate-200">{display}</div>
-        <div className="flex items-center gap-2 text-slate-300">
-          <span className="inline-block h-2 w-2 rounded-full bg-violet-400" />
-          Ср. время до термина:{" "}
-          <span className="ml-auto font-medium text-violet-300">
-            {row.combinedAvgDays == null
-              ? "—"
-              : `${row.combinedAvgDays.toFixed(1)} дн.`}
-          </span>
-        </div>
-        <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-400 space-y-0.5">
-          <div>
-            Только ДЦ (от создания):{" "}
-            <span className="font-medium text-blue-300">
-              {row.dcAvgDays == null ? "—" : `${row.dcAvgDays.toFixed(1)} дн.`}
-            </span>
-          </div>
-          <div>
-            Только АА (от создания):{" "}
-            <span className="font-medium text-emerald-300">
-              {row.aaAvgDays == null ? "—" : `${row.aaAvgDays.toFixed(1)} дн.`}
-            </span>
-          </div>
-          <div>
-            Сделок:{" "}
-            <span className="font-medium text-slate-200">{row.count}</span>
-            {row.bothCount > 0 && (
-              <span className="text-slate-500">
-                {" "}
-                (из них {row.bothCount} с двумя терминами)
-              </span>
-            )}
-          </div>
-          <div>
-            Перенесено:{" "}
-            <span className="font-medium text-amber-300">
-              {row.rescheduledCount}
-            </span>
-            {row.count > 0 && (
-              <span className="text-slate-500">
-                {" "}
-                ({((row.rescheduledCount / row.count) * 100).toFixed(0)}%)
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
   return (
     <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
       <div className="mb-1 font-semibold text-slate-200">{display}</div>
@@ -182,6 +127,9 @@ function TerminChartTooltip({
         <span className="ml-auto font-medium text-blue-300">
           {row.dcAvgDays == null ? "—" : `${row.dcAvgDays.toFixed(1)} дн.`}
         </span>
+        {row.dcCount > 0 && (
+          <span className="text-slate-500 text-[10px]">({row.dcCount})</span>
+        )}
       </div>
       <div className="flex items-center gap-2 text-slate-300">
         <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
@@ -189,6 +137,9 @@ function TerminChartTooltip({
         <span className="ml-auto font-medium text-emerald-300">
           {row.aaAvgDays == null ? "—" : `${row.aaAvgDays.toFixed(1)} дн.`}
         </span>
+        {row.aaCount > 0 && (
+          <span className="text-slate-500 text-[10px]">({row.aaCount})</span>
+        )}
       </div>
       <div className="mt-1 border-t border-white/5 pt-1 text-[11px] text-slate-400 space-y-0.5">
         <div>
@@ -274,7 +225,6 @@ export default function TerminTab() {
     <div className="flex flex-col gap-8 fade-in">
       <TerminDashboardSection
         bucketBy="created_at"
-        metricMode="split"
         chartTitle="Среднее время до термина (Бух Бератер)"
         xAxisHint={{
           day: "дата создания сделки",
@@ -283,7 +233,6 @@ export default function TerminTab() {
       />
       <TerminDashboardSection
         bucketBy="termin_date"
-        metricMode="combined"
         chartTitle="Среднее время до термина (по дате термина)"
         xAxisHint={{
           day: "дата термина (ДЦ или АА)",
@@ -294,7 +243,6 @@ export default function TerminTab() {
       <FunnelTimingSection />
       <UpcomingTerminsSection />
       <PreTerminSection />
-      <PlanVsFactSection />
     </div>
   );
 }
@@ -303,16 +251,13 @@ export default function TerminTab() {
 
 function TerminDashboardSection({
   bucketBy,
-  metricMode,
   chartTitle,
   xAxisHint,
 }: {
   bucketBy: BucketBy;
-  metricMode: MetricMode;
   chartTitle: string;
   xAxisHint: Record<Granularity, string>;
 }) {
-  const isCombined = metricMode === "combined";
   const [preset, setPreset] = useState<Preset>("30d");
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     rangeForPreset("30d"),
@@ -380,49 +325,37 @@ function TerminDashboardSection({
       return {
         totalDeals: 0,
         rescheduledTotal: 0,
-        bothTotal: 0,
         dcOverall: null as number | null,
         aaOverall: null as number | null,
-        combinedOverall: null as number | null,
       };
     let totalDeals = 0;
     let rescheduledTotal = 0;
-    let bothTotal = 0;
     let dcSumWeighted = 0;
     let dcWeight = 0;
     let aaSumWeighted = 0;
     let aaWeight = 0;
-    let combinedSumWeighted = 0;
-    let combinedWeight = 0;
     for (const row of data) {
       totalDeals += row.count;
       rescheduledTotal += row.rescheduledCount;
-      bothTotal += row.bothCount;
-      if (row.dcAvgDays != null) {
-        dcSumWeighted += row.dcAvgDays * row.count;
-        dcWeight += row.count;
+      // Per-leg counts as weights — bucket-level dcCount and aaCount differ
+      // from row.count (cohort dedup) in chart 2 where each lead can land in
+      // different DC vs AA buckets.
+      if (row.dcAvgDays != null && row.dcCount > 0) {
+        dcSumWeighted += row.dcAvgDays * row.dcCount;
+        dcWeight += row.dcCount;
       }
-      if (row.aaAvgDays != null) {
-        aaSumWeighted += row.aaAvgDays * row.count;
-        aaWeight += row.count;
-      }
-      if (row.combinedAvgDays != null) {
-        combinedSumWeighted += row.combinedAvgDays * row.count;
-        combinedWeight += row.count;
+      if (row.aaAvgDays != null && row.aaCount > 0) {
+        aaSumWeighted += row.aaAvgDays * row.aaCount;
+        aaWeight += row.aaCount;
       }
     }
     return {
       totalDeals,
       rescheduledTotal,
-      bothTotal,
       dcOverall:
         dcWeight > 0 ? Number((dcSumWeighted / dcWeight).toFixed(1)) : null,
       aaOverall:
         aaWeight > 0 ? Number((aaSumWeighted / aaWeight).toFixed(1)) : null,
-      combinedOverall:
-        combinedWeight > 0
-          ? Number((combinedSumWeighted / combinedWeight).toFixed(1))
-          : null,
     };
   }, [data]);
 
@@ -553,52 +486,20 @@ function TerminDashboardSection({
           value={stats.totalDeals.toLocaleString("ru-RU")}
           accent="text-slate-200"
         />
-        {isCombined ? (
-          <>
-            <SummaryTile
-              label="Ср. время до термина"
-              value={
-                stats.combinedOverall == null
-                  ? "—"
-                  : `${stats.combinedOverall.toFixed(1)} дн.`
-              }
-              accent="text-violet-300"
-            />
-            <SummaryTile
-              label="С двумя терминами"
-              value={
-                stats.totalDeals > 0
-                  ? `${stats.bothTotal.toLocaleString("ru-RU")} (${(
-                      (stats.bothTotal / stats.totalDeals) *
-                      100
-                    ).toFixed(0)}%)`
-                  : "—"
-              }
-              accent="text-slate-200"
-            />
-          </>
-        ) : (
-          <>
-            <SummaryTile
-              label="Ср. до Термин ДЦ"
-              value={
-                stats.dcOverall == null
-                  ? "—"
-                  : `${stats.dcOverall.toFixed(1)} дн.`
-              }
-              accent="text-blue-300"
-            />
-            <SummaryTile
-              label="Ср. до Термин АА"
-              value={
-                stats.aaOverall == null
-                  ? "—"
-                  : `${stats.aaOverall.toFixed(1)} дн.`
-              }
-              accent="text-emerald-300"
-            />
-          </>
-        )}
+        <SummaryTile
+          label="Ср. до Термин ДЦ"
+          value={
+            stats.dcOverall == null ? "—" : `${stats.dcOverall.toFixed(1)} дн.`
+          }
+          accent="text-blue-300"
+        />
+        <SummaryTile
+          label="Ср. до Термин АА"
+          value={
+            stats.aaOverall == null ? "—" : `${stats.aaOverall.toFixed(1)} дн.`
+          }
+          accent="text-emerald-300"
+        />
         <SummaryTile
           label="Перенесено"
           value={
@@ -652,49 +553,30 @@ function TerminDashboardSection({
                   unit=" дн"
                 />
                 <RTooltip
-                  content={
-                    <TerminChartTooltip
-                      granularity={granularity}
-                      metricMode={metricMode}
-                    />
-                  }
+                  content={<TerminChartTooltip granularity={granularity} />}
                 />
                 <Legend
                   wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
                   iconType="circle"
                 />
-                {isCombined ? (
-                  <Line
-                    type="monotone"
-                    dataKey="combinedAvgDays"
-                    name="Ср. время до термина"
-                    stroke="#a78bfa"
-                    strokeWidth={2}
-                    dot={{ fill: "#a78bfa", r: 3 }}
-                    connectNulls
-                  />
-                ) : (
-                  <>
-                    <Line
-                      type="monotone"
-                      dataKey="dcAvgDays"
-                      name="Термин ДЦ"
-                      stroke="#3b82f6"
-                      strokeWidth={2}
-                      dot={{ fill: "#3b82f6", r: 3 }}
-                      connectNulls
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="aaAvgDays"
-                      name="Термин АА"
-                      stroke="#10b981"
-                      strokeWidth={2}
-                      dot={{ fill: "#10b981", r: 3 }}
-                      connectNulls
-                    />
-                  </>
-                )}
+                <Line
+                  type="monotone"
+                  dataKey="dcAvgDays"
+                  name="Термин ДЦ"
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  dot={{ fill: "#3b82f6", r: 3 }}
+                  connectNulls
+                />
+                <Line
+                  type="monotone"
+                  dataKey="aaAvgDays"
+                  name="Термин АА"
+                  stroke="#10b981"
+                  strokeWidth={2}
+                  dot={{ fill: "#10b981", r: 3 }}
+                  connectNulls
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -1172,7 +1054,7 @@ function FunnelTimingSection() {
       <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-            Воронка термин — среднее время между переходами
+            Воронка — среднее время между этапами
           </h3>
           <span className="text-[10px] text-slate-500 hidden sm:inline">
             учтены лиды, чей переход состоялся в окне
@@ -1184,7 +1066,7 @@ function FunnelTimingSection() {
               <BarChart
                 data={chartData}
                 layout="vertical"
-                margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+                margin={{ top: 10, right: 80, left: 0, bottom: 0 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
                 <XAxis
@@ -1230,6 +1112,43 @@ function FunnelTimingSection() {
                   {chartData.map((d) => (
                     <Cell key={d.label} fill={d.color} />
                   ))}
+                  <LabelList
+                    dataKey="avgDays"
+                    position="right"
+                    content={(props) => {
+                      const {
+                        x = 0,
+                        y = 0,
+                        width = 0,
+                        height = 0,
+                        index,
+                      } = props as {
+                        x?: number;
+                        y?: number;
+                        width?: number;
+                        height?: number;
+                        index?: number;
+                      };
+                      const row =
+                        index != null ? chartData[index] : undefined;
+                      if (!row) return null;
+                      const text =
+                        row.avgDays == null
+                          ? "—"
+                          : `${row.avgDays.toFixed(1)} дн (${row.count})`;
+                      return (
+                        <text
+                          x={Number(x) + Number(width) + 8}
+                          y={Number(y) + Number(height) / 2 + 4}
+                          fill="#e2e8f0"
+                          fontSize={12}
+                          fontWeight={600}
+                        >
+                          {text}
+                        </text>
+                      );
+                    }}
+                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -1268,6 +1187,10 @@ function UpcomingTerminsSection() {
       try {
         const res = await fetch(`/api/dashboard/termins-upcoming?days=${days}`, {
           signal,
+          // Polling-driven refreshes must hit the server. Without no-store the
+          // browser HTTP cache could replay a 60s-old response and the
+          // dashboard would drift from CRM until the user manually refreshed.
+          cache: "no-store",
         });
         if (!res.ok) {
           const text = await res.text();
@@ -1290,7 +1213,30 @@ function UpcomingTerminsSection() {
   useEffect(() => {
     const ac = new AbortController();
     fetchData(ac.signal);
-    return () => ac.abort();
+
+    // Auto-refresh: planning data turns over hourly as managers schedule and
+    // reschedule termins. Without polling the dashboard drifts from CRM
+    // truth until the user manually clicks refresh.
+    const POLL_INTERVAL_MS = 5 * 60 * 1000;
+    const interval = setInterval(() => {
+      fetchData();
+    }, POLL_INTERVAL_MS);
+
+    // Tab returning to foreground after being hidden: refresh immediately.
+    // Browsers throttle setInterval in background tabs, so a polling cadence
+    // alone isn't enough — switching back triggers a fresh load.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchData();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      ac.abort();
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [fetchData]);
 
   const stats = useMemo(() => {
@@ -1477,7 +1423,7 @@ function UpcomingTerminsSection() {
 // ── Pre-termin (D2) ─────────────────────────────────
 
 interface PreTerminApiRow {
-  bucket: "pre_dc" | "post_dc" | "limbo";
+  bucket: "pre_dc" | "post_dc";
   statusId: number;
   statusName: string;
   count: number;
@@ -1497,11 +1443,6 @@ const BUCKET_META: Record<
     label: "Между ДЦ и Гутшайном",
     accent: "text-emerald-300",
     barColor: "#10b981",
-  },
-  limbo: {
-    label: "В отмене (ждут переноса)",
-    accent: "text-amber-300",
-    barColor: "#f59e0b",
   },
 };
 
@@ -1540,11 +1481,11 @@ function PreTerminSection() {
 
   const buckets = useMemo(() => {
     if (!data)
-      return { pre_dc: 0, post_dc: 0, limbo: 0 } as Record<
+      return { pre_dc: 0, post_dc: 0 } as Record<
         PreTerminApiRow["bucket"],
         number
       >;
-    const sums = { pre_dc: 0, post_dc: 0, limbo: 0 } as Record<
+    const sums = { pre_dc: 0, post_dc: 0 } as Record<
       PreTerminApiRow["bucket"],
       number
     >;
@@ -1565,17 +1506,11 @@ function PreTerminSection() {
   const isRefreshing = loading && !!data;
   const hasData = !!data && data.some((r) => r.count > 0);
 
-  // Sort by bucket order (pre_dc, post_dc, limbo) then by count desc within
-  // each — so the chart reads as a funnel timeline.
-  const sortedRows = (data ?? [])
-    .slice()
-    .sort((a, b) => {
-      const order = { pre_dc: 0, post_dc: 1, limbo: 2 };
-      if (order[a.bucket] !== order[b.bucket])
-        return order[a.bucket] - order[b.bucket];
-      return b.count - a.count;
-    })
-    .filter((r) => r.count > 0);
+  // API ordering IS the funnel timeline (pre_dc statuses first, then post_dc;
+  // within each bucket, statuses are ordered by their funnel position with
+  // "перенесён" placed next to its consultation pair). We preserve API order
+  // here so changes in pre-termin/route.ts STATUS_BUCKETS propagate directly.
+  const sortedRows = (data ?? []).filter((r) => r.count > 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -1609,8 +1544,8 @@ function PreTerminSection() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        {(["pre_dc", "post_dc", "limbo"] as const).map((b) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {(["pre_dc", "post_dc"] as const).map((b) => (
           <SummaryTile
             key={b}
             label={BUCKET_META[b].label}
@@ -1703,260 +1638,6 @@ function PreTerminSection() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-// ── Plan vs fact + forecast (D3 + D4) ───────────────
-
-interface PlanVsFactResp {
-  month: string;
-  monthStart: string;
-  monthEnd: string;
-  isCurrentMonth: boolean;
-  dc: {
-    plan: number;
-    fact: number;
-    completionRate: number | null;
-    scheduledFuture: number;
-    forecast: number | null;
-  };
-  aa: {
-    plan: number;
-    fact: number;
-    completionRate: number | null;
-    scheduledFuture: number;
-    forecast: number | null;
-  };
-}
-
-function shiftMonth(month: string, delta: number): string {
-  const y = Number(month.slice(0, 4));
-  const m = Number(month.slice(5, 7));
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  return `${d.getUTCFullYear()}`.padStart(4, "0") +
-    "-" + `${d.getUTCMonth() + 1}`.padStart(2, "0");
-}
-
-function PlanVsFactSection() {
-  const initialMonth = useMemo(() => {
-    const today = todayBerlinDate();
-    const { y, m } = berlinCivilComponents(today);
-    return `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}`;
-  }, []);
-  const [month, setMonth] = useState<string>(initialMonth);
-  const [data, setData] = useState<PlanVsFactResp | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const hasDataRef = useRef(false);
-
-  const fetchData = useCallback(
-    async (signal?: AbortSignal) => {
-      if (!hasDataRef.current) setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(
-          `/api/dashboard/termin-plan-vs-fact?month=${month}`,
-          { signal },
-        );
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`API error ${res.status}: ${text}`);
-        }
-        const json = (await res.json()) as PlanVsFactResp;
-        setData(json);
-        hasDataRef.current = true;
-      } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") return;
-        if (e instanceof TypeError && e.message === "Failed to fetch") return;
-        setError(String(e));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [month],
-  );
-
-  useEffect(() => {
-    const ac = new AbortController();
-    fetchData(ac.signal);
-    return () => ac.abort();
-  }, [fetchData]);
-
-  if (loading && !data) return <DinoLoader />;
-  if (error && !data) {
-    return (
-      <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
-        <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
-        <p className="text-red-400 text-sm">{error}</p>
-      </div>
-    );
-  }
-
-  const isRefreshing = loading && !!data;
-
-  const monthLabel = (() => {
-    const [y, m] = month.split("-").map(Number);
-    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("ru-RU", {
-      month: "long",
-      year: "numeric",
-    });
-  })();
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <CalendarDays className="w-4 h-4 text-violet-400" />
-          <button
-            type="button"
-            onClick={() => setMonth(shiftMonth(month, -1))}
-            className="text-[10px] uppercase tracking-wider px-2 py-1.5 rounded-lg bg-slate-800/40 text-slate-400 border border-white/5 hover:text-white"
-          >
-            ◀ предыдущий
-          </button>
-          <span className="text-sm font-semibold text-slate-200 px-2 capitalize">
-            {monthLabel}
-          </span>
-          <button
-            type="button"
-            onClick={() => setMonth(shiftMonth(month, +1))}
-            className="text-[10px] uppercase tracking-wider px-2 py-1.5 rounded-lg bg-slate-800/40 text-slate-400 border border-white/5 hover:text-white"
-            disabled={month >= initialMonth}
-          >
-            следующий ▶
-          </button>
-          <button
-            type="button"
-            onClick={() => setMonth(initialMonth)}
-            className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg bg-violet-500/20 text-violet-300 border border-violet-500/40 ml-2"
-          >
-            текущий
-          </button>
-        </div>
-        <button
-          type="button"
-          onClick={() => fetchData()}
-          disabled={loading}
-          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-          title="Обновить"
-          aria-label="Обновить"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-        </button>
-      </div>
-
-      {isRefreshing && (
-        <div className="flex items-center justify-center">
-          <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-violet-500/10 border border-violet-500/20">
-            <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
-            <span className="text-[10px] text-violet-400 font-medium">
-              Обновление данных...
-            </span>
-          </div>
-        </div>
-      )}
-
-      {data && (
-        <>
-          <div className="glass-panel rounded-2xl border border-white/5 p-4 sm:p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-                Термин ДЦ — план vs факт
-              </h3>
-              {data.dc.completionRate != null && (
-                <span className="text-[10px] text-slate-500">
-                  истор. конверсия план→факт за 90 дн = {data.dc.completionRate}%
-                </span>
-              )}
-            </div>
-            <PlanVsFactGrid
-              plan={data.dc.plan}
-              fact={data.dc.fact}
-              future={data.dc.scheduledFuture}
-              forecast={data.dc.forecast}
-              accentBlue
-              isCurrentMonth={data.isCurrentMonth}
-            />
-          </div>
-
-          <div className="glass-panel rounded-2xl border border-white/5 p-4 sm:p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-                Термин АА — план vs факт
-              </h3>
-              {data.aa.completionRate != null && (
-                <span className="text-[10px] text-slate-500">
-                  истор. конверсия план→факт за 90 дн = {data.aa.completionRate}%
-                </span>
-              )}
-            </div>
-            <PlanVsFactGrid
-              plan={data.aa.plan}
-              fact={data.aa.fact}
-              future={data.aa.scheduledFuture}
-              forecast={data.aa.forecast}
-              accentBlue={false}
-              isCurrentMonth={data.isCurrentMonth}
-            />
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function PlanVsFactGrid({
-  plan,
-  fact,
-  future,
-  forecast,
-  accentBlue,
-  isCurrentMonth,
-}: {
-  plan: number;
-  fact: number;
-  future: number;
-  forecast: number | null;
-  accentBlue: boolean;
-  isCurrentMonth: boolean;
-}) {
-  const planFulfilled = plan > 0 ? Math.round((fact / plan) * 100) : null;
-  const factColor = accentBlue ? "text-blue-300" : "text-emerald-300";
-  return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-      <SummaryTile label="План на месяц" value={plan.toLocaleString("ru-RU")} accent="text-slate-200" />
-      <SummaryTile
-        label={isCurrentMonth ? "Факт на сегодня" : "Факт"}
-        value={fact.toLocaleString("ru-RU")}
-        accent={factColor}
-        sublabel={
-          planFulfilled != null
-            ? `${planFulfilled}% от плана`
-            : undefined
-        }
-      />
-      <SummaryTile
-        label={isCurrentMonth ? "Запланировано до конца месяца" : "—"}
-        value={isCurrentMonth ? future.toLocaleString("ru-RU") : "—"}
-        accent="text-slate-200"
-      />
-      <SummaryTile
-        label={isCurrentMonth ? "Прогноз на конец месяца" : "—"}
-        value={
-          !isCurrentMonth
-            ? "—"
-            : forecast == null
-              ? "—"
-              : forecast.toLocaleString("ru-RU")
-        }
-        accent="text-violet-300"
-        sublabel={
-          isCurrentMonth && forecast != null && plan > 0
-            ? `${Math.round((forecast / plan) * 100)}% от плана`
-            : undefined
-        }
-      />
     </div>
   );
 }

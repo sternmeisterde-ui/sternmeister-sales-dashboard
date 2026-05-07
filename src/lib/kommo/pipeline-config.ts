@@ -173,6 +173,47 @@ export const QUALIFIED_STATUSES: Set<number> = new Set([
   BERATER_STATUSES.WON,
 ]);
 
+// ==================== QUAL FILTER FOR DASHBOARD CHARTS ====================
+// Frozen 2026-05-07 from a Kommo filter URL provided by ROP. Allow-list
+// semantics: a FIRST_LINE lead is "qual" iff
+//   1. its status_id is in QUAL_FIRST_LINE_STATUS_IDS (excludes the
+//      pre-processing buckets Неразобранное and База), AND
+//   2. its non_qual_enum_id (cf 879824 "Причина закрытия госники") is either
+//      NULL or in QUAL_REASON_ENUM_IDS.
+// Used by chart 3 (qual-leads-docs) and chart 4 stage A (termin-funnel,
+// FIRST_LINE creation → Термин ДЦ).
+
+/** FIRST_LINE statuses that count as "qual" for the dashboards.
+ *  Excludes Неразобранное (83873487) and База (93485479) — pre-processing
+ *  buckets where the lead hasn't yet been picked up. */
+export const QUAL_FIRST_LINE_STATUS_IDS: readonly number[] = [
+  FIRST_LINE_STATUSES.NEW_LEAD,        // 83873491 Новый лид
+  FIRST_LINE_STATUSES.IN_PROGRESS,     // 90367079 Взято в работу
+  FIRST_LINE_STATUSES.NO_ANSWER,       // 90367083 Недозвон
+  FIRST_LINE_STATUSES.CONTACT_MADE,    // 90367087 Контакт установлен
+  FIRST_LINE_STATUSES.CONSULT_DONE,    // 95514983 Консультация проведена
+  FIRST_LINE_STATUSES.DECISION_MAKING, // 104211575 Принимает решение
+  FIRST_LINE_STATUSES.DOCS_SENT_DC,    // 101935919 Документы отправлены в ДЦ
+  FIRST_LINE_STATUSES.DELAYED_START,   // 95514987 Отложенный старт
+  FIRST_LINE_STATUSES.WON,             // 142 Термин ДЦ
+  FIRST_LINE_STATUSES.LOST,            // 143 Закрыто и не реализовано
+];
+
+/** "Причина закрытия госники" (cf 879824) enum values that count as qual.
+ *  Frozen from ROP-provided Kommo URL — list of reasons that DON'T disqualify
+ *  the lead. NULL (поле не заполнено) ALSO counts as qual; that case is
+ *  handled in the SQL clause separately, not in this list. */
+export const QUAL_REASON_ENUM_IDS: readonly number[] = [
+  744186, 744188, 744190, 744192,
+  744304, 744312, 744314, 744316, 744318, 744320,
+  744384,
+  745292, 745304,
+  746174,
+  746700,
+  750386,
+  753840, 753842,
+];
+
 // ==================== ALL ACTIVE (NON-CLOSED) STATUS IDS ====================
 // Used to filter leads from Kommo API — fetch only active leads first,
 // then separately fetch WON/LOST for result counts.
