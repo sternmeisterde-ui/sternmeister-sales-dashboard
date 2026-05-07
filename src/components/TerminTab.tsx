@@ -1522,7 +1522,7 @@ function PreTerminSection() {
               <BarChart
                 data={sortedRows}
                 layout="vertical"
-                margin={{ top: 5, right: 100, left: 0, bottom: 0 }}
+                margin={{ top: 5, right: 320, left: 0, bottom: 0 }}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
@@ -1544,38 +1544,11 @@ function PreTerminSection() {
                   tickLine={false}
                   width={280}
                 />
-                <RTooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload || payload.length === 0) return null;
-                    const r = payload[0]?.payload as PreTerminApiRow | undefined;
-                    if (!r) return null;
-                    return (
-                      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
-                        <div className="font-semibold text-slate-200 mb-1">
-                          {r.statusName}
-                        </div>
-                        <div className="text-slate-300">
-                          В статусе:{" "}
-                          <span className="font-medium text-cyan-300">
-                            {r.count}
-                          </span>
-                        </div>
-                        <div className="text-slate-300">
-                          Ср. время с последнего перехода:{" "}
-                          <span className="font-medium text-slate-200">
-                            {r.avgDaysInStatus == null
-                              ? "—"
-                              : `${r.avgDaysInStatus.toFixed(1)} дн.`}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-[10px] text-slate-500">
-                          Группа: {BUCKET_META[r.bucket].label}
-                        </div>
-                      </div>
-                    );
-                  }}
-                />
-                <Bar dataKey="count" radius={[0, 6, 6, 0]}>
+                <Bar
+                  dataKey="count"
+                  radius={[0, 6, 6, 0]}
+                  isAnimationActive={false}
+                >
                   {sortedRows.map((r) => (
                     <Cell key={r.statusId} fill={BUCKET_META[r.bucket].barColor} />
                   ))}
@@ -1601,8 +1574,8 @@ function PreTerminSection() {
                       if (!row) return null;
                       const days =
                         row.avgDaysInStatus == null
-                          ? ""
-                          : ` · ${row.avgDaysInStatus.toFixed(1)} дн`;
+                          ? "—"
+                          : `${row.avgDaysInStatus.toFixed(1)} дн`;
                       return (
                         <text
                           x={Number(x) + Number(width) + 8}
@@ -1611,9 +1584,10 @@ function PreTerminSection() {
                           fontSize={11}
                           fontWeight={600}
                         >
-                          {row.count}
+                          В статусе: {row.count}
                           <tspan fill="#94a3b8" fontWeight={400}>
-                            {days}
+                            {" "}
+                            · ср. время с последнего перехода: {days}
                           </tspan>
                         </text>
                       );
