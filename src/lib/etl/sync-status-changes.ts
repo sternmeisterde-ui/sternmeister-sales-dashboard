@@ -52,15 +52,37 @@ export async function syncStatusChanges(
     });
   }
 
-  // Delete rows for this date range, then insert
-  await analyticsDb.execute(
-    sql`DELETE FROM analytics.lead_status_changes
-        WHERE event_at >= ${fromDate} AND event_at <= ${toDate}`,
-  );
-
+  // INSERT … ON CONFLICT DO UPDATE on the natural key (lead_id, event_at,
+  // status_id). Idempotent: a retry of a fetch that already committed
+  // server-side becomes a no-op UPDATE instead of a duplicate row. The old
+  // DELETE-then-INSERT shape was race-prone — see migration 0014.
+  //
+  // We still UPDATE the snapshot fields (pipeline name/sort/manager,
+  // lead_created_at) on conflict because Kommo can rename a status or
+  // reassign a lead's manager; the window-function pass below recomputes
+  // last_event_at / next_status_id / next_event_at so we don't touch those
+  // here.
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb.insert(leadStatusChanges).values(rows.slice(i, i + CHUNK));
+    await analyticsDb
+      .insert(leadStatusChanges)
+      .values(rows.slice(i, i + CHUNK))
+      .onConflictDoUpdate({
+        target: [
+          leadStatusChanges.leadId,
+          leadStatusChanges.eventAt,
+          leadStatusChanges.statusId,
+        ],
+        set: {
+          amoDomain: sql`EXCLUDED.amo_domain`,
+          pipelineId: sql`EXCLUDED.pipeline_id`,
+          pipeline: sql`EXCLUDED.pipeline`,
+          status: sql`EXCLUDED.status`,
+          sort: sql`EXCLUDED.sort`,
+          leadCreatedAt: sql`EXCLUDED.lead_created_at`,
+          manager: sql`EXCLUDED.manager`,
+        },
+      });
   }
 
   // Compute last_event_at, next_status_id, next_event_at via window functions

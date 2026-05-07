@@ -205,6 +205,11 @@ export const leadStatusChanges = analyticsSchema.table(
     index().on(t.leadId, t.eventAt),
     index().on(t.pipelineId, t.statusId),
     index().on(t.eventAt),
+    // Natural identity of a single pipeline transition. Without this,
+    // sync-status-changes' chunked INSERT could double-write whenever the
+    // Neon HTTP client retried a fetch that had already committed
+    // server-side (see migration 0014).
+    uniqueIndex("lead_status_changes_unique").on(t.leadId, t.eventAt, t.statusId),
   ],
 );
 
