@@ -26,17 +26,32 @@ interface CaptureContext {
   severity: EtlSeverity;
   /** Free-form extra context — sync window, row counts, etc. */
   extra?: Record<string, unknown>;
+  /** Stable Sentry fingerprint. Use when the message text varies (timestamps,
+   *  counters) but the underlying signal is the same — keeps Sentry from
+   *  spawning N issues for what is actually one. */
+  fingerprint?: string[];
+}
+
+function applyFingerprint(
+  scope: Sentry.Scope,
+  ctx: CaptureContext,
+): void {
+  if (ctx.fingerprint?.length) {
+    scope.setFingerprint(ctx.fingerprint);
+  }
 }
 
 /** Send an exception to Sentry with consistent ETL tags. */
 export function captureEtlException(err: unknown, ctx: CaptureContext): void {
-  Sentry.captureException(err, {
-    tags: {
+  Sentry.withScope((scope) => {
+    scope.setTags({
       component: "etl",
       step: ctx.step,
       severity: ctx.severity,
-    },
-    extra: ctx.extra,
+    });
+    if (ctx.extra) scope.setExtras(ctx.extra);
+    applyFingerprint(scope, ctx);
+    Sentry.captureException(err);
   });
 }
 
@@ -48,13 +63,15 @@ export function captureEtlMessage(
   level: "info" | "warning" | "error",
   ctx: CaptureContext,
 ): void {
-  Sentry.captureMessage(message, {
-    level,
-    tags: {
+  Sentry.withScope((scope) => {
+    scope.setLevel(level);
+    scope.setTags({
       component: "etl",
       step: ctx.step,
       severity: ctx.severity,
-    },
-    extra: ctx.extra,
+    });
+    if (ctx.extra) scope.setExtras(ctx.extra);
+    applyFingerprint(scope, ctx);
+    Sentry.captureMessage(message);
   });
 }

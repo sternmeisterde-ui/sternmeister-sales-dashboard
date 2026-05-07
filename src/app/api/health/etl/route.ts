@@ -36,12 +36,13 @@ const STALE_THRESHOLD_MIN = 30;
 // reports `degraded: true` and surfaces the count.
 const BACKLOG_DEGRADED_THRESHOLD = 2000;
 
-// Sentry rate-limit. Without this the badge polls every 60s and a stale
-// episode lasting an hour fires 60 captureEtlMessage calls — Sentry de-dups
-// by fingerprint but the issue's event count climbs uselessly. Send at most
-// once per status per cooldown window. Process-local cache resets when the
-// lambda recycles, which is fine — fresh lambda = fresh signal worth seeing.
-const SENTRY_COOLDOWN_MS = 5 * 60 * 1000;
+// Sentry rate-limit. Badge polls every 60s; a multi-hour stale episode
+// at 5 min cooldown produced ~600 events under DASHBOARD-C. Bumped to
+// 30 min so an 8 h outage produces at most ~16 events. We also
+//   1. always fire on status transitions (so a flap is visible immediately),
+//   2. send a stable fingerprint so the events ALWAYS group into one issue
+//      regardless of the changing `ageSec` in the message.
+const SENTRY_COOLDOWN_MS = 30 * 60 * 1000;
 let lastSentryReportAt: { status: string; at: number } | null = null;
 
 interface FreshnessRow {
@@ -155,12 +156,18 @@ export async function GET(): Promise<NextResponse> {
           .join(", ");
         captureEtlMessage(
           stale
-            ? `cron heartbeat stale: ${heartbeat.ageSec ?? "null"}s since last_completed_at`
-            : `enrichment backlog ${enrichmentBacklog} > ${BACKLOG_DEGRADED_THRESHOLD}`,
+            ? "ETL cron heartbeat stale (>30 min since last_completed_at)"
+            : `ETL enrichment backlog above ${BACKLOG_DEGRADED_THRESHOLD}`,
           stale ? "error" : "warning",
           {
             step: stale ? "health:cron-heartbeat" : "health:enrichment-backlog",
             severity: stale ? "fatal" : "warning",
+            // Stable fingerprint — keeps Sentry from spawning a fresh issue
+            // for every distinct `ageSec` value (which is what gave us the
+            // 639-event DASHBOARD-C storm).
+            fingerprint: stale
+              ? ["etl", "health", "cron-heartbeat-stale"]
+              : ["etl", "health", "enrichment-backlog"],
             extra: {
               heartbeat_age_sec: heartbeat.ageSec,
               heartbeat_last_completed_at: heartbeat.lastCompletedAt,

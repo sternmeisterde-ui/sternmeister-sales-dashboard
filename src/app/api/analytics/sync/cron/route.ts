@@ -10,6 +10,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { runSync } from "@/lib/etl";
 import { analyticsDb } from "@/lib/db/analytics";
+import { isTransientDbError, withDbRetry } from "@/lib/db/with-retry";
 import { captureEtlException, captureEtlMessage } from "@/lib/etl/sentry";
 
 export const maxDuration = 300;
@@ -36,19 +37,28 @@ const LOCK_NAME = "cron";
 // 6 min = 5 min maxDuration + 1 min grace.
 const LEASE_MINUTES = 6;
 
-/** Try to acquire the lease. Returns the token if acquired, null otherwise. */
+/** Try to acquire the lease. Returns the token if acquired, null otherwise.
+ *
+ *  Wrapped in `withDbRetry` so transient Neon hiccups (the dominant failure
+ *  mode — Sentry DASHBOARD-G/F) don't drop the tick. Combined with the
+ *  fetch-level retries in `neon-setup.ts`, sustained failure here means Neon
+ *  has been unreachable for ~2+ minutes, which is a real outage worth a
+ *  Sentry signal — a ~1-second blip is not. */
 async function tryAcquireLock(): Promise<string | null> {
   const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const res = await analyticsDb.execute<{ token: string }>(sql`
-    INSERT INTO analytics.etl_locks (name, token, acquired_at, expires_at)
-    VALUES (${LOCK_NAME}, ${token}, now(), now() + ${`${LEASE_MINUTES} minutes`}::interval)
-    ON CONFLICT (name) DO UPDATE
-      SET token       = EXCLUDED.token,
-          acquired_at = EXCLUDED.acquired_at,
-          expires_at  = EXCLUDED.expires_at
-      WHERE analytics.etl_locks.expires_at <= now()
-    RETURNING token
-  `);
+  const res = await withDbRetry(
+    () => analyticsDb.execute<{ token: string }>(sql`
+      INSERT INTO analytics.etl_locks (name, token, acquired_at, expires_at)
+      VALUES (${LOCK_NAME}, ${token}, now(), now() + ${`${LEASE_MINUTES} minutes`}::interval)
+      ON CONFLICT (name) DO UPDATE
+        SET token       = EXCLUDED.token,
+            acquired_at = EXCLUDED.acquired_at,
+            expires_at  = EXCLUDED.expires_at
+        WHERE analytics.etl_locks.expires_at <= now()
+      RETURNING token
+    `),
+    { label: "etl-cron:acquire-lock" },
+  );
   const row = res.rows[0];
   return row && row.token === token ? token : null;
 }
@@ -64,13 +74,16 @@ async function tryAcquireLock(): Promise<string | null> {
  *
  *  Token-scoped WHERE so we never release someone else's lease. */
 async function releaseLock(token: string): Promise<void> {
-  await analyticsDb.execute(sql`
-    UPDATE analytics.etl_locks
-    SET token             = '',
-        expires_at        = now(),
-        last_completed_at = now()
-    WHERE name = ${LOCK_NAME} AND token = ${token}
-  `);
+  await withDbRetry(
+    () => analyticsDb.execute(sql`
+      UPDATE analytics.etl_locks
+      SET token             = '',
+          expires_at        = now(),
+          last_completed_at = now()
+      WHERE name = ${LOCK_NAME} AND token = ${token}
+    `),
+    { label: "etl-cron:release-lock" },
+  );
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -96,9 +109,34 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     token = await tryAcquireLock();
   } catch (lockErr) {
-    // Lock table missing or DB unreachable — fail loud so we don't run
-    // unprotected. Most likely cause: migration 0010 not applied yet.
-    console.error("[ETL cron] failed to acquire lease lock:", lockErr);
+    // Two distinct failure modes here:
+    //   - Transient Neon outage that survived 5 fetch retries × 3 statement
+    //     retries (~2 min of unreachability). Skip this tick — next one
+    //     picks up. Health endpoint already alarms on stale heartbeat, so
+    //     no need to fire a fatal here too (avoids the DASHBOARD-G storm).
+    //   - Schema/permission error (e.g. migration 0010 not applied). Fire
+    //     fatal — this won't self-heal.
+    const transient = isTransientDbError(lockErr);
+    console.error(
+      `[ETL cron] failed to acquire lease lock (${transient ? "transient" : "fatal"}):`,
+      lockErr,
+    );
+    if (transient) {
+      captureEtlMessage(
+        "ETL cron skipped — transient DB error on lock acquire",
+        "warning",
+        {
+          step: "cron:acquire-lock",
+          severity: "warning",
+          fingerprint: ["etl", "cron", "acquire-lock-transient"],
+          extra: { error: lockErr instanceof Error ? lockErr.message : String(lockErr) },
+        },
+      );
+      return NextResponse.json(
+        { success: false, skipped: true, reason: "transient db error on lock acquire" },
+        { status: 503 },
+      );
+    }
     captureEtlException(lockErr, { step: "cron:acquire-lock", severity: "fatal" });
     return NextResponse.json(
       { success: false, error: "lease-lock query failed (run migration 0010?)" },
@@ -114,7 +152,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     captureEtlMessage(
       "ETL cron skipped — concurrent run in progress",
       "warning",
-      { step: "cron:lock", severity: "warning" },
+      {
+        step: "cron:lock",
+        severity: "warning",
+        fingerprint: ["etl", "cron", "concurrent-skip"],
+      },
     );
     return NextResponse.json(
       { success: false, skipped: true, reason: "concurrent run in progress" },
