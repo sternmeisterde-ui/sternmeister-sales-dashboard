@@ -119,14 +119,20 @@ export async function GET(req: NextRequest) {
     // DC bucket axis = dc_termin date (Berlin); AA bucket axis = aa_termin date.
     // A lead with both termins in the window contributes to both lines, each
     // at the respective leg's own bucket date.
+    // Double TZ conversion: termin_date is stored as `timestamp without time
+    // zone` carrying UTC; single `AT TIME ZONE 'Europe/Berlin'` would treat
+    // the stored value as already-Berlin and shift midnight appointments to
+    // the previous day. `AT TIME ZONE 'UTC'` first reinterprets as UTC, then
+    // `AT TIME ZONE 'Europe/Berlin'` converts to Berlin civil. (Bug fixed
+    // 2026-05-07.)
     const dcBucketExpr =
       granularity === "week"
-        ? sql`DATE_TRUNC('week', dc_termin AT TIME ZONE 'Europe/Berlin')::date`
-        : sql`DATE(dc_termin AT TIME ZONE 'Europe/Berlin')`;
+        ? sql`DATE_TRUNC('week', (dc_termin AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`
+        : sql`DATE((dc_termin AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')`;
     const aaBucketExpr =
       granularity === "week"
-        ? sql`DATE_TRUNC('week', aa_termin AT TIME ZONE 'Europe/Berlin')::date`
-        : sql`DATE(aa_termin AT TIME ZONE 'Europe/Berlin')`;
+        ? sql`DATE_TRUNC('week', (aa_termin AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`
+        : sql`DATE((aa_termin AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')`;
 
     const result = await exec(sql`
       WITH cancellations AS (
@@ -202,10 +208,11 @@ export async function GET(req: NextRequest) {
     rows = result.rows;
   } else {
     // Chart 1 — creation cohort. AA from creation; future-termin guard.
+    // Double TZ conversion: see chart-2 block above for rationale.
     const cohortBucketExpr =
       granularity === "week"
-        ? sql`DATE_TRUNC('week', lc.created_at AT TIME ZONE 'Europe/Berlin')::date`
-        : sql`DATE(lc.created_at AT TIME ZONE 'Europe/Berlin')`;
+        ? sql`DATE_TRUNC('week', (lc.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`
+        : sql`DATE((lc.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')`;
 
     const result = await exec(sql`
       WITH cancellations AS (

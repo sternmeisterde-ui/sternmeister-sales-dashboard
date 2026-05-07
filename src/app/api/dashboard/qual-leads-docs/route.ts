@@ -81,8 +81,12 @@ export async function GET(req: NextRequest) {
   const firstLineId = B2G_PIPELINES.FIRST_LINE;
   const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
 
-  // Bucket in Europe/Berlin (see termins/route.ts for rationale).
-  const berlinCreated = sql`(lc.created_at) AT TIME ZONE 'Europe/Berlin'`;
+  // Double TZ conversion: created_at is stored as `timestamp without time
+  // zone` carrying UTC; single `AT TIME ZONE 'Europe/Berlin'` would treat
+  // the stored clock as already-Berlin and shift midnight rows to the prior
+  // day. (Bug fixed 2026-05-07 — see termins/route.ts comment for the same
+  // pattern.)
+  const berlinCreated = sql`((lc.created_at) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'`;
   const cohortBucketExpr =
     granularity === "week"
       ? sql`DATE_TRUNC('week', ${berlinCreated})::date`
