@@ -6,24 +6,33 @@ import {
   A2_STATUSES,
   B1_STATUSES,
   B2_PLUS_STATUSES,
+  B2G_PIPELINES,
+  QUAL_FIRST_LINE_STATUS_IDS,
+  QUAL_REASON_ENUM_IDS,
 } from "./pipeline-config";
 
 /**
- * Квал-фильтр per user spec 2026-04-24 (финальное уточнение):
+ * Квал-фильтр (frozen 2026-05-07 from ROP Kommo URL — see pipeline-config.ts
+ * `QUAL_FIRST_LINE_STATUS_IDS` and `QUAL_REASON_ENUM_IDS`).
  *
- *   Квал = лид НЕ закрыт как "Неквал".
- *   Не-квал = status_id=143 (LOST) И причина закрытия = "Неквал *".
+ * FIRST_LINE leads — strict allow-list:
+ *   1. status_id ∈ QUAL_FIRST_LINE_STATUS_IDS (10 statuses; excludes
+ *      Неразобранное and База — pre-processing buckets).
+ *   2. non_qual_enum_id (cf 879824 "Причина закрытия госники") IS NULL
+ *      OR ∈ QUAL_REASON_ENUM_IDS (18 allowed reasons; excludes all
+ *      "Неквал ..." values + "Неправильный номер" + any value not
+ *      explicitly allow-listed).
  *
- * Источники причины закрытия:
- *   1) Kommo system loss_reason_id → текст через лукап (для Госников редко заполнен).
- *   2) Custom field 879824 (enum "Причина закрытия Госники") с enum_ids:
- *      744486 Неправильный номер, 744876 Неквал лид, 747530 Неквал Образование,
- *      747532 Неквал Возраст, 747534 Неквал Язык, 747536 Неквал Доход.
- *   3) Sentinel CFV field_id=999001 с текстом loss_reason для analytics-mapped leads
- *      (ETL подставляет сюда текст из leads_cohort.loss_reason).
+ * Non-FIRST_LINE leads (BERATER, B2B Бух/Мед) — legacy deny-list kept
+ * because BERATER doesn't have a "qual" stage in the same sense (leads
+ * reaching BERATER are already past qualification) and B2B uses category
+ * letter grading via analytics-b2b.ts, not this function.
+ *   - LOST + Неквал-reason → not qual.
+ *   - Anything else → qual.
  *
- * Все остальные (в том числе LOST без указанной Неквал-причины, E-category и
- * без category) — **квал по умолчанию**.
+ * The two branches answer different questions: FIRST_LINE asks "should this
+ * lead enter the planning pipeline?", BERATER/B2B asks "did this lead get
+ * explicitly disqualified by the manager?".
  */
 
 const NEQVAL_ENUM_IDS = new Set([744486, 744876, 747530, 747532, 747534, 747536]);
@@ -31,27 +40,39 @@ const NEQVAL_ENUM_IDS = new Set([744486, 744876, 747530, 747532, 747534, 747536]
 /** Sentinel CFV field_id used to carry loss_reason text from analytics-leads.ts. */
 export const SYNTH_LOSS_REASON_FIELD_ID = 999001;
 
+const FIRST_LINE_REASON_FIELD_ID = 879824;
+
 export function isQualLead(lead: KommoLead): boolean {
-  // Only leads closed as LOST can be marked "non-qual" per spec.
+  if (lead.pipeline_id === B2G_PIPELINES.FIRST_LINE) {
+    // URL allow-list: status must be allow-listed; reason must be NULL or
+    // allow-listed.
+    if (!QUAL_FIRST_LINE_STATUS_IDS.includes(lead.status_id)) return false;
+    const fields = lead.custom_fields_values || [];
+    const reasonCf = fields.find((f) => f.field_id === FIRST_LINE_REASON_FIELD_ID);
+    if (reasonCf) {
+      const enumId = reasonCf.values?.[0]?.enum_id;
+      if (typeof enumId === "number" && !QUAL_REASON_ENUM_IDS.includes(enumId)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Non-FIRST_LINE legacy deny-list — only a LOST lead with explicit
+  // "Неквал ..." marker is non-qual; everything else stays qual.
   if (lead.status_id !== 143) return true;
 
   const fields = lead.custom_fields_values || [];
-
-  // Path 2: non-qual reason enum (custom field 879824)
-  const reasonCf = fields.find((f) => f.field_id === 879824);
+  const reasonCf = fields.find((f) => f.field_id === FIRST_LINE_REASON_FIELD_ID);
   if (reasonCf) {
     const enumId = reasonCf.values?.[0]?.enum_id;
     if (typeof enumId === "number" && NEQVAL_ENUM_IDS.has(enumId)) return false;
   }
-
-  // Path 3: synthesised loss_reason text (analytics-mapped leads)
   const textCf = fields.find((f) => f.field_id === SYNTH_LOSS_REASON_FIELD_ID);
   if (textCf) {
     const v = textCf.values?.[0]?.value;
     if (typeof v === "string" && /неквал/i.test(v)) return false;
   }
-
-  // Conservative default: if LOST without an explicit Неквал marker → still qual.
   return true;
 }
 
