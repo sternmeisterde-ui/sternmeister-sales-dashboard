@@ -1479,20 +1479,6 @@ function PreTerminSection() {
     return () => ac.abort();
   }, [fetchData]);
 
-  const buckets = useMemo(() => {
-    if (!data)
-      return { pre_dc: 0, post_dc: 0 } as Record<
-        PreTerminApiRow["bucket"],
-        number
-      >;
-    const sums = { pre_dc: 0, post_dc: 0 } as Record<
-      PreTerminApiRow["bucket"],
-      number
-    >;
-    for (const r of data) sums[r.bucket] += r.count;
-    return sums;
-  }, [data]);
-
   if (loading && !data) return <DinoLoader />;
   if (error && !data) {
     return (
@@ -1514,25 +1500,6 @@ function PreTerminSection() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <CalendarDays className="w-4 h-4 text-cyan-400" />
-          <span className="text-xs text-slate-300 font-semibold tracking-wide uppercase">
-            Ожидающие термин (snapshot)
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={() => fetchData()}
-          disabled={loading}
-          className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-          title="Обновить"
-          aria-label="Обновить"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-        </button>
-      </div>
-
       {isRefreshing && (
         <div className="flex items-center justify-center">
           <div className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20">
@@ -1544,25 +1511,26 @@ function PreTerminSection() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {(["pre_dc", "post_dc"] as const).map((b) => (
-          <SummaryTile
-            key={b}
-            label={BUCKET_META[b].label}
-            value={buckets[b].toLocaleString("ru-RU")}
-            accent={BUCKET_META[b].accent}
-          />
-        ))}
-      </div>
-
       <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
             Распределение по статусам
           </h3>
-          <span className="text-[10px] text-slate-500 hidden sm:inline">
-            avg-дней — среднее время с последнего перехода
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] text-slate-500 hidden sm:inline">
+              avg-дней — среднее время с последнего перехода
+            </span>
+            <button
+              type="button"
+              onClick={() => fetchData()}
+              disabled={loading}
+              className="p-1.5 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+              title="Обновить"
+              aria-label="Обновить"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            </button>
+          </div>
         </div>
         {hasData ? (
           <div className="h-[400px] sm:h-[440px] w-full">
@@ -1570,7 +1538,7 @@ function PreTerminSection() {
               <BarChart
                 data={sortedRows}
                 layout="vertical"
-                margin={{ top: 5, right: 30, left: 0, bottom: 0 }}
+                margin={{ top: 5, right: 100, left: 0, bottom: 0 }}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
@@ -1627,6 +1595,46 @@ function PreTerminSection() {
                   {sortedRows.map((r) => (
                     <Cell key={r.statusId} fill={BUCKET_META[r.bucket].barColor} />
                   ))}
+                  <LabelList
+                    dataKey="count"
+                    position="right"
+                    content={(props) => {
+                      const {
+                        x = 0,
+                        y = 0,
+                        width = 0,
+                        height = 0,
+                        index,
+                      } = props as {
+                        x?: number;
+                        y?: number;
+                        width?: number;
+                        height?: number;
+                        index?: number;
+                      };
+                      const row =
+                        index != null ? sortedRows[index] : undefined;
+                      if (!row) return null;
+                      const days =
+                        row.avgDaysInStatus == null
+                          ? ""
+                          : ` · ${row.avgDaysInStatus.toFixed(1)} дн`;
+                      return (
+                        <text
+                          x={Number(x) + Number(width) + 8}
+                          y={Number(y) + Number(height) / 2 + 4}
+                          fill="#e2e8f0"
+                          fontSize={11}
+                          fontWeight={600}
+                        >
+                          {row.count}
+                          <tspan fill="#94a3b8" fontWeight={400}>
+                            {days}
+                          </tspan>
+                        </text>
+                      );
+                    }}
+                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
