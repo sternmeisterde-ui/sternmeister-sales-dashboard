@@ -117,4 +117,5 @@ Sync targets при upsert: D2.`managers`, R2.`managers`, D1.`d1_users`, R1.`r1_
 - [`mysql-analytics.md`](./mysql-analytics.md) — полная карта 3rd-party MySQL → наша `analytics.*`
 - [`kommo-api-usage.md`](./kommo-api-usage.md) — Kommo rate-limit policy (1 rps/process, 2 rps combined)
 - [`SENTRY.md`](./SENTRY.md) — мониторинг и обработка ошибок
+- [`etl-architecture.md`](./etl-architecture.md) — **обязательно к прочтению перед добавлением новых INSERT-writers в `analytics.*`**: правила идемпотентности, natural keys, ON CONFLICT, поведение cron
 - [`THEME-AND-REFACTOR-PLAN.md`](./THEME-AND-REFACTOR-PLAN.md) — рефакторинговый план

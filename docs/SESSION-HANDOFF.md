@@ -30,6 +30,7 @@ This doc is for the next Claude Code session. Read it first.
 - [`MCP-IMPLEMENTATION-PLAN.md`](./MCP-IMPLEMENTATION-PLAN.md) — детальный архитектурный план MCP-сервера (added 2026-04-30)
 - [`daily-commerce-spec.md`](./daily-commerce-spec.md) — Daily commerce business spec
 - [`mysql-analytics.md`](./mysql-analytics.md) — analytics.* schema reference
+- [`etl-architecture.md`](./etl-architecture.md) — **обязательно перед добавлением INSERT-writers в `analytics.*`**: natural-key + ON CONFLICT правила, Neon retry-hazard, cron concurrency (added 2026-05-07)
 
 ---
 
