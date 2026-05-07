@@ -44,13 +44,43 @@ export async function syncTasks(
     });
   }
 
+  // DELETE-by-leadId clears tasks that were deleted in Kommo so they don't
+  // linger as orphans in our analytics copy. The follow-up INSERT … ON
+  // CONFLICT then writes the current state. The DELETE is safe here
+  // because:
+  //   - syncTasks runs only on full backfills (cron skips it in incremental
+  //     mode), so a brief empty window between DELETE and INSERT is
+  //     acceptable — next backfill will repopulate.
+  //   - The INSERT is now idempotent: a chunk retry after a successful
+  //     server-side commit (Neon HTTP retry hazard) becomes a no-op UPDATE
+  //     instead of a duplicate row, thanks to the unique index on task_id
+  //     (migration 0015) — see docs/etl-architecture.md.
+  //
+  // Mutable fields (deadline, manager reassignment, completion state) are
+  // refreshed on conflict so a re-sync picks up updates.
   await analyticsDb.execute(
     sql.raw(`DELETE FROM analytics.tasks WHERE lead_id IN (${leadIds.join(",")})`),
   );
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb.insert(tasks).values(rows.slice(i, i + CHUNK));
+    await analyticsDb
+      .insert(tasks)
+      .values(rows.slice(i, i + CHUNK))
+      .onConflictDoUpdate({
+        target: tasks.taskId,
+        set: {
+          leadId: sql`EXCLUDED.lead_id`,
+          leadCreatedAt: sql`EXCLUDED.lead_created_at`,
+          closedFlg: sql`EXCLUDED.closed_flg`,
+          leadManager: sql`EXCLUDED.lead_manager`,
+          taskCreatedAt: sql`EXCLUDED.task_created_at`,
+          completedAt: sql`EXCLUDED.completed_at`,
+          isCompleted: sql`EXCLUDED.is_completed`,
+          deadline: sql`EXCLUDED.deadline`,
+          taskManager: sql`EXCLUDED.task_manager`,
+        },
+      });
   }
 
   console.log(`[ETL] sync-tasks: inserted ${rows.length} rows`);

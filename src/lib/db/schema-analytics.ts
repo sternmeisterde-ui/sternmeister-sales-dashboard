@@ -174,13 +174,17 @@ export const tasks = analyticsSchema.table(
     taskManager: text("task_manager"),
   },
   (t) => [
-    index().on(t.taskId),
     index().on(t.leadId),
     index().on(t.deadline),
     index().on(t.isCompleted, t.deadline),
     // Phase 1 of Daily refactor: getOverdueTasksByManager filters by
     // (task_manager, is_completed, deadline).
     index("idx_tasks_mgr_completed_deadline").on(t.taskManager, t.isCompleted, t.deadline),
+    // Kommo task ID is the natural key — one row per task. Required for
+    // the ON CONFLICT DO UPDATE pattern in sync-tasks.ts so retries of a
+    // chunked INSERT (Neon transient + fetch retry) become no-op upserts
+    // instead of duplicates. See migration 0015.
+    uniqueIndex("tasks_task_id_unique").on(t.taskId),
   ],
 );
 
