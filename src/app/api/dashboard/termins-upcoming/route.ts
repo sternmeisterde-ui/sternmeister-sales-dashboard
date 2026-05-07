@@ -18,10 +18,14 @@
 // through the BERATER consultation flow, so the ROP doesn't plan around
 // them. Verified 2026-05-07: BERATER-only matches the ROP-cited 19 DC count.
 //
-// No status-based exclusion. Cancelled-state leads (TERM_DC_CANCELLED
-// 93860875, TERM_AA_CANCELLED 93860883) keep their last-known termin_date
-// in the row; they appear in the planning view because Kommo treats the
-// slot as "occupied / awaiting reschedule" rather than vacant.
+// DC counter has no status-based exclusion — cancelled-state leads
+// (TERM_DC_CANCELLED 93860875, TERM_AA_CANCELLED 93860883) keep their
+// last-known termin_date and the slot is treated as "occupied / awaiting
+// reschedule" rather than vacant.
+//
+// AA counter excludes BERATER_REVIEW (93860887): once the lead is in
+// review, the AA appointment already happened and aa_termin_date is the
+// historical record, not an upcoming slot.
 //
 // Returns a dense array (one row per Berlin civil day in the window) so the
 // UI heatmap shows zeros instead of missing days.
@@ -29,7 +33,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, todayCivil } from "@/lib/utils/date";
 
 interface UpcomingRow {
@@ -52,6 +56,10 @@ export async function GET(req: NextRequest) {
   const lastDay = addDaysCivil(todayBerlin, days - 1);
 
   const beraterId = B2G_PIPELINES.BERATER;
+  // AA exclusion: BERATER_REVIEW (93860887) means the AA appointment already
+  // happened and the lead is sitting in review — its aa_termin_date is the
+  // historical record, not an upcoming slot. Exclude from AA counter only.
+  const beraterReviewStatus = BERATER_STATUSES.BERATER_REVIEW;
 
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
@@ -92,6 +100,7 @@ export async function GET(req: NextRequest) {
         COUNT(*)::int AS n
       FROM analytics.leads_cohort
       WHERE pipeline_id = ${beraterId}
+        AND status_id <> ${beraterReviewStatus}
         AND aa_termin_date IS NOT NULL
         AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${todayBerlin}::date
         AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${lastDay}::date
