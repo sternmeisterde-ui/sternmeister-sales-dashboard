@@ -1,12 +1,24 @@
 // GET /api/dashboard/termins-upcoming?days=30
 //
-// Per-day count of upcoming termins (DC and AA, separately) for planning
-// the next N days. Reads BERATER leads' termin_date / aa_termin_date custom
-// fields directly — these ARE the planned dates.
+// Per-day count of upcoming termins (DC and AA, separately) for planning the
+// next N days. Reads termin_date / aa_termin_date directly — these ARE the
+// planned dates.
 //
-// Excludes leads whose CURRENT status is TERM_DC_CANCELLED (B3 logic — a
-// lead sitting in cancelled state has no committed new date even if the old
-// termin_date is still in the row).
+// Per ROP rule (2026-05-07):
+//   - A lead with termin_date set AND aa_termin_date IS NULL → counts as DC
+//     on its termin_date day.
+//   - A lead with aa_termin_date set → counts as AA on its aa_termin_date
+//     day, regardless of whether termin_date is also set. The AA stage
+//     supersedes the DC slot for planning purposes (each calendar slot is
+//     either a DC visit or an AA appointment, not both).
+//
+// Pipelines: BOTH FIRST_LINE (Бух Гос) and BERATER (Бух Бератер). FIRST_LINE
+// leads with status_id=142 ("Термин ДЦ" closed-won) carry termin_date too —
+// they're "got termin straight away" and need to appear in the planning
+// view alongside BERATER-flow leads.
+//
+// Excludes leads whose CURRENT status is TERM_DC_CANCELLED (BERATER 93860875)
+// — a lead sitting in cancelled state has no committed date.
 //
 // Returns a dense array (one row per Berlin civil day in the window) so the
 // UI heatmap shows zeros instead of missing days.
@@ -36,7 +48,8 @@ export async function GET(req: NextRequest) {
   const todayBerlin = todayCivil();
   const lastDay = addDaysCivil(todayBerlin, days - 1);
 
-  const pipelineId = B2G_PIPELINES.BERATER;
+  const firstLineId = B2G_PIPELINES.FIRST_LINE;
+  const beraterId = B2G_PIPELINES.BERATER;
   const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
 
   const result = await (
@@ -53,24 +66,30 @@ export async function GET(req: NextRequest) {
         '1 day'::interval
       )::date AS bday
     ),
+    -- DC slot: termin_date set AND aa_termin_date IS NULL — DC visit not yet
+    -- progressed to AA stage. Lead with both dates set is counted as AA only.
     dc_per_day AS (
       SELECT
         DATE(termin_date AT TIME ZONE 'Europe/Berlin') AS bday,
         COUNT(*)::int AS n
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${firstLineId}, ${beraterId})
         AND status_id <> ${cancelledStatusId}
         AND termin_date IS NOT NULL
+        AND aa_termin_date IS NULL
         AND DATE(termin_date AT TIME ZONE 'Europe/Berlin') >= ${todayBerlin}::date
         AND DATE(termin_date AT TIME ZONE 'Europe/Berlin') <= ${lastDay}::date
       GROUP BY 1
     ),
+    -- AA slot: any lead with aa_termin_date set (regardless of DC date) lands
+    -- here on its AA date. This is the planning-side rule: once AA is on the
+    -- calendar, the slot belongs to AA.
     aa_per_day AS (
       SELECT
         DATE(aa_termin_date AT TIME ZONE 'Europe/Berlin') AS bday,
         COUNT(*)::int AS n
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${firstLineId}, ${beraterId})
         AND status_id <> ${cancelledStatusId}
         AND aa_termin_date IS NOT NULL
         AND DATE(aa_termin_date AT TIME ZONE 'Europe/Berlin') >= ${todayBerlin}::date
