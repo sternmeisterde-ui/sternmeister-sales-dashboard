@@ -7,7 +7,7 @@ import {
   okkManagers,
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
-import { eq, sql, and, gte, lte, isNotNull, inArray } from "drizzle-orm";
+import { eq, sql, and, gte, lte, isNotNull, inArray, desc } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
@@ -398,9 +398,10 @@ async function fetchOkkData(
     sql`${okkManagers.role} IN ('manager', 'rop')`,
   ];
 
-  const [rows, managers] = await Promise.all([
+  const [rawRows, managers] = await Promise.all([
     db
       .select({
+        callId: okkCalls.id,
         callCreatedAt: okkCalls.callCreatedAt,
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
@@ -410,12 +411,23 @@ async function fetchOkkData(
       .from(okkCalls)
       .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
       .where(and(...conditions))
-      .orderBy(okkCalls.callCreatedAt),
+      // Latest evaluation first so the dedupe below keeps the active one.
+      // Re-evaluations (different prompt version, retries) create extra rows
+      // in `evaluations`; without this dedupe, a call with N evaluations was
+      // counted N times in callCount/breakdown.
+      .orderBy(desc(okkEvaluations.createdAt)),
     db
       .select({ id: okkManagers.id, name: okkManagers.name })
       .from(okkManagers)
       .where(and(...managerConditions)),
   ]);
+
+  const seenCallIds = new Set<string>();
+  const rows = rawRows.filter((r) => {
+    if (seenCallIds.has(r.callId)) return false;
+    seenCallIds.add(r.callId);
+    return true;
+  });
 
   const periods = buildPeriodRange(fromCivil, toCivil, groupBy);
   const accMap = new Map<string, PeriodAcc>();
