@@ -1066,7 +1066,7 @@ function FunnelTimingSection() {
               <BarChart
                 data={chartData}
                 layout="vertical"
-                margin={{ top: 10, right: 80, left: 0, bottom: 0 }}
+                margin={{ top: 10, right: 220, left: 0, bottom: 0 }}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
                 <XAxis
@@ -1084,31 +1084,11 @@ function FunnelTimingSection() {
                   tickLine={false}
                   width={260}
                 />
-                <RTooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload || payload.length === 0) return null;
-                    const r = payload[0]?.payload as
-                      | { label: string; avgDays: number | null; count: number }
-                      | undefined;
-                    if (!r) return null;
-                    return (
-                      <div className="rounded-lg border border-white/10 bg-slate-900/95 px-3 py-2 text-xs shadow-lg">
-                        <div className="font-semibold text-slate-200 mb-1">{r.label}</div>
-                        <div className="text-slate-300">
-                          Ср. время:{" "}
-                          <span className="font-medium text-violet-300">
-                            {r.avgDays == null ? "—" : `${r.avgDays.toFixed(1)} дн.`}
-                          </span>
-                        </div>
-                        <div className="text-slate-300">
-                          Переходов:{" "}
-                          <span className="font-medium text-slate-200">{r.count}</span>
-                        </div>
-                      </div>
-                    );
-                  }}
-                />
-                <Bar dataKey="avgDays" radius={[0, 6, 6, 0]}>
+                <Bar
+                  dataKey="avgDays"
+                  radius={[0, 6, 6, 0]}
+                  isAnimationActive={false}
+                >
                   {chartData.map((d) => (
                     <Cell key={d.label} fill={d.color} />
                   ))}
@@ -1132,10 +1112,10 @@ function FunnelTimingSection() {
                       const row =
                         index != null ? chartData[index] : undefined;
                       if (!row) return null;
-                      const text =
+                      const days =
                         row.avgDays == null
                           ? "—"
-                          : `${row.avgDays.toFixed(1)} дн (${row.count})`;
+                          : `${row.avgDays.toFixed(1)} дн`;
                       return (
                         <text
                           x={Number(x) + Number(width) + 8}
@@ -1144,7 +1124,11 @@ function FunnelTimingSection() {
                           fontSize={12}
                           fontWeight={600}
                         >
-                          {text}
+                          Ср. время {days}
+                          <tspan fill="#94a3b8" fontWeight={400}>
+                            {" "}
+                            · переходов: {row.count}
+                          </tspan>
                         </text>
                       );
                     }}
