@@ -23,6 +23,9 @@ import {
 } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
+import TerminLeadDrillModal, {
+  type DrillRequest,
+} from "@/components/TerminLeadDrillModal";
 import {
   fmtLocalDate as formatDate,
   berlinCivilComponents,
@@ -269,6 +272,7 @@ function TerminDashboardSection({
   const [data, setData] = useState<TerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drill, setDrill] = useState<DrillRequest | null>(null);
   const hasDataRef = useRef(false);
 
   const fetchData = useCallback(
@@ -485,6 +489,27 @@ function TerminDashboardSection({
           label="Сделок в когорте"
           value={stats.totalDeals.toLocaleString("ru-RU")}
           accent="text-slate-200"
+          onClick={
+            stats.totalDeals === 0
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/termins/leads",
+                    params: {
+                      dateFrom,
+                      dateTo,
+                      mode: "cohort",
+                      bucketBy,
+                      granularity,
+                      useFirst: useFirst ? "1" : "0",
+                    },
+                    title: `Когорта · ${dateDisplay}`,
+                    subtitle: `${stats.totalDeals} лидов · сверху — с большим числом переносов`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Ср. до Термин ДЦ"
@@ -492,6 +517,27 @@ function TerminDashboardSection({
             stats.dcOverall == null ? "—" : `${stats.dcOverall.toFixed(1)} дн.`
           }
           accent="text-blue-300"
+          onClick={
+            stats.dcOverall == null
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/termins/leads",
+                    params: {
+                      dateFrom,
+                      dateTo,
+                      leg: "dc",
+                      bucketBy,
+                      granularity,
+                      useFirst: useFirst ? "1" : "0",
+                    },
+                    title: `Термин ДЦ · ${dateDisplay}`,
+                    subtitle: `Ср. ${(stats.dcOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Ср. до Термин АА"
@@ -499,6 +545,27 @@ function TerminDashboardSection({
             stats.aaOverall == null ? "—" : `${stats.aaOverall.toFixed(1)} дн.`
           }
           accent="text-emerald-300"
+          onClick={
+            stats.aaOverall == null
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/termins/leads",
+                    params: {
+                      dateFrom,
+                      dateTo,
+                      leg: "aa",
+                      bucketBy,
+                      granularity,
+                      useFirst: useFirst ? "1" : "0",
+                    },
+                    title: `Термин АА · ${dateDisplay}`,
+                    subtitle: `Ср. ${(stats.aaOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Перенесено"
@@ -511,6 +578,27 @@ function TerminDashboardSection({
               : "—"
           }
           accent="text-amber-300"
+          onClick={
+            stats.rescheduledTotal === 0
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/termins/leads",
+                    params: {
+                      dateFrom,
+                      dateTo,
+                      mode: "rescheduled",
+                      bucketBy,
+                      granularity,
+                      useFirst: useFirst ? "1" : "0",
+                    },
+                    title: `Перенесено · ${dateDisplay}`,
+                    subtitle: `${stats.rescheduledTotal} лидов с переносами · сверху — больше всего переносов`,
+                  });
+                }
+          }
         />
       </div>
 
@@ -565,7 +653,31 @@ function TerminDashboardSection({
                   name="Термин ДЦ"
                   stroke="#3b82f6"
                   strokeWidth={2}
-                  dot={{ fill: "#3b82f6", r: 3 }}
+                  dot={{ fill: "#3b82f6", r: 4 }}
+                  activeDot={{
+                    r: 6,
+                    fill: "#3b82f6",
+                    cursor: "pointer",
+                    onClick: (_e: unknown, payload: unknown) => {
+                      const p = payload as
+                        | { payload?: TerminApiRow }
+                        | undefined;
+                      const row = p?.payload;
+                      if (!row || row.dcCount === 0) return;
+                      setDrill({
+                        url: "/api/dashboard/termins/leads",
+                        params: {
+                          date: row.date,
+                          leg: "dc",
+                          bucketBy,
+                          granularity,
+                          useFirst: useFirst ? "1" : "0",
+                        },
+                        title: `${formatBucketLabel(row.date, granularity)} · Термин ДЦ`,
+                        subtitle: `Ср. ${row.dcAvgDays?.toFixed(1) ?? "—"} дн · ${row.dcCount} лидов · сверху — самые долгие`,
+                      });
+                    },
+                  }}
                   connectNulls
                 />
                 <Line
@@ -574,7 +686,31 @@ function TerminDashboardSection({
                   name="Термин АА"
                   stroke="#10b981"
                   strokeWidth={2}
-                  dot={{ fill: "#10b981", r: 3 }}
+                  dot={{ fill: "#10b981", r: 4 }}
+                  activeDot={{
+                    r: 6,
+                    fill: "#10b981",
+                    cursor: "pointer",
+                    onClick: (_e: unknown, payload: unknown) => {
+                      const p = payload as
+                        | { payload?: TerminApiRow }
+                        | undefined;
+                      const row = p?.payload;
+                      if (!row || row.aaCount === 0) return;
+                      setDrill({
+                        url: "/api/dashboard/termins/leads",
+                        params: {
+                          date: row.date,
+                          leg: "aa",
+                          bucketBy,
+                          granularity,
+                          useFirst: useFirst ? "1" : "0",
+                        },
+                        title: `${formatBucketLabel(row.date, granularity)} · Термин АА`,
+                        subtitle: `Ср. ${row.aaAvgDays?.toFixed(1) ?? "—"} дн · ${row.aaCount} лидов · сверху — самые долгие`,
+                      });
+                    },
+                  }}
                   connectNulls
                 />
               </LineChart>
@@ -589,6 +725,9 @@ function TerminDashboardSection({
           </div>
         )}
       </div>
+      {drill && (
+        <TerminLeadDrillModal request={drill} onClose={() => setDrill(null)} />
+      )}
     </div>
   );
 }
@@ -604,6 +743,7 @@ function QualLeadsDocsSection() {
   const [data, setData] = useState<QualLeadsApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drill, setDrill] = useState<DrillRequest | null>(null);
   const hasDataRef = useRef(false);
 
   const fetchData = useCallback(
@@ -784,11 +924,39 @@ function QualLeadsDocsSection() {
           label="Квал лидов в когорте"
           value={stats.qualTotal.toLocaleString("ru-RU")}
           accent="text-slate-200"
+          onClick={
+            stats.qualTotal === 0
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/qual-leads-docs/leads",
+                    params: { dateFrom, dateTo, mode: "cohort" },
+                    title: `Квал-когорта · ${dateDisplay}`,
+                    subtitle: `${stats.qualTotal} лидов · сверху — без перехода в «Док. в ДЦ»`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Перешли на «Док. отпр.»"
           value={stats.docsTotal.toLocaleString("ru-RU")}
           accent="text-slate-200"
+          onClick={
+            stats.docsTotal === 0
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/qual-leads-docs/leads",
+                    params: { dateFrom, dateTo, mode: "docs" },
+                    title: `Перешли на «Док. отпр.» · ${dateDisplay}`,
+                    subtitle: `${stats.docsTotal} лидов · сверху — самые долгие переходы`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Ср. дней до перехода"
@@ -798,6 +966,20 @@ function QualLeadsDocsSection() {
               : `${stats.avgOverall.toFixed(1)} дн.`
           }
           accent="text-amber-300"
+          onClick={
+            stats.avgOverall == null
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/qual-leads-docs/leads",
+                    params: { dateFrom, dateTo, mode: "docs" },
+                    title: `Ср. дней до Док. в ДЦ · ${dateDisplay}`,
+                    subtitle: `${stats.docsTotal} лидов · ср. ${(stats.avgOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Конверсия"
@@ -807,6 +989,20 @@ function QualLeadsDocsSection() {
               : `${stats.conversionOverall.toFixed(1)}%`
           }
           accent="text-amber-300"
+          onClick={
+            stats.qualTotal === 0
+              ? undefined
+              : () => {
+                  const dateFrom = formatDate(range.start);
+                  const dateTo = formatDate(range.end);
+                  setDrill({
+                    url: "/api/dashboard/qual-leads-docs/leads",
+                    params: { dateFrom, dateTo, mode: "cohort" },
+                    title: `Конверсия в «Док. в ДЦ» · ${dateDisplay}`,
+                    subtitle: `${stats.docsTotal} из ${stats.qualTotal} (${stats.conversionOverall?.toFixed(1) ?? "—"}%) · сверху — кто не дошёл`,
+                  });
+                }
+          }
         />
       </div>
 
@@ -864,7 +1060,25 @@ function QualLeadsDocsSection() {
                   name="Ср. дней до Док. в ДЦ"
                   stroke="#f59e0b"
                   strokeWidth={2}
-                  dot={{ fill: "#f59e0b", r: 3 }}
+                  dot={{ fill: "#f59e0b", r: 4 }}
+                  activeDot={{
+                    r: 6,
+                    fill: "#f59e0b",
+                    cursor: "pointer",
+                    onClick: (_e: unknown, payload: unknown) => {
+                      const p = payload as
+                        | { payload?: QualLeadsApiRow }
+                        | undefined;
+                      const row = p?.payload;
+                      if (!row || row.docsCount === 0) return;
+                      setDrill({
+                        url: "/api/dashboard/qual-leads-docs/leads",
+                        params: { date: row.date, granularity },
+                        title: formatBucketLabel(row.date, granularity),
+                        subtitle: `${row.docsCount} лидов с переходом в «Док. в ДЦ» (из ${row.qualCount} квал-когорты) · ср. ${row.avgDays?.toFixed(1) ?? "—"} дн · самые долгие сверху`,
+                      });
+                    },
+                  }}
                   connectNulls
                 />
               </LineChart>
@@ -879,6 +1093,9 @@ function QualLeadsDocsSection() {
           </div>
         )}
       </div>
+      {drill && (
+        <TerminLeadDrillModal request={drill} onClose={() => setDrill(null)} />
+      )}
     </div>
   );
 }
@@ -908,6 +1125,7 @@ function FunnelTimingSection() {
   const [data, setData] = useState<FunnelStageRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drill, setDrill] = useState<DrillRequest | null>(null);
   const hasDataRef = useRef(false);
 
   const fetchData = useCallback(
@@ -977,6 +1195,12 @@ function FunnelTimingSection() {
     avgDays: s.avgDays,
     count: s.count,
     color: stageColors[i] ?? "#94a3b8",
+    // Stage index is 1-based for the API (matches its query schema), but
+    // chartData is rendered in array order — we keep `stage` on the row so
+    // the bar onClick can pass it through without index lookups.
+    stage: (i + 1) as 1 | 2 | 3,
+    fromName: s.fromName,
+    toName: s.toName,
   }));
 
   return (
@@ -1030,25 +1254,46 @@ function FunnelTimingSection() {
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        {(data ?? []).map((s, i) => (
-          <SummaryTile
-            key={s.from + s.to}
-            label={`${s.fromName} → ${s.toName}`}
-            value={
-              s.avgDays == null
-                ? "— дн."
-                : `${s.avgDays.toFixed(1)} дн.`
-            }
-            sublabel={`${s.count.toLocaleString("ru-RU")} переходов`}
-            accent={
-              i === 0
-                ? "text-violet-300"
-                : i === 1
-                  ? "text-cyan-300"
-                  : "text-emerald-300"
-            }
-          />
-        ))}
+        {(data ?? []).map((s, i) => {
+          const stage = (i + 1) as 1 | 2 | 3;
+          return (
+            <SummaryTile
+              key={s.from + s.to}
+              label={`${s.fromName} → ${s.toName}`}
+              value={
+                s.avgDays == null
+                  ? "— дн."
+                  : `${s.avgDays.toFixed(1)} дн.`
+              }
+              sublabel={`${s.count.toLocaleString("ru-RU")} переходов`}
+              accent={
+                i === 0
+                  ? "text-violet-300"
+                  : i === 1
+                    ? "text-cyan-300"
+                    : "text-emerald-300"
+              }
+              onClick={
+                s.count === 0
+                  ? undefined
+                  : () => {
+                      const dateFrom = formatDate(range.start);
+                      const dateTo = formatDate(range.end);
+                      setDrill({
+                        url: "/api/dashboard/termin-funnel/leads",
+                        params: {
+                          stage: String(stage),
+                          dateFrom,
+                          dateTo,
+                        },
+                        title: `${s.fromName} → ${s.toName}`,
+                        subtitle: `${s.count} переходов · ср. ${s.avgDays?.toFixed(1) ?? "—"} дн · сверху — самые долгие · окно ${dateDisplay}`,
+                      });
+                    }
+              }
+            />
+          );
+        })}
       </div>
 
       <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
@@ -1088,6 +1333,25 @@ function FunnelTimingSection() {
                   dataKey="avgDays"
                   radius={[0, 6, 6, 0]}
                   isAnimationActive={false}
+                  cursor="pointer"
+                  onClick={(d: unknown) => {
+                    const row = d as
+                      | (typeof chartData)[number]
+                      | undefined;
+                    if (!row || row.count === 0) return;
+                    const dateFrom = formatDate(range.start);
+                    const dateTo = formatDate(range.end);
+                    setDrill({
+                      url: "/api/dashboard/termin-funnel/leads",
+                      params: {
+                        stage: String(row.stage),
+                        dateFrom,
+                        dateTo,
+                      },
+                      title: `${row.fromName} → ${row.toName}`,
+                      subtitle: `${row.count} переходов · самые долгие сверху · окно ${formatRu(range.start)} — ${formatRu(range.end)}`,
+                    });
+                  }}
                 >
                   {chartData.map((d) => (
                     <Cell key={d.label} fill={d.color} />
@@ -1144,6 +1408,9 @@ function FunnelTimingSection() {
           </div>
         )}
       </div>
+      {drill && (
+        <TerminLeadDrillModal request={drill} onClose={() => setDrill(null)} />
+      )}
     </div>
   );
 }
@@ -1162,6 +1429,7 @@ function UpcomingTerminsSection() {
   const [data, setData] = useState<UpcomingRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drill, setDrill] = useState<DrillRequest | null>(null);
   const hasDataRef = useRef(false);
 
   const fetchData = useCallback(
@@ -1301,11 +1569,39 @@ function UpcomingTerminsSection() {
           label="Всего ДЦ-термин на период"
           value={stats.totalDc.toLocaleString("ru-RU")}
           accent="text-blue-300"
+          onClick={
+            stats.totalDc === 0 || !data || data.length === 0
+              ? undefined
+              : () => {
+                  const dateFrom = data[0].date;
+                  const dateTo = data[data.length - 1].date;
+                  setDrill({
+                    url: "/api/dashboard/termins-upcoming/leads",
+                    params: { dateFrom, dateTo, leg: "dc" },
+                    title: `Термин ДЦ · следующие ${days} дней`,
+                    subtitle: `${stats.totalDc} лидов · по времени слота`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Всего АА-термин на период"
           value={stats.totalAa.toLocaleString("ru-RU")}
           accent="text-emerald-300"
+          onClick={
+            stats.totalAa === 0 || !data || data.length === 0
+              ? undefined
+              : () => {
+                  const dateFrom = data[0].date;
+                  const dateTo = data[data.length - 1].date;
+                  setDrill({
+                    url: "/api/dashboard/termins-upcoming/leads",
+                    params: { dateFrom, dateTo, leg: "aa" },
+                    title: `Термин АА · следующие ${days} дней`,
+                    subtitle: `${stats.totalAa} лидов · по времени слота`,
+                  });
+                }
+          }
         />
         <SummaryTile
           label="Пиковый день"
@@ -1315,6 +1611,24 @@ function UpcomingTerminsSection() {
               : "—"
           }
           accent="text-cyan-300"
+          onClick={
+            !stats.peakDay
+              ? undefined
+              : () => {
+                  // Peak-day drill: both legs at the peak date.
+                  const peakDate = stats.peakDay!.date;
+                  setDrill({
+                    url: "/api/dashboard/termins-upcoming/leads",
+                    params: {
+                      dateFrom: peakDate,
+                      dateTo: peakDate,
+                      leg: "both",
+                    },
+                    title: `Пиковый день · ${formatRu(new Date(peakDate))}`,
+                    subtitle: `${stats.peakDay!.n} слотов (ДЦ + АА) · по времени`,
+                  });
+                }
+          }
         />
       </div>
 
@@ -1389,8 +1703,42 @@ function UpcomingTerminsSection() {
                   wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
                   iconType="circle"
                 />
-                <Bar dataKey="dcCount" name="Термин ДЦ" stackId="a" fill="#3b82f6" />
-                <Bar dataKey="aaCount" name="Термин АА" stackId="a" fill="#10b981" />
+                <Bar
+                  dataKey="dcCount"
+                  name="Термин ДЦ"
+                  stackId="a"
+                  fill="#3b82f6"
+                  cursor="pointer"
+                  isAnimationActive={false}
+                  onClick={(d: unknown) => {
+                    const row = d as UpcomingRow | undefined;
+                    if (!row || row.dcCount === 0) return;
+                    setDrill({
+                      url: "/api/dashboard/termins-upcoming/leads",
+                      params: { date: row.date, leg: "dc" },
+                      title: `${formatBucketLabel(row.date, "day")} · Термин ДЦ`,
+                      subtitle: `${row.dcCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
+                    });
+                  }}
+                />
+                <Bar
+                  dataKey="aaCount"
+                  name="Термин АА"
+                  stackId="a"
+                  fill="#10b981"
+                  cursor="pointer"
+                  isAnimationActive={false}
+                  onClick={(d: unknown) => {
+                    const row = d as UpcomingRow | undefined;
+                    if (!row || row.aaCount === 0) return;
+                    setDrill({
+                      url: "/api/dashboard/termins-upcoming/leads",
+                      params: { date: row.date, leg: "aa" },
+                      title: `${formatBucketLabel(row.date, "day")} · Термин АА`,
+                      subtitle: `${row.aaCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
+                    });
+                  }}
+                />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -1401,6 +1749,9 @@ function UpcomingTerminsSection() {
           </div>
         )}
       </div>
+      {drill && (
+        <TerminLeadDrillModal request={drill} onClose={() => setDrill(null)} />
+      )}
     </div>
   );
 }
@@ -1435,6 +1786,7 @@ function PreTerminSection() {
   const [data, setData] = useState<PreTerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drill, setDrill] = useState<DrillRequest | null>(null);
   const hasDataRef = useRef(false);
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
@@ -1549,6 +1901,17 @@ function PreTerminSection() {
                   dataKey="count"
                   radius={[0, 6, 6, 0]}
                   isAnimationActive={false}
+                  cursor="pointer"
+                  onClick={(d: unknown) => {
+                    const row = d as PreTerminApiRow | undefined;
+                    if (!row || row.count === 0) return;
+                    setDrill({
+                      url: "/api/dashboard/pre-termin/leads",
+                      params: { statusId: String(row.statusId) },
+                      title: row.statusName,
+                      subtitle: `${row.count} лидов · отсортировано по самым «застрявшим» (выше — дольше в статусе)`,
+                    });
+                  }}
                 >
                   {sortedRows.map((r) => (
                     <Cell key={r.statusId} fill={BUCKET_META[r.bucket].barColor} />
@@ -1605,6 +1968,9 @@ function PreTerminSection() {
           </div>
         )}
       </div>
+      {drill && (
+        <TerminLeadDrillModal request={drill} onClose={() => setDrill(null)} />
+      )}
     </div>
   );
 }
@@ -1616,14 +1982,40 @@ function SummaryTile({
   value,
   accent,
   sublabel,
+  onClick,
 }: {
   label: string;
   value: string;
   accent: string;
   sublabel?: string;
+  /** When provided, the tile becomes a button with hover/focus styling. */
+  onClick?: () => void;
 }) {
+  const baseCls = "glass-panel rounded-2xl border border-white/5 p-4";
+  const interactiveCls =
+    "cursor-pointer transition-colors hover:border-white/20 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50";
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`${baseCls} ${interactiveCls} text-left w-full`}
+      >
+        <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1 flex items-center gap-1">
+          <span>{label}</span>
+          <span className="text-slate-600 group-hover:text-slate-400">›</span>
+        </div>
+        <div className={`text-xl font-semibold ${accent}`}>{value}</div>
+        {sublabel && (
+          <div className="text-[10px] text-slate-500 mt-1">{sublabel}</div>
+        )}
+      </button>
+    );
+  }
+
   return (
-    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+    <div className={baseCls}>
       <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">
         {label}
       </div>
