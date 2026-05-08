@@ -100,14 +100,17 @@ const SESSION_SWEEP_MS = 10 * 60 * 1000;
 
 function evictStaleSessions(): void {
   const now = Date.now();
+  // Only call transport.close() — calling server.close() too triggers a
+  // recursion: MCP SDK's Server.close() calls transport.close(), which
+  // fires transport.onclose (set in handleMcp), which used to call
+  // server.close() again → infinite loop → "Maximum call stack size
+  // exceeded" was crashing the MCP container hourly. transport.close()
+  // alone is enough; for Neon-HTTP there are no persistent handles to
+  // free.
   for (const [sid, entry] of sessions) {
     if (now - entry.lastActivityAt > SESSION_IDLE_MS) {
-      // Delete from the Map directly — don't rely on transport.onclose to
-      // fire (it may not, if the transport is already half-dead from a
-      // dropped network). transport.close() is fire-and-forget cleanup.
       sessions.delete(sid);
       void entry.transport.close().catch(() => undefined);
-      void entry.server.close().catch(() => undefined);
     }
   }
   if (sessions.size > SESSION_MAX) {
@@ -117,7 +120,6 @@ function evictStaleSessions(): void {
     for (const [sid, entry] of sorted.slice(0, sessions.size - SESSION_MAX)) {
       sessions.delete(sid);
       void entry.transport.close().catch(() => undefined);
-      void entry.server.close().catch(() => undefined);
     }
   }
 }
@@ -217,7 +219,8 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
       // Mint a new session. The Map insertion happens inside
       // onsessioninitialized — that callback is the SOLE write path for
       // sessions[]. We capture `transport` and `server` in the closure so
-      // onclose can call server.close() to free Drizzle handles.
+      // we can hold the pair in SessionEntry; close cleanup runs through
+      // transport only.
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid: string) => {
@@ -230,9 +233,15 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
         },
       });
       const server = createMcpServer();
+      // onclose: drop from Map only. Do NOT call server.close() — MCP SDK's
+      // Server.close() internally calls transport.close(), which fires this
+      // very onclose handler again → infinite recursion → "Maximum call
+      // stack size exceeded" crash. The transport is already closing when
+      // this fires; there's nothing for us to do beyond removing our
+      // bookkeeping entry. (Drizzle handles do not need explicit close —
+      // Neon-HTTP is stateless per-query.)
       transport.onclose = () => {
         if (transport.sessionId) sessions.delete(transport.sessionId);
-        void server.close().catch(() => undefined);
       };
       await server.connect(transport);
       // Don't construct a separate entry object here — onsessioninitialized
