@@ -26,6 +26,7 @@ import {
   QUAL_REASON_ENUM_IDS,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
+import { formatDaysDuration } from "@/lib/utils/duration";
 
 const HARD_CAP = 500;
 
@@ -257,7 +258,7 @@ export async function GET(req: NextRequest) {
     const label =
       days == null
         ? `${labels.short}: длительность не определена`
-        : `${labels.short}: ${days.toFixed(1)} дн`;
+        : `${labels.short}: ${formatDaysDuration(days)}`;
     return {
       leadId: Number(r.lead_id),
       statusName: r.status_name,

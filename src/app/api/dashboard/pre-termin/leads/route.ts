@@ -17,6 +17,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import { formatDaysDuration } from "@/lib/utils/duration";
 
 const HARD_CAP = 500;
 
@@ -100,7 +101,7 @@ export async function GET(req: NextRequest) {
   const leads = result.rows.map((r) => {
     const days = r.days_in_status == null ? null : Number(r.days_in_status);
     const label =
-      days == null ? "В статусе: ?" : `В статусе ${days.toFixed(1)} дн`;
+      days == null ? "В статусе: ?" : `В статусе ${formatDaysDuration(days)}`;
     return {
       leadId: Number(r.lead_id),
       statusName: r.status_name,

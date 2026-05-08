@@ -29,6 +29,7 @@ import {
   QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
 } from "@/lib/kommo/pipeline-config";
+import { formatDaysDuration } from "@/lib/utils/duration";
 
 const HARD_CAP = 500;
 
@@ -159,7 +160,7 @@ export async function GET(req: NextRequest) {
     const label =
       days == null
         ? "Без перехода в Док. в ДЦ"
-        : `Док. в ДЦ через ${days.toFixed(1)} дн`;
+        : `Док. в ДЦ через ${formatDaysDuration(days)}`;
     return {
       leadId: Number(r.lead_id),
       statusName: r.status_name,
