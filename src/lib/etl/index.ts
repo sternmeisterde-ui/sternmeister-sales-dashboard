@@ -23,7 +23,7 @@ import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
-import { syncTelephony } from "./sync-telephony";
+import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
 import { enrichTelephonyLeads } from "./enrich-telephony-leads";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
@@ -71,6 +71,13 @@ export interface SyncOptions {
    * Use for scheduled 10-min cron runs. Full backfill should use incremental=false.
    */
   incremental?: boolean;
+  /**
+   * Restrict telephony providers in this run. Default = both. The 10-min
+   * cron passes `["cloudtalk"]` because CallGear's API embargoes data for
+   * ~6 hours; a separate hourly job (`/api/analytics/sync/callgear`)
+   * pulls CallGear on a 7h+ lag.
+   */
+  telephonyProviders?: TelephonyProvider[];
 }
 
 export interface SyncResult {
@@ -228,7 +235,9 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   if (!skip.has("telephony") && hasTelephonyCreds) {
     const telRes = await runStep(
       "sync-telephony",
-      () => syncTelephony(opts.fromDate, opts.toDate),
+      () => syncTelephony(opts.fromDate, opts.toDate, {
+        providers: opts.telephonyProviders,
+      }),
       {
         callgearLegs: 0,
         cloudtalkCalls: 0,

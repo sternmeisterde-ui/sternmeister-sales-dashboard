@@ -172,7 +172,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   );
 
   try {
-    const result = await runSync({ fromDate, toDate, incremental: true });
+    // CallGear's data API embargoes recent data for ~6 hours, so the
+    // 10-min cron only ever gets -32602 errors on the CallGear path.
+    // Pull only CloudTalk here; CallGear has its own hourly endpoint
+    // (/api/analytics/sync/callgear) that runs at now-7h.
+    const result = await runSync({
+      fromDate,
+      toDate,
+      incremental: true,
+      telephonyProviders: ["cloudtalk"],
+    });
     // Per-step errors are already captured inside runStep; surface a
     // summary message if any landed so the cron-level dashboard shows a
     // single rolled-up signal too.

@@ -127,10 +127,27 @@ export interface TelephonySyncResult {
   inserted: number;
 }
 
+export type TelephonyProvider = "callgear" | "cloudtalk";
+
+export interface SyncTelephonyOptions {
+  /** Restrict providers fetched in this run. Default = both.
+   *  CallGear has a ~6h data-availability embargo on its API; the main
+   *  10-min cron should pass `["cloudtalk"]` and let a separate hourly
+   *  job pull CallGear with a 7h+ lag (see /api/analytics/sync/callgear). */
+  providers?: TelephonyProvider[];
+}
+
 export async function syncTelephony(
   fromDate: Date,
   toDate: Date,
+  opts: SyncTelephonyOptions = {},
 ): Promise<TelephonySyncResult> {
+  const providers = new Set<TelephonyProvider>(
+    opts.providers ?? ["callgear", "cloudtalk"],
+  );
+  const wantCallgear = providers.has("callgear");
+  const wantCloudtalk = providers.has("cloudtalk");
+
   const links = await loadManagerLinks();
   const cgIndex = indexByCallgearId(links);
   const ctIndex = indexByCloudtalkId(links);
@@ -141,15 +158,17 @@ export async function syncTelephony(
     { count: number; name: string; source: "callgear" | "cloudtalk" }
   >();
 
-  // Pull both providers in parallel — they're independent APIs.
+  // Pull selected providers in parallel — they're independent APIs.
   const [cgCalls, ctCalls] = await Promise.all([
-    getCallGearCallsByDate(fromDate, toDate).catch((err) => {
-      console.error(
-        `[ETL telephony] CallGear failed (skipping): ${err instanceof Error ? err.message : err}`,
-      );
-      return [] as TelephonyCall[];
-    }),
-    process.env.CLOUDTALK_API_ID
+    wantCallgear
+      ? getCallGearCallsByDate(fromDate, toDate).catch((err) => {
+          console.error(
+            `[ETL telephony] CallGear failed (skipping): ${err instanceof Error ? err.message : err}`,
+          );
+          return [] as TelephonyCall[];
+        })
+      : Promise.resolve([] as TelephonyCall[]),
+    wantCloudtalk && process.env.CLOUDTALK_API_ID
       ? getCloudTalkCallsByDate(fromDate, toDate).catch((err) => {
           console.error(
             `[ETL telephony] CloudTalk failed (skipping): ${err instanceof Error ? err.message : err}`,
