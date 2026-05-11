@@ -940,7 +940,7 @@ function QualLeadsDocsSection() {
           }
         />
         <SummaryTile
-          label="Перешли на «Док. отпр.»"
+          label="Дошли до Док./Termin"
           value={stats.docsTotal.toLocaleString("ru-RU")}
           accent="text-slate-200"
           onClick={
@@ -952,7 +952,7 @@ function QualLeadsDocsSection() {
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
                     params: { dateFrom, dateTo, mode: "docs" },
-                    title: `Перешли на «Док. отпр.» · ${dateDisplay}`,
+                    title: `Дошли до Док. / прямого Termin · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} лидов · сверху — самые долгие переходы`,
                   });
                 }
@@ -1009,13 +1009,14 @@ function QualLeadsDocsSection() {
       <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-            Среднее время до этапа «Документы отправлены в ДЦ»
+            Среднее время до «Док. в ДЦ» или прямого Termin ДЦ
           </h3>
           <span className="text-[10px] text-slate-500 hidden sm:inline">
             ось X —{" "}
             {granularity === "day"
               ? "дата создания лида"
-              : "неделя создания (с понедельника)"}
+              : "неделя создания (с понедельника)"}{" "}
+            · первое событие из двух
           </span>
         </div>
         {hasData ? (

@@ -1,15 +1,24 @@
 // GET /api/dashboard/qual-leads-docs?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week
 //
-// Cohort dashboard for "Время до Документы отправлены в ДЦ" (Бух Гос pipeline).
+// Cohort dashboard for "Время до первого ключевого этапа" (Бух Гос pipeline).
+// The "milestone" is the FIRST event_at where status_id ∈ {DOCS_SENT_DC, WON(142)}:
+//
+//   - leads that pass through "Документы отправлены в ДЦ" → milestone =
+//     docs_sent_at event (historical behaviour, unchanged).
+//   - leads that skip docs and go directly to "Термин ДЦ" (status 142) →
+//     milestone = termin event. Per ROP 2026-05-11 these must also count
+//     since they completed the funnel without leaving a docs trail.
+//   - leads that hit both → MIN of the two events wins (chronologically first).
+//
 // For every cohort bucket (day or week) of qualified leads CREATED in the
 // window, returns:
-//   - avgDays:     average days from creation → first event_at where status_id =
-//                  FIRST_LINE_STATUSES.DOCS_SENT_DC. Computed only over leads
-//                  that actually transitioned through that stage.
+//   - avgDays:     average days from creation → milestone event. Computed
+//                  only over leads that actually reached the milestone.
 //   - qualCount:   number of qualified leads created in the bucket (denominator
 //                  of the conversion).
-//   - docsCount:   number of those leads that reached DOCS_SENT_DC at any time
-//                  (numerator of the conversion).
+//   - docsCount:   number of those leads that reached the milestone (kept the
+//                  old field name for frontend compatibility; semantically =
+//                  "reached docs OR termin").
 //   - conversion:  docsCount / qualCount, percent. Null when qualCount = 0.
 //
 // "Qualified" follows ROP-frozen Kommo filter (2026-05-07): allow-list mode
@@ -79,7 +88,11 @@ export async function GET(req: NextRequest) {
   // status_changes (option C) is the marginally cleaner alternative if/when
   // it matters (gives 8.4% vs 8.5% — same in practice).
   const firstLineId = B2G_PIPELINES.FIRST_LINE;
+  // Milestone = first time the lead enters either "Документы отправлены в
+  // ДЦ" OR "Термин ДЦ" (status 142 = WON in FIRST_LINE). MIN(event_at) over
+  // the union gives the chronologically first qualifying event.
   const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
+  const wonStatusId = FIRST_LINE_STATUSES.WON;
 
   // Double TZ conversion: created_at is stored as `timestamp without time
   // zone` carrying UTC; single `AT TIME ZONE 'Europe/Berlin'` would treat
@@ -103,11 +116,14 @@ export async function GET(req: NextRequest) {
     docs_count: string | number;
   }>(sql`
     WITH docs_sent AS (
-      -- Earliest moment each lead entered "Документы отправлены в ДЦ".
+      -- Earliest moment each lead entered EITHER "Документы отправлены в ДЦ"
+      -- OR "Термин ДЦ" (status 142). Direct-to-Termin leads (no docs stop)
+      -- now contribute via the second status. Kept the CTE name for diff
+      -- readability — semantically this is a "first-milestone" timestamp.
       SELECT lead_id, MIN(event_at) AS docs_sent_at
       FROM analytics.lead_status_changes
       WHERE pipeline_id = ${firstLineId}
-        AND status_id = ${docsSentStatusId}
+        AND status_id IN (${docsSentStatusId}, ${wonStatusId})
       GROUP BY lead_id
     ),
     qual_leads AS (

@@ -3,16 +3,18 @@
 //   ?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD    (period — tile drill)
 //   &mode=docs|cohort|nodocs
 //
-// Drill-down for the qual-leads → "Документы отправлены в ДЦ" line chart.
+// Drill-down for the qual-leads → first-milestone line chart. Milestone =
+// MIN(event_at) over status_id ∈ {DOCS_SENT_DC, WON(142)} — same expansion
+// as the parent endpoint. Per-row response indicates which event fired
+// (milestoneType: "docs" | "termin") so the modal can label it accurately.
 //
-// mode=docs (default): leads with docs_sent_at — they form the chart's
-//   avgDays line. Sort by largest days_to_docs first (avg-pullers).
-// mode=cohort: full qual cohort regardless of docs status. Used by tiles
-//   "Квал лидов в когорте" and "Конверсия". Leads without docs surface
-//   first (NULLS FIRST = strongest non-conversion outliers), then largest
-//   days_to_docs.
-// mode=nodocs: cohort minus docs-sent — only the "lost from conversion"
-//   leads. Optional, not currently wired but useful diagnostic.
+// mode=docs (default): leads that reached the milestone (either event).
+//   Sort by largest duration first (avg-pullers).
+// mode=cohort: full qual cohort regardless of milestone status. Used by
+//   tiles "Квал лидов в когорте" and "Конверсия". Leads without milestone
+//   surface first (NULLS FIRST = strongest non-conversion outliers).
+// mode=nodocs: cohort minus those who reached the milestone — only the
+//   "lost from conversion" leads. Optional diagnostic.
 //
 // Filter mirrors src/app/api/dashboard/qual-leads-docs/route.ts:
 //   pipeline = FIRST_LINE
@@ -41,6 +43,7 @@ interface RawRow {
   created_at_iso: string | null;
   docs_sent_at_iso: string | null;
   days_to_docs: string | number | null;
+  milestone_type: "docs" | "termin" | null;
   total_count: string | number;
 }
 
@@ -75,6 +78,7 @@ export async function GET(req: NextRequest) {
 
   const firstLineId = B2G_PIPELINES.FIRST_LINE;
   const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
+  const wonStatusId = FIRST_LINE_STATUSES.WON;
 
   const berlinCreated = sql`((lc.created_at) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'`;
   const bucketMatch: SQL = isBucket
@@ -112,11 +116,20 @@ export async function GET(req: NextRequest) {
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
   ).execute<RawRow>(sql`
     WITH docs_sent AS (
-      SELECT lead_id, MIN(event_at) AS docs_sent_at
+      -- See parent endpoint: milestone = MIN(event_at) over docs OR termin.
+      -- DISTINCT ON gives us the milestone's actual status_id alongside its
+      -- timestamp, so the drill row can label which event fired.
+      SELECT DISTINCT ON (lead_id)
+        lead_id,
+        event_at AS docs_sent_at,
+        CASE
+          WHEN status_id = ${wonStatusId} THEN 'termin'
+          ELSE 'docs'
+        END AS milestone_type
       FROM analytics.lead_status_changes
       WHERE pipeline_id = ${firstLineId}
-        AND status_id = ${docsSentStatusId}
-      GROUP BY lead_id
+        AND status_id IN (${docsSentStatusId}, ${wonStatusId})
+      ORDER BY lead_id, event_at ASC
     )
     SELECT
       lc.lead_id,
@@ -130,6 +143,7 @@ export async function GET(req: NextRequest) {
         THEN ROUND((EXTRACT(EPOCH FROM (ds.docs_sent_at - lc.created_at)) / 86400.0)::numeric, 1)
         ELSE NULL
       END AS days_to_docs,
+      ds.milestone_type,
       COUNT(*) OVER ()::bigint AS total_count
     FROM analytics.leads_cohort lc
     ${docsJoin}
@@ -157,10 +171,15 @@ export async function GET(req: NextRequest) {
 
   const leads = result.rows.map((r) => {
     const days = r.days_to_docs == null ? null : Number(r.days_to_docs);
-    const label =
-      days == null
-        ? "Без перехода в Док. в ДЦ"
-        : `Док. в ДЦ через ${formatDaysDuration(days)}`;
+    const milestone = r.milestone_type;
+    let label: string;
+    if (days == null) {
+      label = "Без перехода в Док. в ДЦ / Termin";
+    } else if (milestone === "termin") {
+      label = `Termin ДЦ через ${formatDaysDuration(days)} (минуя Док.)`;
+    } else {
+      label = `Док. в ДЦ через ${formatDaysDuration(days)}`;
+    }
     return {
       leadId: Number(r.lead_id),
       statusName: r.status_name,
