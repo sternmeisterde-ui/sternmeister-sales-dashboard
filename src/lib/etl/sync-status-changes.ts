@@ -28,14 +28,23 @@ export async function syncStatusChanges(
   const leadMap = new Map(leadCache.map((e) => [e.leadId, e]));
 
   type Row = typeof leadStatusChanges.$inferInsert;
-  const rows: Row[] = [];
+  // Kommo's /events endpoint can return the same logical event twice in one
+  // page (observed 2026-05-11 — DASHBOARD-K). Postgres rejects an
+  // INSERT … ON CONFLICT DO UPDATE when the same target row appears more
+  // than once in the same statement ("ON CONFLICT DO UPDATE command cannot
+  // affect row a second time"). Dedupe by the natural unique key
+  // (lead_id, event_at, status_id) BEFORE the batch INSERT — last
+  // occurrence wins, matching the upsert's "newest data" semantics.
+  const rowsByKey = new Map<string, Row>();
 
   for (const ev of events) {
     const lead = leadMap.get(ev.leadId);
     const pipeline = lookups.pipelines.get(ev.afterPipelineId);
     const status = pipeline?.statuses.get(ev.afterStatusId);
+    const eventAt = new Date(ev.createdAt * 1000);
+    const key = `${ev.leadId}|${eventAt.getTime()}|${ev.afterStatusId}`;
 
-    rows.push({
+    rowsByKey.set(key, {
       amoDomain: AMO_DOMAIN,
       leadId: ev.leadId,
       pipelineId: ev.afterPipelineId,
@@ -43,13 +52,19 @@ export async function syncStatusChanges(
       statusId: ev.afterStatusId,
       status: status?.name ?? String(ev.afterStatusId),
       sort: status?.sort ?? 0,
-      eventAt: new Date(ev.createdAt * 1000),
+      eventAt,
       leadCreatedAt: lead?.createdAt ?? null,
       lastEventAt: null,   // computed via SQL below
       nextStatusId: null,  // computed via SQL below
       nextEventAt: null,   // computed via SQL below
       manager: lead?.manager ?? (ev.createdBy ? (lookups.users.get(ev.createdBy) ?? "") : ""),
     });
+  }
+
+  const rows = Array.from(rowsByKey.values());
+  const dropped = events.length - rows.length;
+  if (dropped > 0) {
+    console.log(`[ETL] sync-status-changes: deduped ${dropped} duplicate event(s) from Kommo`);
   }
 
   // INSERT … ON CONFLICT DO UPDATE on the natural key (lead_id, event_at,
@@ -79,8 +94,14 @@ export async function syncStatusChanges(
           pipeline: sql`EXCLUDED.pipeline`,
           status: sql`EXCLUDED.status`,
           sort: sql`EXCLUDED.sort`,
-          leadCreatedAt: sql`EXCLUDED.lead_created_at`,
-          manager: sql`EXCLUDED.manager`,
+          // COALESCE: backfills with a narrow leadCache (e.g. a 4-day
+          // re-sync after a cron outage) won't have older leads in cache,
+          // so `lead?.createdAt` is null for those rows. Preserve any
+          // value we already learned rather than clobbering it to NULL.
+          leadCreatedAt: sql`COALESCE(EXCLUDED.lead_created_at, lead_status_changes.lead_created_at)`,
+          // Same shape for manager — empty string from `createdBy` fallback
+          // shouldn't overwrite an existing real manager attribution.
+          manager: sql`CASE WHEN EXCLUDED.manager = '' THEN lead_status_changes.manager ELSE EXCLUDED.manager END`,
         },
       });
   }

@@ -29,6 +29,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql } from "drizzle-orm";
 import { captureEtlException } from "./sentry";
+import { withDbRetry } from "@/lib/db/with-retry";
 
 /**
  * Load leadCache from analytics.leads_cohort — used when leads-sync is
@@ -295,15 +296,23 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         : opts.fromDate;
       // Inline try/catch — runStep's generic signature can't carry Neon's
       // full QueryResult type cleanly, and we only need `.rows` here.
+      // Wrapped in withDbRetry: this SELECT used to abort on transient Neon
+      // HTTP hiccups (DASHBOARD-J root), dropping enrichment-linked leads
+      // from the SLA recompute. Retries are cheap (max 3 attempts × 6s) and
+      // an aborted call here means the next cron tick re-enriches in 10 min,
+      // so we accept the cost to keep SLA in sync.
       try {
-        const linked = await analyticsDb.execute<{ lead_id: number | string }>(sql`
-          SELECT DISTINCT lead_id
-          FROM analytics.communications
-          WHERE communication_type LIKE 'call%'
-            AND lead_id IS NOT NULL
-            AND created_at >= ${linkedFromDate}
-            AND created_at <= ${opts.toDate}
-        `);
+        const linked = await withDbRetry(
+          () => analyticsDb.execute<{ lead_id: number | string }>(sql`
+            SELECT DISTINCT lead_id
+            FROM analytics.communications
+            WHERE communication_type LIKE 'call%'
+              AND lead_id IS NOT NULL
+              AND created_at >= ${linkedFromDate}
+              AND created_at <= ${opts.toDate}
+          `),
+          { label: "etl:collect-linked-ids" },
+        );
         for (const r of linked.rows) enrichmentLeadIds.push(Number(r.lead_id));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

@@ -147,10 +147,12 @@ const BULK_BATCH_SIZE = 500;
  *
  * Bounded by the Kommo /contacts rate limit (~1 rps per token, 1 request
  * per unique phone — see src/lib/kommo/client.ts) and the cron route's
- * `maxDuration = 300s` and the 6-min lease. Worst case: 300 distinct
- * phones × 1 sec ≈ 5 min — fits inside maxDuration with headroom for the
- * bulk INSERT/UPDATE. Going higher (we tried 800) risks the tick hitting
- * the lease ceiling on a backlog of unresolvable phones.
+ * `maxDuration = 300s` and the 6-min lease. Worst case: 200 distinct
+ * phones × 1 sec ≈ 3m20s — leaves ~80s headroom inside maxDuration for
+ * the bulk INSERT/UPDATE + the rest of the ETL pipeline. Going higher
+ * (we tried 300, then 800) caused DASHBOARD-4 / DASHBOARD-N: a single
+ * slow phone (Kommo's 30s timeout firing) pushed the tick past maxDuration
+ * and Neon aborted mid-statement.
  *
  * Oldest rows first (ORDER BY created_at) so backfill / replay work
  * doesn't starve fresh tick rows. Backlog size is reported separately so
@@ -158,7 +160,7 @@ const BULK_BATCH_SIZE = 500;
  * — the long-term fix for that case is the unresolvable-phone decoupling
  * tracked in follow-up #10.
  */
-const MAX_ROWS_PER_TICK = 300;
+const MAX_ROWS_PER_TICK = 200;
 
 /**
  * Run phone→lead enrichment for the [fromDate, toDate] window. Department-

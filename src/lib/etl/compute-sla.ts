@@ -19,6 +19,7 @@ import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { leadsCohort, sla, communications } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql, eq, inArray } from "drizzle-orm";
 import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
+import { withDbRetry } from "@/lib/db/with-retry";
 
 // Parse "HH:MM" → hour as number (0–23). Returns null on unparsable.
 function parseHour(s: string | null | undefined): number | null {
@@ -344,14 +345,32 @@ export async function computeSla(
     });
   }
 
-  // Delete existing SLA rows for these leads, then insert
-  await analyticsDb.execute(
-    sql.raw(`DELETE FROM analytics.sla WHERE lead_id IN (${leadIds.join(",")})`),
-  );
+  // Delete existing SLA rows for these leads, then insert.
+  //
+  // Chunk both the DELETE and the INSERT so a single 5000-lead batch doesn't
+  // push the Neon HTTP request past its idle/abort timeout (DASHBOARD-J:
+  // "Error connecting to database: AbortError" on a 2000+ lead full-backfill
+  // SLA recompute). Each chunk is wrapped in withDbRetry so a transient Neon
+  // hiccup (compute restart, control-plane 503) doesn't abort the whole ETL —
+  // we already eat the cost of the round-trip; pay it twice if needed.
+  const DELETE_CHUNK = 1000;
+  for (let i = 0; i < leadIds.length; i += DELETE_CHUNK) {
+    const slice = leadIds.slice(i, i + DELETE_CHUNK);
+    await withDbRetry(
+      () => analyticsDb.execute(
+        sql.raw(`DELETE FROM analytics.sla WHERE lead_id IN (${slice.join(",")})`),
+      ),
+      { label: "compute-sla:delete" },
+    );
+  }
 
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await analyticsDb.insert(sla).values(rows.slice(i, i + CHUNK));
+    const slice = rows.slice(i, i + CHUNK);
+    await withDbRetry(
+      () => analyticsDb.insert(sla).values(slice),
+      { label: "compute-sla:insert" },
+    );
   }
 
   console.log(`[ETL] compute-sla: computed ${rows.length} SLA rows`);

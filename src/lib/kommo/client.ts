@@ -963,6 +963,7 @@ export async function searchContactsByPhone(
   // De-dup before issuing requests; same phone may appear on multiple CDR rows.
   const uniqPhones = Array.from(new Set(phones.filter((p) => p && p.trim() !== "")));
 
+  let timeoutSkipped = 0;
   for (const phone of uniqPhones) {
     // Pick the most specific normalization that Kommo's fuzzy matcher
     // tolerates. Try digits-only first — that hits both +491234… and
@@ -982,7 +983,28 @@ export async function searchContactsByPhone(
       url.searchParams.set("with", "leads");
       url.searchParams.set("limit", "10");
 
-      const res = await rateLimitedFetch(url.toString(), { headers });
+      // Per-phone try/catch: a single 30s timeout on a Kommo /contacts call
+      // used to bubble all the way out of enrichTelephonyLeads and abort the
+      // whole tick (DASHBOARD-4, DASHBOARD-N). Now we just skip this phone
+      // and continue — its row stays lead_id=NULL and the next enrichment
+      // tick retries it via the 7-day lookback sweep.
+      let res: Response;
+      try {
+        res = await rateLimitedFetch(url.toString(), { headers });
+      } catch (err) {
+        const isTimeout =
+          err instanceof DOMException && err.name === "TimeoutError" ||
+          err instanceof DOMException && err.name === "AbortError" ||
+          (err instanceof Error && /timeout|abort/i.test(err.message));
+        if (isTimeout) {
+          timeoutSkipped++;
+          console.warn(
+            `[searchContactsByPhone] ${phone} (${variant}): network timeout — skipping`,
+          );
+          break; // skip remaining variants for this phone too
+        }
+        throw err;
+      }
       if (res.status === 204) continue;
       if (!res.ok) {
         console.warn(`[searchContactsByPhone] ${phone} (${variant}): ${res.status} — skipping`);
@@ -1007,6 +1029,12 @@ export async function searchContactsByPhone(
     }
 
     out.set(phone, Array.from(seenLeadIds));
+  }
+
+  if (timeoutSkipped > 0) {
+    console.warn(
+      `[searchContactsByPhone] ${timeoutSkipped} phone(s) skipped on timeout — will retry next tick`,
+    );
   }
 
   return out;
