@@ -205,6 +205,11 @@ export async function enrichTelephonyLeads(
   // first instead of being starved by fresh-window rows. Whatever doesn't
   // fit this tick is reported via `backlogRemaining` and picked up next
   // tick — bounded latency under load instead of an unbounded slow scan.
+  // LEFT JOIN against analytics.enrich_skip_phones — phones already tried
+  // and known to return 0 Kommo contact matches stay out of the scan.
+  // Without this filter the oldest 200 rows of the queue were dominated
+  // by ~28 dead-letter phones for months, blocking newer resolvable rows
+  // from ever being scanned (migration 0016 added the table).
   const scanRes = await analyticsDb.execute<{
     ctid: string;
     communication_id: string | null;
@@ -223,44 +228,50 @@ export async function enrichTelephonyLeads(
     business_hours_since_communication: number | null;
   }>(sql`
     SELECT
-      ctid::text                                       AS ctid,
-      communication_id,
-      communication_type,
-      entity_id,
-      created_at::text                                 AS created_at,
-      manager,
-      phone,
-      call_status,
-      duration,
-      lead_day_start::text                             AS lead_day_start,
-      first_contact_flg,
-      last_contact_flg,
-      first_call_at::text                              AS first_call_at,
-      business_hours_sla,
-      business_hours_since_communication
-    FROM analytics.communications
-    WHERE lead_id IS NULL
-      AND phone IS NOT NULL
-      AND phone <> ''
-      AND communication_type LIKE 'call%'
-      AND created_at >= ${effectiveFromDate}
-      AND created_at <= ${toDate}
-    ORDER BY created_at ASC
+      c.ctid::text                                     AS ctid,
+      c.communication_id,
+      c.communication_type,
+      c.entity_id,
+      c.created_at::text                               AS created_at,
+      c.manager,
+      c.phone,
+      c.call_status,
+      c.duration,
+      c.lead_day_start::text                           AS lead_day_start,
+      c.first_contact_flg,
+      c.last_contact_flg,
+      c.first_call_at::text                            AS first_call_at,
+      c.business_hours_sla,
+      c.business_hours_since_communication
+    FROM analytics.communications c
+    LEFT JOIN analytics.enrich_skip_phones s ON s.phone = c.phone
+    WHERE c.lead_id IS NULL
+      AND c.phone IS NOT NULL
+      AND c.phone <> ''
+      AND c.communication_type LIKE 'call%'
+      AND c.created_at >= ${effectiveFromDate}
+      AND c.created_at <= ${toDate}
+      AND s.phone IS NULL
+    ORDER BY c.created_at ASC
     LIMIT ${MAX_ROWS_PER_TICK}
   `);
 
   // Total backlog (incl. rows past the cap) — separate fast COUNT so the
   // tick still reports honest queue depth even when capped. Used by the
   // /api/health/etl endpoint and the dashboard freshness badge.
+  // Same skip-list filter as the scan so the reported backlog reflects
+  // actionable work, not the dead-letter set we've decided not to retry.
   const backlogRes = await analyticsDb.execute<{ n: string | number }>(sql`
     SELECT COUNT(*) AS n
-    FROM analytics.communications
-    WHERE lead_id IS NULL
-      AND phone IS NOT NULL
-      AND phone <> ''
-      AND communication_type LIKE 'call%'
-      AND created_at >= ${effectiveFromDate}
-      AND created_at <= ${toDate}
+    FROM analytics.communications c
+    LEFT JOIN analytics.enrich_skip_phones s ON s.phone = c.phone
+    WHERE c.lead_id IS NULL
+      AND c.phone IS NOT NULL
+      AND c.phone <> ''
+      AND c.communication_type LIKE 'call%'
+      AND c.created_at >= ${effectiveFromDate}
+      AND c.created_at <= ${toDate}
+      AND s.phone IS NULL
   `);
   result.backlogRemaining = Number(backlogRes.rows[0]?.n ?? 0);
 
@@ -468,6 +479,29 @@ export async function enrichTelephonyLeads(
   result.rowsLinked = updateRecs.length;
   result.rowsFannedOut = insertRecs.length;
   result.unresolvedPhones = Array.from(unresolvedSet);
+
+  // 6. Record unresolved phones in the skip-list so the next tick's scan
+  //    bypasses them. We DON'T mark a phone skipped if its Kommo lookup
+  //    threw a network/timeout error — that's a transient failure and the
+  //    phone should be retried later. `phoneToLeadIds` only contains
+  //    entries for phones we actually got a response for (resolved OR
+  //    explicit zero-hit), so iterating its keys filters out timeouts.
+  if (result.unresolvedPhones.length > 0) {
+    const definitivelyUnresolved = result.unresolvedPhones.filter((p) =>
+      phoneToLeadIds.has(p),
+    );
+    if (definitivelyUnresolved.length > 0) {
+      const json = JSON.stringify(definitivelyUnresolved.map((p) => ({ phone: p })));
+      await analyticsDb.execute(sql`
+        INSERT INTO analytics.enrich_skip_phones (phone)
+        SELECT i.phone
+        FROM jsonb_to_recordset(${json}::jsonb) AS i(phone text)
+        ON CONFLICT (phone) DO UPDATE
+          SET attempts          = analytics.enrich_skip_phones.attempts + 1,
+              last_attempted_at = now()
+      `);
+    }
+  }
 
   console.log(
     `[ETL enrich] done: phones queried=${result.phonesQueried} resolved=${result.phonesResolved}` +

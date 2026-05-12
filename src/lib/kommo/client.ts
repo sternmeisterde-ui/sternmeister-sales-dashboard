@@ -975,6 +975,13 @@ export async function searchContactsByPhone(
 
     const seenLeadIds = new Set<number>();
     let foundAny = false;
+    // We only call `out.set(phone, ...)` once we've gotten a real response
+    // from Kommo (200 / 204 / non-2xx with body — anything that isn't a
+    // network exception). That distinction matters downstream: the
+    // enrich-telephony-leads skip-list trusts an entry in `out` to mean
+    // "Kommo definitively had no match" and would otherwise blacklist a
+    // phone that merely timed out this round.
+    let gotAnyResponse = false;
 
     for (const variant of variants) {
       if (foundAny) break;
@@ -1005,6 +1012,7 @@ export async function searchContactsByPhone(
         }
         throw err;
       }
+      gotAnyResponse = true;
       if (res.status === 204) continue;
       if (!res.ok) {
         console.warn(`[searchContactsByPhone] ${phone} (${variant}): ${res.status} — skipping`);
@@ -1028,7 +1036,12 @@ export async function searchContactsByPhone(
       }
     }
 
-    out.set(phone, Array.from(seenLeadIds));
+    // Only record an entry for phones we actually got a Kommo response for.
+    // Timeouts / network failures leave the phone absent from `out`, so the
+    // caller can retry next tick rather than blacklisting it.
+    if (gotAnyResponse) {
+      out.set(phone, Array.from(seenLeadIds));
+    }
   }
 
   if (timeoutSkipped > 0) {

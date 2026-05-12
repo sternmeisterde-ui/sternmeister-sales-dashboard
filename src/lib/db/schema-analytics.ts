@@ -365,6 +365,20 @@ export const refusalEnums = analyticsSchema.table(
   },
 );
 
+// Phones that Kommo /contacts search returned 0 hits for — see migration
+// 0016. The enrich-telephony-leads scan LEFT JOINs and excludes these so
+// the dead-letter dial-attempts (cold calls, mistypes, forwarded numbers)
+// don't block the queue from progressing to newer resolvable rows.
+export const enrichSkipPhones = analyticsSchema.table(
+  "enrich_skip_phones",
+  {
+    phone: text("phone").primaryKey(),
+    firstSkippedAt: timestamp("first_skipped_at").defaultNow().notNull(),
+    lastAttemptedAt: timestamp("last_attempted_at").defaultNow().notNull(),
+    attempts: integer("attempts").default(1).notNull(),
+  },
+);
+
 export const funnel = analyticsSchema.table(
   "funnel",
   {
