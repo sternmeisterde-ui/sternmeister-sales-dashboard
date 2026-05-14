@@ -464,13 +464,12 @@ function SummaryTimeTable({
   }
 
   return (
-    // CANNOT use `glass-panel` here: its backdrop-filter creates a containing
-    // block that anchors sticky thead/TH to the panel's own box (so they
-    // scroll out of view with the panel). Also cannot use `overflow-hidden`
-    // on any ancestor, it clips sticky content. Plain div with border/bg is
-    // the only combination that lets thead stick to viewport on page scroll.
+    // Inner wrapper is its own scroll container (max-h + overflow auto), so
+    // sticky thead/TH anchor to the table's own box. Outer div stays a plain
+    // div (no glass-panel/overflow-hidden) to avoid backdrop-filter creating
+    // an unwanted containing block that could clip the sticky cells.
     <div className="text-slate-200 rounded-2xl border border-white/5 shadow-2xl bg-slate-900/40">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="border-b border-white/10">
@@ -1469,7 +1468,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
       ) : (
         // No glass-panel/overflow-hidden here — both break sticky thead.
         <div className="rounded-2xl border border-white/5 bg-slate-900/40">
-          <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+          <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
             <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
               <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
                 <tr className="border-b border-white/10">

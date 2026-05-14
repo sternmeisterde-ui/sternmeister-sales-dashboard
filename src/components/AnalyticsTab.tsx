@@ -473,7 +473,7 @@ function CriteriaTimeTable({
 }) {
   return (
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="w-full text-left border-collapse">
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
@@ -546,7 +546,7 @@ function ManagerTable({
 }) {
   return (
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="w-full text-left border-collapse">
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
@@ -650,7 +650,7 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
 
   return (
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="w-full text-left border-collapse">
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
@@ -766,7 +766,7 @@ function ComparisonManagerTable({ dataA, dataB, labelA, labelB, collapsedBlocks,
 
   return (
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="w-full text-left border-collapse">
           <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
