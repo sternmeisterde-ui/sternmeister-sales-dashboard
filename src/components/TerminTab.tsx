@@ -18,6 +18,9 @@ import {
 import {
   AlertTriangle,
   CalendarDays,
+  Check,
+  ChevronDown,
+  Filter,
   Loader2,
   RefreshCw,
 } from "lucide-react";
@@ -250,6 +253,245 @@ export default function TerminTab() {
   );
 }
 
+// ── BERATER status filter (chart 1 + 2) ─────────────
+//
+// All BERATER status_ids surfaced as user-toggleable filter options. Order
+// mirrors the deal lifecycle (intake → DC → AA → outcomes) so the РОП reads
+// the list left-to-right as the pipeline progresses. Closed-bucket statuses
+// (УNSORTED, WON, LOST, DELAYED_START, APPEAL, BERATER_REVIEW) are at the
+// end — they exist for completeness but rarely participate in termin-timing
+// analysis.
+//
+// `excludedFromDefault` marks statuses NOT included in the initial selection.
+// Currently only TERM_DC_CANCELLED — preserves the prior `<> TERM_DC_CANCELLED`
+// implicit filter as the visible default. Toggling it on is allowed.
+
+const BERATER_STATUS_OPTIONS: ReadonlyArray<{
+  id: number;
+  label: string;
+  group: "pre_dc" | "post_dc" | "closed";
+  excludedFromDefault?: boolean;
+}> = [
+  // Pre-ДЦ pipeline
+  { id: 93860331, label: "Принято от первой линии", group: "pre_dc" },
+  { id: 102183931, label: "Доведение", group: "pre_dc" },
+  { id: 93860335, label: "Взято в работу", group: "pre_dc" },
+  { id: 93860339, label: "Недозвон", group: "pre_dc" },
+  { id: 93860863, label: "Контакт установлен", group: "pre_dc" },
+  { id: 102183935, label: "Консультация перед ДЦ", group: "pre_dc" },
+  { id: 102183939, label: "Консультация перед ДЦ — проведена", group: "pre_dc" },
+  {
+    id: 93860875,
+    label: "Термин ДЦ отменён/перенесён",
+    group: "pre_dc",
+    excludedFromDefault: true,
+  },
+  // Post-ДЦ pipeline
+  { id: 93886075, label: "Термин ДЦ состоялся", group: "post_dc" },
+  { id: 102183943, label: "Консультация перед АА", group: "post_dc" },
+  { id: 102183947, label: "Консультация перед АА — проведена", group: "post_dc" },
+  { id: 93860883, label: "Термин АА отменён/перенесён", group: "post_dc" },
+  { id: 93860879, label: "Термин АА", group: "post_dc" },
+  // Closed / прочие
+  { id: 93860887, label: "На рассмотрении бератера", group: "closed" },
+  { id: 95515895, label: "Отложенный старт", group: "closed" },
+  { id: 93860891, label: "Апелляция", group: "closed" },
+  { id: 142, label: "Гутшайн одобрен", group: "closed" },
+  { id: 143, label: "Закрыто и не реализовано", group: "closed" },
+  { id: 93860327, label: "Неразобранное", group: "closed" },
+];
+
+const BERATER_STATUS_LABEL_BY_ID = new Map<number, string>(
+  BERATER_STATUS_OPTIONS.map((s) => [s.id, s.label]),
+);
+
+const DEFAULT_BERATER_STATUS_IDS: number[] = BERATER_STATUS_OPTIONS.filter(
+  (s) => !s.excludedFromDefault,
+).map((s) => s.id);
+
+const GROUP_LABELS: Record<"pre_dc" | "post_dc" | "closed", string> = {
+  pre_dc: "До термина ДЦ",
+  post_dc: "После термина ДЦ",
+  closed: "Закрытые / прочие",
+};
+
+function loadStoredStatusFilter(storageKey: string): number[] {
+  if (typeof window === "undefined") return DEFAULT_BERATER_STATUS_IDS;
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return DEFAULT_BERATER_STATUS_IDS;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_BERATER_STATUS_IDS;
+    // Keep only known IDs; drop stale entries from older registry versions.
+    const known = parsed.filter(
+      (n: unknown) =>
+        typeof n === "number" && BERATER_STATUS_LABEL_BY_ID.has(n),
+    ) as number[];
+    return known;
+  } catch {
+    return DEFAULT_BERATER_STATUS_IDS;
+  }
+}
+
+function BeraterStatusMultiselect({
+  selected,
+  onChange,
+}: {
+  selected: number[];
+  onChange: (next: number[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const total = BERATER_STATUS_OPTIONS.length;
+  const count = selected.length;
+  const isAll = count === total;
+  const summary =
+    count === 0
+      ? "Не выбрано"
+      : isAll
+        ? "Все статусы"
+        : count === 1
+          ? (BERATER_STATUS_LABEL_BY_ID.get(selected[0]!) ?? `${selected[0]}`)
+          : `Статусы: ${count} из ${total}`;
+
+  const toggle = (id: number) => {
+    const next = new Set(selectedSet);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    // Preserve canonical order from the registry.
+    onChange(BERATER_STATUS_OPTIONS.filter((s) => next.has(s.id)).map((s) => s.id));
+  };
+  const selectAll = () =>
+    onChange(BERATER_STATUS_OPTIONS.map((s) => s.id));
+  const selectDefault = () => onChange(DEFAULT_BERATER_STATUS_IDS);
+  const clearAll = () => onChange([]);
+
+  type StatusOption = (typeof BERATER_STATUS_OPTIONS)[number];
+  const grouped: Record<"pre_dc" | "post_dc" | "closed", StatusOption[]> = {
+    pre_dc: [],
+    post_dc: [],
+    closed: [],
+  };
+  for (const opt of BERATER_STATUS_OPTIONS) grouped[opt.group].push(opt);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-colors ${
+          isAll || count === 0
+            ? "bg-slate-800/40 text-slate-300 border-white/5 hover:border-white/20"
+            : "bg-blue-500/10 text-blue-300 border-blue-500/30"
+        }`}
+        title="Фильтр по статусам сделок (текущий статус в Kommo)"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <Filter className="w-3.5 h-3.5" />
+        <span className="max-w-[180px] truncate">{summary}</span>
+        <ChevronDown
+          className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-full mt-1 z-40 w-[320px] rounded-xl border border-white/10 bg-slate-900/98 shadow-2xl backdrop-blur p-3"
+          role="listbox"
+        >
+          <div className="flex items-center justify-between gap-2 mb-2 pb-2 border-b border-white/5">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">
+              Фильтр статусов
+            </div>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={selectAll}
+                className="text-[10px] px-2 py-0.5 rounded hover:bg-white/5 text-slate-400 hover:text-white"
+              >
+                Все
+              </button>
+              <button
+                type="button"
+                onClick={selectDefault}
+                className="text-[10px] px-2 py-0.5 rounded hover:bg-white/5 text-slate-400 hover:text-white"
+                title="Все статусы кроме «Термин ДЦ отменён/перенесён»"
+              >
+                По умолч.
+              </button>
+              <button
+                type="button"
+                onClick={clearAll}
+                className="text-[10px] px-2 py-0.5 rounded hover:bg-white/5 text-slate-400 hover:text-white"
+              >
+                Сбросить
+              </button>
+            </div>
+          </div>
+          <div className="max-h-[360px] overflow-y-auto pr-1 space-y-2">
+            {(["pre_dc", "post_dc", "closed"] as const).map((g) => (
+              <div key={g}>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 px-2 py-1">
+                  {GROUP_LABELS[g]}
+                </div>
+                <div className="flex flex-col">
+                  {grouped[g].map((opt) => {
+                    const checked = selectedSet.has(opt.id);
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => toggle(opt.id)}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 text-left text-xs"
+                        role="option"
+                        aria-selected={checked}
+                      >
+                        <span
+                          className={`flex items-center justify-center w-4 h-4 rounded border ${
+                            checked
+                              ? "bg-blue-500 border-blue-500"
+                              : "border-slate-600"
+                          }`}
+                        >
+                          {checked && <Check className="w-3 h-3 text-white" />}
+                        </span>
+                        <span
+                          className={checked ? "text-slate-200" : "text-slate-400"}
+                        >
+                          {opt.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Termin dashboard section ────────────────────────
 
 function TerminDashboardSection({
@@ -269,6 +511,22 @@ function TerminDashboardSection({
   // useFirst defaults to TRUE per B1=A: original committed termin date, not
   // whatever's been rescheduled to. Toggle exposed in the filter row.
   const [useFirst, setUseFirst] = useState<boolean>(true);
+  // Per-section status filter — each chart (created_at vs termin_date) has its
+  // own state + localStorage slot so the РОП can configure them independently.
+  const storageKey = `termin-section-status-filter-${bucketBy}`;
+  const [statusIds, setStatusIds] = useState<number[]>(() =>
+    loadStoredStatusFilter(storageKey),
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(statusIds));
+    } catch {
+      // localStorage may be unavailable (private mode, quota); ignore.
+    }
+  }, [storageKey, statusIds]);
+  // Stable string for fetch deps + URL param — joined CSV.
+  const statusIdsParam = statusIds.join(",");
   const [data, setData] = useState<TerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -283,8 +541,10 @@ function TerminDashboardSection({
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
         const useFirstParam = useFirst ? "1" : "0";
+        // `statusIds` is always sent (empty value means "all deselected → return
+        // empty"). Lets the user observe the empty-state intentionally.
         const res = await fetch(
-          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}`,
+          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}&statusIds=${encodeURIComponent(statusIdsParam)}`,
           { signal },
         );
         if (!res.ok) {
@@ -302,7 +562,7 @@ function TerminDashboardSection({
         setLoading(false);
       }
     },
-    [range.start, range.end, granularity, bucketBy, useFirst],
+    [range.start, range.end, granularity, bucketBy, useFirst, statusIdsParam],
   );
 
   useEffect(() => {
@@ -451,6 +711,10 @@ function TerminDashboardSection({
               );
             })}
           </div>
+          <BeraterStatusMultiselect
+            selected={statusIds}
+            onChange={setStatusIds}
+          />
           <CalendarPicker
             mode="range"
             value={{ start: range.start, end: range.end }}
@@ -504,6 +768,7 @@ function TerminDashboardSection({
                       bucketBy,
                       granularity,
                       useFirst: useFirst ? "1" : "0",
+                      statusIds: statusIdsParam,
                     },
                     title: `Когорта · ${dateDisplay}`,
                     subtitle: `${stats.totalDeals} лидов · сверху — с большим числом переносов`,
@@ -532,6 +797,7 @@ function TerminDashboardSection({
                       bucketBy,
                       granularity,
                       useFirst: useFirst ? "1" : "0",
+                      statusIds: statusIdsParam,
                     },
                     title: `Термин ДЦ · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.dcOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -560,6 +826,7 @@ function TerminDashboardSection({
                       bucketBy,
                       granularity,
                       useFirst: useFirst ? "1" : "0",
+                      statusIds: statusIdsParam,
                     },
                     title: `Термин АА · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.aaOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -593,6 +860,7 @@ function TerminDashboardSection({
                       bucketBy,
                       granularity,
                       useFirst: useFirst ? "1" : "0",
+                      statusIds: statusIdsParam,
                     },
                     title: `Перенесено · ${dateDisplay}`,
                     subtitle: `${stats.rescheduledTotal} лидов с переносами · сверху — больше всего переносов`,
@@ -672,6 +940,7 @@ function TerminDashboardSection({
                           bucketBy,
                           granularity,
                           useFirst: useFirst ? "1" : "0",
+                          statusIds: statusIdsParam,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин ДЦ`,
                         subtitle: `Ср. ${row.dcAvgDays?.toFixed(1) ?? "—"} дн · ${row.dcCount} лидов · сверху — самые долгие`,
@@ -705,6 +974,7 @@ function TerminDashboardSection({
                           bucketBy,
                           granularity,
                           useFirst: useFirst ? "1" : "0",
+                          statusIds: statusIdsParam,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин АА`,
                         subtitle: `Ср. ${row.aaAvgDays?.toFixed(1) ?? "—"} дн · ${row.aaCount} лидов · сверху — самые долгие`,

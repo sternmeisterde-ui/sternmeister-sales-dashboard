@@ -5,10 +5,16 @@
 //     ?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&mode=cohort|leg|rescheduled[&leg=dc|aa]
 //   Common params:
 //     &bucketBy=created_at|termin_date  &granularity=day|week  &useFirst=1|0
+//     &statusIds=id,id,...    (optional BERATER status allow-list — see parent)
 //
 // Drill-down for the cohort-metric line charts (chart 1 by created_at,
 // chart 2 by termin_date). Returns the lead-level rows that contribute to
 // either a single (date, leg) point or a whole-period summary tile.
+//
+// statusIds (added 2026-05-14): mirrors parent endpoint exactly. Omitted →
+// legacy `<> TERM_DC_CANCELLED` default; empty → empty result; non-empty →
+// `lc.status_id IN (...)`. Drill must use the same filter as the chart so the
+// rows shown actually sum back to the displayed metric.
 //
 // Modes (period only):
 //   cohort       → all leads in the cohort (chart 1: created in window with
@@ -86,10 +92,36 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Status allow-list — same semantics as parent endpoint. See termins/route.ts
+  // header for full spec. Drill MUST mirror the chart's cohort filter or rows
+  // shown won't reconcile with the displayed average.
+  const statusIdsRaw = url.searchParams.get("statusIds");
+  let statusIds: number[] | null = null;
+  if (statusIdsRaw !== null) {
+    statusIds = statusIdsRaw
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && Number.isInteger(n) && n > 0);
+  }
+  if (statusIds !== null && statusIds.length === 0) {
+    return NextResponse.json(
+      { leads: [], totalCount: 0, truncated: false },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
+  }
+
   const pipelineId = B2G_PIPELINES.BERATER;
   const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
   const dcCol = useFirst ? sql`lc.termin_date_first` : sql`lc.termin_date`;
   const aaCol = useFirst ? sql`lc.aa_termin_date_first` : sql`lc.aa_termin_date`;
+
+  const statusFilter: SQL =
+    statusIds && statusIds.length > 0
+      ? sql`lc.status_id IN (${sql.join(
+          statusIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`
+      : sql`lc.status_id <> ${cancelledStatusId}`;
 
   // Range expressions for created_at vs termin_date cohorts.
   const createdRange: SQL = isBucket
@@ -147,7 +179,7 @@ export async function GET(req: NextRequest) {
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
         WHERE lc.pipeline_id = ${pipelineId}
-          AND lc.status_id <> ${cancelledStatusId}
+          AND ${statusFilter}
           AND ${createdRange}
           AND ${slotCol} IS NOT NULL
           AND ${slotCol} >= lc.created_at
@@ -173,7 +205,7 @@ export async function GET(req: NextRequest) {
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
         WHERE lc.pipeline_id = ${pipelineId}
-          AND lc.status_id <> ${cancelledStatusId}
+          AND ${statusFilter}
           AND ${dcCol} IS NOT NULL
           AND ${dcCol} >= lc.created_at
           AND ${dcSlotRange}
@@ -198,7 +230,7 @@ export async function GET(req: NextRequest) {
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
         WHERE lc.pipeline_id = ${pipelineId}
-          AND lc.status_id <> ${cancelledStatusId}
+          AND ${statusFilter}
           AND ${aaCol} IS NOT NULL
           AND ${aaCol} >= COALESCE(${dcCol}, lc.created_at)
           AND ${aaSlotRange}
@@ -239,7 +271,7 @@ export async function GET(req: NextRequest) {
       FROM analytics.leads_cohort lc
       LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
       WHERE lc.pipeline_id = ${pipelineId}
-        AND lc.status_id <> ${cancelledStatusId}
+        AND ${statusFilter}
         AND (${cohortMatch})
         ${reschedFilter}
       ORDER BY c.cancel_events DESC NULLS LAST, lc.created_at DESC

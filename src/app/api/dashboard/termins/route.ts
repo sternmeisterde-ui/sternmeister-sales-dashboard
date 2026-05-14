@@ -1,6 +1,17 @@
-// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week&bucketBy=created_at|termin_date&useFirst=1|0
+// GET /api/dashboard/termins?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD&granularity=day|week&bucketBy=created_at|termin_date&useFirst=1|0&statusIds=id,id,...
 //
 // Two-chart cohort aggregation for the Termin dashboard tab.
+//
+// `statusIds` (optional, added 2026-05-14 per ROP request): comma-separated
+// allow-list of BERATER status_ids to include in the cohort. Semantics:
+//   - param omitted        → legacy default: include everything EXCEPT
+//                            TERM_DC_CANCELLED (preserves prior metric).
+//   - param present, empty → empty result (user explicitly deselected all).
+//   - param non-empty list → cohort = leads currently in those statuses ONLY.
+// The implicit `<> TERM_DC_CANCELLED` exclusion is dropped when an explicit
+// allow-list is provided — caller is in control. cancellations CTE is still
+// computed from the event log so "Перенесено" tile / chart 2 reschedule flag
+// stay accurate even when CANCELLED leads aren't in the cohort.
 //
 // chart 1 (bucketBy=created_at, default):
 //   Cohort = leads CREATED in the window. For every bucket (Berlin civil day
@@ -43,7 +54,7 @@
 //   analytics.lead_status_changes — TERM_DC_CANCELLED counts (rescheduled flag)
 
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
   B2G_PIPELINES,
@@ -104,10 +115,38 @@ export async function GET(req: NextRequest) {
     url.searchParams.get("bucketBy") === "termin_date" ? "termin_date" : "created_at";
   const useFirst = url.searchParams.get("useFirst") !== "0";
 
+  // Status allow-list (RОП-configurable). See header comment for semantics.
+  const statusIdsRaw = url.searchParams.get("statusIds");
+  let statusIds: number[] | null = null;
+  if (statusIdsRaw !== null) {
+    statusIds = statusIdsRaw
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && Number.isInteger(n) && n > 0);
+  }
+  // Param explicitly present but empty after parse → user deselected everything.
+  // Return empty array now; no need to hit the DB.
+  if (statusIds !== null && statusIds.length === 0) {
+    return NextResponse.json([], {
+      headers: { "Cache-Control": "private, max-age=60" },
+    });
+  }
+
   const pipelineId = B2G_PIPELINES.BERATER;
   const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
   const dcCol = useFirst ? sql`lc.termin_date_first` : sql`lc.termin_date`;
   const aaCol = useFirst ? sql`lc.aa_termin_date_first` : sql`lc.aa_termin_date`;
+
+  // Cohort status filter: explicit allow-list wins; otherwise legacy default
+  // `<> TERM_DC_CANCELLED`. When the user supplies a list, the implicit
+  // CANCELLED exclusion is dropped — they're already filtering deliberately.
+  const statusFilter: SQL =
+    statusIds && statusIds.length > 0
+      ? sql`lc.status_id IN (${sql.join(
+          statusIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`
+      : sql`lc.status_id <> ${cancelledStatusId}`;
 
   const exec = (q: unknown) =>
     (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<DbRow>(q);
@@ -152,7 +191,7 @@ export async function GET(req: NextRequest) {
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
         WHERE lc.pipeline_id = ${pipelineId}
-          AND lc.status_id <> ${cancelledStatusId}
+          AND ${statusFilter}
           AND (
             (${dcCol} IS NOT NULL AND ${dcCol} >= ${fromDate} AND ${dcCol} <= ${toDateEnd})
             OR
@@ -236,7 +275,7 @@ export async function GET(req: NextRequest) {
           AND lc.created_at >= ${fromDate}
           AND lc.created_at <= ${toDateEnd}
           AND (${dcCol} IS NOT NULL OR ${aaCol} IS NOT NULL)
-          AND lc.status_id <> ${cancelledStatusId}
+          AND ${statusFilter}
       )
       SELECT
         cohort_date::text AS cohort_date,
