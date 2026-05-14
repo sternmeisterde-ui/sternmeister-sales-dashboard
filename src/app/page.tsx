@@ -602,14 +602,14 @@ export default function Dashboard() {
   const closeManagerSidebar = () => setSelectedManager(null);
 
   return (
-    <div className="flex sm:flex-row flex-col min-h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-hidden text-sm">
+    <div className="flex sm:flex-row flex-col h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-hidden text-sm">
       {/* BACKGROUND DECORATIONS (GLOWS) - Changed to Blue tones */}
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[30%] h-[50%] bg-cyan-500/10 blur-[150px] rounded-full pointer-events-none" />
       <div className="absolute top-[40%] left-[30%] w-[20%] h-[20%] bg-sky-400/5 blur-[100px] rounded-full pointer-events-none" />
 
       {/* COLLAPSIBLE SIDEBAR */}
-      <aside className={`glass-panel rounded-3xl p-4 flex flex-col gap-5 shadow-2xl relative z-20 border border-white/5 transition-all duration-300 ${isSidebarOpen ? "w-full sm:w-48" : "w-full sm:w-16 items-center"
+      <aside className={`glass-panel rounded-3xl p-4 flex flex-col gap-5 shadow-2xl relative z-20 border border-white/5 transition-all duration-300 overflow-y-auto ${isSidebarOpen ? "w-full sm:w-48" : "w-full sm:w-16 items-center"
         }`}>
         <div className="flex items-center justify-between w-full">
           <div className="flex items-center gap-3">
@@ -696,7 +696,7 @@ export default function Dashboard() {
       </aside>
 
       {/* MAIN CONTENT AREA */}
-      <main className="flex-1 flex flex-col gap-4 relative z-10 min-w-0">
+      <main className="flex-1 flex flex-col gap-4 relative z-10 min-w-0 min-h-0">
 
         {/* TOP NAVIGATION / HEADER */}
         <header className="glass-panel rounded-2xl px-5 py-3 flex flex-col sm:flex-row justify-between items-center shadow-lg border border-white/5 gap-4">
