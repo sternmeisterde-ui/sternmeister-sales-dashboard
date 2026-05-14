@@ -472,12 +472,12 @@ function CriteriaTimeTable({
   collapsedBlocks: Set<string>; onToggle: (n: string) => void;
 }) {
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="w-full overflow-x-auto">
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Критерий
               </th>
               {periods.map((p) => (
@@ -545,12 +545,12 @@ function ManagerTable({
   collapsedBlocks: Set<string>; onToggle: (n: string) => void;
 }) {
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="w-full overflow-x-auto">
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Критерий
               </th>
               {managers.map((m) => (
@@ -649,12 +649,12 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
   for (const b of aggB.blocks) { if (!blockNames.includes(b.name)) blockNames.push(b.name); }
 
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="w-full overflow-x-auto">
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[260px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Критерий
               </th>
               <th className="px-3 py-2.5 text-center min-w-[100px]">
@@ -765,12 +765,12 @@ function ComparisonManagerTable({ dataA, dataB, labelA, labelB, collapsedBlocks,
   for (const b of dataB.blocks) { if (!blockNames.includes(b.name)) blockNames.push(b.name); }
 
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl overflow-hidden border border-white/5 shadow-2xl">
-      <div className="w-full overflow-x-auto">
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
         <table className="w-full text-left border-collapse">
-          <thead>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="light-panel-header border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 bg-slate-900/95 backdrop-blur-sm z-20 min-w-[180px]">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[180px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Менеджер
               </th>
               <th className="px-2 py-2.5 text-center min-w-[50px]">

@@ -470,9 +470,9 @@ function SummaryTimeTable({
     // on any ancestor, it clips sticky content. Plain div with border/bg is
     // the only combination that lets thead stick to viewport on page scroll.
     <div className="text-slate-200 rounded-2xl border border-white/5 shadow-2xl bg-slate-900/40">
-      <div className="w-full overflow-x-auto rounded-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
         <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
-          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
             <tr className="border-b border-white/10">
               <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[220px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                 Метрика
@@ -1469,9 +1469,9 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
       ) : (
         // No glass-panel/overflow-hidden here — both break sticky thead.
         <div className="rounded-2xl border border-white/5 bg-slate-900/40">
-          <div className="w-full overflow-x-auto rounded-2xl">
+          <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "clip" }}>
             <table className="w-full text-left" style={{ borderCollapse: "separate", borderSpacing: 0 }}>
-              <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+              <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
                 <tr className="border-b border-white/10">
                   <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
                     Метрика
