@@ -227,6 +227,8 @@ function QualLeadsChartTooltip({
 // ── Tab root ────────────────────────────────────────
 
 export default function TerminTab() {
+  // One fetch of the Kommo status list, shared by both Termin-cohort charts.
+  const statusRegistry = useBeraterStatuses();
   return (
     <div className="flex flex-col gap-8 fade-in">
       <TerminDashboardSection
@@ -236,6 +238,7 @@ export default function TerminTab() {
           day: "дата создания сделки",
           week: "неделя создания (с понедельника)",
         }}
+        statusRegistry={statusRegistry}
       />
       <TerminDashboardSection
         bucketBy="termin_date"
@@ -244,6 +247,7 @@ export default function TerminTab() {
           day: "дата термина (ДЦ или АА)",
           week: "неделя термина (с понедельника)",
         }}
+        statusRegistry={statusRegistry}
       />
       <QualLeadsDocsSection />
       <FunnelTimingSection />
@@ -255,94 +259,109 @@ export default function TerminTab() {
 
 // ── BERATER status filter (chart 1 + 2) ─────────────
 //
-// All BERATER status_ids surfaced as user-toggleable filter options. Order
-// mirrors the deal lifecycle (intake → DC → AA → outcomes) so the РОП reads
-// the list left-to-right as the pipeline progresses. Closed-bucket statuses
-// (УNSORTED, WON, LOST, DELAYED_START, APPEAL, BERATER_REVIEW) are at the
-// end — they exist for completeness but rarely participate in termin-timing
-// analysis.
+// Status list is pulled live from /api/dashboard/berater-statuses, which reads
+// the analytics mirror of Kommo. Names and even IDs can change in Kommo; the
+// frontend never assumes either. We only keep TWO pieces of stable knowledge
+// in code:
 //
-// `excludedFromDefault` marks statuses NOT included in the initial selection.
-// Currently only TERM_DC_CANCELLED — preserves the prior `<> TERM_DC_CANCELLED`
-// implicit filter as the visible default. Toggling it on is allowed.
+//   - STATUS_GROUP_BY_ID — visual grouping. IDs are stable across Kommo
+//     renames; only the labels move. Unknown IDs (new statuses introduced in
+//     Kommo since this map was written) get group "other" and appear at the
+//     bottom — they're still selectable, just unsorted.
+//   - DEFAULT_EXCLUDED_FROM_SELECTION — initial-state exclusions that mirror
+//     the prior implicit `<> TERM_DC_CANCELLED` cohort filter.
+//
+// Anything else (display names, lead counts, ordering within groups) flows
+// from the API.
 
-const BERATER_STATUS_OPTIONS: ReadonlyArray<{
-  id: number;
-  label: string;
-  group: "pre_dc" | "post_dc" | "closed";
-  excludedFromDefault?: boolean;
-}> = [
-  // Pre-ДЦ pipeline
-  { id: 93860331, label: "Принято от первой линии", group: "pre_dc" },
-  { id: 102183931, label: "Доведение", group: "pre_dc" },
-  { id: 93860335, label: "Взято в работу", group: "pre_dc" },
-  { id: 93860339, label: "Недозвон", group: "pre_dc" },
-  { id: 93860863, label: "Контакт установлен", group: "pre_dc" },
-  { id: 102183935, label: "Консультация перед ДЦ", group: "pre_dc" },
-  { id: 102183939, label: "Консультация перед ДЦ — проведена", group: "pre_dc" },
-  {
-    id: 93860875,
-    label: "Термин ДЦ отменён/перенесён",
-    group: "pre_dc",
-    excludedFromDefault: true,
-  },
-  // Post-ДЦ pipeline
-  { id: 93886075, label: "Термин ДЦ состоялся", group: "post_dc" },
-  { id: 102183943, label: "Консультация перед АА", group: "post_dc" },
-  { id: 102183947, label: "Консультация перед АА — проведена", group: "post_dc" },
-  { id: 93860883, label: "Термин АА отменён/перенесён", group: "post_dc" },
-  { id: 93860879, label: "Термин АА", group: "post_dc" },
+type StatusGroup = "pre_dc" | "post_dc" | "closed" | "other";
+
+const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
+  // Pre-ДЦ
+  93860331: "pre_dc", // RECEIVED_FROM_FIRST
+  102183931: "pre_dc", // DOVEDENIE
+  93860335: "pre_dc", // IN_PROGRESS
+  93860339: "pre_dc", // NO_ANSWER
+  93860863: "pre_dc", // CONTACT_MADE
+  102183935: "pre_dc", // CONSULT_BEFORE_DC
+  102183939: "pre_dc", // CONSULT_BEFORE_DC_DONE
+  93860875: "pre_dc", // TERM_DC_CANCELLED
+  // Post-ДЦ
+  93886075: "post_dc", // TERM_DC_DONE
+  102183943: "post_dc", // CONSULT_BEFORE_AA
+  102183947: "post_dc", // CONSULT_BEFORE_AA_DONE
+  93860883: "post_dc", // TERM_AA_CANCELLED
+  93860879: "post_dc", // TERM_AA
   // Closed / прочие
-  { id: 93860887, label: "На рассмотрении бератера", group: "closed" },
-  { id: 95515895, label: "Отложенный старт", group: "closed" },
-  { id: 93860891, label: "Апелляция", group: "closed" },
-  { id: 142, label: "Гутшайн одобрен", group: "closed" },
-  { id: 143, label: "Закрыто и не реализовано", group: "closed" },
-  { id: 93860327, label: "Неразобранное", group: "closed" },
-];
+  93860887: "closed", // BERATER_REVIEW
+  95515895: "closed", // DELAYED_START
+  93860891: "closed", // APPEAL
+  142: "closed", // WON
+  143: "closed", // LOST
+  93860327: "closed", // UNSORTED
+};
 
-const BERATER_STATUS_LABEL_BY_ID = new Map<number, string>(
-  BERATER_STATUS_OPTIONS.map((s) => [s.id, s.label]),
-);
+// Default-deselected on first load. Mirrors the prior implicit
+// `<> TERM_DC_CANCELLED` cohort filter so chart values don't shift for
+// existing users.
+const DEFAULT_EXCLUDED_FROM_SELECTION: ReadonlySet<number> = new Set([
+  93860875, // TERM_DC_CANCELLED
+]);
 
-const DEFAULT_BERATER_STATUS_IDS: number[] = BERATER_STATUS_OPTIONS.filter(
-  (s) => !s.excludedFromDefault,
-).map((s) => s.id);
-
-const GROUP_LABELS: Record<"pre_dc" | "post_dc" | "closed", string> = {
+const GROUP_LABELS: Record<StatusGroup, string> = {
   pre_dc: "До термина ДЦ",
   post_dc: "После термина ДЦ",
   closed: "Закрытые / прочие",
+  other: "Новые / неклассифицированные",
 };
 
-function loadStoredStatusFilter(storageKey: string): number[] {
-  if (typeof window === "undefined") return DEFAULT_BERATER_STATUS_IDS;
+interface StatusMeta {
+  id: number;
+  name: string;
+  leadCount: number;
+}
+
+interface BeraterStatusesResponse {
+  statuses: StatusMeta[];
+}
+
+function loadStoredStatusFilter(storageKey: string): number[] | null {
+  if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(storageKey);
-    if (!raw) return DEFAULT_BERATER_STATUS_IDS;
+    if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return DEFAULT_BERATER_STATUS_IDS;
-    // Keep only known IDs; drop stale entries from older registry versions.
-    const known = parsed.filter(
-      (n: unknown) =>
-        typeof n === "number" && BERATER_STATUS_LABEL_BY_ID.has(n),
-    ) as number[];
-    return known;
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((n: unknown) => typeof n === "number") as number[];
   } catch {
-    return DEFAULT_BERATER_STATUS_IDS;
+    return null;
   }
 }
 
+function defaultStatusIds(statuses: StatusMeta[]): number[] {
+  return statuses
+    .map((s) => s.id)
+    .filter((id) => !DEFAULT_EXCLUDED_FROM_SELECTION.has(id));
+}
+
 function BeraterStatusMultiselect({
+  options,
+  loading,
   selected,
   onChange,
 }: {
+  options: StatusMeta[];
+  loading: boolean;
   selected: number[];
   onChange: (next: number[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const labelById = useMemo(
+    () => new Map(options.map((s) => [s.id, s.name])),
+    [options],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -361,66 +380,77 @@ function BeraterStatusMultiselect({
     };
   }, [open]);
 
-  const total = BERATER_STATUS_OPTIONS.length;
+  const total = options.length;
   const count = selected.length;
-  const isAll = count === total;
-  const summary =
-    count === 0
-      ? "Не выбрано"
-      : isAll
-        ? "Все статусы"
-        : count === 1
-          ? (BERATER_STATUS_LABEL_BY_ID.get(selected[0]!) ?? `${selected[0]}`)
-          : `Статусы: ${count} из ${total}`;
+  const isAll = total > 0 && count === total;
+  const summary = loading
+    ? "Загрузка статусов…"
+    : total === 0
+      ? "Нет данных"
+      : count === 0
+        ? "Не выбрано"
+        : isAll
+          ? "Все статусы"
+          : count === 1
+            ? (labelById.get(selected[0]!) ?? `${selected[0]}`)
+            : `Статусы: ${count} из ${total}`;
 
   const toggle = (id: number) => {
     const next = new Set(selectedSet);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    // Preserve canonical order from the registry.
-    onChange(BERATER_STATUS_OPTIONS.filter((s) => next.has(s.id)).map((s) => s.id));
+    // Keep API order stable (matches the registry order from the endpoint).
+    onChange(options.filter((s) => next.has(s.id)).map((s) => s.id));
   };
-  const selectAll = () =>
-    onChange(BERATER_STATUS_OPTIONS.map((s) => s.id));
-  const selectDefault = () => onChange(DEFAULT_BERATER_STATUS_IDS);
+  const selectAll = () => onChange(options.map((s) => s.id));
+  const selectDefault = () => onChange(defaultStatusIds(options));
   const clearAll = () => onChange([]);
 
-  type StatusOption = (typeof BERATER_STATUS_OPTIONS)[number];
-  const grouped: Record<"pre_dc" | "post_dc" | "closed", StatusOption[]> = {
+  const grouped: Record<StatusGroup, StatusMeta[]> = {
     pre_dc: [],
     post_dc: [],
     closed: [],
+    other: [],
   };
-  for (const opt of BERATER_STATUS_OPTIONS) grouped[opt.group].push(opt);
+  for (const opt of options) {
+    const g = STATUS_GROUP_BY_ID[opt.id] ?? "other";
+    grouped[g].push(opt);
+  }
+  const groupsToRender: StatusGroup[] = (
+    ["pre_dc", "post_dc", "closed", "other"] as const
+  ).filter((g) => grouped[g].length > 0);
 
   return (
     <div ref={rootRef} className="relative">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => !loading && setOpen((v) => !v)}
+        disabled={loading}
         className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-colors ${
-          isAll || count === 0
-            ? "bg-slate-800/40 text-slate-300 border-white/5 hover:border-white/20"
-            : "bg-blue-500/10 text-blue-300 border-blue-500/30"
+          loading
+            ? "bg-slate-800/40 text-slate-500 border-white/5 cursor-wait"
+            : isAll || count === 0
+              ? "bg-slate-800/40 text-slate-300 border-white/5 hover:border-white/20"
+              : "bg-blue-500/10 text-blue-300 border-blue-500/30"
         }`}
         title="Фильтр по статусам сделок (текущий статус в Kommo)"
         aria-haspopup="listbox"
         aria-expanded={open}
       >
         <Filter className="w-3.5 h-3.5" />
-        <span className="max-w-[180px] truncate">{summary}</span>
+        <span className="max-w-[200px] truncate">{summary}</span>
         <ChevronDown
           className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
-      {open && (
+      {open && !loading && (
         <div
-          className="absolute right-0 top-full mt-1 z-40 w-[320px] rounded-xl border border-white/10 bg-slate-900/98 shadow-2xl backdrop-blur p-3"
+          className="absolute right-0 top-full mt-1 z-40 w-[340px] rounded-xl border border-white/10 bg-slate-900/98 shadow-2xl backdrop-blur p-3"
           role="listbox"
         >
           <div className="flex items-center justify-between gap-2 mb-2 pb-2 border-b border-white/5">
             <div className="text-[10px] uppercase tracking-wider text-slate-500">
-              Фильтр статусов
+              Фильтр статусов · из Kommo
             </div>
             <div className="flex gap-1">
               <button
@@ -448,7 +478,7 @@ function BeraterStatusMultiselect({
             </div>
           </div>
           <div className="max-h-[360px] overflow-y-auto pr-1 space-y-2">
-            {(["pre_dc", "post_dc", "closed"] as const).map((g) => (
+            {groupsToRender.map((g) => (
               <div key={g}>
                 <div className="text-[10px] uppercase tracking-wider text-slate-500 px-2 py-1">
                   {GROUP_LABELS[g]}
@@ -461,23 +491,28 @@ function BeraterStatusMultiselect({
                         key={opt.id}
                         type="button"
                         onClick={() => toggle(opt.id)}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 text-left text-xs"
+                        className="flex items-center justify-between gap-2 px-2 py-1.5 rounded hover:bg-white/5 text-left text-xs"
                         role="option"
                         aria-selected={checked}
                       >
-                        <span
-                          className={`flex items-center justify-center w-4 h-4 rounded border ${
-                            checked
-                              ? "bg-blue-500 border-blue-500"
-                              : "border-slate-600"
-                          }`}
-                        >
-                          {checked && <Check className="w-3 h-3 text-white" />}
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`flex items-center justify-center w-4 h-4 rounded border shrink-0 ${
+                              checked
+                                ? "bg-blue-500 border-blue-500"
+                                : "border-slate-600"
+                            }`}
+                          >
+                            {checked && <Check className="w-3 h-3 text-white" />}
+                          </span>
+                          <span
+                            className={`truncate ${checked ? "text-slate-200" : "text-slate-400"}`}
+                          >
+                            {opt.name}
+                          </span>
                         </span>
-                        <span
-                          className={checked ? "text-slate-200" : "text-slate-400"}
-                        >
-                          {opt.label}
+                        <span className="text-[10px] text-slate-500 shrink-0">
+                          {opt.leadCount.toLocaleString("ru-RU")}
                         </span>
                       </button>
                     );
@@ -492,16 +527,46 @@ function BeraterStatusMultiselect({
   );
 }
 
+/** Loads the BERATER status list once per Termin-tab mount and shares it
+ *  across the two TerminDashboardSection instances. */
+function useBeraterStatuses(): { statuses: StatusMeta[]; loading: boolean } {
+  const [statuses, setStatuses] = useState<StatusMeta[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    const ac = new AbortController();
+    fetch("/api/dashboard/berater-statuses", { signal: ac.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<BeraterStatusesResponse>;
+      })
+      .then((data) => {
+        setStatuses(data.statuses ?? []);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        // On failure, fall through to empty list — the filter will show
+        // "Нет данных" and charts will return whatever the API returns when
+        // statusIds is empty (currently: empty result). User can refresh.
+        setLoading(false);
+      });
+    return () => ac.abort();
+  }, []);
+  return { statuses, loading };
+}
+
 // ── Termin dashboard section ────────────────────────
 
 function TerminDashboardSection({
   bucketBy,
   chartTitle,
   xAxisHint,
+  statusRegistry,
 }: {
   bucketBy: BucketBy;
   chartTitle: string;
   xAxisHint: Record<Granularity, string>;
+  statusRegistry: { statuses: StatusMeta[]; loading: boolean };
 }) {
   const [preset, setPreset] = useState<Preset>("30d");
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
@@ -513,12 +578,38 @@ function TerminDashboardSection({
   const [useFirst, setUseFirst] = useState<boolean>(true);
   // Per-section status filter — each chart (created_at vs termin_date) has its
   // own state + localStorage slot so the РОП can configure them independently.
+  // statusIds is null until the Kommo registry resolves: we don't want to
+  // fire /termins with stale localStorage IDs before we can validate them
+  // against the current Kommo status set.
   const storageKey = `termin-section-status-filter-${bucketBy}`;
-  const [statusIds, setStatusIds] = useState<number[]>(() =>
-    loadStoredStatusFilter(storageKey),
-  );
+  const [statusIds, setStatusIds] = useState<number[] | null>(null);
+  const { statuses: statusOptions, loading: statusesLoading } = statusRegistry;
+
+  // Initial seed: once the registry resolves, reconcile localStorage against
+  // it (drop unknown IDs) or fall back to the default (everything except
+  // CANCELLED). Only runs once per registry-load.
+  const initRef = useRef(false);
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (statusesLoading || initRef.current) return;
+    initRef.current = true;
+    const validIds = new Set(statusOptions.map((s) => s.id));
+    const stored = loadStoredStatusFilter(storageKey);
+    if (stored) {
+      const reconciled = stored.filter((id) => validIds.has(id));
+      // If localStorage had nothing valid (stale registry), fall back to
+      // default rather than locking the user into an empty selection.
+      setStatusIds(
+        reconciled.length === 0 && stored.length > 0
+          ? defaultStatusIds(statusOptions)
+          : reconciled,
+      );
+    } else {
+      setStatusIds(defaultStatusIds(statusOptions));
+    }
+  }, [statusOptions, statusesLoading, storageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || statusIds === null) return;
     try {
       window.localStorage.setItem(storageKey, JSON.stringify(statusIds));
     } catch {
@@ -526,7 +617,7 @@ function TerminDashboardSection({
     }
   }, [storageKey, statusIds]);
   // Stable string for fetch deps + URL param — joined CSV.
-  const statusIdsParam = statusIds.join(",");
+  const statusIdsParam = (statusIds ?? []).join(",");
   const [data, setData] = useState<TerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -535,6 +626,10 @@ function TerminDashboardSection({
 
   const fetchData = useCallback(
     async (signal?: AbortSignal) => {
+      // Defer the first /termins call until the status registry is loaded —
+      // otherwise we'd issue it with statusIds="" and immediately get an
+      // empty response, only to refetch a moment later.
+      if (statusIds === null) return;
       if (!hasDataRef.current) setLoading(true);
       setError(null);
       try {
@@ -562,7 +657,15 @@ function TerminDashboardSection({
         setLoading(false);
       }
     },
-    [range.start, range.end, granularity, bucketBy, useFirst, statusIdsParam],
+    [
+      range.start,
+      range.end,
+      granularity,
+      bucketBy,
+      useFirst,
+      statusIdsParam,
+      statusIds,
+    ],
   );
 
   useEffect(() => {
@@ -712,7 +815,9 @@ function TerminDashboardSection({
             })}
           </div>
           <BeraterStatusMultiselect
-            selected={statusIds}
+            options={statusOptions}
+            loading={statusesLoading}
+            selected={statusIds ?? []}
             onChange={setStatusIds}
           />
           <CalendarPicker
