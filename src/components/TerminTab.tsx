@@ -31,39 +31,20 @@ import TerminLeadDrillModal, {
 } from "@/components/TerminLeadDrillModal";
 import {
   fmtLocalDate as formatDate,
-  berlinCivilComponents,
-  berlinCivilDate,
   todayBerlinDate,
 } from "@/lib/utils/date";
 
 // ── Shared types & helpers ──────────────────────────
 
-type Preset = "today" | "7d" | "30d" | "month" | "custom";
 type Granularity = "day" | "week";
 type BucketBy = "created_at" | "termin_date";
 
-const PRESETS: Array<{ id: Preset; label: string }> = [
-  { id: "today", label: "Сегодня" },
-  { id: "7d", label: "7 дней" },
-  { id: "30d", label: "30 дней" },
-  { id: "month", label: "Текущий месяц" },
-  { id: "custom", label: "Произвольный" },
-];
-
-function rangeForPreset(preset: Preset): { start: Date; end: Date } {
+/** Default initial range when a section first mounts: last 30 Berlin civil
+ *  days through today. Used as the seed before the РОП picks anything via
+ *  the calendar. */
+function defaultRangeLast30Days(): { start: Date; end: Date } {
   const today = todayBerlinDate();
-  if (preset === "today") return { start: today, end: today };
-  if (preset === "7d") {
-    const start = new Date(today.getTime() - 6 * 86_400_000);
-    return { start, end: today };
-  }
-  if (preset === "30d") {
-    const start = new Date(today.getTime() - 29 * 86_400_000);
-    return { start, end: today };
-  }
-  const { y, m } = berlinCivilComponents(today);
-  const civil = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-01`;
-  const start = berlinCivilDate(civil);
+  const start = new Date(today.getTime() - 29 * 86_400_000);
   return { start, end: today };
 }
 
@@ -568,9 +549,8 @@ function TerminDashboardSection({
   xAxisHint: Record<Granularity, string>;
   statusRegistry: { statuses: StatusMeta[]; loading: boolean };
 }) {
-  const [preset, setPreset] = useState<Preset>("30d");
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
-    rangeForPreset("30d"),
+    defaultRangeLast30Days(),
   );
   const [granularity, setGranularity] = useState<Granularity>("day");
   // useFirst defaults to TRUE per B1=A: original committed termin date, not
@@ -674,17 +654,11 @@ function TerminDashboardSection({
     return () => ac.abort();
   }, [fetchData]);
 
-  const handlePreset = (id: Preset) => {
-    setPreset(id);
-    if (id !== "custom") setRange(rangeForPreset(id));
-  };
-
   const handleRangeChange = (r: DateRange) => {
     if (!r.start) return;
     const start = r.start;
     const end = r.end ?? r.start;
     setRange({ start, end });
-    setPreset("custom");
   };
 
   const stats = useMemo(() => {
@@ -753,20 +727,9 @@ function TerminDashboardSection({
       <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           <CalendarDays className="w-4 h-4 text-blue-400 shrink-0" />
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => handlePreset(p.id)}
-              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
-                preset === p.id
-                  ? "bg-blue-500/20 text-blue-300 border-blue-500/40"
-                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+          <span className="text-xs text-slate-300 font-medium">
+            Выберите период:
+          </span>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
@@ -824,7 +787,7 @@ function TerminDashboardSection({
             mode="range"
             value={{ start: range.start, end: range.end }}
             onChange={handleRangeChange}
-            onClear={() => handlePreset("30d")}
+            onClear={() => setRange(defaultRangeLast30Days())}
           />
           <span className="text-xs text-slate-400 hidden sm:inline">
             {dateDisplay}
@@ -1110,9 +1073,8 @@ function TerminDashboardSection({
 // ── Qual-leads → Документы отправлены в ДЦ section ───
 
 function QualLeadsDocsSection() {
-  const [preset, setPreset] = useState<Preset>("30d");
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
-    rangeForPreset("30d"),
+    defaultRangeLast30Days(),
   );
   const [granularity, setGranularity] = useState<Granularity>("day");
   const [data, setData] = useState<QualLeadsApiRow[] | null>(null);
@@ -1156,17 +1118,11 @@ function QualLeadsDocsSection() {
     return () => ac.abort();
   }, [fetchData]);
 
-  const handlePreset = (id: Preset) => {
-    setPreset(id);
-    if (id !== "custom") setRange(rangeForPreset(id));
-  };
-
   const handleRangeChange = (r: DateRange) => {
     if (!r.start) return;
     const start = r.start;
     const end = r.end ?? r.start;
     setRange({ start, end });
-    setPreset("custom");
   };
 
   const stats = useMemo(() => {
@@ -1228,20 +1184,9 @@ function QualLeadsDocsSection() {
       <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           <CalendarDays className="w-4 h-4 text-amber-400 shrink-0" />
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => handlePreset(p.id)}
-              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
-                preset === p.id
-                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+          <span className="text-xs text-slate-300 font-medium">
+            Выберите период:
+          </span>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
@@ -1265,7 +1210,7 @@ function QualLeadsDocsSection() {
             mode="range"
             value={{ start: range.start, end: range.end }}
             onChange={handleRangeChange}
-            onClear={() => handlePreset("30d")}
+            onClear={() => setRange(defaultRangeLast30Days())}
           />
           <span className="text-xs text-slate-400 hidden sm:inline">
             {dateDisplay}
@@ -1496,7 +1441,6 @@ function FunnelTimingSection() {
     const start = new Date(today.getTime() - 89 * 86_400_000);
     return { start, end: today };
   }, []);
-  const [preset, setPreset] = useState<Preset>("custom");
   const [range, setRange] = useState<{ start: Date; end: Date }>(initialRange);
   const [data, setData] = useState<FunnelStageRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1539,15 +1483,9 @@ function FunnelTimingSection() {
     return () => ac.abort();
   }, [fetchData]);
 
-  const handlePreset = (id: Preset) => {
-    setPreset(id);
-    if (id !== "custom") setRange(rangeForPreset(id));
-  };
-
   const handleRangeChange = (r: DateRange) => {
     if (!r.start) return;
     setRange({ start: r.start, end: r.end ?? r.start });
-    setPreset("custom");
   };
 
   if (loading && !data) return <DinoLoader />;
@@ -1584,27 +1522,16 @@ function FunnelTimingSection() {
       <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           <CalendarDays className="w-4 h-4 text-violet-400 shrink-0" />
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => handlePreset(p.id)}
-              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
-                preset === p.id
-                  ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
-                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+          <span className="text-xs text-slate-300 font-medium">
+            Выберите период:
+          </span>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           <CalendarPicker
             mode="range"
             value={{ start: range.start, end: range.end }}
             onChange={handleRangeChange}
-            onClear={() => handlePreset("30d")}
+            onClear={() => setRange(initialRange)}
           />
           <span className="text-xs text-slate-400 hidden sm:inline">{dateDisplay}</span>
           <button
