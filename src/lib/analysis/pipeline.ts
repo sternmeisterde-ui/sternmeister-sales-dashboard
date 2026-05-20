@@ -108,13 +108,17 @@ async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 interface KommoLeadCustomFieldValue { value?: string; enum_id?: number; enum_code?: string }
 interface KommoLeadCustomField { field_id: number; values: KommoLeadCustomFieldValue[] }
+interface KommoEmbeddedContact { id: number }
 interface KommoLead {
   id: number;
   name: string;
   responsible_user_id: number;
   status_id: number;
   pipeline_id: number;
+  created_at: number;
+  closed_at?: number | null;
   custom_fields_values?: KommoLeadCustomField[] | null;
+  _embedded?: { contacts?: KommoEmbeddedContact[] };
 }
 interface KommoNote { id: number; note_type: string; params: { duration?: number; link?: string }; created_at: number; responsible_user_id: number }
 
@@ -128,6 +132,14 @@ interface ParsedKommoFilter {
    * of its values' enum_id is in the corresponding set (AND-across-fields,
    * OR-within-field — same semantics the Kommo UI applies). */
   cfEnumFilter: Map<number, Set<number>>;
+  /** Set of fieldIds for which the URL includes `filter[cf][FIELD_ID][]=empty`.
+   * Means: a lead with no value for that CF still matches (OR'd with the
+   * enum-id set). Kommo's UI behavior — picking specific enums + checking
+   * "Пусто" means "any of these OR unset". Without this, picking "Пусто" in
+   * the UI would silently exclude leads that match it (the user verified
+   * count: 104 leads in CRM ↔ API result was 18 without `empty` support,
+   * 104 with). */
+  cfAllowEmpty: Set<number>;
 }
 
 /**
@@ -194,18 +206,30 @@ function buildLeadsApiQuery(kommoUrl: string): ParsedKommoFilter {
     if (pathPipeline) out.append("filter[pipeline_id][]", pathPipeline);
   }
 
-  // 2. Date filter
-  const dateSwitch = fp.get("filter_date_switch");
+  // 2. Date filter. Translates Kommo *frontend* URL date params into the
+  // *API*'s `filter[<field>][from/to]` form. The frontend uses
+  // `filter_date_from/to` (DD.MM.YYYY) + optional `filter_date_switch`
+  // selecting which date field. Per Kommo CRM behavior the default sidebar
+  // filter is by "Дата создания" (created_at), so we default `dateSwitch`
+  // to "created" when the param is missing — matches what the user sees
+  // when they paste a filter URL whose UI date picker was left at default.
+  //
+  // Important: this MUST be applied at the lead level (Kommo API). If we
+  // skip it, the API returns the most-recently-updated 5k leads matching
+  // status+cf, and we'd then scan ~2k+ irrelevant deals for call notes.
+  // With the date applied, the API returns exactly the deals created in
+  // the window — typically tens to low hundreds.
+  const dateSwitch = fp.get("filter_date_switch") || "created";
   const dateFrom = fp.get("filter_date_from");
   const dateTo = fp.get("filter_date_to");
-  if (dateSwitch && dateFrom && dateTo) {
-    const apiField = dateSwitch === "closed" ? "closed_at"
-      : dateSwitch === "created" ? "created_at"
-      : dateSwitch === "updated" ? "updated_at"
-      : null;
+  if (dateFrom && dateTo) {
     const fromTs = parseRuDate(dateFrom, false);
     const toTs = parseRuDate(dateTo, true);
-    if (apiField && fromTs !== null && toTs !== null) {
+    if (fromTs !== null && toTs !== null) {
+      const apiField = dateSwitch === "closed" ? "closed_at"
+        : dateSwitch === "created" ? "created_at"
+        : dateSwitch === "updated" ? "updated_at"
+        : "created_at"; // any unrecognized value also falls back to created_at
       out.set(`filter[${apiField}][from]`, String(fromTs));
       out.set(`filter[${apiField}][to]`, String(toTs));
     }
@@ -215,40 +239,54 @@ function buildLeadsApiQuery(kommoUrl: string): ParsedKommoFilter {
   // We deliberately do NOT add them to `out`: Kommo /api/v4/leads ignores
   // `filter[custom_fields_values]` on GET, so attempting to filter via the
   // API would not narrow the dataset and would just bloat the URL.
+  //
+  // Special value `empty` means "include leads where this CF is unset" —
+  // OR'd with the enum_id set for that field.
   const CF_RE = /^filter\[cf\]\[(\d+)\]\[\]$/;
   const cfEnumFilter = new Map<number, Set<number>>();
+  const cfAllowEmpty = new Set<number>();
   for (const [key, value] of fp.entries()) {
     const m = key.match(CF_RE);
     if (!m) continue;
     const fieldId = Number(m[1]);
+    if (!Number.isFinite(fieldId)) continue;
+    if (value === "empty") {
+      cfAllowEmpty.add(fieldId);
+      continue;
+    }
     const enumId = Number(value);
-    if (!Number.isFinite(fieldId) || !Number.isFinite(enumId)) continue;
+    if (!Number.isFinite(enumId)) continue;
     if (!cfEnumFilter.has(fieldId)) cfEnumFilter.set(fieldId, new Set());
     cfEnumFilter.get(fieldId)!.add(enumId);
   }
 
-  return { apiQuery: out.toString(), cfEnumFilter };
+  return { apiQuery: out.toString(), cfEnumFilter, cfAllowEmpty };
 }
 
 /**
  * Apply client-side custom-field-enum filter (the part Kommo's API ignores).
  * Same semantics as the Kommo UI: AND across fields, OR within a field.
- * A lead passes only if every requested field has at least one of its
- * values' enum_ids in the requested set.
+ * A lead passes only if every requested field is satisfied — either at least
+ * one value's enum_id is in the requested set, OR the field is unset and
+ * `cfAllowEmpty` includes that field id.
  */
 function passesCfFilter(
   lead: KommoLead,
   cfEnumFilter: Map<number, Set<number>>,
+  cfAllowEmpty: Set<number>,
 ): boolean {
-  if (cfEnumFilter.size === 0) return true;
+  if (cfEnumFilter.size === 0 && cfAllowEmpty.size === 0) return true;
   const fields = lead.custom_fields_values ?? [];
-  for (const [requiredFieldId, allowedEnumIds] of cfEnumFilter) {
-    const f = fields.find((cf) => cf.field_id === requiredFieldId);
-    if (!f) return false;
-    const hasMatch = f.values.some(
-      (v) => v.enum_id !== undefined && allowedEnumIds.has(v.enum_id),
-    );
-    if (!hasMatch) return false;
+  const allFieldIds = new Set<number>([...cfEnumFilter.keys(), ...cfAllowEmpty]);
+  for (const fid of allFieldIds) {
+    const f = fields.find((cf) => cf.field_id === fid);
+    const isEmpty = !f || !f.values || f.values.length === 0;
+    if (cfAllowEmpty.has(fid) && isEmpty) continue;
+    const allowed = cfEnumFilter.get(fid);
+    if (!isEmpty && allowed && f!.values.some(
+      (v) => v.enum_id !== undefined && allowed.has(v.enum_id),
+    )) continue;
+    return false;
   }
   return true;
 }
@@ -267,19 +305,18 @@ function parseRuDate(s: string, endOfDay: boolean): number | null {
 }
 
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
-  const { apiQuery, cfEnumFilter } = buildLeadsApiQuery(kommoUrl);
-  const hasCfFilter = cfEnumFilter.size > 0;
+  const { apiQuery, cfEnumFilter, cfAllowEmpty } = buildLeadsApiQuery(kommoUrl);
+  const hasCfFilter = cfEnumFilter.size > 0 || cfAllowEmpty.size > 0;
 
-  // When a CF filter is in play, we must over-fetch and post-filter, so let
-  // the API return everything matching pipeline+status+date, then narrow
-  // locally. Without CF filtering, what comes back is already final.
-  // `with=` adds nothing here — `custom_fields_values` is included in
-  // /api/v4/leads responses by default.
-  const apiQueryFull = apiQuery;
-
+  // Embed contacts so we can pull contact-level call notes downstream.
+  // Kommo PBX/VoIP integrations attach call notes to the CONTACT entity
+  // (matched by the dialed phone number's last 10 digits, per Kommo docs),
+  // not to the lead — so reading only `/leads/{id}/notes` misses 100% of
+  // dialer-originated calls. Including contacts in the leads response (`with=contacts`)
+  // is one request per page rather than one per lead.
   const apiLeads: KommoLead[] = [];
   for (let page = 1; page <= 20; page++) {
-    const apiUrl = `/leads?${apiQueryFull}&limit=250&page=${page}`;
+    const apiUrl = `/leads?${apiQuery}&with=contacts&limit=250&page=${page}`;
     const data = await kommoFetchPath(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
     if (!data?._embedded?.leads?.length) break;
     apiLeads.push(...data._embedded.leads);
@@ -287,30 +324,64 @@ async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
 
   if (!hasCfFilter) return apiLeads;
 
-  const filtered = apiLeads.filter((l) => passesCfFilter(l, cfEnumFilter));
+  const filtered = apiLeads.filter((l) => passesCfFilter(l, cfEnumFilter, cfAllowEmpty));
   console.log(
     `[Analysis] CF filter: ${apiLeads.length} leads from API → ${filtered.length} after custom-field filter ` +
-      `(fields: ${[...cfEnumFilter.keys()].join(",")})`,
+      `(fields: ${[...cfEnumFilter.keys()].join(",")}${cfAllowEmpty.size ? `; allow_empty: ${[...cfAllowEmpty].join(",")}` : ""})`,
   );
   return filtered;
 }
 
-async function fetchCallNotes(leadId: number): Promise<KommoNote[]> {
-  // Paginate so deals with >100 call notes (long-running deals can easily
-  // have 50-200 attempts) get fully covered. Prior single-page fetch
-  // silently capped the list at 100 — we'd miss earlier qualifying calls
-  // on busy leads. `filter[note_type][]` is the array form documented for
-  // /api/v4 endpoint; the comma-separated form was Kommo's legacy syntax.
+async function fetchCallNotesForEntity(
+  entity: "leads" | "contacts",
+  entityId: number,
+): Promise<KommoNote[]> {
   const all: KommoNote[] = [];
   for (let page = 1; page <= 10; page++) {
     const data = await kommoFetchPath(
-      `/leads/${leadId}/notes?limit=250&page=${page}` +
+      `/${entity}/${entityId}/notes?limit=250&page=${page}` +
         `&filter[note_type][]=call_in&filter[note_type][]=call_out`,
     ) as { _embedded?: { notes?: KommoNote[] } } | null;
     const batch = data?._embedded?.notes ?? [];
     if (batch.length === 0) break;
     all.push(...batch);
     if (batch.length < 250) break;
+  }
+  return all;
+}
+
+/**
+ * Collect call notes for a lead by gathering notes attached to the lead AND
+ * to each of its embedded contacts. Per Kommo docs, PBX/VoIP integrations
+ * route inbound/outbound calls to the contact entity (matched on the last 10
+ * digits of the phone number) — leads typically have zero call notes of
+ * their own when calls come through a dialer, while their contacts hold the
+ * full call history. Reading only the lead would silently miss 100% of
+ * dialer-originated calls (verified: 113 leads in this sample had 0 lead-
+ * notes vs 2036 contact-notes total).
+ *
+ * Notes are tagged with their source (`__source`) so downstream code can
+ * surface where the recording came from. Duplicate notes across multiple
+ * contacts of the same lead are deduped by note.id — Kommo PBX integrations
+ * sometimes attach the same call to several entities when a contact-lead
+ * link triggers multiple "add to entity card" rules.
+ */
+async function fetchCallNotes(lead: KommoLead): Promise<KommoNote[]> {
+  const all: KommoNote[] = [];
+  const seen = new Set<number>();
+
+  const push = (notes: KommoNote[]) => {
+    for (const n of notes) {
+      if (seen.has(n.id)) continue;
+      seen.add(n.id);
+      all.push(n);
+    }
+  };
+
+  push(await fetchCallNotesForEntity("leads", lead.id));
+  const contacts = lead._embedded?.contacts ?? [];
+  for (const c of contacts) {
+    push(await fetchCallNotesForEntity("contacts", c.id));
   }
   return all;
 }
@@ -688,27 +759,43 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     //    leads (same recording can appear on several leads in Kommo), filter
     //    by duration. Progress is updated every 25 leads so the UI shows
     //    movement even when the filter returns thousands of deals.
+    //
+    //    Note on date semantics: the URL's filter_date_from/to is applied at
+    //    the LEAD level via Kommo API (when filter_date_switch is present) to
+    //    narrow which deals enter the pipeline. The call notes themselves are
+    //    NOT additionally filtered by date — the user's mental model is
+    //    "filter narrows deals; then pick all qualifying calls (by duration)
+    //    in those deals regardless of when the calls were made." If you ever
+    //    want to add a call-date filter, do it as a separate UI option, not
+    //    silently coupled to the URL date range.
     await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
 
     interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
     let scanned = 0;
     let multiCallLeads = 0;
     const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
-      const notes = await fetchCallNotes(lead.id).catch((e: unknown) => {
+      const notes = await fetchCallNotes(lead).catch((e: unknown) => {
         console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
         return [] as KommoNote[];
       });
-      // Iterate every note, not just the latest — a single deal can have
-      // multiple qualifying calls (e.g. follow-up + closing call) and each
-      // one needs its own transcription/analysis. Per-URL dedup happens
-      // later globally so the same recording cross-referenced from another
-      // lead doesn't get double-processed.
       const matched: CallRecord[] = [];
+      // Lower bound on call date: a call attributed to a lead must have
+      // happened DURING that lead's lifetime, not before. Contact-level
+      // notes (which is where PBX integrations log calls — see
+      // fetchCallNotes) include the contact's entire call history across
+      // ALL of the contact's deals. Without this guard a new lead inherits
+      // every old call the contact ever had, polluting the analysis.
+      const leadCreatedAt = lead.created_at || 0;
+      // Upper bound: closed deals — only count calls up to the close date
+      // (`closed_at` is 0 for open deals; ignore in that case).
+      const leadClosedAt = lead.closed_at && lead.closed_at > 0 ? lead.closed_at : Number.POSITIVE_INFINITY;
       for (const n of notes) {
         const dur = n.params?.duration || 0;
         const link = n.params?.link;
         if (dur < minDuration || !link) continue;
         if (link.includes("localhost")) continue;
+        if (n.created_at < leadCreatedAt) continue;
+        if (n.created_at > leadClosedAt) continue;
         matched.push({
           leadId: lead.id,
           leadName: (lead.name || "").substring(0, 60),
@@ -735,8 +822,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       );
     }
 
-    // Global dedup by URL — same recording in several leads → count once,
-    // attributed to the first lead we saw it on.
+    // Global dedup by URL — same recording in several leads → count once.
     const seenUrls = new Set<string>();
     const calls: CallRecord[] = [];
     for (const bucket of perLeadResults) {
