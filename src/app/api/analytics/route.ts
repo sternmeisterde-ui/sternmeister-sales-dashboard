@@ -118,54 +118,31 @@ function buildPeriodRange(fromCivil: string, toCivil: string, groupBy: string): 
   return [...periods].sort();
 }
 
-// ─── Line / prompt-type filter mapping ─────────────────────────
+// ─── Prompt-type filter mapping ──────────────────────────────
 //
-// Two different routes:
-//   B2G (D2) — filter by `managers.line` (with prompt_type as secondary key
-//     for the Бератер 1 / Бератер 2 split). OKK sets prompt_type per Kommo
-//     stage, but the prompt semantics are role-based — Кристина/Лихварь
-//     (manager.line=3) call on "Конс ДЦ"/"проведена" stages and get
-//     evaluated as d2_berater, which used to hide them from the Доведение
-//     tab. Routing by manager.line keeps role and tab aligned.
-//   B2B (R2) — keep filtering by `prompt_type`. master_managers.line has
-//     no semantic meaning for R2; prompt_type (r2_commercial / r2_decisions
-//     / r2_med_commercial) is the canonical split there.
+// Each UI line pill = one prompt_type (so the criteria table always matches
+// the prompt's JSON schema in src/criteria/*.json). For B2G that means 4
+// pills × 4 prompts: d2_qualifier / d2_berater / d2_berater2 / d2_dovedenie.
+// "Линия 2" conceptually covers both Бератер 1 and Бератер 2 — they're
+// shown as separate pills in the UI, never as a merged "Бератер" group.
+//
+// NOTE: a previous iteration tried filtering by managers.line instead, to
+// pull all Кристина+Лихварь (line=3) calls into the Доведение tab even
+// when OKK had evaluated them with the d2_berater prompt (because OKK
+// routes by Kommo stage, not by role). That broke criteria rendering —
+// evaluation_json from d2_berater has different block names than the
+// d2_dovedenie.json criteria schema, so all rows except "Приветствие"
+// showed dashes. Fix belongs in OKK (re-eval those calls under
+// d2_dovedenie), not here.
 
-interface D2LineFilter {
-  managerLine: string | null;
-  promptTypes: string[] | null;
-}
-
-function getD2LineFilter(line: string): D2LineFilter {
-  if (line === "all" || !line) return { managerLine: null, promptTypes: null };
-  if (line === "1") return { managerLine: "1", promptTypes: null };
-  if (line === "2") return { managerLine: "2", promptTypes: null };
-  if (line === "2a") return { managerLine: "2", promptTypes: ["d2_berater"] };
-  if (line === "2b") return { managerLine: "2", promptTypes: ["d2_berater2"] };
-  if (line === "3") return { managerLine: "3", promptTypes: null };
-  return { managerLine: null, promptTypes: null };
-}
-
-function getB2bPromptTypes(line: string): string[] | null {
+function getOkkPromptTypes(department: string, line: string): string[] | null {
+  if (department !== "b2g" && department !== "b2b") return null;
   if (line === "all" || !line) return null;
-  const lines = getLines("b2b");
+  const lines = getLines(department as DepartmentId);
   const exact = lines.find((l) => l.id === line);
   if (exact) return [exact.promptType];
   const inGroup = lines.filter((l) => l.group === line).map((l) => l.promptType);
   return inGroup.length > 0 ? inGroup : null;
-}
-
-// Promp_types covered by the UI line filter — used only for picking which
-// `src/criteria/*.json` files to load. Distinct from the DB filter because
-// for D2 line=3 we want to load d2_dovedenie.json even though the SQL filter
-// is `managers.line='3'` (no prompt_type constraint).
-function getPromptTypesForCriteria(dept: DepartmentId, line: string): string[] {
-  if (line === "all" || !line) return getLines(dept).map((l) => l.promptType);
-  const lines = getLines(dept);
-  const exact = lines.find((l) => l.id === line);
-  if (exact) return [exact.promptType];
-  const inGroup = lines.filter((l) => l.group === line).map((l) => l.promptType);
-  return inGroup.length > 0 ? inGroup : [];
 }
 
 // ─── Funnel labels for "Все" mode ──────────────────────────
@@ -173,27 +150,9 @@ function getPromptTypesForCriteria(dept: DepartmentId, line: string): string[] {
 // When line=all the left column lists funnels (one row per active line)
 // instead of criteria — B2G funnels (Квалификатор/Бератер/Доведение) have
 // disjoint criteria sets so cross-funnel criteria-level rows are noise.
-//
-// For B2G we label by `managers.line` (1/2/3) — matches the same routing the
-// SQL filter uses, so a call's funnel row is the same one its tab filter
-// would pick. The Бератер row is sub-split by prompt_type since both d2_berater
-// and d2_berater2 share manager.line='2'.
-// For B2B we keep labelling by prompt_type (no managers.line semantics).
+// Funnel label = whatever shortLabel the prompt_type maps to in tenant.ts.
 
-function funnelLabelForOkk(
-  department: DepartmentId,
-  managerLine: string | null,
-  promptType: string | null,
-): string {
-  if (department === "b2g") {
-    if (managerLine === "1") return "Квалификатор";
-    if (managerLine === "3") return "Доведение";
-    if (managerLine === "2") {
-      if (promptType === "d2_berater2") return "Бератер 2";
-      return "Бератер 1";
-    }
-    return "Без линии";
-  }
+function funnelLabelForOkk(department: DepartmentId, promptType: string | null): string {
   if (!promptType) return "Без воронки";
   const line = getLines(department).find((l) => l.promptType === promptType);
   return line ? (line.shortLabel ?? line.label) : promptType;
@@ -211,9 +170,6 @@ function funnelLabelForRoleplay(department: DepartmentId, callType: string | nul
 }
 
 function funnelOrderForOkk(department: DepartmentId): string[] {
-  if (department === "b2g") {
-    return ["Квалификатор", "Бератер 1", "Бератер 2", "Доведение"];
-  }
   return getLines(department).map((l) => l.shortLabel ?? l.label);
 }
 
@@ -426,9 +382,7 @@ async function fetchOkkData(
   managerId: string | null,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
-  const isB2g = department === "b2g";
-  const d2Filter = isB2g ? getD2LineFilter(line) : null;
-  const b2bPromptTypes = !isB2g ? getB2bPromptTypes(line) : null;
+  const promptTypes = getOkkPromptTypes(department, line);
 
   const conditions = [
     sql`${okkCalls.callCreatedAt} >= ${from}`,
@@ -436,18 +390,8 @@ async function fetchOkkData(
     sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
     isNotNull(okkEvaluations.totalScore),
   ];
-  if (isB2g && d2Filter) {
-    // B2G filters by managers.line — keeps Кристина/Лихварь (line=3) calls on
-    // "Конс ДЦ"/"проведена" stages in the Доведение tab even though OKK
-    // evaluated them as d2_berater (since OKK routes by Kommo stage, not role).
-    if (d2Filter.managerLine) {
-      conditions.push(eq(okkManagers.line, d2Filter.managerLine));
-    }
-    if (d2Filter.promptTypes && d2Filter.promptTypes.length > 0) {
-      conditions.push(inArray(okkEvaluations.promptType, d2Filter.promptTypes));
-    }
-  } else if (b2bPromptTypes && b2bPromptTypes.length > 0) {
-    conditions.push(inArray(okkEvaluations.promptType, b2bPromptTypes));
+  if (promptTypes && promptTypes.length > 0) {
+    conditions.push(inArray(okkEvaluations.promptType, promptTypes));
   }
   if (managerId) {
     conditions.push(eq(okkEvaluations.managerId, managerId));
@@ -473,15 +417,9 @@ async function fetchOkkData(
         evaluationJson: okkEvaluations.evaluationJson,
         managerId: okkEvaluations.managerId,
         promptType: okkEvaluations.promptType,
-        managerLine: okkManagers.line,
       })
       .from(okkCalls)
       .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
-      // leftJoin (not inner): keeps calls whose manager isn't in `managers`
-      // table for the "Все" view. They get `managerLine=null` and fall into
-      // "Без линии" funnel. For specific line filters the SQL `eq(managers.line)`
-      // condition above already drops these rows.
-      .leftJoin(okkManagers, eq(okkManagers.id, okkEvaluations.managerId))
       .where(and(...conditions))
       // Latest evaluation first so the dedupe below keeps the active one.
       // Re-evaluations (different prompt version, retries) create extra rows
@@ -534,7 +472,7 @@ async function fetchOkkData(
     // skipped period-side but still bump the manager total — totals diverge.
     let had: boolean;
     if (isAllFunnels) {
-      const funnel = funnelLabelForOkk(department, row.managerLine, row.promptType);
+      const funnel = funnelLabelForOkk(department, row.promptType);
       had = processCallAsFunnel(acc, row.totalScore, funnel);
     } else {
       had = processBlocks(blocks, acc, row.totalScore);
@@ -545,7 +483,7 @@ async function fetchOkkData(
     const mgrKey = row.managerId ?? NO_MANAGER_KEY;
     if (!managerAccMap.has(mgrKey)) managerAccMap.set(mgrKey, newAcc());
     if (isAllFunnels) {
-      const funnel = funnelLabelForOkk(department, row.managerLine, row.promptType);
+      const funnel = funnelLabelForOkk(department, row.promptType);
       processCallAsFunnel(managerAccMap.get(mgrKey)!, row.totalScore, funnel);
     } else {
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
@@ -595,11 +533,7 @@ async function fetchOkkData(
       validKeys: new Set(),
     };
   } else {
-    // Criteria JSON files live per prompt_type, not per manager-line, so the
-    // canonical loader uses the prompt_type set that the UI line filter maps
-    // to — even for B2G line=3 where the DB filter is `managers.line=3` and
-    // promptTypes is empty.
-    const promptTypesForCanonical = getPromptTypesForCriteria(department, line);
+    const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
     canonical = await loadCanonicalCriteria(promptTypesForCanonical);
   }
 
