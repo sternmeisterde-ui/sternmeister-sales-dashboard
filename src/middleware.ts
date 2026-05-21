@@ -27,7 +27,9 @@ export function middleware(request: NextRequest) {
   }
 
   // Cron endpoints authenticate via CRON_SECRET header/query param — no session.
-  if (pathname === "/api/analytics/sync/cron") {
+  // Covers /sync/cron (10-min CloudTalk), /sync/callgear (hourly, 7h-lag), and
+  // any future sync/* endpoint added for new ETL slices.
+  if (pathname.startsWith("/api/analytics/sync/")) {
     return NextResponse.next();
   }
 
