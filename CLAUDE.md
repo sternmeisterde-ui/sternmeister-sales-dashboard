@@ -1,293 +1,382 @@
-# SternMeister Sales Dashboard — Claude / Dev Entry-Point
+# SternMeister Sales Dashboard
 
-Last reviewed: 2026-05-21
+Next.js admin dashboard для OKK (call quality control) и Roleplay (AI training) систем
+двух sales-отделов (B2G/B2B). Прод: `https://dashboard.sternmeister.online`. Self-hosted
+на Dokploy, образ компонуется из `docker-compose.yml` (3 сервиса: `app`, `mcp`, `etl-cron`).
 
-You're about to work on a Next.js admin dashboard for **SternMeister** (Russian-speaking sales org, two departments: B2G "Госники" + B2B "Коммерсы"). The dashboard surfaces call-quality control (OKK), AI roleplay training, daily KPIs, lead-funnel analytics, and CDR/telephony data, pulling from **6 separate Neon Postgres databases** and three external APIs (Kommo CRM, CallGear, CloudTalk).
-
-There is also a separate **MCP server** (`mcp-server/` workspace) that exposes ~35 read-only tools to Claude Desktop/Code so РОПы can ask business questions in natural language. It lives in this repo, ships as a sibling Docker service, and is deployed at `mcp.sternmeister.online`.
-
-If you need to ship something fast, read this file end-to-end, then jump straight to `docs/SESSION-HANDOFF.md` and `docs/DASHBOARD-INDEX.md`. Everything else is reference.
+> **Новая Claude-сессия — порядок чтения:**
+> 1. Этот файл — карта проекта, ловушки, env, file map.
+> 2. [`docs/SESSION-HANDOFF.md`](docs/SESSION-HANDOFF.md) — текущий фокус, что работает, что недавно фикснули.
+> 3. [`docs/DASHBOARD-INDEX.md`](docs/DASHBOARD-INDEX.md) — таблица tab → component → API → таблицы.
+> 4. [`docs/etl-architecture.md`](docs/etl-architecture.md) — **обязательно** перед любым `INSERT` в `analytics.*`: natural-key + ON CONFLICT правила, Neon retry-hazard.
+> 5. Per-tab doc из `docs/DASHBOARD-<TAB>.md` — открывать когда работаешь с конкретной вкладкой.
 
 ---
 
-## 1. What this project actually is
+## Tech Stack
 
-- **Single Next.js 16 app** (App Router, React 19, TypeScript) at the repo root.
-- **MCP sub-server** at `mcp-server/` — npm workspace, separate Dockerfile, separate Dokploy service. See `mcp-server/README.md` and `mcp-server/INSTALL.md`.
-- Deployed to **Dokploy** (self-hosted Docker compose orchestrator), not Vercel. Production compose: `docker-compose.yml`. Local dev compose: `docker-compose.dev.yml` (spins up Postgres only; usually you just run `npm run dev`).
-- Three services in production compose: `app` (Next.js, port 3008), `mcp` (MCP HTTP transport, port 3009), `etl-cron` (curl-loop sidecar that pings `/api/analytics/sync/cron` every ~10 min).
-
-## 2. Tech stack
-
-| Layer | Choice |
-|---|---|
-| Framework | Next.js 16 (App Router) |
-| UI | Tailwind 4, Lucide icons, Recharts |
-| ORM | Drizzle (`drizzle-orm` + `drizzle-kit`) — schemas in `src/lib/db/schema-*.ts` |
-| DB driver | `@neondatabase/serverless` (HTTP, not the WS variant — keeps cold-start fast) |
-| Auth | Custom session cookie, `/api/auth/me`, `src/lib/auth.ts` |
-| Telegram | `telegram` package (MTProto) for username → user-id resolution |
-| Telephony | CallGear (JSON-RPC) + CloudTalk (Basic auth) clients in `src/lib/telephony/` |
-| AI | xAI Grok (`XAI_API_KEY`) for call analysis, ElevenLabs Scribe (`ELEVENLABS_API_KEY`) for transcription |
-| Monitoring | Sentry (`@sentry/nextjs`), separate DSNs for app and MCP |
-| Deploy | Dokploy → Docker → Traefik (TLS) |
-| Pkg manager | npm workspaces (root + `mcp-server/`) |
-
-## 3. Run it locally
+| Слой | Что | Версия |
+|---|---|---|
+| Framework | Next.js (App Router) | 16 |
+| Runtime | React | 19 |
+| Lang | TypeScript | 5 |
+| ORM | Drizzle / drizzle-kit | 0.45 / 0.31 |
+| DB driver | `@neondatabase/serverless` (HTTP) | 1.0 |
+| Styling | Tailwind CSS | 4 |
+| Charts | Recharts | 3.7 |
+| Icons | lucide-react | latest |
+| Slides | pptxgenjs | 4.0 |
+| AI | xAI Grok (analysis), ElevenLabs Scribe v2 (transcription) | — |
+| Telegram | `telegram` (MTProto) — username→ID resolver | — |
+| Monitoring | `@sentry/nextjs` (отдельные DSN для `app` и `mcp`) | 10.45 |
+| Deploy | Dokploy (self-hosted) → Docker Compose → Traefik | — |
+| Pkg | npm workspaces (root + `mcp-server/`) | — |
 
 ```bash
-npm install                # installs root + mcp-server workspace
-cp .env.example .env.local # then fill it in — see Section 6
-npm run dev                # Next.js on http://localhost:3008
+npm run dev          # port 3008
+npm run build
+npm run db:push      # Drizzle → main schema (D1)
+npm run db:studio
 ```
 
-Useful scripts (`package.json`):
+---
 
-```
-npm run dev                 # next dev -p 3008
-npm run build               # production build
-npm run lint                # eslint
-npm run db:generate         # drizzle-kit generate (roleplay/OKK schemas)
-npm run db:migrate          # drizzle-kit migrate
-npm run db:studio           # drizzle studio
-npm run db:generate:analytics   # same, but for analytics.* schema (separate config)
-npm run db:migrate:analytics
-npm run db:studio:analytics
-npm run docker:up           # docker-compose up
-npm run docker:dev          # docker-compose -f docker-compose.dev.yml up (postgres only)
-npm run analytics:backfill          # tsx scripts/backfill-analytics.ts
-npm run analytics:backfill:range    # same, takes date args
-npm run analytics:backfill:comms    # tsx scripts/backfill-comms.ts
-```
+## Архитектура: 6 БД, 4 драйвера
 
-There are also ~50 one-off operational scripts in `scripts/` — they're not in `package.json` but you run them with `npx tsx scripts/<name>.ts`. They cover backfills, audits, ETL re-syncs, Kommo probes, Telegram auth, MCP token rotation, etc. Skim the filenames before writing a new one.
+Все Neon Postgres. Подключения lazy-инициализируются через Proxy в `src/lib/db/index.ts` и `src/lib/db/okk.ts`.
 
-To use Drizzle Studio against analytics DB: `npm run db:studio:analytics`. Two configs because `drizzle.config.ts` points at the roleplay/OKK schemas while `drizzle.analytics.config.ts` points at the analytics-mirror schema.
+| Connection | Env var | Что внутри |
+|---|---|---|
+| **D1** | `DATABASE_URL` | B2G roleplay + **`master_managers`** (single source of truth) + общие таблицы: `daily_plans`, `payroll_runs`, `kommo_tokens`, `scripts`, `call_analyses`, `mcp_audit_log` |
+| **R1** | `R1_DATABASE_URL` | B2B roleplay (`r1_users`, `r1_calls`, `r1_avatars`). Авто-derive из D1 (свопает Neon-branch endpoint), если не задано |
+| **D2** | `D2_OKK_DATABASE_URL` | B2G OKK: `calls`, `evaluations`, `voice_feedback`, `managers` (синк-таргет от master_managers). Hardcoded fallback |
+| **R2** | `R2_OKK_DATABASE_URL` | B2B OKK (та же схема) |
+| **Analytics** | `ANALYTICS_DATABASE_URL` | `analytics.*` — Kommo+CDR mirror: `leads_cohort`, `communications`, `lead_status_changes`, `tasks`, `sla`, `etl_locks`, `refusal_enums`. **Primary источник** для Дейли / Звонки / Looker / Активность(calls) |
+| **Tracking** | `TRACKING_DATABASE_URL` | `tracking_events` + `tracking_sync_state`. Только для Активность tab (CRM-события Kommo) |
 
-## 4. Architecture in one screen
+### Department mapping
 
-```
-              ┌─────────────────────────────────────────────────────┐
-              │  Sources                                            │
-              │   • Kommo CRM   (leads, contacts, notes, events)    │
-              │   • CallGear    (CDR — every dial leg)              │
-              │   • CloudTalk   (CDR — every call)                  │
-              │   • Telegram    (MTProto for username→id)           │
-              └────────────────────┬────────────────────────────────┘
-                                   │
-                ┌──────────────────┴───────────────────┐
-                │                                      │
-                ▼                                      ▼
-        ETL cron (10 min)                    OKK service (external)
-   src/lib/etl/*.ts                          writes evaluated calls
-   → analytics.* mirror                      → D2 / R2 OKK databases
-                │
-                ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │  6 Neon Postgres databases                                  │
-   │   D1  DATABASE_URL          B2G roleplay + master_managers  │
-   │   R1  R1_DATABASE_URL       B2B roleplay                    │
-   │   D2  D2_OKK_DATABASE_URL   B2G OKK (real calls)            │
-   │   R2  R2_OKK_DATABASE_URL   B2B OKK                         │
-   │   AN  ANALYTICS_DATABASE_URL  Kommo mirror (analytics.*)    │
-   │   TR  TRACKING_DATABASE_URL   tracking_events (Активность)  │
-   └────────────────────────┬────────────────────────────────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-       Next.js app (3008)           MCP server (3009)
-       src/app/api/*                mcp-server/src/*
-       src/components/*Tab.tsx      ~35 curated read-only tools
+| Label | Code | Roleplay | OKK | Команда |
+|---|---|---|---|---|
+| B2G «Госники» | `b2g` | D1 | D2 | Дмитрий |
+| B2B «Коммерсы» | `b2b` | R1 | R2 | Рузанна |
+
+Russian aliases: `b2g`=Госники, `b2b`=Коммерсы.
+
+### ETL chain (`src/lib/etl/index.ts:runSync()`)
+
+1. **`fetchLookups`** — Kommo pipelines, users, loss reasons, refusal enums (must-have, hard-fail если упало)
+2. **`syncLeads`** → `analytics.leads_cohort` (creates `leadCache` для downstream)
+3. **`syncCommunications`** → `analytics.communications` (Kommo `/notes` + `/events` для chat/mail; calls — отдельно через telephony)
+4. **`syncStatusChanges`** → `analytics.lead_status_changes`
+5. **`syncTasks`** → `analytics.tasks` (пропускается в incremental, тяжёлый)
+6. **`updateContactDates`** — back-fill `leads_cohort.contact_date`
+7. **`syncTelephony`** — CallGear + CloudTalk CDR → `analytics.communications` с префиксом `cg-leg:N` / `ct:N`. Auto-skip если нет токенов
+8. **`enrichTelephonyLeads`** — phone → contact → leads через Kommo `/api/v4/contacts?filter[query]=phone`, **Pattern A fanout** (1 CDR → N rows по matched leads). Sweeps 7d backward в incremental
+9. **`computeSla`** → `analytics.sla` (creation→first-call math, ROP-aware)
+
+`runStep()` wraps каждый шаг — isolation, ошибки в `step_errors[]` отправляются в Sentry с `severity:non_fatal`, остальной pipeline идёт. Hard-fail только на `fetchLookups`.
+
+---
+
+## Cron & Schedules
+
+### Где живёт cron — НЕ в Dokploy UI
+
+`schedules:[]` в Dokploy для compose `Dashboard` — **нормально**. Cron-нагрузка вынесена в **отдельный compose-сервис `etl-cron`** (`docker-compose.yml:129-152`):
+
+```yaml
+etl-cron:
+  image: curlimages/curl:8.7.1
+  command: |
+    while true; do
+      curl -H "x-cron-secret: $CRON_SECRET" http://app:3008/api/analytics/sync/cron
+      sleep $SYNC_INTERVAL_SECONDS  # default 600 = 10 мин
+    done
 ```
 
-The 6-DB map and every tab's data source is documented in `docs/DASHBOARD-INDEX.md` — read that file before touching any reading query.
+Это даёт CloudTalk + leads + status + tasks + comms каждые 10 мин.
 
-## 5. Where the code lives
+### CallGear отдельно: hourly Dokploy schedule
 
-```
-src/
-├─ app/
-│  ├─ api/                  REST endpoints (analysis, analytics, audio, auth,
-│  │                        bug-reports, calls, criteria, daily, dashboard,
-│  │                        error-report, health, kommo, managers, okk,
-│  │                        scripts, telegram, tracking)
-│  ├─ login/page.tsx        login screen
-│  ├─ layout.tsx            root layout, favicon = /logo.png from public/
-│  └─ page.tsx              main dashboard — owns tab state + role gating
-├─ components/              one *Tab.tsx per sidebar section + popups + charts
-│                           AnalysisTab, AnalyticsTab, AuditTab, CalendarPicker,
-│                           CallsChart, CriteriaTab, DailyTab, DashboardTab,
-│                           DinoLoader, LookerTab, ManagersTab, ReportBugPopup,
-│                           SchedulePopup, ScriptsTab, TabelPopup, TerminTab,
-│                           TerminLeadDrillModal, TrackingTab, WorstCallsPanel
-├─ criteria/                evaluation-criteria data + helpers
-├─ hooks/                   React hooks
-├─ instrumentation.ts       Sentry init
-├─ middleware.ts            auth gate
-└─ lib/
-   ├─ analysis/             call-analysis pipeline (xAI + ElevenLabs)
-   ├─ auth.ts               session helpers
-   ├─ config/               department / pipeline / status maps
-   ├─ daily/                Daily tab business logic (analytics-calls.ts is the
-   │                        key read path; build-response.ts orchestrates)
-   ├─ db/                   index.ts (D1/R1), okk.ts (D2/R2), analytics.ts (AN),
-   │                        tracking-db.ts (TR), daily-db.ts (lifecycle),
-   │                        schema-existing.ts (roleplay), schema-okk.ts,
-   │                        schema-analytics.ts, schema-tracking.ts,
-   │                        with-retry.ts, neon-setup.ts
-   ├─ etl/                  Kommo→analytics.* ETL (sync-leads, sync-communications,
-   │                        sync-status-changes, sync-tasks, compute-sla,
-   │                        sync-telephony, enrich-telephony-leads, index.ts)
-   ├─ kommo/                Kommo API client + OAuth token store
-   ├─ scripts/              shared script utilities
-   ├─ telegram/             MTProto username→id resolver
-   ├─ telephony/            CallGear + CloudTalk clients, unified TelephonyCall
-   ├─ tracking/             tracking_events sync (Активность tab)
-   └─ utils/                misc helpers
+CallGear API эмбарго на ~7 часов (recent data unavailable). Поэтому он вынесен в отдельный endpoint `/api/analytics/sync/callgear` (LAG=7h, WINDOW=1h) и hourly Dokploy schedule `etl-callgear-cron` дёргает его (cron `15 * * * *`, runs внутри service `etl-cron` так как там есть `curl` + `CRON_SECRET` в env).
 
-mcp-server/                 npm workspace, separate Dockerfile
-├─ src/
-│  ├─ auth/                 bearer-token store, per-request ALS context
-│  ├─ db/                   6 read-only Neon connections + audit middleware
-│  ├─ registry/             list_domains, describe_domain, glossary
-│  ├─ domains/              managers / okk / daily / analytics / looker /
-│  │                        tracking / termin / roleplay / scripts / analiz
-│  ├─ resources/            auto-loaded MD glossary + playbooks
-│  ├─ server.ts             factory
-│  ├─ stdio.ts              stdio transport (Claude Code local)
-│  └─ index.ts              HTTP streamable transport (prod, bearer auth)
-└─ tests/                   golden-eval suite (work in progress)
+Без этого schedule CallGear молчит — был баг 11–21 мая 2026 (10 дней пропусков, ~3800 cg-leg-строк потеряно, backfill'ом восстановлено).
 
-drizzle/                    migrations, one folder per DB
-├─ d1/                      D1 roleplay schema migrations
-├─ r1/                      R1 roleplay
-├─ d2/                      D2 OKK
-├─ r2/                      R2 OKK
-├─ analytics/               analytics.* (the heavy mirror — read carefully)
-├─ tracking/                tracking_events
-├─ all/                     migrations applied to multiple branches
-└─ meta/                    drizzle journal
+### Middleware bypass для cron
 
-scripts/                    ~50 operational scripts (backfills, audits, probes,
-                            ETL runners, MCP token rotation, telegram auth, …)
+`src/middleware.ts` whitelist'ит `pathname.startsWith("/api/analytics/sync/")` — без этого CallGear endpoint редиректится в `/login` (фикс `d9079c6`, 2026-05-21).
 
-public/                     static assets (logo.png, favicons, svgs)
-иксели/                     Excel sources for KPIs / plans / scripts (Russian
-                            "икселя" = xlsx files, kept out of the repo root)
-ref/                        reference screenshots from the old Looker dashboard
-                            and Kommo UI — used to spec what we replicate
+### Lease-lock в `analytics.etl_locks`
 
-docs/                       per-tab architecture docs + initiatives. See §7.
-```
+Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear-cron`. Поля `acquired_at`, `expires_at`, `last_completed_at`. Lease TTL ~6 мин (больше maxDuration=300s + grace), auto-expires при крэше тика. **`released = (token = '')` AND `expires_at <= now()`**.
 
-## 6. Environment variables
+`/api/health/etl` читает `last_completed_at` — алармит если stale > N минут.
 
-Real values live in `.env.local` (not committed). Template in `.env.example`. Production values live in Dokploy. Anything not listed in `docker-compose.yml` `environment:` whitelist will NOT reach the container even if set in Dokploy UI — this has bitten us before, double-check that file before adding a new env var.
+---
 
-Minimal local set you need to run things:
+## Tabs (по `docs/DASHBOARD-INDEX.md`)
+
+| Tab | Label | Доступ | Компонент | API | Главные таблицы |
+|---|---|---|---|---|---|
+| `dashboard` | Звонки | admin | `DashboardTab.tsx` | `/api/dashboard` | `analytics.communications` (DISTINCT comm_id), `leads_cohort` |
+| `daily` | Дейли | admin | `DailyTab.tsx` | `/api/daily` | `analytics.*` + `daily_plans` (plan/fact) |
+| `analytics` | Аналитика | admin | `AnalyticsTab.tsx` | `/api/analytics/data` | `analytics.communications` + roleplay (union okk/roleplay) |
+| `tracking` | Активность | admin | `TrackingTab.tsx` | `/api/tracking` | `tracking_events` + calls из `analytics.communications` |
+| `termins` | Термин | admin | `TerminTab.tsx` | `/api/dashboard/termins`, looker views | `leads_cohort.termin_date/aa_termin_date`, `lead_status_changes` |
+| `looker` | Looker | admin | `LookerTab.tsx` | `/api/analytics/looker/data` | `communications` (enriched), `leads_cohort`, `lead_status_changes`, `sla` |
+| `real_calls` | ОКК | manager+admin | inline `page.tsx` | `/api/okk/calls` | D2/R2 `calls`+`evaluations` (orphan-фильтр) |
+| `ai_calls` | AI Ролевки | manager+admin | inline `page.tsx` | `/api/calls` | D1/R1 `d1_calls` / `r1_calls` |
+| `managers` | Менеджеры | admin | `ManagersTab.tsx` | `/api/managers` | `master_managers` + sync targets D2/R2/D1/R1 |
+| `call_analysis` | Анализ | admin | `AnalysisTab.tsx` | `/api/analysis` | `call_analyses`, `call_analysis_files` + xAI/ElevenLabs |
+| `criteria` | Критерии | admin | `CriteriaTab.tsx` | `/api/criteria` | JSON в `src/criteria/*.json` (FS, не БД) |
+| `scripts` | Скрипты | session(R), admin(W) | `ScriptsTab.tsx` | `/api/scripts` | D1 `scripts` |
+| `audit` | Аудит | admin | `AuditTab.tsx` | `/api/okk/audit` | D2/R2 `evaluations.override_metadata` JSONB, `phantom_history` |
+
+Auth & роли:
+- Session: `/api/auth/me` (HMAC cookie, см. `src/lib/auth`)
+- Roles: `admin` (всё), `manager` (только свои звонки, стартует на real_calls)
+- Department: `b2g`/`b2b` — initial filter
+
+---
+
+## Critical patterns (соблюдать всегда)
+
+1. **TZ = Europe/Berlin везде.** `TZ=${TZ:-Europe/Berlin}` в compose; в SQL — `(created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'`; в JS — `tzOffsetMinutes(d, "Europe/Berlin")` из `src/lib/utils/date.ts`. Никогда `new Date(YMD)` без TZ — браузерный midnight уплывает на ±1-2ч в non-Berlin.
+2. **`master_managers` в D1 = единственный источник правды.** POST `/api/managers` синкает в targets: `D2.managers`, `R2.managers`, `D1.d1_users`, `R1.r1_users`. Soft-delete (`isActive=false`) — никогда `DELETE`, FK integrity для call history.
+3. **Double-status ROP+line.** `role='rop' AND line IS NOT NULL` (e.g. Татьяна Дерикова, line=2) — участвует как линейный сотрудник в Активность / Дейли / Звонки. Plain ROPs без line — координируют, не звонят.
+4. **Pattern A fanout.** 1 CDR (`communication_id`) → N rows в `analytics.communications` (по matched leads). Unique-индекс: `(communication_id, COALESCE(lead_id, 0)) WHERE communication_id IS NOT NULL`. **Reads всегда `COUNT(DISTINCT communication_id)`** для правильного счёта; per-pipeline tile намеренно double-counts.
+5. **Idempotent ETL.** Все INSERT в `analytics.*` через `ON CONFLICT DO UPDATE` с unique natural-key. Neon HTTP-driver auto-retry'ит до 5 раз — non-idempotent DELETE-then-INSERT даёт duplicates. См. `docs/etl-architecture.md`.
+6. **Stale-while-revalidate.** Активность tab + Дейли — отдают immediately из кеша/таблицы, sync дёргается фоном (fire-and-forget). Не блокировать GET на Kommo rate-limit.
+7. **Name aliases drift.** `master_managers.name` ↔ `analytics.communications.manager` могут расходиться (Latin/Cyrillic, Maksim/Максим, Є/Е). Lookup в `src/lib/daily/name-aliases.ts`.
+8. **CURRENT_FILTER_VERSION (tracking_events).** Сейчас **v12**. Bump при изменении Kommo-фетча → автоматический 90-day re-backfill на mismatch. История версий — в `docs/DASHBOARD-AKTIVNOST.md`.
+9. **Env var whitelist в compose.** Любая переменная, не listed в `environment:` блоке `app` сервиса, **невидима в контейнере** даже если задана в Dokploy UI. История: SESSION_SECRET + Telegram tokens проваливались по этой причине.
+10. **OKK orphan-фильтр.** Calls в OKK tab видны только если `evaluations.total_score IS NOT NULL AND calls.manager_id IS NOT NULL`. Unscored / от удалённых менеджеров — скрыты.
+
+---
+
+## Env vars
 
 ```
-# Databases — all 6 are needed for full functionality
-DATABASE_URL=                  # D1 (B2G roleplay + master_managers)
-R1_DATABASE_URL=               # R1 (B2B roleplay) — auto-derived if blank
-D2_OKK_DATABASE_URL=           # D2 (B2G OKK)
-R2_OKK_DATABASE_URL=           # R2 (B2B OKK)
-ANALYTICS_DATABASE_URL=        # analytics.* mirror (Daily/Звонки/Looker/Термин)
-TRACKING_DATABASE_URL=         # tracking_events (Активность tab)
+# Core
+NODE_ENV=production
+PORT=3008
+TZ=Europe/Berlin
+APP_TIMEZONE=Europe/Berlin
+SESSION_SECRET=...
+ADMIN_BYPASS_PASSWORD=...
+NEXT_TELEMETRY_DISABLED=1
 
-# Auth (production fails loud if SESSION_SECRET missing)
-SESSION_SECRET=
-COOKIE_INSECURE=               # set to "1" for http://localhost dev
+# Six DBs
+DATABASE_URL=                # D1
+R1_DATABASE_URL=             # R1 (auto-derivable)
+D2_OKK_DATABASE_URL=         # D2
+R2_OKK_DATABASE_URL=         # R2
+ANALYTICS_DATABASE_URL=      # Kommo/CDR mirror
+TRACKING_DATABASE_URL=       # tracking_events (отдельный Neon project)
 
-# Kommo CRM
-KOMMO_ACCESS_TOKEN=
-KOMMO_SUBDOMAIN=
-KOMMO_API_DOMAIN=              # legacy alias still read in some places
-KOMMO_TOKEN_SOURCE=            # set to "db" to force using kommo_tokens table
+# Kommo
+KOMMO_ACCESS_TOKEN=          # JWT, ~2kb
+KOMMO_API_DOMAIN=sternmeister.kommo.com
+KOMMO_SUBDOMAIN=sternmeister
+KOMMO_TOKEN_SOURCE=db        # читать из kommo_tokens таблицы (refresh)
 
-# Telephony CDR (without these, ETL skips telephony silently)
+# Telephony
 CALLGEAR_ACCESS_TOKEN=
 CLOUDTALK_API_ID=
 CLOUDTALK_API_SECRET=
 
-# Telegram MTProto (manager save resolves @username → numeric id)
+# Telegram MTProto (username resolution)
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
-TELEGRAM_SESSION=
-TELEGRAM_BOT_TOKEN=            # for /login resolution
-TELEGRAM_OKK_BOT_TOKEN=
+TELEGRAM_SESSION=            # длинный, ~400 chars
+TELEGRAM_OKK_BOT_TOKEN=      # для notifications
 
-# AI providers (for Анализ tab)
+# AI
 XAI_API_KEY=
 ELEVENLABS_API_KEY=
 
-# Roleplay audio servers
-D1_API_URL=
-R1_API_URL=
+# Cron + MCP
+CRON_SECRET=                 # for /api/analytics/sync/*
+MCP_BEARER_TOKENS=           # JSON-массив для MCP-server
+MCP_D1_RO_URL=               # read-only Postgres role для MCP
+# и аналогичные _RO_URL для R1/D2/R2/Analytics
 
-# ETL cron secret — protects /api/analytics/sync/cron
-CRON_SECRET=
-
-# Discord webhook for in-app bug reports
-DISCORD_BUG_REPORT_WEBHOOK_URL=
-
-# Sentry
-SENTRY_DSN=
-
-# Timezone (we run on Berlin civil-day everywhere)
-TZ=Europe/Berlin
-APP_TIMEZONE=Europe/Berlin
+# Monitoring
+SENTRY_DSN=                  # app
+SENTRY_DSN_MCP=              # отдельный для mcp service
 ```
 
-MCP-server-specific env (only the mcp service consumes these):
+---
+
+## Gotchas (топ-10)
+
+1. **Kommo rate-limit:** 7 rps base, 2 rps combined в multi-process. `/notes` endpoint **silently ignores** `filter[created_at]` — ВСЕГДА `filter[updated_at]`. Эта ошибка стоила нам недели расследования (commit `f4bd662`).
+2. **CallGear 7h embargo:** API не отдаёт recent data. Hourly endpoint `/api/analytics/sync/callgear` с `LAG_HOURS=7, WINDOW_HOURS=1`. **Окно tick'а ≠ now**, окно = `[now-8h, now-7h]`.
+3. **`/notes` ≠ CDR.** PBX-интеграторы пишут Kommo-note для большинства звонков, но НЕ для instant-hangups, route-failures, immediately-cancelled outbound. Этот gap закрывает `sync-telephony.ts` (прямой CDR pull).
+4. **Filter-version bump = 90-day re-backfill.** Любое изменение `src/lib/tracking/sync.ts` Kommo-fetch требует `CURRENT_FILTER_VERSION++`. Без bump'а кеш тихо расходится.
+5. **B2G sub-lines 2a/2b** — теггируются, но **коллапсятся в `2`** перед Kommo-запросами. В master_managers `line` всегда `1/2/3`.
+6. **Phone fallback в communications:** CDR-строки приходят с `lead_id=NULL + pipeline_id=NULL + phone populated`. Per-pipeline reads должны включать `OR pipeline_id IS NULL`, иначе теряем телефонные звонки до enrichment'а.
+7. **OKK D2/R2 — только подключённые звонки (≥10s).** Не source-of-truth для total counts. Звонки ≥1s (дозвон) считать через `analytics.communications`.
+8. **Daily plans vs daily_snapshots.** Legacy `daily_snapshots` deprecated (2026-04-24), но может всплыть в edge-case queries. Префер `daily_plans`.
+9. **Юлия Смирнова (b2b)** — `kommo_user_id=NULL`, работает только в ролевках без Kommo CRM. См. `memory/project_yulia_smirnova_roleplay_only.md`.
+10. **Recharts + responsive containers + sticky thead** — есть тонкости с overflow / scroll context. Исправлено в коммитах `2026-05-14`. Если ломаешь — смотри `src/components/DailyTab.tsx` или `AnalyticsTab.tsx` для эталона.
+
+---
+
+## File map (самые часто-нужные)
 
 ```
-MCP_BEARER_TOKENS=             # JSON array of { token, userId, role, depts, ... }
-MCP_D1_RO_URL=                 # dedicated read-only Postgres role per branch
-MCP_R1_RO_URL=
-MCP_D2_RO_URL=
-MCP_R2_RO_URL=
-MCP_ANALYTICS_RO_URL=
-MCP_TRACKING_RO_URL=
-MCP_SENTRY_DSN=
-MCP_ALLOWED_ORIGINS=
+src/lib/db/
+  index.ts              ← Proxy lazy-init D1/R1 (roleplay)
+  okk.ts                ← D2/R2 (с hardcoded fallback)
+  analytics.ts          ← Analytics + neon-setup
+  tracking-db.ts        ← Tracking
+  schema-existing.ts    ← D1/R1 schema (master_managers + d1_users + scripts + ...)
+  schema-okk.ts         ← D2/R2 schema (calls + evaluations)
+  schema-analytics.ts   ← analytics.* schema
+  schema-tracking.ts    ← tracking_events + tracking_sync_state
+
+src/lib/etl/
+  index.ts              ← runSync orchestrator
+  sync-communications.ts  ← Kommo notes + events → analytics.communications
+  sync-leads.ts         ← analytics.leads_cohort
+  sync-status-changes.ts
+  sync-tasks.ts
+  sync-telephony.ts     ← CallGear + CloudTalk CDR
+  enrich-telephony-leads.ts ← phone → lead Pattern A fanout
+  compute-sla.ts        ← analytics.sla
+  sentry.ts             ← captureEtlException/Message helpers
+
+src/lib/daily/
+  analytics-calls.ts    ← Daily+Dashboard read path
+  analytics-leads.ts
+  build-response.ts     ← Daily tab response orchestrator
+  name-aliases.ts       ← master_managers.name ↔ analytics.manager drift
+
+src/lib/tracking/
+  sync.ts               ← v12 filter logic, 60s debounce, 90d re-backfill on bump
+  timeline.ts           ← per-minute call/crm/idle math, 09:00-20:00 Berlin
+  event-types.ts        ← 41 declared types + normalizeEventType
+  init.ts               ← schema bootstrap
+
+src/lib/kommo/
+  client.ts             ← rate-limited fetcher, getAllCallNotesByDate, fetchRawEvents
+  pipeline-config.ts    ← B2G/B2B pipeline IDs
+  cache.ts              ← 60s TTL + in-flight dedup
+
+src/lib/telephony/
+  types.ts              ← TelephonyCall unified shape
+  callgear.ts           ← JSON-RPC 2.0 client (calls_report + call_legs_report)
+  cloudtalk.ts          ← Basic-auth REST client
+
+src/lib/auth/            ← HMAC session cookie + getSession() (Node runtime full verify)
+
+src/app/api/
+  dashboard/route.ts    ← Звонки tab
+  daily/route.ts        ← Дейли tab
+  tracking/route.ts     ← Активность tab
+  analytics/looker/data/route.ts ← Looker views
+  analytics/sync/cron/route.ts   ← 10-min cron (CloudTalk + leads + ...)
+  analytics/sync/callgear/route.ts ← hourly cron (CallGear)
+  analytics/debug/route.ts       ← per-day comms count
+  analytics/debug-kommo/route.ts ← Kommo passthrough
+  managers/route.ts     ← master_managers CRUD + sync to targets
+  health/etl/route.ts   ← heartbeat (читает etl_locks)
+
+src/middleware.ts       ← Edge: cookie-existence + sync/* + auth bypass
+
+scripts/
+  backfill-analytics.ts            ← month-by-month
+  backfill-by-day.ts               ← day-by-day с progress log
+  backfill-from-telephony.ts       ← CallGear+CloudTalk chunked backfill
+  enrich-telephony-leads.ts        ← bulk phone→lead, supports --from --to --chunk
+  recompute-sla.ts                 ← после новых links
+  link-managers-telephony.ts       ← match master_managers ↔ telephony agents
+  ... всего ~56 files
+
+drizzle/
+  analytics/0001..0016_*.sql       ← миграции analytics.*
+  ...                              ← + D1, OKK, Tracking миграции
 ```
 
-## 7. Reading order for new contributors
+---
 
-1. **`docs/SESSION-HANDOFF.md`** — current focus, what works, what's broken, recent commits. Always start here.
-2. **`docs/DASHBOARD-INDEX.md`** — single tab→component→doc→tables map. Your routing table when answering "where does this metric come from?".
-3. **`docs/TODO.md`** — prioritised pending work (P0/P1/P2/P3). Lots of `[x]` clutter from past sprints; the live items are the unchecked ones at the bottom of each section.
-4. **`docs/etl-architecture.md`** — REQUIRED before writing any INSERT into `analytics.*`. Documents natural-key + ON CONFLICT rules, Neon HTTP retry hazards, cron concurrency.
-5. **`docs/kommo-api-usage.md`** — REQUIRED before touching any Kommo call. Rate limit is 7 rps (we cap at 145ms between requests, 2 rps combined across processes).
-6. **Per-tab docs** (`docs/DASHBOARD-*.md`) — read the one matching the tab you're editing. Each lists its data sources at the top.
-7. **`mcp-server/README.md`** — only if you're touching the MCP server. Skip otherwise.
+## Manager Management (`/api/managers` POST)
 
-## 8. Key cross-cutting patterns
+Master table: `master_managers` (D1). Key поля: `name`, `telegramUsername`, `telegramId`,
+`department`, `role` (manager/rop/admin), `line` (1/2/3), `team` (dima/ruzanna), `inOkk`,
+`inRolevki`, `kommoUserId`, `callgearEmployeeId`, `cloudtalkAgentId`.
 
-- **Lazy DB initialisation** via Proxy. Connections aren't opened until first SQL. Look at `src/lib/db/index.ts` for the pattern.
-- **Soft-delete managers** — `isActive: false` keeps FK references intact in call history. Never hard-delete from `master_managers`.
-- **Department routing** — almost every API takes `?department=b2g|b2b`. The handler swaps between D1/R1 (roleplay) or D2/R2 (OKK) connections accordingly.
-- **`master_managers` is the single source of truth** (lives in D1). On save, it syncs to D2/R2 (OKK `managers`), D1/R1 (`d1_users`/`r1_users`). Sync failures to individual targets are non-fatal (logged as warnings).
-- **Berlin civil-day everywhere** — date math uses `tzOffsetMinutes(d, "Europe/Berlin")`. Server uses `TZ=Europe/Berlin` so OS dates also agree.
-- **Pattern A fanout in `analytics.communications`** — one telephony CDR can produce N rows (one per matched lead). Reads must use `COUNT(DISTINCT communication_id)` to avoid double-count. Composite unique `(communication_id, COALESCE(lead_id, 0))`. See `drizzle/analytics/0005_phone_enrichment.sql`.
-- **Department aliases** — B2G = `Госники` = `dima` team, B2B = `Коммерсы` = `ruzanna` team. Lines for B2G: 1 = Квалификатор, 2 = Бератер, 3 = Доведение.
-- **ROPs (`role='rop'`)** with `line IS NOT NULL` (e.g. Татьяна Дерикова) participate in attribution — special case enshrined in `CURRENT_FILTER_VERSION = v11`.
+Flow on save:
 
-## 9. Things that are easy to break
+1. Soft-delete removed (set `isActive=false` в targets, preserve call history)
+2. Resolve Telegram IDs через MTProto когда username меняется/неизвестно
+3. Auto-match Kommo user ID по name (если `inOkk: true`)
+4. Auto-match CallGear/CloudTalk agent IDs (если creds в env)
+5. Upsert в `master_managers`
+6. Sync в targets:
+   - OKK (D2/R2 `managers`): upsert если `inOkk=true`, иначе deactivate
+   - Roleplay (D1/R1 `d1_users` / `r1_users`): upsert если `inRolevki=true` AND `telegramId`, иначе deactivate
 
-- Adding a new env var without putting it in `docker-compose.yml` `environment:` — invisible in prod even when set in Dokploy UI.
-- Calling Kommo with `filter[created_at]` on `/notes` — it's silently ignored. Use `filter[updated_at]`. Same on `/events`.
-- Running `db:push` against prod. Never. Use `db:generate` + `db:migrate`.
-- Writing `analytics.*` without reading `docs/etl-architecture.md` (natural-key + ON CONFLICT, Neon HTTP retry hazards).
-- Forgetting to bump `CURRENT_FILTER_VERSION` in `src/lib/tracking/sync.ts` when changing event-type fetch logic — old `tracking_events` will silently mismatch.
-- Touching the MCP `MCP_BEARER_TOKENS` env in Dokploy without restarting the service. Token rotation procedure in `mcp-server/README.md`.
+Failure isolation: сбой синка в один target → warning, остальное продолжается.
 
-## 10. Other reference docs
+---
 
-- `INTEGRATION.md` — initial Neon connection notes (mostly historical; the connection layout has since grown to 6 DBs — see Section 4 here for the current map).
-- `DOCKER.md` — Docker setup guide.
-- `OKK_фильтрация_звонков.md` — how the external OKK service decides which calls to evaluate (min duration, pipeline-to-evaluation-type mapping). Useful background when something looks "missing" from the ОКК tab.
-- `about.md` — short Russian intro, used for stakeholder context.
-- `иксели/` — Excel sources of truth for plans, scripts, daily KPIs (the dashboard mirrors what's in those sheets).
-- `ref/` — reference screenshots (Looker / Kommo UI) we replicate.
+## MCP Server
+
+В соседней workspace `mcp-server/` (отдельный сервис в compose, port 3009).
+
+- 8 domains: managers, okk, daily, analytics, looker, tracking, termin, roleplay
+- ~35 curated tools
+- Bearer-token auth (`MCP_BEARER_TOKENS` JSON-массив с per-user scope)
+- Отдельные read-only Postgres роли (`MCP_*_RO_URL`)
+- Audit log → `D1.mcp_audit_log`
+- Подробности: `docs/MCP-IMPLEMENTATION-PLAN.md`
+
+---
+
+## Recent significant changes (последние 30 дней)
+
+См. `docs/SESSION-HANDOFF.md` для деталей. Highlights:
+
+- **CallGear/CloudTalk hard-split** (2026-04-28): отдельный telephony ETL, idempotent DELETE-then-INSERT, Migration 0005 (phone column + composite unique)
+- **Phone → lead enrichment** (2026-04-28..29): Pattern A fanout, Looker drill-down fix
+- **Termin tab launch** (2026-04-28): cohort math (creation → termin_date / aa_termin_date), Migration 0006 + backfill
+- **Tracking v11** (2026-04-28): ROP+line support в attribution (Татьяна Дерикова) — нынешняя v12 от 2026-05-20
+- **Looker всё** (2026-04-29): SLA drill-down, TLT merged, sortable headers, sticky thead
+- **Idempotent ETL rules** (2026-05-07): `etl-architecture.md`, Migration 0014/0015 — unique natural-key indexes
+- **CallGear 7h embargo workaround** (2026-05-20): `/api/analytics/sync/callgear` hourly endpoint
+- **MCP Phase 1-3 landed** (2026-04-30 → 2026-05-21): tools + read-only roles + audit log
+- **Pg comments backfill** (2026-05-12): Migration 0012, Drizzle Studio показывает descriptions
+- **Middleware cron bypass** (2026-05-21, `d9079c6`): `startsWith("/api/analytics/sync/")` — без этого CallGear endpoint 307 → `/login`
+
+---
+
+## Quick health checks
+
+```bash
+# heartbeat
+curl -fsS https://dashboard.sternmeister.online/api/health/etl
+
+# per-day comms counts (admin only)
+GET /api/analytics/debug?dept=b2g&from=2026-05-20&to=2026-05-21
+
+# direct Kommo passthrough
+GET /api/analytics/debug-kommo?from=...T00:00:00Z&to=...T00:00:00Z
+
+# force sync (admin only)
+POST /api/analytics/sync?from=...&to=...
+
+# server-side streaming backfill
+GET /api/analytics/backfill?from=2026-01-01&to=2026-05-01&chunkDays=7
+```
+
+SQL для проверки lock-state:
+
+```sql
+SELECT name, token='' AS released, last_completed_at, (now()-last_completed_at) AS since
+FROM analytics.etl_locks ORDER BY name;
+-- name='cron' → CloudTalk + leads + …
+-- name='callgear-cron' → CallGear hourly
+```
