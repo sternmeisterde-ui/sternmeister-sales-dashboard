@@ -1,9 +1,14 @@
 # Docker Setup Guide
 
+Last reviewed: 2026-05-21.
+
+> Production runs on **Dokploy** (Docker Compose orchestrator + Traefik for TLS). The production `docker-compose.yml` declares three services: `app` (Next.js, port 3008), `mcp` (MCP server, port 3009), `etl-cron` (curl-loop that pings `/api/analytics/sync/cron` every ~10 min). The env-var whitelist inside that file is load-bearing — adding a var to Dokploy UI alone does NOT pipe it into the container.
+
 ## Prerequisites
 
 - Docker Desktop installed (includes Docker Compose)
-- `.env.local` file with required environment variables
+- `.env.local` file with required environment variables (template in `.env.example`)
+- For local dev with hot reload you usually skip Docker entirely and run `npm run dev` against remote Neon DBs.
 
 ## Quick Start
 
@@ -52,15 +57,20 @@ docker-compose -f docker-compose.dev.yml down
 
 ## Environment Variables
 
-Create a `.env.local` file with the following variables:
+The full var set has grown well past what's listed here. See [`CLAUDE.md`](./CLAUDE.md#6-environment-variables) for the canonical list (6 Neon DBs, Kommo, telephony, Telegram, AI, MCP). The `.env.example` template covers the minimum required.
 
 ```env
-# Database (Neon PostgreSQL)
-DATABASE_URL=postgresql://user:password@host/database?sslmode=require
-
-# Optional: Add other API keys as needed
-# KOMMO_CLIENT_ID=your_client_id
-# KOMMO_CLIENT_SECRET=your_client_secret
+# Bare minimum to boot the app:
+DATABASE_URL=postgresql://...          # D1 (B2G roleplay + master_managers)
+R1_DATABASE_URL=...                    # B2B roleplay (auto-derived if blank)
+D2_OKK_DATABASE_URL=...                # B2G OKK
+R2_OKK_DATABASE_URL=...                # B2B OKK
+ANALYTICS_DATABASE_URL=...             # analytics.* mirror
+TRACKING_DATABASE_URL=...              # tracking_events
+SESSION_SECRET=...                     # required in production
+KOMMO_ACCESS_TOKEN=...
+TZ=Europe/Berlin
+APP_TIMEZONE=Europe/Berlin
 ```
 
 ## Docker Commands Reference
@@ -156,20 +166,14 @@ The Docker setup includes:
 
 ## Production Deployment
 
-For production deployment:
+We deploy via **Dokploy** (self-hosted Docker Compose orchestrator) with Traefik for TLS termination. There is no manual `docker push` step — Dokploy clones the repo, runs `docker-compose up --build` on the configured server, and Traefik routes TLS by host header.
 
-1. **Build the image:**
-```bash
-docker build -t sternmeister-dashboard:latest .
-```
+Production hosts:
 
-2. **Push to registry (e.g., Docker Hub, GitHub Container Registry):**
-```bash
-docker tag sternmeister-dashboard:latest ghcr.io/yourorg/sternmeister-dashboard:latest
-docker push ghcr.io/yourorg/sternmeister-dashboard:latest
-```
+- `dashboard.sternmeister.online` → `app` service (port 3008)
+- `mcp.sternmeister.online` → `mcp` service (port 3009), see [`mcp-server/README.md`](./mcp-server/README.md)
 
-3. **Deploy to your hosting platform** (AWS, GCP, Azure, etc.)
+Env vars live in the Dokploy UI but **must also be listed in the `environment:` whitelist of `docker-compose.yml`** to be visible inside the container. This has bitten us multiple times — always update both.
 
 ## Notes
 

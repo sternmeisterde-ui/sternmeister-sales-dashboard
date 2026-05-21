@@ -1,111 +1,85 @@
-# 🎯 Sternmeister Sales Dashboard
+# Sternmeister Sales Dashboard
 
-Современный дашборд для руководителей отделов продаж с интеграцией Kommo CRM и AI-анализом звонков.
+Next.js 16 admin dashboard for SternMeister sales (B2G «Госники» + B2B «Коммерсы»). Аггрегирует Kommo CRM, телефонию (CallGear + CloudTalk), OKK-оценку реальных звонков и AI-ролевки. Дополнительно — MCP-сервер для подключения Claude Desktop/Code.
 
-![Next.js](https://img.shields.io/badge/Next.js-16-black)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)
-![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-38bdf8)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Neon-00D9FF)
+> **Где смотреть полную картину**: [`CLAUDE.md`](./CLAUDE.md) — entry-point для свежего разработчика. Архитектура, как запустить, что где лежит, какие env-переменные, на что не наступать.
+>
+> Список разделов и таблиц БД: [`docs/DASHBOARD-INDEX.md`](./docs/DASHBOARD-INDEX.md).
+> Текущий фокус и недавние правки: [`docs/SESSION-HANDOFF.md`](./docs/SESSION-HANDOFF.md).
+> Бэклог: [`docs/TODO.md`](./docs/TODO.md) и [`todo.md`](./todo.md) (root).
 
-## 📋 Описание
+## Стек
 
-Дашборд предназначен для мониторинга и анализа работы двух отделов продаж:
-- **Госники (B2G)** - работа с государственными организациями
-- **Коммерсы (B2B)** - работа с коммерческими компаниями
+Next.js 16 (App Router) · React 19 · TypeScript · Tailwind 4 · Drizzle ORM · Neon Postgres (6 баз) · Recharts · Lucide · Sentry · Telegram MTProto · CallGear + CloudTalk · xAI Grok · ElevenLabs Scribe. Деплой: Dokploy + Docker Compose. Локальный порт: 3008 (app), 3009 (MCP).
 
-## ✨ Основные функции
+## Быстрый старт
 
-### 📊 Общий дашборд
-- Карточки ключевых метрик (выручка, лучший менеджер, звонки, время на линии)
-- Графики динамики звонков по отделам
-- Дневной/недельный/месячный рост показателей
+```bash
+npm install                # включает workspace mcp-server
+cp .env.example .env.local # затем заполнить (6 БД, Kommo, Telephony, Telegram, AI)
+npm run dev                # http://localhost:3008
+```
 
-### 📞 Реальные звонки
-- Таблица всех звонков с детальной информацией
-- Поиск по менеджерам в реальном времени
-- Фильтрация по периоду (календарь с выбором диапазона дат)
-- Модальные окна с:
-  - Транскрипцией разговора (форматированный диалог)
-  - AI-анализом и скорингом (0-100%)
-- Интеграция с Kommo CRM (прямые ссылки на сделки)
+Полезные команды (см. `package.json`):
 
-### 🤖 AI Ролевые звонки
-- Анализ тренировочных звонков с AI-агентом
-- Детальная обратная связь по каждому звонку
-- Оценка по критериям (цветовая кодировка: красный/желтый/зеленый)
-- Рекомендации для улучшения навыков
+```bash
+npm run build
+npm run lint
+npm run db:generate          # миграции roleplay/OKK
+npm run db:migrate
+npm run db:studio
+npm run db:studio:analytics  # analytics.* схема — отдельный drizzle config
+npm run docker:up            # production compose
+npm run docker:dev           # dev-compose (только Postgres)
+npm run analytics:backfill   # tsx scripts/backfill-analytics.ts
+```
 
-### 👤 Досье менеджера
-- Модальное окно с полной статистикой менеджера
-- Фильтры по периоду (неделя/месяц/все время)
-- Фильтр по минимальной оценке
-- Автоматический расчет всех метрик
+Одноразовые операционные скрипты — в `scripts/` (≈50 штук), запускать через `npx tsx scripts/<name>.ts`. Покрывают бэкфилы, аудиты, ETL-повторы, MCP-токены, Telegram-авторизацию.
 
-## 🛠 Технологический стек
+## Архитектура (TL;DR)
 
-- **Next.js 16** - App Router, Server Components
-- **TypeScript 5** - Типизация
-- **Tailwind CSS 4** - Стилизация
-- **Drizzle ORM** - База данных
-- **Neon PostgreSQL** - Serverless БД
-- **Docker** - Контейнизация
+```
+Kommo CRM ─┐
+CallGear   ├─► ETL (10-min cron) ──► analytics.* (Neon mirror)
+CloudTalk  ┘                              │
+                                          ▼
+   master_managers (D1)            Next.js app (port 3008)
+       ├── D1/R1 roleplay (AI-ролевки)
+       ├── D2/R2 OKK (реальные звонки + оценки)
+       ├── analytics.* (mirror — Daily/Звонки/Looker/Термин)
+       └── tracking_events (Активность tab)
 
-## 🚀 Быстрый старт
+         + MCP server (port 3009) — read-only tools для Claude Desktop
+```
 
-### Локальная разработка
+Шесть Neon-баз: `D1`, `R1`, `D2`, `R2`, `ANALYTICS_DATABASE_URL`, `TRACKING_DATABASE_URL`. Полная карта в [`CLAUDE.md`](./CLAUDE.md#4-architecture-in-one-screen) и [`docs/DASHBOARD-INDEX.md`](./docs/DASHBOARD-INDEX.md).
 
-\`\`\`bash
-# Клонируйте репозиторий
-git clone https://github.com/sternmeisterde-ui/sternmeister-sales-dashboard.git
-cd sternmeister-sales-dashboard
+## Структура репо
 
-# Установите зависимости
-npm install
+```
+src/                Next.js app (app router, components, lib, db, etl, kommo,
+                    telephony, tracking, daily, analysis, telegram, …)
+mcp-server/         MCP sub-package (отдельный workspace, отдельный Dockerfile)
+drizzle/            миграции (по папке на каждую БД)
+scripts/            оперативные tsx-скрипты (бэкфилы, аудиты, ротация токенов)
+public/             статика
+docs/               per-tab архитектурные доки + initiatives
+иксели/             исходные .xlsx (планы, скрипты, KPI)
+ref/                референсные скриншоты (Looker, Kommo UI)
+docker-compose.yml          production (3 сервиса: app, mcp, etl-cron)
+docker-compose.dev.yml      dev (Postgres сайдкар для локалки)
+Dockerfile                  app image
+mcp-server/Dockerfile       mcp image
+drizzle.config.ts           roleplay + OKK схемы
+drizzle.analytics.config.ts analytics.* схема (отдельный config)
+```
 
-# Настройте .env.local
-cp .env.example .env.local
+## Деплой
 
-# Запустите dev сервер
-npm run dev
-\`\`\`
+Dokploy → Docker Compose → Traefik (TLS). См. [`DOCKER.md`](./DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
 
-### Запуск с Docker
+Production URLs: `dashboard.sternmeister.online` (app), `mcp.sternmeister.online` (MCP).
 
-\`\`\`bash
-# Production
-npm run docker:up
+## License
 
-# Development с локальной БД
-npm run docker:dev
-\`\`\`
-
-Подробнее см. [DOCKER.md](./DOCKER.md)
-
-## 📁 Структура проекта
-
-\`\`\`
-├── src/
-│   ├── app/              # Next.js App Router
-│   │   ├── api/          # API Routes
-│   │   └── page.tsx      # Главная страница
-│   └── lib/
-│       ├── db/           # База данных
-│       └── mockData.ts   # Тестовые данные
-├── docker-compose.yml    # Docker конфигурация
-├── DOCKER.md            # Docker документация
-└── todo.md              # План разработки
-\`\`\`
-
-## 🔌 Интеграции
-
-- ✅ Neon PostgreSQL (подключено)
-- 🔄 Kommo CRM (планируется)
-- 🔄 AI Сервисы (планируется)
-
-## 📝 License
-
-Proprietary - All rights reserved
-
----
-
-**Built with ❤️ using Next.js and Claude AI**
+Proprietary — internal SternMeister project.
