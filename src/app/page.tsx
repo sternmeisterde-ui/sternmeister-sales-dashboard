@@ -170,8 +170,10 @@ export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [crmSearchUrl, setCrmSearchUrl] = useState("");
 
-  // AI Dashboard period filter
-  const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("week");
+  // AI Dashboard period filter. Default "month" so first-load mirrors the user's
+  // mental model ("show me this month"). Switching to "Неделя" used to bury the
+  // fact that the dashboard was already filtering to the last 7 days.
+  const [aiDashPeriod, setAiDashPeriod] = useState<"day" | "week" | "month">("month");
   const [aiCustomRange, setAiCustomRange] = useState<DateRange>({ start: null, end: null });
 
   // Manager filter states
@@ -264,9 +266,18 @@ export default function Dashboard() {
     return { from, to: addDaysCivil(today, 1) };
   }, [aiDashPeriod, aiCustomRange]);
 
-  // Load BOTH datasets in PARALLEL (single useEffect, Promise.all)
+  // Load BOTH datasets in PARALLEL (single useEffect, Promise.all).
+  //
+  // AbortController alone isn't enough: once a fetch has resolved (response
+  // headers received) and the body is being parsed, abort() can't stop the
+  // downstream `.then(setState)`. So if a stale request resolves AFTER a fresh
+  // one, the stale data clobbers the fresh data — the "I clicked Месяц but
+  // numbers are still weekly" bug. The reqIdRef guard makes only the latest
+  // request's setState win, regardless of resolution order.
+  const okkReqIdRef = useRef(0);
   useEffect(() => {
     const ac = new AbortController();
+    const myReqId = ++okkReqIdRef.current;
     const dept = activeDepartment;
     const { from: dateFrom, to: dateTo } = getOkkDateRange();
 
@@ -277,29 +288,31 @@ export default function Dashboard() {
     const fetches: Promise<void>[] = [];
 
     fetches.push(
-      fetch(`/api/calls?department=${dept}&type=all&from=${dateFrom}&to=${dateTo}`, { signal: ac.signal })
+      fetch(`/api/calls?department=${dept}&type=all&from=${dateFrom}&to=${dateTo}`, { signal: ac.signal, cache: "no-store" })
         .then(r => r.json())
         .then(res => {
+          if (okkReqIdRef.current !== myReqId) return;
           if (res.success) {
             setAiCalls(res.data.calls);
             setAiManagers(res.data.managers);
           }
         })
         .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading AI calls:", e); })
-        .finally(() => setIsLoadingAI(false))
+        .finally(() => { if (okkReqIdRef.current === myReqId) setIsLoadingAI(false); })
     );
 
     fetches.push(
-      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}${lineFilter !== "all" ? `&line=${lineFilter}` : ""}`, { signal: ac.signal })
+      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}${lineFilter !== "all" ? `&line=${lineFilter}` : ""}`, { signal: ac.signal, cache: "no-store" })
         .then(r => r.json())
         .then(res => {
+          if (okkReqIdRef.current !== myReqId) return;
           if (res.success) {
             setRealCalls(res.data.calls);
             setRealManagers(res.data.managers);
           }
         })
         .catch(e => { if (e instanceof DOMException && e.name === "AbortError") return; console.error("Error loading OKK calls:", e); })
-        .finally(() => setIsLoadingReal(false))
+        .finally(() => { if (okkReqIdRef.current === myReqId) setIsLoadingReal(false); })
     );
 
     return () => ac.abort();
@@ -846,7 +859,7 @@ export default function Dashboard() {
                       }}
                       className={`px-4 py-1.5 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
                         aiDashPeriod === p.id && !aiCustomRange.start
-                          ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                          ? "bg-blue-500 text-white shadow-lg shadow-blue-500/30"
                           : "text-slate-400 hover:text-white"
                       }`}
                     >
@@ -854,6 +867,23 @@ export default function Dashboard() {
                     </button>
                   ))}
                 </div>
+                {/* Live label of the actually-applied range so the user never
+                    has to guess which period is in effect — kills the entire
+                    class of "is this week or month?" reports. */}
+                {(() => {
+                  const { from, to } = getOkkDateRange();
+                  const fmt = (s: string) => {
+                    const [, m, d] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s) ?? [];
+                    return d && m ? `${d}.${m}` : s;
+                  };
+                  // `to` is exclusive (today+1) — show the inclusive label instead.
+                  const inclusiveTo = addDaysCivil(to, -1);
+                  return (
+                    <span className="text-[10px] text-slate-500 font-mono px-2">
+                      {fmt(from)} — {fmt(inclusiveTo)}
+                    </span>
+                  );
+                })()}
                 <CalendarPicker
                   mode="range"
                   allowModeToggle
