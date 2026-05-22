@@ -19,32 +19,17 @@
 // can identify the writer.
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { d2OkkDb } from "@/lib/db/okk";
 import { ALL_PROMPT_TYPES, isValidPromptType as isValidPT } from "@/lib/config/tenant";
-import { clearCache } from "@/lib/kommo/cache";
-
 function isValidPromptType(value: unknown): value is string {
   return typeof value === "string" && isValidPT(value);
 }
 
 function getCriteriaFilePath(promptType: string): string {
   return path.join(process.cwd(), "src", "criteria", `${promptType}.json`);
-}
-
-function validateConfigShape(raw: unknown): { ok: true } | { ok: false; reason: string } {
-  if (typeof raw !== "object" || raw === null) return { ok: false, reason: "config is not an object" };
-  const stages = (raw as { stages?: unknown }).stages;
-  if (!Array.isArray(stages)) return { ok: false, reason: "missing \"stages\" array" };
-  if (stages.length === 0) return { ok: false, reason: "\"stages\" array is empty" };
-  for (let i = 0; i < stages.length; i++) {
-    const st = stages[i];
-    if (typeof st !== "object" || st === null) return { ok: false, reason: `stages[${i}] is not an object` };
-    if (!Array.isArray((st as { criteria?: unknown }).criteria)) return { ok: false, reason: `stages[${i}].criteria missing` };
-  }
-  return { ok: true };
 }
 
 async function readFromDb(promptType: string): Promise<{ version: string; config: unknown } | null> {
@@ -100,68 +85,18 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// ─── POST ──────────────────────────────────────────────────────────────────
+// ─── POST disabled ─────────────────────────────────────────────────────────
+// UI is read-only by design (2026-05-22 decision). To change criteria, edit
+// `src/criteria/*.json` in sternmeisterde-ui/okk, commit, and the next deploy
+// will sync the DB via `npm start` → `migrate-criteria-to-db.ts --apply`.
+// Direct DB UPDATEs are also fine; OKK loader picks them up within 60s.
 
-export async function POST(request: NextRequest) {
-  try {
-    const session = await getSession();
-    if (!session || session.role !== "admin") {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-
-    const body = await request.json();
-    const { prompt_type: promptType, config } = body as {
-      prompt_type: unknown;
-      config: unknown;
-    };
-
-    if (!isValidPromptType(promptType)) {
-      return NextResponse.json(
-        { error: `Invalid prompt_type. Must be one of: ${ALL_PROMPT_TYPES.join(", ")}` },
-        { status: 400 },
-      );
-    }
-
-    const shape = validateConfigShape(config);
-    if (!shape.ok) {
-      return NextResponse.json({ error: `Invalid config: ${shape.reason}` }, { status: 400 });
-    }
-
-    const version =
-      typeof (config as { version?: unknown }).version === "string" &&
-      ((config as { version: string }).version).trim().length > 0
-        ? (config as { version: string }).version.trim()
-        : "1.0";
-
-    const writer = session.telegramUsername || session.name || "dashboard-admin";
-
-    // 1. Write to DB (source of truth).
-    await d2OkkDb.execute(sql`
-      INSERT INTO criteria_configs (prompt_type, version, config, updated_by, source)
-      VALUES (${promptType}, ${version}, ${JSON.stringify(config)}::jsonb, ${writer}, 'dashboard-ui')
-      ON CONFLICT (prompt_type) DO UPDATE
-        SET version = EXCLUDED.version,
-            config = EXCLUDED.config,
-            updated_at = now(),
-            updated_by = EXCLUDED.updated_by,
-            source = EXCLUDED.source
-    `);
-
-    // 2. Write FS backup (image-baked safety net for OKK FS fallback).
-    //    Best-effort — if it fails (read-only FS, etc.), DB is still updated.
-    try {
-      await writeFile(getCriteriaFilePath(promptType as string), JSON.stringify(config, null, 2), "utf-8");
-    } catch (fsErr) {
-      console.warn(`[Criteria API POST] DB written, FS backup failed for ${promptType}:`, fsErr);
-    }
-
-    // 3. Drop Analytics cache so dashboards see new scoring on next request.
-    clearCache();
-
-    return NextResponse.json({ success: true, persistedTo: "db" });
-  } catch (error) {
-    console.error("[Criteria API POST]", error);
-    const msg = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: msg }, { status: 500 });
-  }
+export async function POST() {
+  return NextResponse.json(
+    {
+      error:
+        "Criteria are read-only via UI. Edit src/criteria/*.json in the OKK repo or run scripts/migrate-criteria-to-db.ts.",
+    },
+    { status: 405 },
+  );
 }
