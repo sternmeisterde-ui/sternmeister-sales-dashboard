@@ -140,6 +140,12 @@ interface ParsedKommoFilter {
    * count: 104 leads in CRM ↔ API result was 18 without `empty` support,
    * 104 with). */
   cfAllowEmpty: Set<number>;
+  /** True when the URL resolved to a date-bounded API query (either explicit
+   * filter_date_from/to or a recognised filter[date_preset]). Used downstream
+   * to decide whether it's safe to keep paging through the result set: an
+   * unbounded query can return up to ~5k leads per pipeline+status and was
+   * the historical cause of "transcribed 435 calls from 5000 deals" runs. */
+  hasDateFilter: boolean;
 }
 
 /**
@@ -219,20 +225,51 @@ function buildLeadsApiQuery(kommoUrl: string): ParsedKommoFilter {
   // status+cf, and we'd then scan ~2k+ irrelevant deals for call notes.
   // With the date applied, the API returns exactly the deals created in
   // the window — typically tens to low hundreds.
+  //
+  // Three URL shapes we have to recognise (Kommo emits all three depending
+  // on what the user picked in the date dropdown):
+  //   1. Explicit range: `filter_date_from=01.05.2026&filter_date_to=31.05.2026`
+  //   2. Preset:        `filter[date_preset]=current_month` (and the rare
+  //                      `filter_date_preset=current_month` shape some Kommo
+  //                      builds emit)
+  //   3. No date:        nothing — leave the API call unfiltered by date.
+  //
+  // Preset support is the one that historically broke the pipeline: a user
+  // pastes a URL with `date_preset=current_month`, the code ignored it,
+  // /api/v4/leads returned every lead in the pipeline+status (~5k) and we
+  // burned the MAX_CALLS budget on irrelevant deals. Map every preset Kommo
+  // exposes to an explicit (from, to) range in Europe/Berlin so this never
+  // silently drops the date constraint again.
   const dateSwitch = fp.get("filter_date_switch") || "created";
+  const apiField = dateSwitch === "closed" ? "closed_at"
+    : dateSwitch === "created" ? "created_at"
+    : dateSwitch === "updated" ? "updated_at"
+    : "created_at"; // any unrecognized value also falls back to created_at
+
+  const datePreset = fp.get("filter[date_preset]") ?? fp.get("filter_date_preset");
   const dateFrom = fp.get("filter_date_from");
   const dateTo = fp.get("filter_date_to");
+  let resolvedFromTs: number | null = null;
+  let resolvedToTs: number | null = null;
   if (dateFrom && dateTo) {
-    const fromTs = parseRuDate(dateFrom, false);
-    const toTs = parseRuDate(dateTo, true);
-    if (fromTs !== null && toTs !== null) {
-      const apiField = dateSwitch === "closed" ? "closed_at"
-        : dateSwitch === "created" ? "created_at"
-        : dateSwitch === "updated" ? "updated_at"
-        : "created_at"; // any unrecognized value also falls back to created_at
-      out.set(`filter[${apiField}][from]`, String(fromTs));
-      out.set(`filter[${apiField}][to]`, String(toTs));
+    resolvedFromTs = parseRuDate(dateFrom, false);
+    resolvedToTs = parseRuDate(dateTo, true);
+  } else if (datePreset) {
+    const range = resolveKommoDatePreset(datePreset);
+    if (range) {
+      resolvedFromTs = range.fromTs;
+      resolvedToTs = range.toTs;
+    } else {
+      // Unknown preset → loud warning in logs so the gap shows up before the
+      // pipeline burns a full Grok run on the wrong dataset. Cheaper to fail
+      // discoverable than silently scan 5k deals.
+      console.warn(`[Analysis] Unknown filter[date_preset]=${datePreset} — date constraint NOT applied`);
     }
+  }
+  const hasDateFilter = resolvedFromTs !== null && resolvedToTs !== null;
+  if (hasDateFilter) {
+    out.set(`filter[${apiField}][from]`, String(resolvedFromTs));
+    out.set(`filter[${apiField}][to]`, String(resolvedToTs));
   }
 
   // 3. Custom-field enum filters — collected for client-side application.
@@ -260,7 +297,7 @@ function buildLeadsApiQuery(kommoUrl: string): ParsedKommoFilter {
     cfEnumFilter.get(fieldId)!.add(enumId);
   }
 
-  return { apiQuery: out.toString(), cfEnumFilter, cfAllowEmpty };
+  return { apiQuery: out.toString(), cfEnumFilter, cfAllowEmpty, hasDateFilter };
 }
 
 /**
@@ -291,6 +328,115 @@ function passesCfFilter(
   return true;
 }
 
+/**
+ * Translate Kommo's frontend date presets (the "Сегодня / Текущая неделя / …"
+ * options in the filter sidebar) into an explicit [from, to] Unix-seconds
+ * range in Europe/Berlin — the same wall-clock the rest of the pipeline uses.
+ *
+ * Presets observed in the wild (`filter[date_preset]=...`):
+ *   today, yesterday,
+ *   current_week, last_week,
+ *   current_month, last_month,
+ *   current_quarter, last_quarter,
+ *   current_year, last_year
+ *
+ * Week boundary: Monday → Sunday (ISO 8601 / Kommo UI default). Day-of-week
+ * arithmetic uses Berlin civil date so DST transitions don't shift the start.
+ *
+ * Returns null for unknown presets so the caller can log + continue without
+ * a date filter (failing loudly is fine; silently scanning 5k leads is not).
+ */
+function resolveKommoDatePreset(preset: string): { fromTs: number; toTs: number } | null {
+  const todayCivil = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" });
+  // Compute "day - n" / "day + n" via civil-date arithmetic, then resolve
+  // back to a Unix instant in Berlin TZ at the day boundary.
+  const shiftCivil = (civil: string, days: number): string => {
+    const [y, m, d] = civil.split("-").map(Number);
+    const t = Date.UTC(y, m - 1, d) + days * 86_400_000;
+    const o = new Date(t);
+    return `${o.getUTCFullYear()}-${String(o.getUTCMonth() + 1).padStart(2, "0")}-${String(o.getUTCDate()).padStart(2, "0")}`;
+  };
+  const toUnix = (civil: string, kind: "start" | "end"): number => {
+    const b = parseDateBoundary(civil, kind);
+    if (!b) throw new Error(`bad civil ${civil}`);
+    return Math.floor(b.getTime() / 1000);
+  };
+  // ISO day-of-week (Mon=1 … Sun=7) for a Berlin civil date.
+  const isoDow = (civil: string): number => {
+    const [y, m, d] = civil.split("-").map(Number);
+    const utcDow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun … 6=Sat
+    return utcDow === 0 ? 7 : utcDow;
+  };
+
+  const [yStr, mStr] = todayCivil.split("-");
+  const todayY = Number(yStr);
+  const todayM = Number(mStr);
+  const startOfMonth = (y: number, m: number): string => `${y}-${String(m).padStart(2, "0")}-01`;
+  const lastDayOfMonth = (y: number, m: number): number => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const endOfMonth = (y: number, m: number): string => `${y}-${String(m).padStart(2, "0")}-${String(lastDayOfMonth(y, m)).padStart(2, "0")}`;
+  const addMonths = (y: number, m: number, delta: number): { y: number; m: number } => {
+    const total = y * 12 + (m - 1) + delta;
+    return { y: Math.floor(total / 12), m: (total % 12) + 1 };
+  };
+
+  switch (preset) {
+    case "today":
+      return { fromTs: toUnix(todayCivil, "start"), toTs: toUnix(todayCivil, "end") };
+    case "yesterday": {
+      const y = shiftCivil(todayCivil, -1);
+      return { fromTs: toUnix(y, "start"), toTs: toUnix(y, "end") };
+    }
+    case "current_week": {
+      const dow = isoDow(todayCivil); // 1..7
+      const monday = shiftCivil(todayCivil, -(dow - 1));
+      const sunday = shiftCivil(monday, 6);
+      return { fromTs: toUnix(monday, "start"), toTs: toUnix(sunday, "end") };
+    }
+    case "last_week": {
+      const dow = isoDow(todayCivil);
+      const thisMonday = shiftCivil(todayCivil, -(dow - 1));
+      const lastMonday = shiftCivil(thisMonday, -7);
+      const lastSunday = shiftCivil(thisMonday, -1);
+      return { fromTs: toUnix(lastMonday, "start"), toTs: toUnix(lastSunday, "end") };
+    }
+    case "current_month":
+      return {
+        fromTs: toUnix(startOfMonth(todayY, todayM), "start"),
+        toTs: toUnix(endOfMonth(todayY, todayM), "end"),
+      };
+    case "last_month": {
+      const lm = addMonths(todayY, todayM, -1);
+      return {
+        fromTs: toUnix(startOfMonth(lm.y, lm.m), "start"),
+        toTs: toUnix(endOfMonth(lm.y, lm.m), "end"),
+      };
+    }
+    case "current_quarter": {
+      const qStart = Math.floor((todayM - 1) / 3) * 3 + 1; // 1, 4, 7, 10
+      const qEnd = qStart + 2;
+      return {
+        fromTs: toUnix(startOfMonth(todayY, qStart), "start"),
+        toTs: toUnix(endOfMonth(todayY, qEnd), "end"),
+      };
+    }
+    case "last_quarter": {
+      const qStart = Math.floor((todayM - 1) / 3) * 3 + 1;
+      const prev = addMonths(todayY, qStart, -3);
+      const prevEnd = addMonths(prev.y, prev.m, 2);
+      return {
+        fromTs: toUnix(startOfMonth(prev.y, prev.m), "start"),
+        toTs: toUnix(endOfMonth(prevEnd.y, prevEnd.m), "end"),
+      };
+    }
+    case "current_year":
+      return { fromTs: toUnix(`${todayY}-01-01`, "start"), toTs: toUnix(`${todayY}-12-31`, "end") };
+    case "last_year":
+      return { fromTs: toUnix(`${todayY - 1}-01-01`, "start"), toTs: toUnix(`${todayY - 1}-12-31`, "end") };
+    default:
+      return null;
+  }
+}
+
 function parseRuDate(s: string, endOfDay: boolean): number | null {
   // Accepts DD.MM.YYYY (Kommo frontend default) and treats the wall-clock as
   // Europe/Berlin (per APP_TZ rule — business operates in Berlin time and
@@ -305,7 +451,7 @@ function parseRuDate(s: string, endOfDay: boolean): number | null {
 }
 
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
-  const { apiQuery, cfEnumFilter, cfAllowEmpty } = buildLeadsApiQuery(kommoUrl);
+  const { apiQuery, cfEnumFilter, cfAllowEmpty, hasDateFilter } = buildLeadsApiQuery(kommoUrl);
   const hasCfFilter = cfEnumFilter.size > 0 || cfAllowEmpty.size > 0;
 
   // Embed contacts so we can pull contact-level call notes downstream.
@@ -314,8 +460,23 @@ async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
   // not to the lead — so reading only `/leads/{id}/notes` misses 100% of
   // dialer-originated calls. Including contacts in the leads response (`with=contacts`)
   // is one request per page rather than one per lead.
+  //
+  // Pagination cap: 20 pages × 250 = 5000 leads ceiling when a date filter
+  // narrows the dataset. When NO date filter is in play (rare; only legit
+  // case is a pipeline+status pull with intentional full history), drop the
+  // cap to 5 pages (1250 leads). Hitting it without a date filter is almost
+  // always a misread URL — the previous behaviour silently scanned 5k leads
+  // and burned the Grok budget. Loud cap + warning makes that visible.
+  const maxPages = hasDateFilter ? 20 : 5;
+  if (!hasDateFilter) {
+    console.warn(
+      "[Analysis] No date filter resolved from URL — capping paginated lead pull to " +
+        `${maxPages} pages (${maxPages * 250} leads). Add filter[date_preset]=... or ` +
+        "filter_date_from/to to the Kommo URL to widen the cap.",
+    );
+  }
   const apiLeads: KommoLead[] = [];
-  for (let page = 1; page <= 20; page++) {
+  for (let page = 1; page <= maxPages; page++) {
     const apiUrl = `/leads?${apiQuery}&with=contacts&limit=250&page=${page}`;
     const data = await kommoFetchPath(apiUrl) as { _embedded?: { leads?: KommoLead[] } } | null;
     if (!data?._embedded?.leads?.length) break;
