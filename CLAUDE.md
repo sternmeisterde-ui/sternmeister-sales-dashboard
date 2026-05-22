@@ -129,7 +129,7 @@ Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear
 | `ai_calls` | AI Ролевки | manager+admin | inline `page.tsx` | `/api/calls` | D1/R1 `d1_calls` / `r1_calls` |
 | `managers` | Менеджеры | admin | `ManagersTab.tsx` | `/api/managers` | `master_managers` + sync targets D2/R2/D1/R1 |
 | `call_analysis` | Анализ | admin | `AnalysisTab.tsx` | `/api/analysis` | `call_analyses`, `call_analysis_files` + xAI/ElevenLabs |
-| `criteria` | Критерии | admin | `CriteriaTab.tsx` | `/api/criteria` | JSON в `src/criteria/*.json` (FS, не БД) |
+| `criteria` | Критерии | admin | `CriteriaTab.tsx` | `/api/criteria` | **D2 OKK БД `criteria_configs`** (jsonb). FS `src/criteria/*.json` — image backup для OKK FS fallback. Editing flow: Dashboard UI POST → `d2OkkDb.criteria_configs` UPSERT + FS write. OKK reads same table via `loadCriteriaConfigCached`. |
 | `scripts` | Скрипты | session(R), admin(W) | `ScriptsTab.tsx` | `/api/scripts` | D1 `scripts` |
 | `audit` | Аудит | admin | `AuditTab.tsx` | `/api/okk/audit` | D2/R2 `evaluations.override_metadata` JSONB, `phantom_history` |
 
