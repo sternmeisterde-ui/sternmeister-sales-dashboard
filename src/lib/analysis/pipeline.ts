@@ -39,8 +39,16 @@ const DEFAULT_MIN_DURATION = 300; // 5 min
 // 15-min call, ~3-5min for a 60-min call. We give it 15min headroom so a
 // long call doesn't fail spuriously.
 const SCRIBE_TIMEOUT_MS = 15 * 60 * 1000;
-const GROK_TIMEOUT_MS = 120_000;               // single-attempt timeout: 25k-char prompts on grok-beta regularly hit 45-90s
-const GROK_TOTAL_TIMEOUT_MS = 180_000;         // overall callGrok budget across retries — bounds worker-freeze cascade if xAI partially outages
+// Raised from 120s/180s after the 2026-05-22 incident: a single 60-min
+// transcript per-call analysis tripped the 120s per-attempt ceiling on grok-4
+// and exhausted the 180s total budget on a single attempt, throwing
+// "Grok API timeout after 120000ms" and (pre-isolation) killing the whole
+// 74-call run on the 8th call. 180s/attempt + 360s total gives two real
+// attempts at the long tail of generation while still bounding worker
+// freezes — and the per-call try/catch added in the same patch ensures one
+// stuck call never aborts the rest regardless.
+const GROK_TIMEOUT_MS = 180_000;
+const GROK_TOTAL_TIMEOUT_MS = 360_000;
 // Hard ceiling to avoid runaway cost — raised from 100 because filters with
 // 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
 // the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
@@ -450,7 +458,249 @@ function parseRuDate(s: string, endOfDay: boolean): number | null {
   return boundary ? Math.floor(boundary.getTime() / 1000) : null;
 }
 
+/**
+ * Kommo emits filter params in two different places depending on the page:
+ *   - /leads/list/?pipeline/.../?filter[...]   → searchParams
+ *   - /events/list/?with_filter=y#filter[...]  → hash (after `#`)
+ *
+ * Merge both into a single URLSearchParams so the rest of the parsing code
+ * doesn't have to care where the user copied the URL from. Hash takes
+ * precedence if both define the same key (events URLs typically only use
+ * the hash, and decorative `?with_filter=y` lives in the search).
+ */
+function mergedParams(parsed: URL): URLSearchParams {
+  const merged = new URLSearchParams();
+  for (const [k, v] of parsed.searchParams.entries()) merged.append(k, v);
+  if (parsed.hash && parsed.hash.length > 1) {
+    const hash = new URLSearchParams(parsed.hash.slice(1));
+    for (const [k, v] of hash.entries()) {
+      // Append, don't set — Kommo emits repeated keys (filter[main_user][])
+      // and we need to preserve every value, not just the last.
+      merged.append(k, v);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Determine whether the URL is the leads list (current default flow) or the
+ * events list (`/events/list/`). Events URLs filter changes-of-state instead
+ * of deals, so we resolve them through /api/v4/events and then load only the
+ * matched leads.
+ */
+function isEventsListUrl(parsed: URL): boolean {
+  return parsed.pathname.includes("/events/list");
+}
+
+interface KommoStatusValue { lead_status?: { id: number; pipeline_id: number } }
+interface KommoEventRow {
+  id: string;
+  type: string;
+  entity_id: number;
+  entity_type: string;
+  created_by: number;
+  created_at: number;
+  value_before: KommoStatusValue[] | null;
+  value_after: KommoStatusValue[] | null;
+}
+
+/**
+ * Translate a Kommo events-list URL into a set of matching lead IDs.
+ *
+ * The events list shows changes-of-state (status transitions, calls, etc.).
+ * The user typically narrows it to:
+ *   - filter[event_type][]=14   → status changes (API: `lead_status_changed`)
+ *   - filter[entity][]=2        → entity=lead (API: `entity=lead`)
+ *   - filter_date_from/to       → window
+ *   - filter[value_before/after][status_lead][]=PIPE:STATUS  → status pair
+ *   - filter[main_user][]=USER  → restricted by responsible user (applied
+ *                                 lead-side after we load the leads, since
+ *                                 events don't carry the responsible).
+ *
+ * The Kommo /api/v4/events endpoint supports filter[type], filter[entity],
+ * filter[created_at][from/to], filter[entity_id] (≤10), filter[created_by]
+ * (≤10) — but NOT filter[value_before]/[value_after] (verified: HTTP 400
+ * "Filter can not be empty."). So we pull all status-change events in the
+ * window and filter by before/after status_id in memory. For a 2.5-month
+ * window this is ~12k events / ~50 paginated requests ≈ 6-8 seconds, vs an
+ * unbounded scan that would burn through MAX_CALLS=500 worth of irrelevant
+ * deals.
+ */
+async function fetchLeadIdsFromEventsUrl(parsed: URL): Promise<{
+  leadIds: Set<number>;
+  mainUserIds: Set<number>;
+  hasDateFilter: boolean;
+}> {
+  const params = mergedParams(parsed);
+
+  // Event type mapping: Kommo UI uses numeric ids (event_type=14 is "status
+  // changed"), the API uses string slugs. We support the handful that map
+  // cleanly to call-related analysis; everything else falls back to the
+  // status-changed flow because that's the one the user actually pastes.
+  const UI_TO_API_EVENT_TYPE: Record<string, string> = {
+    "14": "lead_status_changed",
+    // Other types kept for future use; analysis pipeline only really needs
+    // status changes today.
+    "4": "outgoing_call",
+    "5": "incoming_call",
+  };
+  const uiEventTypes = params.getAll("filter[event_type][]");
+  const apiTypes = new Set<string>();
+  for (const t of uiEventTypes) {
+    const slug = UI_TO_API_EVENT_TYPE[t];
+    if (slug) apiTypes.add(slug);
+  }
+  // Default to lead_status_changed — that's the only event type whose
+  // before/after value carries the (pipeline, status) pair we filter on.
+  if (apiTypes.size === 0) apiTypes.add("lead_status_changed");
+
+  // Date window: events URLs use the same filter_date_from/to + filter[date_preset]
+  // shapes the leads URL does.
+  const dateFrom = params.get("filter_date_from");
+  const dateTo = params.get("filter_date_to");
+  const datePreset = params.get("filter[date_preset]") ?? params.get("filter_date_preset");
+  let fromTs: number | null = null;
+  let toTs: number | null = null;
+  if (dateFrom && dateTo) {
+    fromTs = parseRuDate(dateFrom, false);
+    toTs = parseRuDate(dateTo, true);
+  } else if (datePreset) {
+    const r = resolveKommoDatePreset(datePreset);
+    if (r) { fromTs = r.fromTs; toTs = r.toTs; }
+  }
+  const hasDateFilter = fromTs !== null && toTs !== null;
+
+  // before/after status pairs from filter[value_before|after][status_lead][]=PIPE:STATUS
+  // Both halves are optional; if the user only sets one we still narrow.
+  const parseStatusPairs = (key: string): Array<{ pipelineId: number; statusId: number }> => {
+    const raw = params.getAll(`filter[${key}][status_lead][]`);
+    const out: Array<{ pipelineId: number; statusId: number }> = [];
+    for (const v of raw) {
+      const m = v.match(/^(\d+):(\d+)$/);
+      if (!m) continue;
+      out.push({ pipelineId: Number(m[1]), statusId: Number(m[2]) });
+    }
+    return out;
+  };
+  const beforePairs = parseStatusPairs("value_before");
+  const afterPairs = parseStatusPairs("value_after");
+
+  // main_user filter — applied later on the loaded leads, not on events.
+  const mainUserIds = new Set<number>(
+    params.getAll("filter[main_user][]").map(Number).filter(Number.isFinite),
+  );
+
+  // Pull events page by page. /api/v4/events caps at 250/page; we set a hard
+  // ceiling of 100 pages (25k events ≈ ~30s wall clock) so a misconfigured
+  // multi-month window can't run away. If we hit it, the warning is loud
+  // enough that the user notices and tightens the window.
+  const MAX_PAGES = 100;
+  const events: KommoEventRow[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const qs = new URLSearchParams();
+    for (const t of apiTypes) qs.append("filter[type][]", t);
+    qs.set("filter[entity]", "lead");
+    if (hasDateFilter) {
+      qs.set("filter[created_at][from]", String(fromTs));
+      qs.set("filter[created_at][to]", String(toTs));
+    }
+    qs.set("limit", "250");
+    qs.set("page", String(page));
+    const data = await kommoFetchPath(`/events?${qs.toString()}`) as
+      { _embedded?: { events?: KommoEventRow[] } } | null;
+    const batch = data?._embedded?.events ?? [];
+    if (batch.length === 0) break;
+    events.push(...batch);
+    if (batch.length < 250) break;
+    if (page === MAX_PAGES) {
+      console.warn(
+        `[Analysis] Events pagination hit ceiling of ${MAX_PAGES} pages (${MAX_PAGES * 250} events). ` +
+          "Narrow the date range in the Kommo URL for better results.",
+      );
+    }
+  }
+
+  // Client-side filter by value_before / value_after status pairs.
+  const matchesPair = (sv: KommoStatusValue[] | null | undefined, pairs: Array<{ pipelineId: number; statusId: number }>): boolean => {
+    if (pairs.length === 0) return true;
+    if (!sv || sv.length === 0) return false;
+    return sv.some((s) => {
+      const ls = s.lead_status;
+      if (!ls) return false;
+      return pairs.some((p) => p.pipelineId === ls.pipeline_id && p.statusId === ls.id);
+    });
+  };
+
+  const leadIds = new Set<number>();
+  for (const e of events) {
+    if (!matchesPair(e.value_before, beforePairs)) continue;
+    if (!matchesPair(e.value_after, afterPairs)) continue;
+    leadIds.add(e.entity_id);
+  }
+
+  console.log(
+    `[Analysis] events URL: pulled ${events.length} ${[...apiTypes].join("/")} events → ${leadIds.size} distinct leads ` +
+      `(before=${beforePairs.length ? beforePairs.map((p) => `${p.pipelineId}:${p.statusId}`).join(",") : "*"}, ` +
+      `after=${afterPairs.length ? afterPairs.map((p) => `${p.pipelineId}:${p.statusId}`).join(",") : "*"})`,
+  );
+
+  return { leadIds, mainUserIds, hasDateFilter };
+}
+
+/**
+ * Bulk-load leads by id. Kommo's /api/v4/leads accepts `filter[id][]=N` repeated
+ * and caps at ~40 ids per request before silently truncating; we chunk to 40
+ * to stay safe. Uses `with=contacts` so the downstream call-note fetcher can
+ * walk contact-level notes (where PBX integrations log calls — see
+ * fetchCallNotes for the long-form explanation).
+ */
+async function fetchLeadsByIds(ids: number[]): Promise<KommoLead[]> {
+  if (ids.length === 0) return [];
+  const CHUNK = 40;
+  const out: KommoLead[] = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const qs = new URLSearchParams();
+    for (const id of slice) qs.append("filter[id][]", String(id));
+    qs.set("with", "contacts");
+    qs.set("limit", "250");
+    const data = await kommoFetchPath(`/leads?${qs.toString()}`) as
+      { _embedded?: { leads?: KommoLead[] } } | null;
+    if (data?._embedded?.leads?.length) out.push(...data._embedded.leads);
+  }
+  return out;
+}
+
 async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
+  const parsed = new URL(kommoUrl);
+  if (parsed.hostname !== KOMMO.host) throw new Error("Invalid Kommo URL domain");
+
+  // Events-list URL: resolve via /api/v4/events → matched lead IDs → load
+  // those leads with `with=contacts`. This is the path the user pastes from
+  // Аналитика → "Список событий" in Kommo.
+  if (isEventsListUrl(parsed)) {
+    const { leadIds, mainUserIds, hasDateFilter } = await fetchLeadIdsFromEventsUrl(parsed);
+    if (!hasDateFilter) {
+      console.warn(
+        "[Analysis] Events URL has no resolvable date filter — refusing to load (would scan account-wide event history). " +
+          "Pick a date range in the Kommo filter and re-copy the URL.",
+      );
+      return [];
+    }
+    if (leadIds.size === 0) return [];
+    let leads = await fetchLeadsByIds([...leadIds]);
+    if (mainUserIds.size > 0) {
+      // Kommo events don't carry responsible_user_id; apply that filter once
+      // we have the lead bodies. main_user in the Kommo UI = lead responsible.
+      const before = leads.length;
+      leads = leads.filter((l) => mainUserIds.has(l.responsible_user_id));
+      console.log(
+        `[Analysis] events URL: main_user filter (${mainUserIds.size} users) narrowed ${before} → ${leads.length} leads`,
+      );
+    }
+    return leads;
+  }
+
   const { apiQuery, cfEnumFilter, cfAllowEmpty, hasDateFilter } = buildLeadsApiQuery(kommoUrl);
   const hasCfFilter = cfEnumFilter.size > 0 || cfAllowEmpty.size > 0;
 
@@ -1054,6 +1304,16 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     let processed = analysis.processedCalls || 0;
     const perCallLimit = Math.min(TRANSCRIBE_CONCURRENCY, GROK_CONCURRENCY);
 
+    // Per-call failure isolation. Historically a single xAI timeout (one stuck
+    // generation past GROK_TOTAL_TIMEOUT_MS=180s) bubbled out of the worker
+    // through Promise.all and aborted the entire run — losing 60+ already-
+    // transcribed calls' worth of work. Wrap callGrok/transcribe in per-call
+    // try/catch so one bad call records itself as ⚠️ and the rest finish.
+    // Track failure counts to detect a partial xAI outage and surface it in
+    // the final status without poisoning the run.
+    let transcribeFailures = 0;
+    let grokFailures = 0;
+
     await mapConcurrent(cappedCalls, perCallLimit, async (call, idx) => {
       const num = String(idx + 1).padStart(2, "0");
       const dateStr = call.date.toLocaleDateString("ru-RU");
@@ -1065,14 +1325,29 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         return;
       }
 
-      console.log(`[Analysis ${analysisId}] [${num}/${cappedCalls.length}] Transcribing lead ${call.leadId}...`);
-      const transcript = await transcribeAudio(call.url);
-
       let md = `# Звонок ${num} — Lead ${call.leadId}\n\n`;
       md += `- **Дата:** ${dateStr}\n`;
       md += `- **Длительность:** ${durMin} мин\n`;
       md += `- **Направление:** ${call.direction}\n`;
       md += `- **Lead:** ${call.leadName}\n\n`;
+
+      // Transcription: failures are already non-throwing (returns null), but
+      // wrap defensively so an unexpected error (e.g. fetch DNS hiccup that
+      // slips past AbortSignal) doesn't propagate out of the worker.
+      let transcript: { text: string; speakers: string } | null = null;
+      try {
+        console.log(`[Analysis ${analysisId}] [${num}/${cappedCalls.length}] Transcribing lead ${call.leadId}...`);
+        transcript = await transcribeAudio(call.url);
+      } catch (err) {
+        transcribeFailures++;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.warn(`[Analysis ${analysisId}] [${num}] transcribe threw: ${errMsg.slice(0, 200)}`);
+        captureAnalysisException(err, {
+          step: "transcription",
+          severity: "non_fatal",
+          extra: { analysisId, callIdx: idx, leadId: call.leadId, url: call.url.slice(0, 200) },
+        });
+      }
 
       if (!transcript) {
         // Network/HTTP failure for both primary and fallback URL.
@@ -1085,9 +1360,24 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       } else {
         md += `## Транскрипт\n\n${transcript.speakers}\n\n`;
         console.log(`[Analysis ${analysisId}] [${num}] Analyzing with Grok...`);
-        const analysisText = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
-        md += `## Анализ\n\n${analysisText}\n`;
-        allAnalysesByIdx[idx] = `### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`;
+        try {
+          const analysisText = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
+          md += `## Анализ\n\n${analysisText}\n`;
+          allAnalysesByIdx[idx] = `### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`;
+        } catch (err) {
+          grokFailures++;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(`[Analysis ${analysisId}] [${num}] Grok per-call failed: ${errMsg.slice(0, 200)}`);
+          captureAnalysisException(err, {
+            step: "grok-per-call",
+            severity: "non_fatal",
+            extra: { analysisId, callIdx: idx, leadId: call.leadId, duration: call.duration },
+          });
+          // Persist the failure inline so the user can see WHICH call broke
+          // and the rest of the pipeline (file save + progress update + final
+          // summary) keeps moving.
+          md += `## Анализ\n\n⚠️ Grok API недоступен для этого звонка: ${errMsg.slice(0, 200)}\n`;
+        }
       }
 
       await db
@@ -1112,17 +1402,39 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         .where(eq(callAnalyses.id, analysisId));
     });
 
-    // 4. Generate aggregate summary
+    // 4. Generate aggregate summary. Only if we have at least one successful
+    // per-call analysis — otherwise we'd burn another Grok call on an empty
+    // input and get back generic noise.
     console.log(`[Analysis ${analysisId}] Generating summary...`);
     const allAnalyses = allAnalysesByIdx.filter((s): s is string => s !== null);
-    const allAnalysesText = allAnalyses.join("\n\n---\n\n");
-    const summary = await callGrok(
-      summaryPrompt,
-      `Всего проанализировано ${processed} звонков.\n\n${allAnalysesText}`,
-      SUMMARY_MODEL,
-      SUMMARY_MAX_TOKENS,
-      SUMMARY_MAX_INPUT_CHARS,
-    );
+    let summary = "";
+    let summaryError: string | null = null;
+    if (allAnalyses.length === 0) {
+      summary = `⚠️ Ни один звонок не удалось проанализировать (Grok timeouts: ${grokFailures}, transcribe failures: ${transcribeFailures}). Запустите Resume позже, когда xAI восстановится, либо проверьте Sentry на детали.`;
+    } else {
+      const allAnalysesText = allAnalyses.join("\n\n---\n\n");
+      try {
+        summary = await callGrok(
+          summaryPrompt,
+          `Всего проанализировано ${allAnalyses.length} звонков из ${cappedCalls.length}.\n\n${allAnalysesText}`,
+          SUMMARY_MODEL,
+          SUMMARY_MAX_TOKENS,
+          SUMMARY_MAX_INPUT_CHARS,
+        );
+      } catch (err) {
+        // Summary Grok call failed too — keep the run as 'done' with all
+        // per-call files saved and a placeholder summary, so the user doesn't
+        // lose hours of transcription work to a single end-of-run timeout.
+        summaryError = err instanceof Error ? err.message : String(err);
+        console.warn(`[Analysis ${analysisId}] summary Grok failed: ${summaryError.slice(0, 200)}`);
+        captureAnalysisException(err, {
+          step: "grok-summary",
+          severity: "non_fatal",
+          extra: { analysisId, perCallCount: allAnalyses.length },
+        });
+        summary = `⚠️ Сводный анализ Grok не удался: ${summaryError.slice(0, 200)}. Per-call analyses (${allAnalyses.length}) сохранены в файлах ниже.`;
+      }
+    }
 
     // Save summary file
     await db.insert(callAnalysisFiles).values({
@@ -1132,15 +1444,27 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       fileType: "summary",
     });
 
-    // Done
+    // Final status. Even if some Grok calls failed, mark the run as 'done'
+    // so the user can read what we have. Surface degraded state via
+    // error_message (kept alongside status='done' for the UI to render as a
+    // warning chip) so the operator knows to inspect failures.
+    const degraded = grokFailures > 0 || transcribeFailures > 0 || summaryError;
+    const degradedMsg = degraded
+      ? `Завершено с предупреждениями: Grok timeouts ${grokFailures}, transcribe ошибок ${transcribeFailures}` +
+        (summaryError ? `, summary failed (${summaryError.slice(0, 60)})` : "")
+      : null;
     await db.update(callAnalyses).set({
       status: "done",
       progress: 100,
       resultSummary: summary,
+      errorMessage: degradedMsg,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     }).where(eq(callAnalyses.id, analysisId));
 
-    console.log(`[Analysis ${analysisId}] ✅ Complete! ${processed} calls analyzed.`);
+    console.log(
+      `[Analysis ${analysisId}] ✅ Complete! ${allAnalyses.length}/${cappedCalls.length} calls analyzed ` +
+        `(grok fails: ${grokFailures}, transcribe fails: ${transcribeFailures}).`,
+    );
 
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
