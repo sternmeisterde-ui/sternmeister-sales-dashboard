@@ -62,6 +62,12 @@ const GROK_CONCURRENCY = 3;
 // Minimal worker-pool helper — keeps memory flat (results array pre-sized)
 // and cancels-on-throw behaviour, unlike naive Promise.all that fans out
 // all `map` tasks immediately.
+//
+// Throw policy: callers are expected to handle their own per-item errors. As
+// a defensive backstop, if `fn` throws anyway we log + skip that slot rather
+// than aborting the whole batch through Promise.all rejection. This is the
+// "any future code change that adds a new unguarded await in the worker
+// shouldn't be able to kill 60+ calls' worth of work" guarantee.
 async function mapConcurrent<T, R>(
   items: T[],
   limit: number,
@@ -73,7 +79,16 @@ async function mapConcurrent<T, R>(
     while (true) {
       const i = next++;
       if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        // Log but don't abort the pool. Caller-level catches should handle
+        // their own observability; this is purely the "stop one bad worker
+        // from cancelling the others" backstop.
+        console.warn(
+          `[mapConcurrent] worker[${i}] threw and was suppressed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
+        );
+      }
     }
   }
   await Promise.all(
@@ -469,13 +484,27 @@ function parseRuDate(s: string, endOfDay: boolean): number | null {
  * the hash, and decorative `?with_filter=y` lives in the search).
  */
 function mergedParams(parsed: URL): URLSearchParams {
+  // Hash takes precedence over search for the SAME key — Kommo events list
+  // puts live filter state in the hash and sometimes leaves a stale
+  // `filter_date_from` echo in the search. If both define `filter_date_from`,
+  // `params.get()` must return the hash value (the actual live filter), not
+  // the search echo. Single-value keys: drop search entries before appending
+  // hash. Repeated keys (filter[main_user][], filter[event_type][]): keep
+  // both so we don't lose multi-value semantics.
   const merged = new URLSearchParams();
-  for (const [k, v] of parsed.searchParams.entries()) merged.append(k, v);
-  if (parsed.hash && parsed.hash.length > 1) {
-    const hash = new URLSearchParams(parsed.hash.slice(1));
-    for (const [k, v] of hash.entries()) {
-      // Append, don't set — Kommo emits repeated keys (filter[main_user][])
-      // and we need to preserve every value, not just the last.
+  const hashRaw = parsed.hash && parsed.hash.length > 1 ? parsed.hash.slice(1) : "";
+  const hashKeys = new Set<string>();
+  if (hashRaw) {
+    for (const k of new URLSearchParams(hashRaw).keys()) hashKeys.add(k);
+  }
+  for (const [k, v] of parsed.searchParams.entries()) {
+    // Drop search-side keys that the hash will overwrite, except multi-value
+    // array keys (`...[]`) where the consumer always calls getAll().
+    if (hashKeys.has(k) && !k.endsWith("[]")) continue;
+    merged.append(k, v);
+  }
+  if (hashRaw) {
+    for (const [k, v] of new URLSearchParams(hashRaw).entries()) {
       merged.append(k, v);
     }
   }
@@ -681,11 +710,13 @@ async function fetchLeadsFromUrl(kommoUrl: string): Promise<KommoLead[]> {
   if (isEventsListUrl(parsed)) {
     const { leadIds, mainUserIds, hasDateFilter } = await fetchLeadIdsFromEventsUrl(parsed);
     if (!hasDateFilter) {
-      console.warn(
-        "[Analysis] Events URL has no resolvable date filter — refusing to load (would scan account-wide event history). " +
-          "Pick a date range in the Kommo filter and re-copy the URL.",
+      // Throw with a descriptive message so the user sees the real cause in
+      // call_analyses.error_message instead of the generic "не найдено лидов"
+      // copy the caller falls back to on empty results.
+      throw new Error(
+        "Events URL не содержит фильтр по дате. Откройте Kommo → Аналитика → Список событий, " +
+          "выберите диапазон дат (или пресет вроде «Текущий месяц») и скопируйте ссылку заново.",
       );
-      return [];
     }
     if (leadIds.size === 0) return [];
     let leads = await fetchLeadsByIds([...leadIds]);
@@ -1380,26 +1411,49 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         }
       }
 
-      await db
-        .insert(callAnalysisFiles)
-        .values({
-          analysisId,
-          filename,
-          content: md,
-          fileType: "transcript",
-          leadId: String(call.leadId),
-        })
-        .onConflictDoUpdate({
-          target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
-          set: { content: md },
+      // DB ops MUST NOT throw out of the worker — that would kill the whole
+      // run via Promise.all aggregation, exactly the failure mode the per-
+      // call try/catch above is trying to prevent. Neon HTTP occasionally
+      // returns transient 5xx on compute cold-start (~2s); swallow + log so
+      // one bad write loses one call's record, not the entire batch.
+      try {
+        await db
+          .insert(callAnalysisFiles)
+          .values({
+            analysisId,
+            filename,
+            content: md,
+            fileType: "transcript",
+            leadId: String(call.leadId),
+          })
+          .onConflictDoUpdate({
+            target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
+            set: { content: md },
+          });
+      } catch (err) {
+        console.warn(
+          `[Analysis ${analysisId}] [${num}] DB insert failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
+        );
+        captureAnalysisException(err, {
+          step: "grok-per-call", // closest existing step tag; file persistence
+          severity: "non_fatal",
+          extra: { analysisId, callIdx: idx, leadId: call.leadId, kind: "db_insert" },
         });
+      }
 
       processed++;
       const progress = Math.round((processed / cappedCalls.length) * 90);
       await db
         .update(callAnalyses)
         .set({ processedCalls: processed, progress })
-        .where(eq(callAnalyses.id, analysisId));
+        .where(eq(callAnalyses.id, analysisId))
+        .catch((err: unknown) => {
+          // Progress-update failures are cosmetic — the next worker's update
+          // will overwrite or correct. Never let one bad PATCH abort the run.
+          console.warn(
+            `[Analysis ${analysisId}] [${num}] progress update failed: ${err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)}`,
+          );
+        });
     });
 
     // 4. Generate aggregate summary. Only if we have at least one successful
@@ -1436,13 +1490,22 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       }
     }
 
-    // Save summary file
-    await db.insert(callAnalysisFiles).values({
-      analysisId,
-      filename: "SUMMARY.md",
-      content: `# Сводный анализ\n\n${summary}`,
-      fileType: "summary",
-    });
+    // Save summary file. Use onConflictDoUpdate against the same
+    // (analysis_id, filename) unique index the per-call files use — without
+    // this, a Resume run hitting an already-existing SUMMARY.md would crash
+    // with a duplicate-key violation and lose the whole batch's progress.
+    await db
+      .insert(callAnalysisFiles)
+      .values({
+        analysisId,
+        filename: "SUMMARY.md",
+        content: `# Сводный анализ\n\n${summary}`,
+        fileType: "summary",
+      })
+      .onConflictDoUpdate({
+        target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
+        set: { content: `# Сводный анализ\n\n${summary}` },
+      });
 
     // Final status. Even if some Grok calls failed, mark the run as 'done'
     // so the user can read what we have. Surface degraded state via
