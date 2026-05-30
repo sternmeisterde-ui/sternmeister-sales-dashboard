@@ -8,10 +8,13 @@
 import {
   pgSchema,
   bigint,
+  boolean,
   date,
   doublePrecision,
   index,
   integer,
+  jsonb,
+  primaryKey,
   smallint,
   text,
   timestamp,
@@ -397,5 +400,52 @@ export const funnel = analyticsSchema.table(
     index().on(t.metricName, t.dtCohort),
     index().on(t.leadId),
     index().on(t.pipelineName, t.statusName),
+  ],
+);
+
+// Kommo contact mirror. Populated by sync-contacts.ts via /api/v4/contacts
+// (batched by id, 250 per request, 1 rps). Idempotent — ON CONFLICT updates
+// name/phones/raw_payload on every resync. raw_payload kept for debugging
+// only; queries should use the normalised columns.
+export const contacts = analyticsSchema.table(
+  "contacts",
+  {
+    contactId: bigint("contact_id", { mode: "number" }).primaryKey(),
+    name: text("name"),
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    phone: text("phone"),
+    phonesAll: jsonb("phones_all"),
+    responsibleUserId: bigint("responsible_user_id", { mode: "number" }),
+    kommoCreatedAt: timestamp("kommo_created_at"),
+    kommoUpdatedAt: timestamp("kommo_updated_at"),
+    rawPayload: jsonb("raw_payload").notNull(),
+    syncedAt: timestamp("synced_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_contacts_phone").on(t.phone),
+    index("idx_contacts_updated_at").on(t.kommoUpdatedAt),
+  ],
+);
+
+// Lead ↔ Contact link table. One lead can have multiple contacts (rare);
+// one contact can belong to multiple leads (common — same client across
+// Бух Гос and Бух Бератер). is_active flipped to false when Kommo no
+// longer returns the link; rows never deleted so history is preserved.
+export const leadContactLinks = analyticsSchema.table(
+  "lead_contact_links",
+  {
+    leadId: bigint("lead_id", { mode: "number" }).notNull(),
+    contactId: bigint("contact_id", { mode: "number" }).notNull(),
+    firstSeenAt: timestamp("first_seen_at").defaultNow().notNull(),
+    lastSeenAt: timestamp("last_seen_at").defaultNow().notNull(),
+    isActive: boolean("is_active").default(true).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.leadId, t.contactId], name: "lead_contact_links_pkey" }),
+    index("idx_lcl_contact_id").on(t.contactId),
+    index("idx_lcl_active")
+      .on(t.leadId)
+      .where(sql`is_active = TRUE`),
   ],
 );

@@ -1,6 +1,14 @@
 // Direct ETL runner — bypasses Next.js HTTP layer entirely
-// Usage: npx tsx --env-file .env.local scripts/etl-sync.ts [from] [to]
-// Example: npx tsx --env-file .env.local scripts/etl-sync.ts 2026-04-16 2026-04-23
+// Usage: npx tsx scripts/etl-sync.ts [from] [to]
+// Example: npx tsx scripts/etl-sync.ts 2026-04-16 2026-04-23
+//
+// Loads .env.local automatically so callers don't need the
+// --env-file flag (matches the apply-migration-*.ts pattern).
+import { config } from "dotenv";
+import { resolve } from "node:path";
+
+config({ path: resolve(process.cwd(), ".env.local") });
+
 import { runSync } from "../src/lib/etl/index";
 
 const [fromArg, toArg] = process.argv.slice(2);

@@ -19,6 +19,7 @@
 
 import { fetchLookups } from "./lookups";
 import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads";
+import { syncContacts } from "./sync-contacts";
 import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncTasks } from "./sync-tasks";
@@ -65,7 +66,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "communications" | "status_changes" | "tasks" | "sla" | "telephony")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -83,6 +84,7 @@ export interface SyncOptions {
 
 export interface SyncResult {
   leads: number;
+  contacts: number;
   communications: number;
   statusChanges: number;
   tasks: number;
@@ -179,6 +181,21 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     // statusId, etc.). Reload lead cache from analytics.leads_cohort — no Kommo call.
     leadCache = await loadLeadCacheFromDb(opts.fromDate, opts.toDate);
     console.log(`[ETL] leadCache rehydrated from DB: ${leadCache.length} leads`);
+  }
+
+  // Sync contacts referenced by the leads we just synced. Uses
+  // contactIds from leadCache, so it must run after sync-leads. Skipped
+  // when leadCache was rehydrated from DB (contactIds are empty there)
+  // or when explicitly disabled. Adds ~1 Kommo request per 250 unique
+  // contact IDs at the configured 1 rps.
+  let contactsCount = 0;
+  if (!skip.has("contacts") && leadCache.length > 0 && leadCache.some((e) => e.contactIds.length > 0)) {
+    contactsCount = await runStep(
+      "sync-contacts",
+      () => syncContacts(leadCache),
+      0,
+      stepErrors,
+    );
   }
 
   // Comms + status_changes were `Promise.all`'d before — but `Promise.all`
@@ -343,6 +360,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
 
   const result: SyncResult = {
     leads: leadsCount,
+    contacts: contactsCount,
     communications: commsCount,
     statusChanges: statusChangesCount,
     tasks: tasksCount,
@@ -357,6 +375,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   console.log(
     `[ETL] done in ${result.durationMs}ms —`,
     `leads=${result.leads}`,
+    `contacts=${result.contacts}`,
     `comms=${result.communications}`,
     `status_changes=${result.statusChanges}`,
     `tasks=${result.tasks}`,

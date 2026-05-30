@@ -886,6 +886,66 @@ export async function getLeadCustomFieldEnums(
   }
 }
 
+export interface KommoContactSnapshot {
+  id: number;
+  name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  responsible_user_id: number | null;
+  created_at: number | null;
+  updated_at: number | null;
+  custom_fields_values: Array<{
+    field_id: number;
+    field_name: string;
+    field_code: string | null;
+    field_type: string;
+    values: Array<{ value: unknown; enum_id?: number; enum_code?: string }>;
+  }> | null;
+}
+
+/**
+ * Batch-fetch full contact snapshots by ID. Used by sync-contacts to mirror
+ * Kommo Contact data (name, phones from custom_fields_values) into
+ * analytics.contacts. Each batch is one Kommo request at the configured rps;
+ * 250 contact IDs per request is the URL-length sweet spot (well under the
+ * 8KB header limit on Kommo's side).
+ */
+export async function getContactsByIds(
+  contactIds: number[],
+): Promise<KommoContactSnapshot[]> {
+  if (contactIds.length === 0) return [];
+
+  const baseUrl = await getBaseUrl();
+  const headers = await getAuthHeaders();
+  const result: KommoContactSnapshot[] = [];
+
+  const BATCH = 250;
+  for (let i = 0; i < contactIds.length; i += BATCH) {
+    const batch = contactIds.slice(i, i + BATCH);
+    const url = new URL(`${baseUrl}/contacts`);
+    url.searchParams.set("limit", "250");
+    batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+
+    const res = await rateLimitedFetch(url.toString(), { headers });
+    if (res.status === 204) continue;
+    if (!res.ok) {
+      console.warn(
+        `[Kommo] getContactsByIds batch ${i}-${i + BATCH} failed with ${res.status}`,
+      );
+      continue;
+    }
+
+    const data = (await res.json()) as {
+      _embedded?: { contacts?: KommoContactSnapshot[] };
+    };
+
+    const contacts = data._embedded?.contacts ?? [];
+    result.push(...contacts);
+  }
+
+  return result;
+}
+
 /**
  * Batch-fetch contacts by ID with their linked leads.
  * Used in ETL to resolve contact_id → lead_id[] for call events.
