@@ -100,6 +100,17 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
     conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE total_score IS NOT NULL)`);
     conditions.push(sql`${okkCalls.managerId} IS NOT NULL`);
 
+    // Hide calls withdrawn by audit/cleanup. Plain processing tags like
+    // "Retro CRM-fetch ...", "Skipped: ..." stay visible — those are status
+    // notes, not withdrawals. Withdrawal markers always start with "Removed"
+    // or "Cleanup" (see scripts/preliminary-remove-complaint-evals.ts and
+    // prior dual-filter cleanups of 2026-05-16 / 2026-05-20 in OKK repo).
+    conditions.push(sql`
+      (${okkCalls.errorMessage} IS NULL
+       OR (${okkCalls.errorMessage} NOT ILIKE 'Removed%'
+           AND ${okkCalls.errorMessage} NOT ILIKE 'Cleanup%'))
+    `);
+
     const managerIdParam = sp.get("manager_id");
     if (managerIdParam) {
       conditions.push(eq(okkCalls.managerId, managerIdParam));
