@@ -23,21 +23,17 @@ interface Props {
 }
 
 /**
- * Слоты карточек. C1.1 и C2.2 — placeholder'ы, пока без данных.
- * Порядок: C1 → C1.1 → C2 → C2.2 → C3 → C4 → C5 (7 карточек).
+ * Порядок карточек: C1 → C1.1 → C2 → C2.1 → C3 → C4 → C5 (7 карточек).
+ * C1.1/C2.1 — «чистые» варианты C1/C2 без лидов с причиной «Игнор».
  */
-type CardSlot =
-  | { kind: "real"; id: ConversionId }
-  | { kind: "placeholder"; id: string; hint: string };
-
-const CARD_SLOTS: CardSlot[] = [
-  { kind: "real", id: "C1" },
-  { kind: "placeholder", id: "C1.1", hint: "В планах" },
-  { kind: "real", id: "C2" },
-  { kind: "placeholder", id: "C2.2", hint: "В планах" },
-  { kind: "real", id: "C3" },
-  { kind: "real", id: "C4" },
-  { kind: "real", id: "C5" },
+const CARD_ORDER: ConversionId[] = [
+  "C1",
+  "C1.1",
+  "C2",
+  "C2.1",
+  "C3",
+  "C4",
+  "C5",
 ];
 
 export default function ConversionCards({
@@ -71,18 +67,14 @@ export default function ConversionCards({
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-        {CARD_SLOTS.map((slot) =>
-          slot.kind === "real" ? (
-            <ConversionCard
-              key={slot.id}
-              bundle={conversions[slot.id]}
-              isActive={slot.id === activeId}
-              onSelect={() => onSelect(slot.id)}
-            />
-          ) : (
-            <PlaceholderCard key={slot.id} id={slot.id} hint={slot.hint} />
-          )
-        )}
+        {CARD_ORDER.map((id) => (
+          <ConversionCard
+            key={id}
+            bundle={conversions[id]}
+            isActive={id === activeId}
+            onSelect={() => onSelect(id)}
+          />
+        ))}
       </div>
     </section>
   );
@@ -241,27 +233,3 @@ function ConversionCard({
   );
 }
 
-function PlaceholderCard({ id, hint: _hint }: { id: string; hint: string }) {
-  return (
-    <div
-      className="glass-panel rounded-xl border border-dashed border-white/10 px-3 py-2.5 flex flex-col gap-1.5 min-w-0 opacity-50 select-none"
-      aria-hidden="true"
-    >
-      <div className="flex items-baseline justify-between">
-        <span className="text-xs font-bold uppercase tracking-widest text-slate-500">
-          {id}
-        </span>
-      </div>
-      <div className="text-[11px] text-slate-500 leading-snug line-clamp-2 min-h-[28px]">
-        В планах
-      </div>
-      <div className="text-xl font-bold text-slate-700 tabular-nums leading-none">
-        —
-      </div>
-      <div className="h-7" />
-      <div className="text-[10px] text-slate-700">скоро</div>
-      <div className="text-[10px] text-slate-700">—</div>
-      <div className="text-[10px] text-slate-700">—</div>
-    </div>
-  );
-}

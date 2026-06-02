@@ -6,6 +6,7 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
+  excludesIgnor,
   fetchBeraterContext,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
@@ -76,6 +77,9 @@ export async function computeCohortLeads(
     // Currently-disqualified → не в base и не в target (соответствует
     // displayLeadCount() cohort-conversion: "Лиды" = base - disqualified).
     if (lead.isDisqualified) continue;
+
+    // C1.1/C2.1: «игнор»-лиды полностью вне расчёта (как в computeCohorts).
+    if (excludesIgnor(opts.conversionId) && lead.isIgnor) continue;
 
     const result = processLeadForConversion(
       opts.conversionId,
