@@ -220,11 +220,66 @@ export async function computeCohorts(
   const cohorts: CohortsApiCohort[] = [];
   const now = todayBerlinUTC();
 
-  for (const conversionId of CONVERSION_ORDER) {
-    const meta = CONVERSIONS[conversionId];
-    const cohortMap = new Map<string, AggBucket>();
+  // Per-conversion (week → bucket) — заполним в одном проходе по лидам.
+  const cohortMapsByConv = new Map<ConversionId, Map<string, AggBucket>>();
+  for (const id of CONVERSION_ORDER) {
+    cohortMapsByConv.set(id, new Map<string, AggBucket>());
+  }
 
-    for (const { lead, weekStart, weekKey } of leadCohortCache) {
+  // Один проход по лидам, вычисляем результаты для всех конверсий сразу.
+  // C1.1/C2.1 переиспользуют результат C1/C2 (та же логика, разница лишь в
+  // excludesIgnor() фильтре). Раньше processLeadForConversion вызывался
+  // 7 раз/лид — теперь 5.
+  for (const { lead, weekStart, weekKey } of leadCohortCache) {
+    const r1 = processLeadForConversion(
+      "C1",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r2 = processLeadForConversion(
+      "C2",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r3 = processLeadForConversion(
+      "C3",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r4 = processLeadForConversion(
+      "C4",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r5 = processLeadForConversion(
+      "C5",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const resultsByConv: Record<
+      ConversionId,
+      { included: boolean; targetAt: Date | null }
+    > = {
+      C1: r1,
+      "C1.1": r1,
+      C2: r2,
+      "C2.1": r2,
+      C3: r3,
+      C4: r4,
+      C5: r5,
+    };
+
+    for (const conversionId of CONVERSION_ORDER) {
+      // C1.1/C2.1: «игнор»-лиды полностью вне расчёта — ни в базе, ни в цели,
+      // ни в дисквале.
+      if (excludesIgnor(conversionId) && lead.isIgnor) continue;
+
+      const cohortMap = cohortMapsByConv.get(conversionId)!;
       let bucket = cohortMap.get(weekKey);
       if (!bucket) {
         bucket = {
@@ -241,16 +296,7 @@ export async function computeCohorts(
         cohortMap.set(weekKey, bucket);
       }
 
-      // C1.1/C2.1: «игнор»-лиды полностью вне расчёта — ни в базе, ни в цели,
-      // ни в дисквале. Должно стоять ДО любого подсчёта.
-      if (excludesIgnor(conversionId) && lead.isIgnor) continue;
-
-      const result = processLeadForConversion(
-        conversionId,
-        lead,
-        targetEvents,
-        beraterContext
-      );
+      const result = resultsByConv[conversionId];
 
       // Target учитывается если дошёл до цели И (не дисквалифицирован ИЛИ
       // target_at ≤ disq_at). Это _target_counts() cohort-conversion qualification.py.
@@ -278,6 +324,11 @@ export async function computeCohorts(
       else if (lead.languageBucket === "c1") bucket.langC1 += 1;
       else bucket.langUnknown += 1;
     }
+  }
+
+  for (const conversionId of CONVERSION_ORDER) {
+    const meta = CONVERSIONS[conversionId];
+    const cohortMap = cohortMapsByConv.get(conversionId)!;
 
     for (const [, bucket] of cohortMap) {
       const weekEnd = isoWeekEndBerlin(bucket.weekStart);
