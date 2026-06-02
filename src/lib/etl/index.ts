@@ -22,6 +22,8 @@ import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads
 import { syncContacts } from "./sync-contacts";
 import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
+import { syncCloseReasonChanges } from "./sync-close-reason-changes";
+import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
@@ -66,7 +68,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -231,6 +233,28 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         0,
         stepErrors,
       );
+
+  // Close-reason history (CFV 879824 transitions) — нужна Funnel'у для точного
+  // disqualified_at. 1 req/sec вне основной плотности — добавляет 5-15s к тику.
+  if (!skip.has("close_reason_changes")) {
+    await runStep(
+      "sync-close-reason-changes",
+      () => syncCloseReasonChanges(opts.fromDate, opts.toDate),
+      0,
+      stepErrors,
+    );
+  }
+
+  // Lead deletions — помечает удалённые в Kommo лиды как is_deleted=TRUE.
+  // Funnel Dashboard их исключает из base (как cohort-conversion).
+  if (!skip.has("lead_deletions")) {
+    await runStep(
+      "sync-lead-deletions",
+      () => syncLeadDeletions(opts.fromDate, opts.toDate),
+      0,
+      stepErrors,
+    );
+  }
 
   // Update contact_date on leads after communications are populated.
   if (!skip.has("communications") && leadCache.length > 0) {

@@ -20,6 +20,17 @@ const CF = {
   UTM_TERM: 849512,
   CATEGORY: 866934,
   /**
+   * Language level (text): "A2 (Базовый уровень) — Свободно..." etc.
+   * Used by Funnel Dashboard for language-level cohort breakdown.
+   */
+  LANGUAGE_LEVEL: 869928,
+  /**
+   * Exclude-from-analytics flag (checkbox/select): when set, lead is
+   * dropped from Funnel computations (qualified base, target). See
+   * cohort-conversion analytics_exclusion.py.
+   */
+  EXCLUDE_FROM_ANALYTICS: 887458,
+  /**
    * Non-qual reason (enum): 744486 Неправильный номер, 744876/747530/747532/
    * 747534/747536 → Неквал (доход / образование / возраст / язык / прочее).
    * Referenced in build-response.ts B2G qualLeads filter.
@@ -123,6 +134,29 @@ function cfEnumId(
   const f = fields?.find((x) => x.field_id === id);
   const enumId = f?.values?.[0]?.enum_id;
   return typeof enumId === "number" && Number.isFinite(enumId) ? enumId : null;
+}
+
+/**
+ * Boolean CFV (checkbox or "yes"/"true" select). Returns true if value is
+ * truthy according to Kommo conventions:
+ *   - boolean true
+ *   - string "1", "yes", "true", "да", "y"
+ *   - number 1
+ * NULL/missing/0/etc → false.
+ */
+function cfBoolean(
+  fields: Array<{ field_id: number; values: Array<{ value: unknown }> }> | null,
+  id: number,
+): boolean {
+  const f = fields?.find((x) => x.field_id === id);
+  const v = f?.values?.[0]?.value;
+  if (v === true) return true;
+  if (typeof v === "number") return v === 1;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    return s === "1" || s === "yes" || s === "true" || s === "y" || s === "да";
+  }
+  return false;
 }
 
 export async function syncLeads(
@@ -280,6 +314,12 @@ export async function syncLeads(
       aaTerminDate,
       terminDateFirst,
       aaTerminDateFirst,
+      languageLevel: cfVal(lead.custom_fields_values, CF.LANGUAGE_LEVEL),
+      excludeFromAnalytics: cfBoolean(
+        lead.custom_fields_values,
+        CF.EXCLUDE_FROM_ANALYTICS,
+      ),
+      updatedAt: lead.updated_at ? new Date(lead.updated_at * 1000) : null,
     });
   }
 
