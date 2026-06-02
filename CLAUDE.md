@@ -125,6 +125,7 @@ Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear
 | `tracking` | Активность | admin | `TrackingTab.tsx` | `/api/tracking` | `tracking_events` + calls из `analytics.communications` |
 | `termins` | Термин | admin | `TerminTab.tsx` | `/api/dashboard/termins`, looker views | `leads_cohort.termin_date/aa_termin_date`, `lead_status_changes` |
 | `looker` | Looker | admin | `LookerTab.tsx` | `/api/analytics/looker/data` | `communications` (enriched), `leads_cohort`, `lead_status_changes`, `sla` |
+| `funnel` | Воронка | admin | `FunnelTab.tsx` | `/api/funnel/cohorts`, `/api/funnel/cohorts/[id]/[week]/leads`, `/api/funnel/conversions/[id]/target-level`, `/api/funnel/filter-options` | `leads_cohort`, `lead_status_changes`, `lead_close_reason_changes`, `lead_contact_links`, `funnel_target_levels` |
 | `real_calls` | ОКК | manager+admin | inline `page.tsx` | `/api/okk/calls` | D2/R2 `calls`+`evaluations` (orphan-фильтр) |
 | `ai_calls` | AI Ролевки | manager+admin | inline `page.tsx` | `/api/calls` | D1/R1 `d1_calls` / `r1_calls` |
 | `managers` | Менеджеры | admin | `ManagersTab.tsx` | `/api/managers` | `master_managers` + sync targets D2/R2/D1/R1 |

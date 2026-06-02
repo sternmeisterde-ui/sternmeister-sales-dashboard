@@ -78,6 +78,25 @@ export const leadsCohort = analyticsSchema.table(
     // Added in migration 0013_termin_first_dates.sql.
     terminDateFirst: timestamp("termin_date_first"),
     aaTerminDateFirst: timestamp("aa_termin_date_first"),
+    // Kommo CFV 869928 ("LANGUAGE_LEVEL") — текст вроде "A2 (Базовый уровень)
+    // — Свободно...". Используется Funnel Dashboard для раскладки когорт по
+    // уровню языка. Добавлено в 0019_leads_cohort_language_level.sql.
+    languageLevel: text("language_level"),
+    // Kommo CFV 887458 ("Исключить из аналитики"). Если TRUE, лид выпадает
+    // из всех расчётов Funnel. Добавлено в 0020_leads_cohort_funnel_extras.sql.
+    excludeFromAnalytics: boolean("exclude_from_analytics").default(false).notNull(),
+    // Reserved: earliest event_at в QUAL_FIRST_LINE_STATUSES. Currently unused
+    // — Funnel использует created_at как anchor (совпадает с qualification.py
+    // cohort-conversion). Колонка зарезервирована для будущего refactor'а.
+    firstQualificationAt: timestamp("first_qualification_at"),
+    // Snapshot lead.updated_at из Kommo. Fallback для disqualified_at когда
+    // в lead_close_reason_changes нет точной даты события.
+    updatedAt: timestamp("updated_at"),
+    // Лид удалён в Kommo. Funnel Dashboard исключает таких из base.
+    // Заполняется ETL-шагом sync-lead-deletions из Kommo /events
+    // (lead_deleted). Добавлено в 0022_leads_cohort_is_deleted.sql.
+    isDeleted: boolean("is_deleted").default(false).notNull(),
+    deletedAt: timestamp("deleted_at"),
   },
   (t) => [
     index().on(t.leadId),
@@ -426,6 +445,18 @@ export const contacts = analyticsSchema.table(
     index("idx_contacts_phone").on(t.phone),
     index("idx_contacts_updated_at").on(t.kommoUpdatedAt),
   ],
+);
+
+// Per-conversion benchmark storage. Set by admins via PATCH endpoint —
+// shared across all users. See migration 0018_funnel_target_levels.sql.
+export const funnelTargetLevels = analyticsSchema.table(
+  "funnel_target_levels",
+  {
+    conversionId: text("conversion_id").primaryKey(),
+    conversionPct: doublePrecision("conversion_pct"),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    updatedBy: text("updated_by"),
+  },
 );
 
 // Lead ↔ Contact link table. One lead can have multiple contacts (rare);

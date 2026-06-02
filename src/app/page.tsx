@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, ShieldCheck,
+  CalendarClock, ShieldCheck, Workflow,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -21,6 +21,7 @@ import ScriptsTab from "@/components/ScriptsTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
+import FunnelTab from "@/components/FunnelTab";
 import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -94,11 +95,31 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
+type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel";
+const VALID_TABS: ReadonlySet<TabId> = new Set([
+  "dashboard", "daily", "analytics", "tracking", "real_calls", "ai_calls",
+  "managers", "criteria", "scripts", "call_analysis", "looker", "termins",
+  "audit", "funnel",
+]);
+const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set([
+  "dashboard", "daily", "analytics", "tracking", "termins", "looker",
+  "funnel", "managers", "call_analysis", "criteria", "scripts", "audit",
+]);
+
+function readTabFromHash(): TabId | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.location.hash.replace(/^#/, "");
+  return VALID_TABS.has(raw as TabId) ? (raw as TabId) : null;
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  const [activeTab, setActiveTab] = useState<"dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit">("dashboard");
+  // Initial tab: URL hash (#funnel) if valid, иначе "dashboard". После загрузки
+  // сессии может перебиться на "real_calls" для manager-роли — но только если
+  // hash не задан явно (manager не может попасть в admin-таб даже по ссылке).
+  const [activeTab, setActiveTab] = useState<TabId>(() => readTabFromHash() ?? "dashboard");
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -111,16 +132,44 @@ export default function Dashboard() {
         if (data) {
           setSession(data);
           setActiveDepartment(data.department);
+          // Manager: пробуем сохранить таб из URL hash. Если он admin-only
+          // или не задан — fallback на "real_calls".
           if (data.role === "manager") {
-            setActiveTab("real_calls");
+            const fromHash = readTabFromHash();
+            if (!fromHash || ADMIN_ONLY_TABS.has(fromHash)) {
+              setActiveTab("real_calls");
+            }
           }
         }
       })
       .finally(() => setSessionLoading(false));
   }, []);
 
+  // Sync activeTab → URL hash (для refresh и shareable links).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const current = window.location.hash.replace(/^#/, "");
+    if (current === activeTab) return;
+    // history.replaceState — без записи в history (browser back button не ловит вкладки).
+    window.history.replaceState(null, "", `#${activeTab}`);
+  }, [activeTab]);
+
   const isAdmin = session?.role === "admin";
   const isManager = session?.role === "manager";
+
+  // Browser navigation (back/forward, ручное редактирование hash) → синхронизируем state.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onHashChange = () => {
+      const tab = readTabFromHash();
+      if (tab && tab !== activeTab) {
+        if (!isAdmin && ADMIN_ONLY_TABS.has(tab)) return; // запрещаем manager-у admin-таб
+        setActiveTab(tab);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [activeTab, isAdmin]);
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -649,6 +698,7 @@ export default function Dashboard() {
             { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
             { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true },
             { id: "looker", icon: Database, label: "Looker", adminOnly: true },
+            { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true },
             { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
             { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
             { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
@@ -797,6 +847,8 @@ export default function Dashboard() {
         )}
 
         {activeTab === "looker" && <LookerTab department={activeDepartment} />}
+
+        {activeTab === "funnel" && <FunnelTab department={activeDepartment} />}
 
         {activeTab === "termins" && <TerminTab />}
 

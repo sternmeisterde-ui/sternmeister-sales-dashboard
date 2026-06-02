@@ -48,7 +48,7 @@ function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> 
   return fetch(url, { ...options, signal });
 }
 
-async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
+export async function rateLimitedFetch(url: string, options: RequestInit): Promise<Response> {
   // Acquire mutex
   const prevMutex = rateLimitMutex;
   let releaseMutex: () => void = () => {};
@@ -267,7 +267,7 @@ function envTokenInUse(): boolean {
 
 // ==================== HELPERS ====================
 
-async function getAuthHeaders(): Promise<HeadersInit> {
+export async function getAuthHeaders(): Promise<HeadersInit> {
   await ensureKommoConfig();
   return {
     Authorization: `Bearer ${_cachedToken}`,
@@ -275,7 +275,7 @@ async function getAuthHeaders(): Promise<HeadersInit> {
   };
 }
 
-async function getBaseUrl(): Promise<string> {
+export async function getBaseUrl(): Promise<string> {
   await ensureKommoConfig();
   const domain = _cachedDomain || process.env.KOMMO_API_DOMAIN || "api-c.kommo.com";
   return `https://${domain}/api/v4`;
