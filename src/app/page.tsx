@@ -116,10 +116,18 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  // Initial tab: URL hash (#funnel) if valid, иначе "dashboard". После загрузки
-  // сессии может перебиться на "real_calls" для manager-роли — но только если
-  // hash не задан явно (manager не может попасть в admin-таб даже по ссылке).
-  const [activeTab, setActiveTab] = useState<TabId>(() => readTabFromHash() ?? "dashboard");
+  // Начальный таб — стабильный SSR-safe "dashboard". Реальный таб из URL hash
+  // (#funnel и т.д.) применяется в useEffect ПОСЛЕ монтирования (см. ниже).
+  // Читать hash прямо в инициализаторе нельзя: на сервере window нет → "dashboard",
+  // на клиенте #funnel → "funnel", и деревья SSR/гидрации расходятся (hydration
+  // error). После загрузки сессии таб может перебиться на "real_calls" для
+  // manager-роли (manager не попадает в admin-таб даже по прямой ссылке).
+  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
+  // True после того, как на клиенте прочитан URL hash и выбран реальный таб.
+  // До этого контент дефолтного "dashboard"-таба НЕ рендерим (см. ниже и render):
+  // иначе при deep-link на #funnel первый кадр успевает смонтировать DashboardTab
+  // и дёрнуть его тяжёлый /api/dashboard впустую, замедляя загрузку нужной вкладки.
+  const [navReady, setNavReady] = useState(false);
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
@@ -145,9 +153,28 @@ export default function Dashboard() {
       .finally(() => setSessionLoading(false));
   }, []);
 
-  // Sync activeTab → URL hash (для refresh и shareable links).
+  // Применяем URL hash → activeTab ПОСЛЕ монтирования (только клиент). Именно
+  // поэтому начальный стейт выше — стабильный "dashboard": первый клиентский
+  // рендер обязан совпасть с SSR (где window нет), иначе hydration mismatch.
+  // hash доступен лишь в браузере — читаем его здесь, а не в useState-инициализаторе.
+  // setActiveTab + setNavReady в одном эффекте → один батч-ререндер: к моменту
+  // navReady=true таб уже правильный, поэтому DashboardTab при #funnel НЕ монтируется.
+  useEffect(() => {
+    const fromHash = readTabFromHash();
+    if (fromHash) setActiveTab(fromHash);
+    setNavReady(true);
+  }, []);
+
+  // Sync activeTab → URL hash (для refresh и shareable links). Первый прогон
+  // (на монтировании) пропускаем — иначе он перезапишет реальный #funnel
+  // дефолтным #dashboard ещё до того, как эффект выше применит таб из hash.
+  const skipFirstHashSync = useRef(true);
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (skipFirstHashSync.current) {
+      skipFirstHashSync.current = false;
+      return;
+    }
     const current = window.location.hash.replace(/^#/, "");
     if (current === activeTab) return;
     // history.replaceState — без записи в history (browser back button не ловит вкладки).
@@ -812,7 +839,10 @@ export default function Dashboard() {
         </header>
 
         {/* --------------------- DASHBOARD VIEW --------------------- */}
-        {activeTab === "dashboard" && (
+        {/* navReady-гейт: "dashboard" — дефолт ДО чтения hash, поэтому при
+            deep-link на другой таб (#funnel) его контент рендерим только когда
+            hash уже прочитан — иначе DashboardTab монтируется и грузит данные зря. */}
+        {navReady && activeTab === "dashboard" && (
           <DashboardTab department={activeDepartment} />
         )}
 
