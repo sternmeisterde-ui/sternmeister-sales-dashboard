@@ -60,12 +60,27 @@ interface ManagerBreakdown {
   blocks: ManagerBlockScore[];
 }
 
+// B2B-only: баллы менеджера по блокам, разбитые ПО ПЕРИОДАМ (даты — колонки).
+// Внешний уровень таблицы — блоки (из `blocks`), вложенный — менеджеры.
+interface ManagerTimeBlock {
+  name: string;
+  scores: Record<string, number>; // ключ периода → балл
+}
+interface ManagerTimeRow {
+  id: string;
+  name: string;
+  callCount: number;
+  blocks: ManagerTimeBlock[];
+}
+
 interface AnalyticsResponse {
   periods: string[];
   blocks: BlockData[];
   overallScores: Record<string, number>;
   managers: Array<{ id: string; name: string }>;
   managerBreakdown: ManagerBreakdown[];
+  // Пусто для всех, кроме B2B. Считается только когда department === "b2b".
+  managerTimeBreakdown: ManagerTimeRow[];
   totalCalls: number;
   source: string;
   department: string;
@@ -455,6 +470,10 @@ async function fetchOkkData(
   //     and key off the canonical JSON config.
   const isAllFunnels = line === "all" || !line;
 
+  // B2B: аккумулятор «менеджер × период» для таблицы разбивки во времени.
+  const managerPeriodAccMap = new Map<string, PeriodAcc>();
+  const wantManagerTime = department === "b2b";
+
   let processedCount = 0;
   for (const row of rows) {
     if (!row.callCreatedAt) continue;
@@ -487,6 +506,19 @@ async function fetchOkkData(
       processCallAsFunnel(managerAccMap.get(mgrKey)!, row.totalScore, funnel);
     } else {
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
+    }
+
+    // Тот же звонок → бакет «менеджер × период» (B2B). Решение accept/reject
+    // уже принято периодным бакетом выше (had), поэтому здесь просто дублируем.
+    if (wantManagerTime) {
+      const mpKey = `${mgrKey}::${p}`;
+      if (!managerPeriodAccMap.has(mpKey)) managerPeriodAccMap.set(mpKey, newAcc());
+      const mpAcc = managerPeriodAccMap.get(mpKey)!;
+      if (isAllFunnels) {
+        processCallAsFunnel(mpAcc, row.totalScore, funnelLabelForOkk(department, row.promptType));
+      } else {
+        processBlocks(blocks, mpAcc, row.totalScore);
+      }
     }
   }
 
@@ -537,7 +569,7 @@ async function fetchOkkData(
     canonical = await loadCanonicalCriteria(promptTypesForCanonical);
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical);
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerPeriodAccMap);
 }
 
 // ─── Roleplay data fetcher ──────────────────────────────────
@@ -616,6 +648,10 @@ async function fetchRoleplayData(
 
   const isAllFunnels = line === "all" || !line;
 
+  // B2B: аккумулятор «менеджер × период» для таблицы разбивки во времени.
+  const managerPeriodAccMap = new Map<string, PeriodAcc>();
+  const wantManagerTime = department === "b2b";
+
   let processedCount = 0;
   for (const row of rows) {
     if (!row.startedAt) continue;
@@ -646,6 +682,18 @@ async function fetchRoleplayData(
       processCallAsFunnel(managerAccMap.get(mgrKey)!, row.score ?? null, funnel);
     } else {
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.score ?? null);
+    }
+
+    // Тот же звонок → бакет «менеджер × период» (B2B). См. fetchOkkData.
+    if (wantManagerTime) {
+      const mpKey = `${mgrKey}::${p}`;
+      if (!managerPeriodAccMap.has(mpKey)) managerPeriodAccMap.set(mpKey, newAcc());
+      const mpAcc = managerPeriodAccMap.get(mpKey)!;
+      if (isAllFunnels) {
+        processCallAsFunnel(mpAcc, row.score ?? null, funnelLabelForRoleplay(department, row.callType));
+      } else {
+        processBlocks(blocks, mpAcc, row.score ?? null);
+      }
     }
   }
 
@@ -691,7 +739,7 @@ async function fetchRoleplayData(
   } else {
     canonical = EMPTY_CANONICAL;
   }
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical);
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerPeriodAccMap);
 }
 
 // ─── Build response from accumulators ───────────────────────
@@ -706,6 +754,7 @@ function buildResponse(
   totalCalls: number,
   managersForBreakdown: Array<{ id: string; name: string }> | undefined,
   canonical: CanonicalCriteria,
+  managerPeriodAccMap: Map<string, PeriodAcc>,
 ): AnalyticsResponse {
   // The dropdown stays scoped to active managers (`managers`); the breakdown
   // uses the full set including inactive/admin/"no-manager" so totals match.
@@ -805,6 +854,23 @@ function buildResponse(
     .filter((m): m is ManagerBreakdown => m !== null)
     .sort((a, b) => (b.overallScore ?? 0) - (a.overallScore ?? 0));
 
+  // B2B-only: менеджер × период × блок (даты — колонки). Пусто, если
+  // managerPeriodAccMap не заполнялся (не B2B). Те же менеджеры и порядок,
+  // что и в managerBreakdown (отсортирован по overallScore).
+  const managerTimeBreakdown: ManagerTimeRow[] = managerPeriodAccMap.size === 0
+    ? []
+    : managerBreakdown.map((mgr) => {
+        const tblocks: ManagerTimeBlock[] = blockOrder.map((blockName) => {
+          const scores: Record<string, number> = {};
+          for (const p of trimmedPeriods) {
+            const be = managerPeriodAccMap.get(`${mgr.id}::${p}`)?.blocks.get(blockName);
+            if (be && be.count > 0) scores[p] = Math.round(be.scoreSum / be.count);
+          }
+          return { name: blockName, scores };
+        });
+        return { id: mgr.id, name: mgr.name, callCount: mgr.callCount, blocks: tblocks };
+      });
+
   // Diagnostic log
   console.log(`[Analytics] ${source}/${department}: ${totalCalls} calls, ${blockOrder.length} blocks, ${managers.length} managers in list, ${managerAccMap.size} managers with data`);
   for (const [mgrId, mgrAcc] of managerAccMap) {
@@ -814,7 +880,7 @@ function buildResponse(
     }
   }
 
-  return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, totalCalls, source, department };
+  return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, managerTimeBreakdown, totalCalls, source, department };
 }
 
 // ─── Route handler ──────────────────────────────────────────
