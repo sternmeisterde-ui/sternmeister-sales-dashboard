@@ -509,12 +509,15 @@ function CriteriaTimeTable({
 }
 
 function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: BlockData; periods: string[]; isCollapsed: boolean; onToggle: () => void }) {
+  // В режиме «Все» строка = воронка без критериев (API отдаёт criteria=[]
+  // намеренно). Раскрывать нечего → убираем шеврон и клик у таких строк.
+  const hasChildren = block.criteria.length > 0;
   return (
     <>
-      <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={onToggle}>
+      <tr className={`bg-slate-900/60 border-t border-white/10 ${hasChildren ? "cursor-pointer hover:bg-slate-800/40" : ""}`} onClick={hasChildren ? onToggle : undefined}>
         <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
           <div className="flex items-center gap-2">
-            {isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />}
+            {hasChildren && (isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />)}
             <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{block.name}</span>
           </div>
         </td>
@@ -523,7 +526,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           return <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
         })}
       </tr>
-      {!isCollapsed && block.criteria.map((c) => (
+      {hasChildren && !isCollapsed && block.criteria.map((c) => (
         <tr key={`${block.name}-${c.name}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
@@ -587,12 +590,14 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
   blockName: string; blockIdx: number; criteriaNames: string[]; managers: ManagerBreakdown[];
   isCollapsed: boolean; onToggle: () => void;
 }) {
+  // «Все» = строка-воронка без критериев → нечего раскрывать (см. BlockTimeRows).
+  const hasChildren = criteriaNames.length > 0;
   return (
     <>
-      <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={onToggle}>
+      <tr className={`bg-slate-900/60 border-t border-white/10 ${hasChildren ? "cursor-pointer hover:bg-slate-800/40" : ""}`} onClick={hasChildren ? onToggle : undefined}>
         <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
           <div className="flex items-center gap-2">
-            {isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />}
+            {hasChildren && (isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />)}
             <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{blockName}</span>
           </div>
         </td>
@@ -601,7 +606,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           return <td key={m.id} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
         })}
       </tr>
-      {!isCollapsed && criteriaNames.map((cName, ci) => (
+      {hasChildren && !isCollapsed && criteriaNames.map((cName, ci) => (
         <tr key={`${blockName}-m-${cName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
@@ -707,12 +712,14 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
   blockA?: AggregatedBlock; blockB?: AggregatedBlock; criteriaNames: string[];
   isCollapsed: boolean; onToggle: () => void;
 }) {
+  // «Все» = строка-воронка без критериев → нечего раскрывать (см. BlockTimeRows).
+  const hasChildren = criteriaNames.length > 0;
   return (
     <>
-      <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={onToggle}>
+      <tr className={`bg-slate-900/60 border-t border-white/10 ${hasChildren ? "cursor-pointer hover:bg-slate-800/40" : ""}`} onClick={hasChildren ? onToggle : undefined}>
         <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
           <div className="flex items-center gap-2">
-            {isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />}
+            {hasChildren && (isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />)}
             <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{blockName}</span>
           </div>
         </td>
@@ -720,7 +727,7 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
         <td className={`px-3 py-2 text-center font-mono text-[11px] font-bold ${getCriteriaColor(scoreB)} ${getCriteriaBg(scoreB)}`}>{fmtScore(scoreB)}</td>
         <td className={`px-3 py-2 text-center font-mono text-[11px] font-bold ${getDeltaColor(scoreA, scoreB)}`}>{fmtDelta(scoreA, scoreB)}</td>
       </tr>
-      {!isCollapsed && criteriaNames.map((cName) => {
+      {hasChildren && !isCollapsed && criteriaNames.map((cName) => {
         const cA = blockA?.criteria.find((c) => c.name === cName)?.score ?? null;
         const cB = blockB?.criteria.find((c) => c.name === cName)?.score ?? null;
         return (
