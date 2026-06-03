@@ -44,3 +44,36 @@ export interface CohortsApiResponse {
   /** Сохранённые в БД целевые уровни (этап K). Перекрывают дефолты из CONVERSIONS. */
   benchmarks: Partial<Record<ConversionId, number | null>>;
 }
+
+// ---------- Обзор: KPI-полоска (§9.1) + объединённая воронка (§9.2) ----------
+
+export interface OverviewKpi {
+  /** Главная сквозная конверсия Квал→Гутшайн, %. */
+  c5Pct: number | null;
+  /** Активных клиентов (не закрыты, обе воронки). */
+  activeClients: number;
+  /** Заглушка до скоринга §8 — null значит «ещё нет». */
+  hotWarmCold: { hot: number; warm: number; cold: number } | null;
+  /** Средний срок квал-лид → Гутшайн, дней (по дошедшим). */
+  avgDaysQualToGutschein: number | null;
+  /** Активных клиентов без звонка за порог дней. */
+  noFreshCallCount: number;
+  /** Порог «свежести» звонка (дней). */
+  freshCallThresholdDays: number;
+}
+
+export interface OverviewFunnelStage {
+  key: string;
+  label: string;
+  /** Сколько клиентов дошло до этапа (накопительно). */
+  count: number;
+  /** % перехода с предыдущего этапа. null для первого. */
+  transitionPctFromPrev: number | null;
+  /** Среднее время перехода с предыдущего этапа, дней. null если неизвестно. */
+  avgDaysFromPrev: number | null;
+}
+
+export interface OverviewResponse {
+  kpi: OverviewKpi;
+  funnel: OverviewFunnelStage[];
+}

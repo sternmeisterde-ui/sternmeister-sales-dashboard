@@ -16,6 +16,10 @@
 //   9. computeSla          — analytics.sla (from leads_cohort + enriched
 //                            communications). Last so it sees both Kommo
 //                            and telephony rows with real lead_ids.
+//
+//   Side step: syncClientRoleplays — mirrors OKK client-roleplay scores
+//   (D2 client_evaluations) → analytics.client_roleplays. Independent of
+//   leadCache; auto-skipped without D2_OKK_DATABASE_URL.
 
 import { fetchLookups } from "./lookups";
 import { syncLeads, updateContactDates, type LeadCacheEntry } from "./sync-leads";
@@ -24,6 +28,7 @@ import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncCloseReasonChanges } from "./sync-close-reason-changes";
 import { syncLeadDeletions } from "./sync-lead-deletions";
+import { syncClientRoleplays } from "./sync-client-roleplays";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
@@ -68,7 +73,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -251,6 +256,19 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await runStep(
       "sync-lead-deletions",
       () => syncLeadDeletions(opts.fromDate, opts.toDate),
+      0,
+      stepErrors,
+    );
+  }
+
+  // Client roleplays — зеркалит объективные оценки клиентских ролевок из ОКК
+  // (D2 client_evaluations, roleplay_present=true) в analytics.client_roleplays.
+  // Не нужен leadCache — ключуется по kommo_lead_id. Окно по eval.created_at.
+  // Авто-skip если D2_OKK_DATABASE_URL не задан.
+  if (!skip.has("client_roleplays")) {
+    await runStep(
+      "sync-client-roleplays",
+      () => syncClientRoleplays(opts.fromDate, opts.toDate),
       0,
       stepErrors,
     );

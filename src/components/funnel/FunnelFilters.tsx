@@ -17,6 +17,8 @@ interface Props {
   activeFilterCount: number;
   /** Когда в проде появится бэкенд, придёт сюда из last_sync. */
   lastUpdatedAt: Date | null;
+  /** Режим «Клиенты»: зрелость/канал/менеджер не применяются — затемняем. */
+  clientsMode?: boolean;
   onChange: (next: Partial<FunnelFiltersState>) => void;
   onReset: () => void;
 }
@@ -34,24 +36,37 @@ export default function FunnelFilters({
   managerOptions,
   activeFilterCount,
   lastUpdatedAt,
+  clientsMode = false,
   onChange,
   onReset,
 }: Props) {
+  // В режиме «Клиенты» к выборке применяется только Период; остальные фильтры
+  // (зрелость когорт, Гос-канал/менеджер) затемняем и блокируем.
+  const dimCls = clientsMode ? "opacity-40 pointer-events-none" : "";
+  const dimTitle = clientsMode
+    ? "Не применяется к виду «Клиенты» (только Период)"
+    : undefined;
   return (
     <section
       className="glass-panel rounded-2xl border border-white/5 px-4 py-3 flex flex-wrap items-center gap-2"
       aria-label="Шапка и фильтры"
     >
-      {/* Period — стандартный CalendarPicker, тот же что в Daily/Analytics/Termin */}
-      <CalendarPicker
-        mode="range"
-        value={state.dateRange}
-        onChange={(dateRange) => onChange({ dateRange })}
-        onClear={() => onChange({ dateRange: defaultState.dateRange })}
-      />
+      {/* Period — стандартный CalendarPicker, тот же что в Daily/Analytics/Termin.
+          В режиме «Клиенты» затемнён — там свой фильтр по дате термина. */}
+      <div className={dimCls} title={dimTitle}>
+        <CalendarPicker
+          mode="range"
+          value={state.dateRange}
+          onChange={(dateRange) => onChange({ dateRange })}
+          onClear={() => onChange({ dateRange: defaultState.dateRange })}
+        />
+      </div>
 
       {/* Maturity — button group в стиле granularity TerminTab */}
-      <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
+      <div
+        title={dimTitle}
+        className={`inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 ${dimCls}`}
+      >
         {MATURITY_OPTIONS.map((opt) => {
           const active = state.maturity === opt.value;
           return (
@@ -73,24 +88,28 @@ export default function FunnelFilters({
       </div>
 
       {/* Source — кастомный селект в дизайне дашборда */}
-      <FilterSelect
-        value={state.source}
-        options={sourceOptions}
-        onChange={(source) => onChange({ source })}
-        emptyLabel="Все каналы"
-        ariaLabel="Канал"
-        minWidthClass="min-w-[140px]"
-      />
+      <div className={dimCls} title={dimTitle}>
+        <FilterSelect
+          value={state.source}
+          options={sourceOptions}
+          onChange={(source) => onChange({ source })}
+          emptyLabel="Все каналы"
+          ariaLabel="Канал"
+          minWidthClass="min-w-[140px]"
+        />
+      </div>
 
       {/* Manager — кастомный селект в дизайне дашборда */}
-      <FilterSelect
-        value={state.responsibleUserId}
-        options={managerOptions}
-        onChange={(responsibleUserId) => onChange({ responsibleUserId })}
-        emptyLabel="Все менеджеры"
-        ariaLabel="Менеджер"
-        minWidthClass="min-w-[170px]"
-      />
+      <div className={dimCls} title={dimTitle}>
+        <FilterSelect
+          value={state.responsibleUserId}
+          options={managerOptions}
+          onChange={(responsibleUserId) => onChange({ responsibleUserId })}
+          emptyLabel="Все менеджеры"
+          ariaLabel="Менеджер"
+          minWidthClass="min-w-[170px]"
+        />
+      </div>
 
       {/* Reset + Active filter badge */}
       <button

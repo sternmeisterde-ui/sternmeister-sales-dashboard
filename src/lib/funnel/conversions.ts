@@ -5,7 +5,15 @@
 
 import type { ConversionId, ConversionMeta } from "./types";
 
-export const CONVERSION_ORDER: ConversionId[] = ["C1", "C2", "C3", "C4", "C5"];
+export const CONVERSION_ORDER: ConversionId[] = [
+  "C1",
+  "C1.1",
+  "C2",
+  "C2.1",
+  "C3",
+  "C4",
+  "C5",
+];
 
 export const CONVERSIONS: Record<ConversionId, ConversionMeta> = {
   C1: {
@@ -14,11 +22,26 @@ export const CONVERSIONS: Record<ConversionId, ConversionMeta> = {
     maturityWeeks: 4,
     benchmark: 40,
   },
+  // C1.1 — то же, что C1, но из базы исключены лиды с причиной «Игнор».
+  // benchmark null: цель чистой конверсии РОП задаёт сам (сохраняется в БД).
+  "C1.1": {
+    id: "C1.1",
+    label: "Квал лид → Документы в ДЦ (без «Игнор»)",
+    maturityWeeks: 4,
+    benchmark: null,
+  },
   C2: {
     id: "C2",
     label: "Квал лид → Термин ДЦ",
     maturityWeeks: 6,
     benchmark: 35,
+  },
+  // C2.1 — то же, что C2, но из базы исключены лиды с причиной «Игнор».
+  "C2.1": {
+    id: "C2.1",
+    label: "Квал лид → Термин ДЦ (без «Игнор»)",
+    maturityWeeks: 6,
+    benchmark: null,
   },
   C3: {
     id: "C3",

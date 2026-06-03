@@ -33,7 +33,7 @@ import {
 } from "@/lib/kommo/pipeline-config";
 import type { CohortsApiCohort, CohortsApiResponse } from "./api-types";
 import type { ConversionId, MaturityFilter } from "./types";
-import { CONVERSIONS } from "./conversions";
+import { CONVERSIONS, CONVERSION_ORDER } from "./conversions";
 import {
   isoLabel,
   isoWeekEndBerlin,
@@ -99,6 +99,8 @@ export interface BaseLead {
   currentStatusId: number;
   /** True если в моменте lead дисквалифицирован (non_qual_enum_id ∈ NEQVAL). */
   isDisqualified: boolean;
+  /** True если причина закрытия — «Игнор» (non_qual_enum_id ∈ IGNOR). Для C1.1/C2.1. */
+  isIgnor: boolean;
   /** Дата дисквалификации: точная (из истории CFV 879824) или приближение через updated_at. */
   disqualifiedAt: Date | null;
   /** Нормализованный уровень языка: a2/b1/b2/c1/unknown. */
@@ -109,6 +111,20 @@ export interface BaseLead {
 const NEQVAL_ENUM_IDS = new Set<number>([
   744486, 744876, 747530, 747532, 747534, 747536,
 ]);
+
+/**
+ * enum_id поля 879824, который трактуем как «тема Игнор» для под-конверсий
+ * C1.1/C2.1. Только базовый «Игнор» (744314) — клиент пропал ДО продвижения
+ * по этапам. Варианты «Игнор после отправки документов/термина» НЕ включаем:
+ * там лид уже дошёл до цели C1/C2, исключение спрятало бы реальную конверсию.
+ * «Игнор» НЕ пересекается с NEQVAL — это разные значения одного select-поля.
+ */
+const IGNOR_ENUM_IDS = new Set<number>([744314]);
+
+/** Под-конверсии, у которых из базы вычитаются «игнор»-лиды (C1.1/C2.1). */
+export function excludesIgnor(id: ConversionId): boolean {
+  return id === "C1.1" || id === "C2.1";
+}
 
 function normalizeLanguageLevel(
   raw: string | null
@@ -204,11 +220,66 @@ export async function computeCohorts(
   const cohorts: CohortsApiCohort[] = [];
   const now = todayBerlinUTC();
 
-  for (const conversionId of ["C1", "C2", "C3", "C4", "C5"] as ConversionId[]) {
-    const meta = CONVERSIONS[conversionId];
-    const cohortMap = new Map<string, AggBucket>();
+  // Per-conversion (week → bucket) — заполним в одном проходе по лидам.
+  const cohortMapsByConv = new Map<ConversionId, Map<string, AggBucket>>();
+  for (const id of CONVERSION_ORDER) {
+    cohortMapsByConv.set(id, new Map<string, AggBucket>());
+  }
 
-    for (const { lead, weekStart, weekKey } of leadCohortCache) {
+  // Один проход по лидам, вычисляем результаты для всех конверсий сразу.
+  // C1.1/C2.1 переиспользуют результат C1/C2 (та же логика, разница лишь в
+  // excludesIgnor() фильтре). Раньше processLeadForConversion вызывался
+  // 7 раз/лид — теперь 5.
+  for (const { lead, weekStart, weekKey } of leadCohortCache) {
+    const r1 = processLeadForConversion(
+      "C1",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r2 = processLeadForConversion(
+      "C2",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r3 = processLeadForConversion(
+      "C3",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r4 = processLeadForConversion(
+      "C4",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const r5 = processLeadForConversion(
+      "C5",
+      lead,
+      targetEvents,
+      beraterContext
+    );
+    const resultsByConv: Record<
+      ConversionId,
+      { included: boolean; targetAt: Date | null }
+    > = {
+      C1: r1,
+      "C1.1": r1,
+      C2: r2,
+      "C2.1": r2,
+      C3: r3,
+      C4: r4,
+      C5: r5,
+    };
+
+    for (const conversionId of CONVERSION_ORDER) {
+      // C1.1/C2.1: «игнор»-лиды полностью вне расчёта — ни в базе, ни в цели,
+      // ни в дисквале.
+      if (excludesIgnor(conversionId) && lead.isIgnor) continue;
+
+      const cohortMap = cohortMapsByConv.get(conversionId)!;
       let bucket = cohortMap.get(weekKey);
       if (!bucket) {
         bucket = {
@@ -225,12 +296,7 @@ export async function computeCohorts(
         cohortMap.set(weekKey, bucket);
       }
 
-      const result = processLeadForConversion(
-        conversionId,
-        lead,
-        targetEvents,
-        beraterContext
-      );
+      const result = resultsByConv[conversionId];
 
       // Target учитывается если дошёл до цели И (не дисквалифицирован ИЛИ
       // target_at ≤ disq_at). Это _target_counts() cohort-conversion qualification.py.
@@ -258,6 +324,11 @@ export async function computeCohorts(
       else if (lead.languageBucket === "c1") bucket.langC1 += 1;
       else bucket.langUnknown += 1;
     }
+  }
+
+  for (const conversionId of CONVERSION_ORDER) {
+    const meta = CONVERSIONS[conversionId];
+    const cohortMap = cohortMapsByConv.get(conversionId)!;
 
     for (const [, bucket] of cohortMap) {
       const weekEnd = isoWeekEndBerlin(bucket.weekStart);
@@ -329,7 +400,8 @@ export function processLeadForConversion(
 ): { included: boolean; targetAt: Date | null } {
   const anchorAt = lead.anchorAt;
 
-  if (conversionId === "C1") {
+  // C1.1 — та же цель, что C1 (вычитание «игнор»-лидов делает вызывающий код).
+  if (conversionId === "C1" || conversionId === "C1.1") {
     const targetAt = pickEarliestGosTargetAfter(
       lead,
       targetEvents,
@@ -339,7 +411,8 @@ export function processLeadForConversion(
     return { included: true, targetAt };
   }
 
-  if (conversionId === "C2") {
+  // C2.1 — та же цель, что C2.
+  if (conversionId === "C2" || conversionId === "C2.1") {
     const targetAt = pickEarliestGosTargetAfter(
       lead,
       targetEvents,
@@ -526,6 +599,8 @@ export async function fetchQualifiedBaseLeads(
       r.nonQualEnumId === null ? null : Number(r.nonQualEnumId);
     const isDisqualified =
       nonQualEnumId !== null && NEQVAL_ENUM_IDS.has(nonQualEnumId);
+    const isIgnor =
+      nonQualEnumId !== null && IGNOR_ENUM_IDS.has(nonQualEnumId);
     const updatedAt =
       r.updatedAt === null
         ? null
@@ -541,6 +616,7 @@ export async function fetchQualifiedBaseLeads(
       utmSource: r.utmSource,
       currentStatusId: Number(r.statusId),
       isDisqualified,
+      isIgnor,
       // Приближение: если currently disqualified — берём updated_at как
       // приблизительную дату. enrichDisqualifiedAt() заменит на точную из
       // истории CFV 879824 если она есть.
@@ -717,13 +793,13 @@ export function buildLanguageBreakdown(bucket: AggBucket): {
 // SQL + helper: история CFV 879824 для точного disqualified_at
 // ──────────────────────────────────────────────────────────────────────────
 
-interface CloseReasonEvent {
+export interface CloseReasonEvent {
   eventAt: Date;
   enumIdAfter: number | null;
 }
 
 /** Fetches close_reason history per lead, sorted by event_at ASC. */
-async function fetchCloseReasonHistory(
+export async function fetchCloseReasonHistory(
   leadIds: number[]
 ): Promise<Map<number, CloseReasonEvent[]>> {
   const idsIn = leadIds.join(",");
@@ -782,7 +858,7 @@ function historicalDisqualifiedSince(
  *   - иначе если currently disqualified → updated_at (приближение)
  *   - иначе → null
  */
-function enrichDisqualifiedAt(
+export function enrichDisqualifiedAt(
   lead: BaseLead,
   events: CloseReasonEvent[] | undefined
 ): BaseLead {

@@ -6,6 +6,7 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
+  excludesIgnor,
   fetchBeraterContext,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
@@ -13,6 +14,7 @@ import {
   unwrapRows,
   type ComputeOpts,
 } from "./compute";
+import { isoWeekStartBerlin } from "./cohort-math";
 import type { ConversionId } from "./types";
 
 const KOMMO_BASE = "https://sternmeister.kommo.com/leads/detail";
@@ -45,18 +47,35 @@ interface ListOpts extends ComputeOpts {
 export async function computeCohortLeads(
   opts: ListOpts
 ): Promise<DrillResponse> {
-  // Сужаем from/to до бордеров запрошенной ISO-недели — иначе тянем тысячи
-  // лидов за весь период из ComputeOpts и потом фильтруем до одной недели.
-  // Для drill-down это лишняя работа: запрос интересует ТОЛЬКО эта неделя.
+  // Запрошенная неделя = UTC-полночь её ISO-понедельника (как weekStartIso,
+  // приходящий из computeCohorts: isoDate(isoWeekStartBerlin(...))).
   const weekStart = new Date(`${opts.weekStartIso}T00:00:00Z`);
   if (Number.isNaN(weekStart.getTime())) {
     throw new Error(`invalid weekStartIso: ${opts.weekStartIso}`);
   }
-  const weekEnd = new Date(weekStart);
-  weekEnd.setUTCDate(weekStart.getUTCDate() + 7);
-  const narrowedOpts = { ...opts, from: weekStart, to: weekEnd };
+  const requestedMondayMs = weekStart.getTime();
 
-  const baseLeads = await fetchQualifiedBaseLeads(narrowedOpts);
+  // Узкое окно для SQL (perf): ISO-неделя ±1 день — Berlin-неделя сдвинута
+  // относительно UTC на 1-2ч, точную принадлежность проверяем ниже через
+  // isoWeekStartBerlin. КРИТИЧНО зажимаем окно в пользовательский [from, to]:
+  // computeCohorts считает только лиды внутри фильтра, поэтому последняя
+  // (текущая) неделя обрезается по `to`. Без зажатия drill тянул полную неделю
+  // (включая «сегодняшние» лиды) и показывал БОЛЬШЕ, чем таблица.
+  const weekLo = new Date(weekStart);
+  weekLo.setUTCDate(weekStart.getUTCDate() - 1);
+  const weekHi = new Date(weekStart);
+  weekHi.setUTCDate(weekStart.getUTCDate() + 8);
+  const lo = weekLo > opts.from ? weekLo : opts.from; // max(weekLo, from)
+  const hi = weekHi < opts.to ? weekHi : opts.to; // min(weekHi, to)
+  const narrowedOpts = { ...opts, from: lo, to: hi };
+
+  const fetched = await fetchQualifiedBaseLeads(narrowedOpts);
+  // Точная принадлежность к запрошенной Berlin ISO-неделе — как группировка в
+  // computeCohorts; отсекает «соседние» недели, попавшие в окно ±1 день.
+  const baseLeads = fetched.filter(
+    (l) => isoWeekStartBerlin(l.anchorAt).getTime() === requestedMondayMs
+  );
+
   const leadIds = baseLeads.map((l) => l.leadId);
   const targetEvents = leadIds.length
     ? await fetchTargetEvents(leadIds)
@@ -71,11 +90,15 @@ export async function computeCohortLeads(
       ? await fetchBeraterContext(leadIds)
       : new Map();
 
+  // Точно повторяем per-metric логику computeCohorts:
+  //  • ignor (C1.1/C2.1) — полностью вне расчёта;
+  //  • base («Лиды») = НЕ дисквалифицирован И included (= displayLeadCount);
+  //  • target («Факт») = included И достиг цели, причём цель засчитывается даже
+  //    дисквалифицированному лиду, если он дошёл ДО дисквалификации
+  //    (target_at ≤ disqualified_at) — это _target_counts() в computeCohorts.
   const matchingIds: number[] = [];
   for (const lead of baseLeads) {
-    // Currently-disqualified → не в base и не в target (соответствует
-    // displayLeadCount() cohort-conversion: "Лиды" = base - disqualified).
-    if (lead.isDisqualified) continue;
+    if (excludesIgnor(opts.conversionId) && lead.isIgnor) continue;
 
     const result = processLeadForConversion(
       opts.conversionId,
@@ -83,15 +106,16 @@ export async function computeCohortLeads(
       targetEvents,
       beraterContext
     );
-    if (!result.included) continue;
+
     if (opts.metric === "target") {
-      if (result.targetAt === null) continue;
-      if (
-        lead.disqualifiedAt !== null &&
-        result.targetAt > lead.disqualifiedAt
-      ) {
-        continue;
-      }
+      if (!result.included || result.targetAt === null) continue;
+      const targetCounts =
+        lead.disqualifiedAt === null ||
+        result.targetAt <= lead.disqualifiedAt;
+      if (!targetCounts) continue;
+    } else {
+      if (lead.isDisqualified) continue;
+      if (!result.included) continue;
     }
     matchingIds.push(lead.leadId);
   }

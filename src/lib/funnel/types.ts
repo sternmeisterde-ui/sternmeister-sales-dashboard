@@ -5,7 +5,17 @@
 
 import type { DateRange } from "@/components/CalendarPicker";
 
-export type ConversionId = "C1" | "C2" | "C3" | "C4" | "C5";
+// C1.1 / C2.1 — «чистые» варианты C1 / C2: та же цель, но из базы исключены
+// лиды, закрытые с причиной «Игнор» (поле 879824 enum 744314). См. compute.ts
+// IGNOR_ENUM_IDS / excludesIgnor.
+export type ConversionId =
+  | "C1"
+  | "C1.1"
+  | "C2"
+  | "C2.1"
+  | "C3"
+  | "C4"
+  | "C5";
 
 export type MaturityFilter = "all" | "mature" | "immature";
 
