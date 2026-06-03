@@ -1083,15 +1083,17 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
                   </tr>
                 </thead>
                 <tbody>
-                  {pipeRows.map((r) => {
+                  {pipeRows.map((r, idx) => {
                     const leadCount = Number(r.lead_count);
                     const pct = Number(r.pct);
                     // Bar width relative to pipeline_total so all bars express the same scale
                     const leadsBarW = total > 0 ? Math.min(Math.round((leadCount / total) * 100), 100) : 0;
 
+                    // key: у B2B Бух Комм и Мед Комм одинаковые имена статусов →
+                    // r.status неуникален среди строк; добавляем idx для уникальности.
                     return (
                       <tr
-                        key={r.status}
+                        key={`${r.status}-${idx}`}
                         className="border-t border-white/5 hover:bg-white/[0.02] transition-colors"
                       >
                         <td className="px-5 py-2.5 text-slate-300 max-w-[280px]">
