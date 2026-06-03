@@ -766,6 +766,19 @@ export default function Dashboard() {
   };
   const closeManagerSidebar = () => setSelectedManager(null);
 
+  // До готовности сессии и навигации показываем лоадер, а не «гостевой» каркас.
+  // Иначе на F5 видна многоступенчатая перерисовка (гость → админ: появляются
+  // вкладки и переключатель, восстанавливаются отдел и таб) — это и есть «дёрганье».
+  // Так получается один плавный переход: лоадер → финальный UI. SSR тоже отдаёт
+  // лоадер (sessionLoading=true изначально), поэтому гидрация совпадает.
+  if (sessionLoading || !navReady) {
+    return (
+      <div className="flex items-center justify-center min-h-screen text-slate-100">
+        <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+      </div>
+    );
+  }
+
   return (
     <div className="flex sm:flex-row flex-col min-h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-hidden text-sm">
       {/* BACKGROUND DECORATIONS (GLOWS) - Changed to Blue tones */}
