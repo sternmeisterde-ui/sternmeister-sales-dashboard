@@ -536,6 +536,13 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
   }, []);
 
   useEffect(() => {
+    // activeLine — состояние компонента и на один рендер отстаёт при смене отдела
+    // (напр. b2g "2b"/"1" → b2b): эффект-сброс activeLine (выше) и этот load-эффект
+    // срабатывают на разных коммитах. Не грузим невалидную для отдела линию — иначе
+    // /api/scripts вернёт "Invalid line for department", и гонка двух запросов может
+    // оставить ошибку на экране. Эффект-сброс тут же выставит валидную линию для
+    // отдела и перезапустит загрузку.
+    if (!isValidLineId(department, activeLine)) return;
     load(department, activeLine);
   }, [department, activeLine, load]);
 
