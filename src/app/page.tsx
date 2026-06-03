@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, ShieldCheck, Workflow,
+  CalendarClock, Workflow,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -22,7 +22,7 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
-import { getLines, DEPARTMENTS } from "@/lib/config/tenant";
+import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
   parseDisplayDate,
@@ -96,15 +96,51 @@ interface SessionUser {
 }
 
 type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel";
-const VALID_TABS: ReadonlySet<TabId> = new Set([
-  "dashboard", "daily", "analytics", "tracking", "real_calls", "ai_calls",
-  "managers", "criteria", "scripts", "call_analysis", "looker", "termins",
-  "audit", "funnel",
-]);
-const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set([
-  "dashboard", "daily", "analytics", "tracking", "termins", "looker",
-  "funnel", "managers", "call_analysis", "criteria", "scripts", "audit",
-]);
+// Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
+// "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
+// компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
+// Термин/Воронка помечены departments:["b2g"] — это концепции только Бух Гос
+// (термины ДЦ/АА, путь к Gutschein); у Коммерсов такого процесса нет (§6.1).
+// Подробности: dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md.
+interface NavItem {
+  id: TabId;
+  icon: React.ElementType;
+  label: string;
+  /** true → пункт виден только админу (роль admin). */
+  adminOnly: boolean;
+  /** Если задано — вкладка доступна только этим отделам; не задано → всем. */
+  departments?: DepartmentId[];
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
+  { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
+  { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
+  { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
+  { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
+  { id: "looker", icon: Database, label: "Looker", adminOnly: true },
+  { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
+  { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
+  { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
+  { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
+  { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
+  { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
+  { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true },
+];
+
+// Деривативы от NAV_ITEMS — один источник правды, списки вручную не дублируем.
+// "audit" нет в NAV_ITEMS → нет в VALID_TABS → deep-link #audit не открывается.
+const VALID_TABS: ReadonlySet<TabId> = new Set(NAV_ITEMS.map((i) => i.id));
+const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set(
+  NAV_ITEMS.filter((i) => i.adminOnly).map((i) => i.id),
+);
+
+/** Доступна ли вкладка в данном отделе (по NAV_ITEMS — единый источник правды).
+ *  Вкладки без записи в NAV_ITEMS считаем доступными — их гейтит VALID_TABS. */
+function tabAllowedInDept(tabId: TabId, dept: DepartmentId): boolean {
+  const item = NAV_ITEMS.find((i) => i.id === tabId);
+  return !item?.departments || item.departments.includes(dept);
+}
 
 function readTabFromHash(): TabId | null {
   if (typeof window === "undefined") return null;
@@ -197,6 +233,17 @@ export default function Dashboard() {
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, [activeTab, isAdmin]);
+
+  // Safety net: если активная вкладка недоступна в текущем отделе (deep-link
+  // #funnel при B2B-сессии, ручная правка hash, смена отдела) — сбрасываем на
+  // дашборд, чтобы активная вкладка и URL-hash оставались согласованными. Сам
+  // render вкладок тоже гейтится по отделу (ниже), поэтому неверный контент не
+  // покажется даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
+  useEffect(() => {
+    if (!tabAllowedInDept(activeTab, activeDepartment)) {
+      setActiveTab("dashboard");
+    }
+  }, [activeDepartment, activeTab]);
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -718,25 +765,13 @@ export default function Dashboard() {
         </div>
 
         <nav className="flex flex-col gap-2 mt-4 w-full">
-          {[
-            { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
-            { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
-            { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
-            { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
-            { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true },
-            { id: "looker", icon: Database, label: "Looker", adminOnly: true },
-            { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true },
-            { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
-            { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
-            { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
-            { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
-            { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
-            { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true },
-            { id: "audit", icon: ShieldCheck, label: "Аудит", adminOnly: true },
-          ].filter(item => isAdmin || !item.adminOnly).map((item) => (
+          {NAV_ITEMS
+            .filter((item) => isAdmin || !item.adminOnly)
+            .filter((item) => tabAllowedInDept(item.id, activeDepartment))
+            .map((item) => (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id as any)}
+              onClick={() => setActiveTab(item.id)}
               className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 font-semibold text-[10px] uppercase tracking-widest whitespace-nowrap ${activeTab === item.id
                 ? "bg-blue-500/20 text-blue-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] border border-blue-500/30"
                 : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -878,10 +913,21 @@ export default function Dashboard() {
 
         {activeTab === "looker" && <LookerTab department={activeDepartment} />}
 
-        {activeTab === "funnel" && <FunnelTab department={activeDepartment} />}
+        {/* Render-гейт по отделу — детерминированно, не зависит от порядка эффектов:
+            funnel/termins (только Бух Гос) никогда не рендерятся под Коммерсами,
+            даже на кадр до сброса вкладки safety-net эффектом. См. §6.1. */}
+        {activeTab === "funnel" && tabAllowedInDept("funnel", activeDepartment) && (
+          <FunnelTab department={activeDepartment} />
+        )}
 
-        {activeTab === "termins" && <TerminTab />}
+        {activeTab === "termins" && tabAllowedInDept("termins", activeDepartment) && (
+          <TerminTab />
+        )}
 
+        {/* "Аудит" скрыт из навигации (см. §6.2 dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md),
+            поэтому activeTab === "audit" недостижим. Блок и импорт AuditTab оставлены
+            НАМЕРЕННО: чтобы вернуть вкладку, достаточно добавить запись в NAV_ITEMS —
+            она сама попадёт в сайдбар и VALID_TABS. Не удалять как «мёртвый». */}
         {activeTab === "audit" && <AuditTab department={activeDepartment} />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
