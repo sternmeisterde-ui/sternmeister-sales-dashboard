@@ -148,6 +148,30 @@ function readTabFromHash(): TabId | null {
   return VALID_TABS.has(raw as TabId) ? (raw as TabId) : null;
 }
 
+// Выбранный админом отдел сохраняем в localStorage, чтобы он переживал F5 и не
+// «слетал» обратно на домашний отдел из сессии. Менеджеры отдел не переключают
+// (привязаны к session.department) — для них это не используется.
+const DEPT_STORAGE_KEY = "sm_active_department";
+
+function readStoredDepartment(): "b2g" | "b2b" | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const v = window.localStorage.getItem(DEPT_STORAGE_KEY);
+    return v === "b2g" || v === "b2b" ? v : null;
+  } catch {
+    return null; // localStorage может быть недоступен (приватный режим) — не критично
+  }
+}
+
+function persistDepartment(dept: "b2g" | "b2b"): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DEPT_STORAGE_KEY, dept);
+  } catch {
+    /* недоступность localStorage не должна ломать переключение отдела */
+  }
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
@@ -175,14 +199,19 @@ export default function Dashboard() {
       .then(data => {
         if (data) {
           setSession(data);
-          setActiveDepartment(data.department);
-          // Manager: пробуем сохранить таб из URL hash. Если он admin-only
-          // или не задан — fallback на "real_calls".
           if (data.role === "manager") {
+            // Менеджер привязан к своему отделу — выбор не восстанавливаем и не храним.
+            setActiveDepartment(data.department);
+            // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
+            // fallback на "real_calls".
             const fromHash = readTabFromHash();
             if (!fromHash || ADMIN_ONLY_TABS.has(fromHash)) {
               setActiveTab("real_calls");
             }
+          } else {
+            // Админ: восстанавливаем ранее выбранный отдел (переживает F5),
+            // иначе — домашний отдел из сессии.
+            setActiveDepartment(readStoredDepartment() ?? data.department);
           }
         }
       })
@@ -828,14 +857,14 @@ export default function Dashboard() {
           {isAdmin ? (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner w-full sm:w-auto">
             <button
-              onClick={() => { setActiveDepartment("b2g"); setLineFilter("all"); }}
+              onClick={() => { setActiveDepartment("b2g"); setLineFilter("all"); persistDepartment("b2g"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
               Госники (B2G)
             </button>
             <button
-              onClick={() => { setActiveDepartment("b2b"); setLineFilter("all"); }}
+              onClick={() => { setActiveDepartment("b2b"); setLineFilter("all"); persistDepartment("b2b"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
