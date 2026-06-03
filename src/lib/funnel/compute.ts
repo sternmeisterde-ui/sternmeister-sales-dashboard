@@ -793,13 +793,13 @@ export function buildLanguageBreakdown(bucket: AggBucket): {
 // SQL + helper: история CFV 879824 для точного disqualified_at
 // ──────────────────────────────────────────────────────────────────────────
 
-interface CloseReasonEvent {
+export interface CloseReasonEvent {
   eventAt: Date;
   enumIdAfter: number | null;
 }
 
 /** Fetches close_reason history per lead, sorted by event_at ASC. */
-async function fetchCloseReasonHistory(
+export async function fetchCloseReasonHistory(
   leadIds: number[]
 ): Promise<Map<number, CloseReasonEvent[]>> {
   const idsIn = leadIds.join(",");
@@ -858,7 +858,7 @@ function historicalDisqualifiedSince(
  *   - иначе если currently disqualified → updated_at (приближение)
  *   - иначе → null
  */
-function enrichDisqualifiedAt(
+export function enrichDisqualifiedAt(
   lead: BaseLead,
   events: CloseReasonEvent[] | undefined
 ): BaseLead {

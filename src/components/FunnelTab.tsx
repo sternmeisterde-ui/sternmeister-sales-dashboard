@@ -8,6 +8,10 @@ import FunnelChart from "@/components/funnel/FunnelChart";
 import TargetLevelInput from "@/components/funnel/TargetLevelInput";
 import ChartModeToggle from "@/components/funnel/ChartModeToggle";
 import CohortTable from "@/components/funnel/CohortTable";
+import KpiBar from "@/components/funnel/KpiBar";
+import UnifiedFunnel from "@/components/funnel/UnifiedFunnel";
+import ViewModeToggle, { type FunnelViewMode } from "@/components/funnel/ViewModeToggle";
+import ClientsView from "@/components/funnel/ClientsView";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import { CONVERSION_ORDER, CONVERSIONS } from "@/lib/funnel/conversions";
 import {
@@ -23,7 +27,10 @@ import type {
   FilterOption,
   FunnelFiltersState,
 } from "@/lib/funnel/types";
-import type { CohortsApiResponse } from "@/lib/funnel/api-types";
+import type {
+  CohortsApiResponse,
+  OverviewResponse,
+} from "@/lib/funnel/api-types";
 
 type Department = "b2g" | "b2b";
 
@@ -99,6 +106,7 @@ export default function FunnelTab({
   const saveTimers = useRef<Partial<Record<ConversionId, ReturnType<typeof setTimeout>>>>({});
 
   const [chartMode, setChartMode] = useState<ChartMode>("percent");
+  const [viewMode, setViewMode] = useState<FunnelViewMode>("cohorts");
 
   const activeFilterCount = countActiveFilters(filters, defaultFilters);
 
@@ -126,6 +134,11 @@ export default function FunnelTab({
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const inflightAbort = useRef<AbortController | null>(null);
+
+  // ── Обзор: KPI-полоска (§9.1) + объединённая воронка (§9.2) ──
+  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const overviewAbort = useRef<AbortController | null>(null);
 
   const fetchCohorts = useCallback(async (state: FunnelFiltersState) => {
     if (!state.dateRange.start || !state.dateRange.end) return;
@@ -191,11 +204,48 @@ export default function FunnelTab({
     }
   }, []);
 
-  // Debounce — 250ms после смены фильтров.
+  // Фетч обзора (KPI + воронка) — те же фильтры, без maturity.
+  const fetchOverview = useCallback(async (state: FunnelFiltersState) => {
+    if (!state.dateRange.start || !state.dateRange.end) return;
+    overviewAbort.current?.abort();
+    const ctrl = new AbortController();
+    overviewAbort.current = ctrl;
+    setOverviewLoading(true);
+    try {
+      const params = new URLSearchParams({
+        from: fmtLocalDate(state.dateRange.start),
+        to: fmtLocalDate(state.dateRange.end),
+      });
+      if (state.source) params.set("source", state.source);
+      if (state.responsibleUserId)
+        params.set("responsible_user_id", state.responsibleUserId);
+      const res = await fetch(`/api/funnel/overview?${params}`, {
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return;
+      const data: OverviewResponse = await res.json();
+      if (overviewAbort.current !== ctrl) return;
+      setOverview(data);
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
+    } finally {
+      if (overviewAbort.current === ctrl) {
+        overviewAbort.current = null;
+        setOverviewLoading(false);
+      }
+    }
+  }, []);
+
+  // Debounce — 250ms после смены фильтров. НЕ зависит от viewMode: переключение
+  // Когорты⇄Клиенты не перезапрашивает данные — когорты остаются в state и
+  // отрисовываются мгновенно при возврате.
   useEffect(() => {
-    const id = setTimeout(() => fetchCohorts(filters), 250);
+    const id = setTimeout(() => {
+      fetchCohorts(filters);
+      fetchOverview(filters);
+    }, 250);
     return () => clearTimeout(id);
-  }, [filters, fetchCohorts]);
+  }, [filters, fetchCohorts, fetchOverview]);
 
   // ── Фетч динамических фильтр-опций при смене дат (debounce 150ms) ──
   const fetchFilterOptions = useCallback(
@@ -417,9 +467,33 @@ export default function FunnelTab({
         managerOptions={managerOptions}
         activeFilterCount={activeFilterCount}
         lastUpdatedAt={lastUpdatedAt}
+        clientsMode={viewMode === "clients"}
         onChange={handleFilterChange}
         onReset={handleReset}
       />
+
+      <div className="flex items-center gap-3 px-1">
+        <ViewModeToggle value={viewMode} onChange={setViewMode} />
+      </div>
+
+      {viewMode === "clients" && <ClientsView filters={filters} />}
+
+      {viewMode === "cohorts" && (
+        <>
+      <div className="flex flex-col lg:flex-row gap-3 items-stretch">
+        <div className="flex-1 min-w-0">
+          <UnifiedFunnel
+            stages={overview?.funnel ?? []}
+            loading={overviewLoading && !overview}
+          />
+        </div>
+        <div className="lg:w-60 shrink-0">
+          <KpiBar
+            kpi={overview?.kpi ?? null}
+            loading={overviewLoading && !overview}
+          />
+        </div>
+      </div>
 
       {fetchError && (
         <div className="glass-panel rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3 text-sm text-rose-300 flex items-center gap-2">
@@ -477,6 +551,8 @@ export default function FunnelTab({
         drillBaseParams={drillBaseParams}
         isMock={activeBundle.isMock}
       />
+        </>
+      )}
     </div>
   );
 }
