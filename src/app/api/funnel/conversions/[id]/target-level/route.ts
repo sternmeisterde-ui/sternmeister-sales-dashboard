@@ -20,7 +20,7 @@ export async function PATCH(
   if (!session) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  if (session.masterRole !== "admin") {
+  if (session.role !== "admin") {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 

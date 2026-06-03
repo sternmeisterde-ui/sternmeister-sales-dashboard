@@ -13,7 +13,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   // По плану 04 §1.5 — вкладка только для admin (роли проверены в page.tsx).
-  if (session.masterRole !== "admin") {
+  // role === "admin" (не masterRole): РОП получает admin-доступ как в остальных
+  // admin-роутах, иначе видит вкладку (nav гейтит по role), но ловит 403.
+  if (session.role !== "admin") {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
