@@ -22,6 +22,7 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
+import AnalyticsLookerSwitch from "@/components/AnalyticsLookerSwitch";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -118,7 +119,9 @@ const NAV_ITEMS: NavItem[] = [
   { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
   { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
-  { id: "looker", icon: Database, label: "Looker", adminOnly: true },
+  // Looker: у Госников — отдельная вкладка; у Коммерсов вынесен переключателем
+  // внутрь «Аналитики» (departments:["b2g"] прячет пункт для B2B). См. §8.
+  { id: "looker", icon: Database, label: "Looker", adminOnly: true, departments: ["b2g"] },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
@@ -265,14 +268,15 @@ export default function Dashboard() {
 
   // Safety net: если активная вкладка недоступна в текущем отделе (deep-link
   // #funnel при B2B-сессии, ручная правка hash, смена отдела) — сбрасываем на
-  // дашборд, чтобы активная вкладка и URL-hash оставались согласованными. Сам
-  // render вкладок тоже гейтится по отделу (ниже), поэтому неверный контент не
-  // покажется даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
+  // безопасную вкладку, чтобы активная вкладка и URL-hash оставались согласованными.
+  // Цель сброса role-aware: админ → dashboard, менеджер → real_calls (dashboard ему
+  // недоступен). Сам render вкладок тоже гейтится по отделу (ниже), поэтому неверный
+  // контент не покажется даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
   useEffect(() => {
     if (!tabAllowedInDept(activeTab, activeDepartment)) {
-      setActiveTab("dashboard");
+      setActiveTab(isAdmin ? "dashboard" : "real_calls");
     }
-  }, [activeDepartment, activeTab]);
+  }, [activeDepartment, activeTab, isAdmin]);
   // dailyFilter moved to DailyTab component
 
   // API Data States
@@ -929,8 +933,12 @@ export default function Dashboard() {
         )}
 
         {/* --------------------- ANALYTICS VIEW --------------------- */}
+        {/* B2B (Рузанна): Looker встроен в Аналитику переключателем и убран из
+            сайдбара. B2G — без изменений: Аналитика и Looker раздельно. См. §8. */}
         {activeTab === "analytics" && (
-          <AnalyticsTab department={activeDepartment} />
+          activeDepartment === "b2b"
+            ? <AnalyticsLookerSwitch department={activeDepartment} />
+            : <AnalyticsTab department={activeDepartment} />
         )}
 
         {activeTab === "tracking" && (
@@ -953,7 +961,9 @@ export default function Dashboard() {
           <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
         )}
 
-        {activeTab === "looker" && <LookerTab department={activeDepartment} />}
+        {/* B2B: Looker доступен внутри Аналитики (см. выше), как отдельная вкладка
+            не рендерится — гейт по отделу + safety-net сбрасывают #looker на дашборд. */}
+        {activeTab === "looker" && tabAllowedInDept("looker", activeDepartment) && <LookerTab department={activeDepartment} />}
 
         {/* Render-гейт по отделу — детерминированно, не зависит от порядка эффектов:
             funnel/termins (только Бух Гос) никогда не рендерятся под Коммерсами,
