@@ -19,12 +19,16 @@ interface BlockData { name: string; scores: Record<string, number>; criteria: Cr
 interface ManagerCriterion { name: string; score: number | null }
 interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
 interface ManagerBreakdown { id: string; name: string; overallScore: number | null; callCount: number; blocks: ManagerBlock[] }
+// B2B-only: баллы менеджера по блокам, разбитые по периодам (даты — колонки).
+interface ManagerTimeBlock { name: string; scores: Record<string, number> }
+interface ManagerTimeRow { id: string; name: string; callCount: number; blocks: ManagerTimeBlock[] }
 interface AnalyticsData {
   periods: string[];
   blocks: BlockData[];
   overallScores: Record<string, number>;
   managers: Array<{ id: string; name: string }>;
   managerBreakdown: ManagerBreakdown[];
+  managerTimeBreakdown: ManagerTimeRow[];
   totalCalls: number;
 }
 
@@ -436,18 +440,33 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             </>
           )}
 
-          {/* ── NORMAL MODE: Table 2 — Criteria x Managers ── */}
+          {/* ── NORMAL MODE: Table 2 — разбивка по менеджерам ── */}
+          {/* B2B (Рузанна): вложенная таблица блок → менеджеры, даты в колонках
+              (ManagerTimeTable). B2G — прежняя ManagerTable (критерии × менеджеры),
+              без изменений. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §8. */}
           {data && data.managerBreakdown.length > 0 && !managerId && (
             <>
               <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500 mt-2">
                 Разбивка по менеджерам
               </div>
-              <ManagerTable
-                blocks={data.blocks}
-                managers={data.managerBreakdown}
-                collapsedBlocks={collapsedMgrBlocks}
-                onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
-              />
+              {department === "b2b" && data.managerTimeBreakdown.length > 0 && periods.length > 0 ? (
+                <ManagerTimeTable
+                  blocks={data.blocks}
+                  periods={periods}
+                  groupBy={groupBy}
+                  managerTime={data.managerTimeBreakdown}
+                  overallScores={data.overallScores}
+                  collapsedBlocks={collapsedMgrBlocks}
+                  onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
+                />
+              ) : (
+                <ManagerTable
+                  blocks={data.blocks}
+                  managers={data.managerBreakdown}
+                  collapsedBlocks={collapsedMgrBlocks}
+                  onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
+                />
+              )}
             </>
           )}
         </>
@@ -615,6 +634,97 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           })}
         </tr>
       ))}
+    </>
+  );
+}
+
+// ==================== Managers x Time Table (B2B only) ====================
+// Внешние строки — блоки (как в «Динамике по критериям»), вложенные — менеджеры.
+// Ячейка = балл менеджера по блоку за период. Даты — колонки. Для Госников не
+// используется (там остаётся ManagerTable). См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §8.
+
+function ManagerTimeTable({
+  blocks, periods, groupBy, managerTime, overallScores, collapsedBlocks, onToggle,
+}: {
+  blocks: BlockData[]; periods: string[]; groupBy: string;
+  managerTime: ManagerTimeRow[];
+  overallScores: Record<string, number>;
+  collapsedBlocks: Set<string>; onToggle: (n: string) => void;
+}) {
+  return (
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
+        <table className="w-full text-left border-collapse">
+          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
+            <tr className="light-panel-header border-b border-white/10">
+              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
+                Критерий / Менеджер
+              </th>
+              {periods.map((p) => (
+                <th key={p} className="px-2 py-2 text-center min-w-[50px]">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">{fmtPeriod(p, groupBy)}</div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="text-sm">
+            {blocks.map((block) => (
+              <BlockManagerTimeRows
+                key={block.name}
+                block={block}
+                periods={periods}
+                managerTime={managerTime}
+                isCollapsed={collapsedBlocks.has(block.name)}
+                onToggle={() => onToggle(block.name)}
+              />
+            ))}
+            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+              <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
+              {periods.map((p) => {
+                const v = overallScores[p];
+                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+              })}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function BlockManagerTimeRows({ block, periods, managerTime, isCollapsed, onToggle }: {
+  block: BlockData; periods: string[]; managerTime: ManagerTimeRow[];
+  isCollapsed: boolean; onToggle: () => void;
+}) {
+  // Менеджеры всегда есть → блок раскрываем (в т.ч. в режиме «Все»/воронки,
+  // где у блока нет критериев, но менеджеры есть).
+  const hasChildren = managerTime.length > 0;
+  return (
+    <>
+      <tr className={`bg-slate-900/60 border-t border-white/10 ${hasChildren ? "cursor-pointer hover:bg-slate-800/40" : ""}`} onClick={hasChildren ? onToggle : undefined}>
+        <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
+          <div className="flex items-center gap-2">
+            {hasChildren && (isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />)}
+            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{block.name}</span>
+          </div>
+        </td>
+        {periods.map((p) => {
+          const v = block.scores[p];
+          return <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+        })}
+      </tr>
+      {hasChildren && !isCollapsed && managerTime.map((m) => {
+        const mb = m.blocks.find((b) => b.name === block.name);
+        return (
+          <tr key={`${block.name}-mgr-${m.id}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
+            <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{m.name}</td>
+            {periods.map((p) => {
+              const v = mb?.scores[p];
+              return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+            })}
+          </tr>
+        );
+      })}
     </>
   );
 }
