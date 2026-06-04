@@ -172,6 +172,17 @@ function persistDepartment(dept: "b2g" | "b2b"): void {
   }
 }
 
+// Чистим при выходе: ключ глобальный (не на пользователя), иначе на общем
+// браузере следующий админ/ROP стартанёт в отделе предыдущего.
+function clearStoredDepartment(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(DEPT_STORAGE_KEY);
+  } catch {
+    /* недоступность localStorage не критична */
+  }
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
@@ -851,6 +862,7 @@ export default function Dashboard() {
             <button
               onClick={async () => {
                 await fetch("/api/auth/logout", { method: "POST" });
+                clearStoredDepartment();
                 window.location.href = "/login";
               }}
               className="flex items-center gap-3 px-4 py-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all w-full text-sm"
@@ -875,19 +887,19 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Госники (B2G)
+              {DEPARTMENTS.b2g.label}
             </button>
             <button
               onClick={() => { setActiveDepartment("b2b"); setLineFilter("all"); persistDepartment("b2b"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2C)
+              {DEPARTMENTS.b2b.label}
             </button>
           </div>
           ) : (
             <div className="text-sm text-slate-400 px-2">
-              {session?.department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}
+              {session?.department === "b2g" ? DEPARTMENTS.b2g.label : DEPARTMENTS.b2b.label}
             </div>
           )}
 

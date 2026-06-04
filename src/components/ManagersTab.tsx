@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Loader2, Plus, Trash2, Save, AlertTriangle, Calendar, Wallet } from "lucide-react";
 import SchedulePopup from "@/components/SchedulePopup";
 import TabelPopup from "@/components/TabelPopup";
+import { getDepartment } from "@/lib/config/tenant";
 
 interface ManagerRow {
   id?: string;
@@ -198,7 +199,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-bold text-white">
-              Менеджеры — {department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}
+              Менеджеры — {getDepartment(department).label}
             </h2>
             <p className="text-xs text-slate-400 mt-1">
               Управление менеджерами. Изменения синхронизируются в ОКК и Ролевки.
