@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
@@ -19,16 +19,19 @@ interface BlockData { name: string; scores: Record<string, number>; criteria: Cr
 interface ManagerCriterion { name: string; score: number | null }
 interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
 interface ManagerBreakdown { id: string; name: string; overallScore: number | null; callCount: number; blocks: ManagerBlock[] }
-// B2B-only: баллы менеджера по блокам, разбитые по периодам (даты — колонки).
-interface ManagerTimeBlock { name: string; scores: Record<string, number> }
-interface ManagerTimeRow { id: string; name: string; callCount: number; blocks: ManagerTimeBlock[] }
+// B2B-only: дерево «неделя → менеджер → дата». overall = средний % за звонок;
+// scores — баллы по колонкам (ключ = имя блока ИЛИ "блок::критерий").
+interface TimeTreeNode { callCount: number; overall: number | null; scores: Record<string, number> }
+interface TimeTreeDate extends TimeTreeNode { date: string }
+interface TimeTreeManager extends TimeTreeNode { id: string; name: string; dates: TimeTreeDate[] }
+interface TimeTreeWeek extends TimeTreeNode { key: string; label: string; managers: TimeTreeManager[] }
 interface AnalyticsData {
   periods: string[];
   blocks: BlockData[];
   overallScores: Record<string, number>;
   managers: Array<{ id: string; name: string }>;
   managerBreakdown: ManagerBreakdown[];
-  managerTimeBreakdown: ManagerTimeRow[];
+  timeTree: TimeTreeWeek[];
   totalCalls: number;
 }
 
@@ -101,19 +104,23 @@ function getDeltaColor(a: number | null | undefined, b: number | null | undefine
 
 // Line options sourced from tenant config so adding a line in one place
 // (src/lib/config/tenant.ts) flows through to Analytics automatically.
-import { getLines } from "@/lib/config/tenant";
+import { getLines, isValidLineId } from "@/lib/config/tenant";
 
 function getAnalyticsLines(dept: "b2g" | "b2b"): { id: string; label: string }[] {
   return getLines(dept).map((l) => ({ id: l.id, label: l.shortLabel ?? l.label }));
 }
 
+// Скрытые направления верхней сводки B2B (мультивыбор) — сохраняются между
+// сессиями. Храним массив id скрытых линий.
+const HIDDEN_DIRECTIONS_KEY = "sm_analytics_b2b_hidden_directions";
+
 // ==================== Main Component ====================
 
 export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
-  // "all" aggregates every active funnel for the selected department/source.
-  // Per-line drill-downs remain available via the pill row below.
-  const [line, setLine] = useState("all");
+  // Коммерсы: вид по вкладкам линий без «Все» → стартуем на первой линии.
+  // Госники: кросс-воронка «Все» + опциональный per-line drill-down.
+  const [line, setLine] = useState<string>(() => (department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all"));
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerId, setManagerId] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>(() => {
@@ -130,6 +137,15 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   const [error, setError] = useState<string | null>(null);
   const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(new Set());
   const [collapsedMgrBlocks, setCollapsedMgrBlocks] = useState<Set<string>>(new Set());
+  // B2B-дерево: раскрытые недели (ключ = week.key) и менеджеры (ключ = "week::mgrId").
+  const [expandedWeeks, setExpandedWeeks] = useState<Set<string>>(new Set());
+  const [expandedMgrs, setExpandedMgrs] = useState<Set<string>>(new Set());
+  // B2B OKK: верхняя сводка «Динамика по критериям» — все линии (воронки) × даты.
+  // Отдельный fetch line="all", не зависит от выбранной вкладки линии.
+  const [overview, setOverview] = useState<AnalyticsData | null>(null);
+  // Скрытые направления в сводке (мультивыбор). Храним id скрытых линий; читаем
+  // из localStorage в эффекте (а не в инициализаторе) — гидрация цела.
+  const [hiddenDirections, setHiddenDirections] = useState<Set<string>>(new Set());
 
   // Comparison mode
   const [compareMode, setCompareMode] = useState(false);
@@ -149,18 +165,37 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     set((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
   };
 
+  // Переключить видимость направления в сводке + сохранить выбор.
+  const toggleDirection = (id: string) => {
+    setHiddenDirections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      try { window.localStorage.setItem(HIDDEN_DIRECTIONS_KEY, JSON.stringify([...next])); } catch { /* localStorage недоступен — не критично */ }
+      return next;
+    });
+  };
+
   // Reset manager when context changes (different DB/line = different manager UUIDs)
   useEffect(() => {
-    // Reset to the cross-funnel "all" view when switching department —
-    // the per-line drill-down is opt-in.
-    setLine("all");
+    // Дефолт линии при смене отдела: Коммерсы стартуют на первой линии (вид по
+    // вкладкам без «Все»); Госники — кросс-воронка «Все» (drill-down опционален).
+    setLine(department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all");
     setManagerId("");
   }, [department]);
   useEffect(() => {
     setManagerId("");
-    // When switching to roleplay, collapse sub-lines to their group id because
-    // roleplay data isn't tagged with the sub-line (e.g. "2b" → "2"). Leave
-    // "all" alone — it's already the cross-funnel view.
+    if (department === "b2b") {
+      // Коммерсы: OKK — по вкладкам линий (Бух1/Бух2/Мед1, без «Все»); ролевки —
+      // один скрипт (line="all"). Нормализуем line под выбранный источник.
+      if (source === "roleplay") {
+        if (line !== "all") setLine("all");
+      } else if (!isValidLineId(department, line)) {
+        setLine(getLines(department)[0]?.id ?? "all");
+      }
+      return;
+    }
+    // B2G: при переключении на ролевки схлопываем под-линии в группу (ролевки
+    // не размечены под-линией, напр. "2b" → "2"). "all" не трогаем.
     if (source === "roleplay" && line !== "all") {
       const current = getLines(department).find((l) => l.id === line);
       if (current && current.id !== current.group) setLine(current.group);
@@ -197,6 +232,9 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     try {
       const params = buildParams(dateRange);
       if (!params) return;
+      // Дерево неделя→менеджер→дата нужно только основному виду B2B; сводка
+      // (line=all) и сравнение его не запрашивают (см. fetchOverview/fetchCompareData).
+      if (department === "b2b") params.set("tree", "1");
       const res = await fetch(`/api/analytics?${params}`, { signal });
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const json = await res.json();
@@ -209,7 +247,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     } finally {
       setLoading(false);
     }
-  }, [buildParams, dateRange]);
+  }, [buildParams, dateRange, department]);
 
   const fetchCompareData = useCallback(async (signal?: AbortSignal) => {
     if (!compareMode) return;
@@ -229,11 +267,50 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     }
   }, [buildParams, compareDateRange, compareMode]);
 
+  // B2B OKK overview (line="all") — независимо от выбранной вкладки линии.
+  // Самодостаточный гард: для не-B2B/не-OKK/compare очищает overview.
+  const fetchOverview = useCallback(async (signal?: AbortSignal) => {
+    if (department !== "b2b" || source !== "okk" || compareMode) { setOverview(null); return; }
+    const fromStr = dateRange.start ? fmtDate(dateRange.start) : "";
+    const toStr = dateRange.end ? fmtDate(dateRange.end) : "";
+    if (!fromStr || !toStr) return;
+    // Сводка всегда по дням (переключателя у Коммерсов нет) — колонки-даты.
+    const params = new URLSearchParams({ department, source, line: "all", groupBy: "day", from: fromStr, to: toStr });
+    if (managerId) params.set("managerId", managerId);
+    try {
+      const res = await fetch(`/api/analytics?${params}`, { signal });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const json = await res.json();
+      if (json.success) setOverview(json.data);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+    }
+  }, [department, source, compareMode, dateRange, managerId]);
+
   useEffect(() => {
     const ac = new AbortController();
     fetchData(ac.signal);
     return () => ac.abort();
   }, [fetchData]);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchOverview(ac.signal);
+    return () => ac.abort();
+  }, [fetchOverview]);
+
+  // Восстановить скрытые направления из localStorage (один раз, на маунте).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(HIDDEN_DIRECTIONS_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        setHiddenDirections(new Set(arr.filter((x: unknown): x is string => typeof x === "string")));
+      }
+    } catch { /* битый JSON / нет доступа — игнорируем */ }
+  }, []);
 
   useEffect(() => {
     if (!compareMode) { setCompareData(null); return; }
@@ -251,6 +328,20 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   const periods = data?.periods ?? [];
   const isCompareReady = compareMode && data && compareData;
 
+  // Видимые направления сводки (скрытые убираем из строк). «Средний балл» НЕ
+  // пересчитываем — всегда серверный (call-weighted общий по отделу): скрытие
+  // направления это фильтр строк, а не смена метрики. Иначе при скрытии число
+  // прыгало с взвешенного на простое среднее (низкообъёмная воронка получала бы
+  // тот же вес, что большая).
+  const visibleOverviewBlocks = useMemo<BlockData[]>(() => {
+    if (!overview) return [];
+    const labelToId = new Map(getLines("b2b").map((l) => [l.shortLabel ?? l.label, l.id]));
+    return overview.blocks.filter((b) => {
+      const id = labelToId.get(b.name);
+      return !id || !hiddenDirections.has(id);
+    });
+  }, [overview, hiddenDirections]);
+
   return (
     <div className="flex flex-col gap-5 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
       {/* ── Filters ── */}
@@ -267,11 +358,11 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           ))}
         </div>
 
-        {/* Line filter — sourced from tenant config. For roleplay we collapse
-            sub-lines into their group (e.g. "2a"/"2b" → single "2") because
-            roleplay calls aren't tagged with the sub-line. The leading "Все"
-            pill aggregates every active funnel. */}
-        {(department === "b2b" ? source === "okk" : true) && (
+        {/* Line filter (только Госники). Коммерсы выбирают линию вкладками над
+            таблицей (без «Все»), поэтому здесь фильтр-бар их линий не показываем.
+            Для ролевок под-линии схлопываются в группу ("2a"/"2b" → "2"), а
+            ведущая «Все» агрегирует все воронки. */}
+        {department !== "b2b" && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
             <button onClick={() => { setLine("all"); setManagerId(""); }}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
@@ -304,8 +395,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           </div>
         )}
 
-        {/* GroupBy — hidden in compare mode */}
-        {!compareMode && (
+        {/* GroupBy — скрыт в режиме сравнения и у Коммерсов: у них сводка всегда
+            по дням (колонки-даты), а дерево — неделя→день. Переключатель
+            дни/нед/мес остаётся только у Госников. */}
+        {!compareMode && department !== "b2b" && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
             {(["day", "week", "month"] as const).map((g) => (
               <button key={g} onClick={() => setGroupBy(g)}
@@ -364,7 +457,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
         )}
 
         {/* Refresh + count */}
-        <button onClick={() => { fetchData(); if (compareMode) fetchCompareData(); }} disabled={loading}
+        <button onClick={() => { fetchData(); fetchOverview(); if (compareMode) fetchCompareData(); }} disabled={loading}
           className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-30">
           <RefreshCw className={`w-3.5 h-3.5 ${loading || compareLoading ? "animate-spin" : ""}`} />
         </button>
@@ -421,9 +514,84 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             </>
           )}
         </>
+      ) : department === "b2b" ? (
+        /* B2B (Коммерсы): сверху сводка «Динамика по критериям» (все линии ×
+           даты, line="all"), ниже — вкладки линий + дерево неделя→менеджер→дата
+           по выбранной линии. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §8. */
+        <>
+          {/* Верхняя сводка: воронки Бух1/Бух2/Мед1 × даты (отдельный fetch).
+              Над таблицей — мультивыбор видимых направлений (сохраняется). */}
+          {overview && overview.blocks.length > 0 && (
+            <>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500">
+                  Динамика по критериям
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {getAnalyticsLines(department).map((l) => {
+                    const on = !hiddenDirections.has(l.id);
+                    return (
+                      <button
+                        key={l.id}
+                        type="button"
+                        onClick={() => toggleDirection(l.id)}
+                        title={on ? "Скрыть направление" : "Показать направление"}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] uppercase tracking-widest font-bold border transition-all ${
+                          on
+                            ? "bg-blue-500/15 text-blue-300 border-blue-500/30"
+                            : "bg-transparent text-slate-600 border-white/5 line-through"
+                        }`}
+                      >
+                        {l.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {visibleOverviewBlocks.length > 0 ? (
+                <CriteriaTimeTable
+                  blocks={visibleOverviewBlocks}
+                  periods={overview.periods}
+                  groupBy="day"
+                  overallScores={overview.overallScores}
+                  collapsedBlocks={collapsedBlocks}
+                  onToggle={(n) => toggle(setCollapsedBlocks, n)}
+                />
+              ) : (
+                <div className="glass-panel rounded-2xl p-6 border border-white/5 text-center">
+                  <p className="text-slate-500 text-sm">Все направления скрыты</p>
+                </div>
+              )}
+            </>
+          )}
+          {/* Детализация по линии: вкладки (folder-tabs) вплотную над деревом. */}
+          <div className="flex flex-col">
+            {source === "okk" && (
+              <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
+            )}
+            {data && data.timeTree.length > 0 ? (
+              <CriteriaTimeTree
+                tree={data.timeTree}
+                blocks={data.blocks}
+                collapsedBlocks={collapsedMgrBlocks}
+                onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
+                expandedWeeks={expandedWeeks}
+                onToggleWeek={(k) => toggle(setExpandedWeeks, k)}
+                expandedMgrs={expandedMgrs}
+                onToggleMgr={(k) => toggle(setExpandedMgrs, k)}
+              />
+            ) : (
+              data && !loading ? (
+                <div className="glass-panel rounded-2xl rounded-tl-none p-6 border border-white/5 text-center" style={{ marginTop: 1 }}>
+                  <p className="text-slate-500 text-sm">Нет данных по выбранной линии за период</p>
+                </div>
+              ) : null
+            )}
+          </div>
+        </>
       ) : (
         <>
-          {/* ── NORMAL MODE: Table 1 — Criteria x Time ── */}
+          {/* ── NORMAL MODE (B2G): Table 1 — Criteria x Time ── */}
           {data && periods.length > 0 && (
             <>
               <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500">
@@ -440,39 +608,24 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             </>
           )}
 
-          {/* ── NORMAL MODE: Table 2 — разбивка по менеджерам ── */}
-          {/* B2B (Рузанна): вложенная таблица блок → менеджеры, даты в колонках
-              (ManagerTimeTable). B2G — прежняя ManagerTable (критерии × менеджеры),
-              без изменений. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §8. */}
+          {/* ── NORMAL MODE (B2G): Table 2 — разбивка по менеджерам ── */}
           {data && data.managerBreakdown.length > 0 && !managerId && (
             <>
               <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500 mt-2">
                 Разбивка по менеджерам
               </div>
-              {department === "b2b" && data.managerTimeBreakdown.length > 0 && periods.length > 0 ? (
-                <ManagerTimeTable
-                  blocks={data.blocks}
-                  periods={periods}
-                  groupBy={groupBy}
-                  managerTime={data.managerTimeBreakdown}
-                  overallScores={data.overallScores}
-                  collapsedBlocks={collapsedMgrBlocks}
-                  onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
-                />
-              ) : (
-                <ManagerTable
-                  blocks={data.blocks}
-                  managers={data.managerBreakdown}
-                  collapsedBlocks={collapsedMgrBlocks}
-                  onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
-                />
-              )}
+              <ManagerTable
+                blocks={data.blocks}
+                managers={data.managerBreakdown}
+                collapsedBlocks={collapsedMgrBlocks}
+                onToggle={(n) => toggle(setCollapsedMgrBlocks, n)}
+              />
             </>
           )}
         </>
       )}
 
-      {data && !loading && data.totalCalls === 0 && (
+      {data && !loading && data.totalCalls === 0 && department !== "b2b" && (
         <div className="glass-panel rounded-2xl p-8 border border-white/5 text-center">
           <p className="text-slate-500 text-sm">Нет данных за выбранный период</p>
         </div>
@@ -638,94 +791,216 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
   );
 }
 
-// ==================== Managers x Time Table (B2B only) ====================
-// Внешние строки — блоки (как в «Динамике по критериям»), вложенные — менеджеры.
-// Ячейка = балл менеджера по блоку за период. Даты — колонки. Для Госников не
-// используется (там остаётся ManagerTable). См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §8.
+// ==================== Line Tabs (B2B only) ====================
+// Вкладки над таблицей в палитре дашборда (стекло/slate, без ярких цветов;
+// нод к референсу Lea Verou «Slanted tabs» — едва заметный наклон-подложка).
+// Активная сливается с таблицей: фон rgb(15,23,42) = фон шапки дерева, без
+// нижней границы, текст blue-400 (синий акцент дашборда — тоггл источника,
+// заголовок «Оценка»). Неактивные — приглушённый slate-800/40 + slate-400, как
+// остальные контролы. Наклоняется только фон-подложка, текст остаётся прямым.
 
-function ManagerTimeTable({
-  blocks, periods, groupBy, managerTime, overallScores, collapsedBlocks, onToggle,
-}: {
-  blocks: BlockData[]; periods: string[]; groupBy: string;
-  managerTime: ManagerTimeRow[];
-  overallScores: Record<string, number>;
-  collapsedBlocks: Set<string>; onToggle: (n: string) => void;
+const TAB_SURFACE = "rgb(15, 23, 42)"; // = фон шапки дерева → бесшовный стык
+
+function LineTabs({ lines, active, onSelect }: {
+  lines: { id: string; label: string }[];
+  active: string;
+  onSelect: (id: string) => void;
 }) {
   return (
-    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
-      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
-        <table className="w-full text-left border-collapse">
-          <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
-            <tr className="light-panel-header border-b border-white/10">
-              <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[260px]" style={{ backgroundColor: "rgb(15, 23, 42)" }}>
-                Критерий / Менеджер
-              </th>
-              {periods.map((p) => (
-                <th key={p} className="px-2 py-2 text-center min-w-[50px]">
-                  <div className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">{fmtPeriod(p, groupBy)}</div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="text-sm">
-            {blocks.map((block) => (
-              <BlockManagerTimeRows
-                key={block.name}
-                block={block}
-                periods={periods}
-                managerTime={managerTime}
-                isCollapsed={collapsedBlocks.has(block.name)}
-                onToggle={() => onToggle(block.name)}
-              />
-            ))}
-            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
-              <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
-              {periods.map((p) => {
-                const v = overallScores[p];
-                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
-              })}
-            </tr>
-          </tbody>
-        </table>
-      </div>
+    <div className="flex items-end gap-1 pl-2" style={{ marginBottom: -1 }}>
+      {lines.map((l) => {
+        const sel = l.id === active;
+        return (
+          <button
+            key={l.id}
+            type="button"
+            onClick={() => onSelect(l.id)}
+            className={`relative px-5 pt-2 pb-2.5 text-[10px] uppercase tracking-widest font-bold transition-colors focus:outline-none ${
+              sel ? "text-blue-400" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`absolute inset-0 rounded-t-xl border-t border-x ${sel ? "border-white/10" : "border-white/5"}`}
+              style={{
+                background: sel ? TAB_SURFACE : "rgba(30, 41, 59, 0.4)",
+                transform: "perspective(16px) rotateX(1.5deg)",
+                transformOrigin: "bottom",
+              }}
+            />
+            <span className="relative">{l.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function BlockManagerTimeRows({ block, periods, managerTime, isCollapsed, onToggle }: {
-  block: BlockData; periods: string[]; managerTime: ManagerTimeRow[];
-  isCollapsed: boolean; onToggle: () => void;
+// ==================== Time Tree (B2B only) ====================
+// Дерево слева: Неделя → Менеджер → Дата (раскрытие). Колонки: ОЦЕНКА + блоки →
+// критерии (свёрнутый блок схлопывается в колонку-итог). Заменяет «Динамику по
+// критериям» и «Разбивку по менеджерам» у Коммерсов; у Госников остаются
+// прежние таблицы. Референс — выгрузка ОКК в Google Sheets. См. dev_docs/13 §8.
+
+const TREE_HEADER_H = 30;
+const TREE_HEADER_BG = "rgb(15, 23, 42)";
+
+type TreeLeaf =
+  | { kind: "overall" }
+  | { kind: "block"; block: BlockData }
+  | { kind: "crit"; block: BlockData; crit: CriterionScore };
+
+// Ключ колонки в node.scores: имя блока (итог/воронка) или "блок::критерий".
+// overall читается отдельно (node.overall), не из scores.
+function leafColId(leaf: TreeLeaf): string {
+  if (leaf.kind === "block") return leaf.block.name;
+  if (leaf.kind === "crit") return `${leaf.block.name}::${leaf.crit.name}`;
+  return "__overall__";
+}
+
+function CriteriaTimeTree({
+  tree, blocks, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr,
+}: {
+  tree: TimeTreeWeek[]; blocks: BlockData[];
+  collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
+  expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
+  expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
 }) {
-  // Менеджеры всегда есть → блок раскрываем (в т.ч. в режиме «Все»/воронки,
-  // где у блока нет критериев, но менеджеры есть).
-  const hasChildren = managerTime.length > 0;
-  return (
-    <>
-      <tr className={`bg-slate-900/60 border-t border-white/10 ${hasChildren ? "cursor-pointer hover:bg-slate-800/40" : ""}`} onClick={hasChildren ? onToggle : undefined}>
-        <td className="px-4 py-2 sticky left-0 bg-slate-900/60 backdrop-blur-sm z-10">
-          <div className="flex items-center gap-2">
-            {hasChildren && (isCollapsed ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronUp className="w-3.5 h-3.5 text-slate-500" />)}
-            <span className="text-[11px] uppercase tracking-widest font-bold text-slate-300">{block.name}</span>
-          </div>
+  const isExpandedBlock = (b: BlockData) => b.criteria.length > 0 && !collapsedBlocks.has(b.name);
+  // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
+  const hasTwoRows = blocks.some(isExpandedBlock);
+
+  // Плоский список колонок-листьев — тело таблицы итерирует его же.
+  const leaves: TreeLeaf[] = [{ kind: "overall" }];
+  for (const b of blocks) {
+    if (isExpandedBlock(b)) for (const c of b.criteria) leaves.push({ kind: "crit", block: b, crit: c });
+    else leaves.push({ kind: "block", block: b });
+  }
+
+  // Ряд ячеек-значений для одного узла дерева (неделя/менеджер/дата).
+  const valueCells = (node: TimeTreeNode, strongAll: boolean) =>
+    leaves.map((leaf, i) => {
+      const v = leaf.kind === "overall" ? node.overall : node.scores[leafColId(leaf)];
+      const strong = strongAll || leaf.kind !== "crit";
+      return (
+        <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>
+          {fmtScore(v)}
         </td>
-        {periods.map((p) => {
-          const v = block.scores[p];
-          return <td key={p} className={`px-2 py-2 text-right font-mono text-[11px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
-        })}
-      </tr>
-      {hasChildren && !isCollapsed && managerTime.map((m) => {
-        const mb = m.blocks.find((b) => b.name === block.name);
-        return (
-          <tr key={`${block.name}-mgr-${m.id}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
-            <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{m.name}</td>
-            {periods.map((p) => {
-              const v = mb?.scores[p];
-              return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+      );
+    });
+
+  return (
+    <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+      <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
+        <table className="text-left border-collapse">
+          <thead className="z-40">
+            {/* Строка 1 — метка дерева · ОЦЕНКА · заголовки блоков */}
+            <tr className="light-panel-header border-b border-white/10">
+              <th rowSpan={hasTwoRows ? 2 : 1}
+                className="px-4 text-left text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[210px]"
+                style={{ backgroundColor: TREE_HEADER_BG, top: 0 }}>
+                Неделя / Менеджер / Дата
+              </th>
+              <th rowSpan={hasTwoRows ? 2 : 1}
+                className="px-2 text-center align-middle min-w-[56px] sticky z-40"
+                style={{ backgroundColor: TREE_HEADER_BG, top: 0 }}>
+                <div className="text-[9px] uppercase tracking-wider text-blue-300 font-bold">Оценка</div>
+              </th>
+              {blocks.map((b) => {
+                const expanded = isExpandedBlock(b);
+                const clickable = b.criteria.length > 0;
+                if (expanded) {
+                  return (
+                    <th key={b.name} colSpan={b.criteria.length} onClick={() => onToggleBlock(b.name)}
+                      className="px-2 text-center border-l border-white/10 sticky z-40 cursor-pointer hover:bg-white/5"
+                      style={{ backgroundColor: TREE_HEADER_BG, top: 0, height: TREE_HEADER_H }}>
+                      <div className="flex items-center justify-center gap-1">
+                        <ChevronUp className="w-3 h-3 text-slate-500 shrink-0" />
+                        <span className="text-[10px] uppercase tracking-wider text-slate-300 font-bold whitespace-nowrap">{b.name}</span>
+                      </div>
+                    </th>
+                  );
+                }
+                return (
+                  <th key={b.name} rowSpan={hasTwoRows ? 2 : 1} onClick={clickable ? () => onToggleBlock(b.name) : undefined}
+                    className={`px-2 text-center border-l border-white/10 align-middle min-w-[60px] sticky z-40 ${clickable ? "cursor-pointer hover:bg-white/5" : ""}`}
+                    style={{ backgroundColor: TREE_HEADER_BG, top: 0 }}>
+                    {/* nowrap: заголовок блока в одну строку → высота строки-1
+                        фиксирована, строка-2 (критерии) встаёт ровно по top:TREE_HEADER_H. */}
+                    <div className="flex items-center justify-center gap-1">
+                      {clickable && <ChevronDown className="w-3 h-3 text-slate-500 shrink-0" />}
+                      <span className="text-[9px] uppercase tracking-wider text-slate-400 font-bold whitespace-nowrap">{b.name}</span>
+                    </div>
+                  </th>
+                );
+              })}
+            </tr>
+            {/* Строка 2 — заголовки критериев развёрнутых блоков */}
+            {hasTwoRows && (
+              <tr className="light-panel-header border-b border-white/10">
+                {blocks.filter(isExpandedBlock).flatMap((b) =>
+                  b.criteria.map((c, ci) => (
+                    <th key={`${b.name}-${c.name}`}
+                      className={`px-2 py-1 text-center align-bottom min-w-[58px] max-w-[82px] sticky z-30 ${ci === 0 ? "border-l border-white/10" : ""}`}
+                      style={{ backgroundColor: TREE_HEADER_BG, top: TREE_HEADER_H }}>
+                      <div className="text-[9px] text-slate-400 font-medium leading-tight whitespace-normal break-words">{c.name}</div>
+                    </th>
+                  )),
+                )}
+              </tr>
+            )}
+          </thead>
+          <tbody className="text-sm">
+            {tree.map((week) => {
+              const wkOpen = expandedWeeks.has(week.key);
+              return (
+                <Fragment key={week.key}>
+                  {/* Неделя */}
+                  <tr className="bg-slate-900/60 border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={() => onToggleWeek(week.key)}>
+                    <td className="px-3 py-2 sticky left-0 bg-slate-900/70 backdrop-blur-sm z-10">
+                      <div className="flex items-center gap-1.5">
+                        {wkOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500 shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />}
+                        <span className="text-[11px] font-bold text-slate-200 whitespace-nowrap">{week.label}</span>
+                        <span className="text-[10px] text-slate-500">· {week.callCount} зв.</span>
+                      </div>
+                    </td>
+                    {valueCells(week, true)}
+                  </tr>
+                  {/* Менеджеры недели */}
+                  {wkOpen && week.managers.map((mgr) => {
+                    const mgrKey = `${week.key}::${mgr.id}`;
+                    const mgrOpen = expandedMgrs.has(mgrKey);
+                    return (
+                      <Fragment key={mgrKey}>
+                        <tr className="border-t border-white/[0.04] cursor-pointer hover:bg-white/[0.03]" onClick={() => onToggleMgr(mgrKey)}>
+                          <td className="px-3 py-1.5 sticky left-0 bg-slate-900/80 backdrop-blur-sm z-10">
+                            <div className="flex items-center gap-1.5 pl-5">
+                              {mgrOpen ? <ChevronUp className="w-3 h-3 text-slate-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-slate-600 shrink-0" />}
+                              <span className="text-[11px] font-semibold text-slate-300 whitespace-nowrap">{mgr.name}</span>
+                              <span className="text-[10px] text-slate-600">· {mgr.callCount}</span>
+                            </div>
+                          </td>
+                          {valueCells(mgr, false)}
+                        </tr>
+                        {/* Даты менеджера */}
+                        {mgrOpen && mgr.dates.map((d) => (
+                          <tr key={`${mgrKey}::${d.date}`} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                            <td className="px-3 py-1 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                              <span className="block pl-11 text-[10px] text-slate-500 whitespace-nowrap">{d.date} · {d.callCount} зв.</span>
+                            </td>
+                            {valueCells(d, false)}
+                          </tr>
+                        ))}
+                      </Fragment>
+                    );
+                  })}
+                </Fragment>
+              );
             })}
-          </tr>
-        );
-      })}
-    </>
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
