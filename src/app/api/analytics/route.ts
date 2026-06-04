@@ -60,18 +60,19 @@ interface ManagerBreakdown {
   blocks: ManagerBlockScore[];
 }
 
-// B2B-only: баллы менеджера по блокам, разбитые ПО ПЕРИОДАМ (даты — колонки).
-// Внешний уровень таблицы — блоки (из `blocks`), вложенный — менеджеры.
-interface ManagerTimeBlock {
-  name: string;
-  scores: Record<string, number>; // ключ периода → балл
-}
-interface ManagerTimeRow {
-  id: string;
-  name: string;
+// B2B-only: дерево «неделя → менеджер → дата». Колонки — ОЦЕНКА + блоки/
+// критерии. `overall` = средний % за звонок; `scores` — баллы по колонкам
+// (ключ = имя блока ИЛИ "блок::критерий"), call-weighted средние. Уровни
+// агрегируются из сырых сумм/счётчиков (см. aggAccs), поэтому веса звонков
+// сохраняются на каждом уровне. Референс — выгрузка ОКК в Google Sheets.
+interface TimeTreeNode {
   callCount: number;
-  blocks: ManagerTimeBlock[];
+  overall: number | null;
+  scores: Record<string, number>;
 }
+interface TimeTreeDate extends TimeTreeNode { date: string }
+interface TimeTreeManager extends TimeTreeNode { id: string; name: string; dates: TimeTreeDate[] }
+interface TimeTreeWeek extends TimeTreeNode { key: string; label: string; managers: TimeTreeManager[] }
 
 interface AnalyticsResponse {
   periods: string[];
@@ -80,7 +81,7 @@ interface AnalyticsResponse {
   managers: Array<{ id: string; name: string }>;
   managerBreakdown: ManagerBreakdown[];
   // Пусто для всех, кроме B2B. Считается только когда department === "b2b".
-  managerTimeBreakdown: ManagerTimeRow[];
+  timeTree: TimeTreeWeek[];
   totalCalls: number;
   source: string;
   department: string;
@@ -109,6 +110,24 @@ function isoWeekOfCivil(civilStr: string): string {
   const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
   const weekNum = Math.ceil(((dt.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
   return `${dt.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+}
+
+// Monday-based week containing the given civil date. Returns a sortable key
+// (Monday's YYYY-MM-DD) and a "start - end" label (Mon–Sun) matching the
+// reference sheet's «2026-05-11 - 2026-05-17» week rows. Pure calendar math —
+// Date.UTC isn't used as an instant.
+function weekRange(civil: string): { key: string; label: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(civil);
+  if (!m) return { key: civil, label: civil };
+  const [, y, mo, d] = m;
+  const dt = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+  const dow = dt.getUTCDay() || 7; // 1..7 (Mon..Sun)
+  const monday = new Date(dt);
+  monday.setUTCDate(dt.getUTCDate() - (dow - 1));
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  const iso = (x: Date) => x.toISOString().slice(0, 10);
+  return { key: iso(monday), label: `${iso(monday)} - ${iso(sunday)}` };
 }
 
 function toPeriodKey(date: Date, groupBy: string): string {
@@ -395,6 +414,7 @@ async function fetchOkkData(
   toCivil: string,
   groupBy: string,
   managerId: string | null,
+  wantTree: boolean,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
   const promptTypes = getOkkPromptTypes(department, line);
@@ -470,9 +490,11 @@ async function fetchOkkData(
   //     and key off the canonical JSON config.
   const isAllFunnels = line === "all" || !line;
 
-  // B2B: аккумулятор «менеджер × период» для таблицы разбивки во времени.
-  const managerPeriodAccMap = new Map<string, PeriodAcc>();
-  const wantManagerTime = department === "b2b";
+  // B2B: аккумулятор «менеджер × день» для дерева неделя→менеджер→дата.
+  // Ключ — civil-день (не period), чтобы дерево не зависело от groupBy: неделя
+  // выводится из дня в buildResponse (weekRange).
+  const managerDayAccMap = new Map<string, PeriodAcc>();
+  const wantManagerTime = department === "b2b" && wantTree;
 
   let processedCount = 0;
   for (const row of rows) {
@@ -508,16 +530,16 @@ async function fetchOkkData(
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
     }
 
-    // Тот же звонок → бакет «менеджер × период» (B2B). Решение accept/reject
+    // Тот же звонок → бакет «менеджер × день» (B2B). Решение accept/reject
     // уже принято периодным бакетом выше (had), поэтому здесь просто дублируем.
     if (wantManagerTime) {
-      const mpKey = `${mgrKey}::${p}`;
-      if (!managerPeriodAccMap.has(mpKey)) managerPeriodAccMap.set(mpKey, newAcc());
-      const mpAcc = managerPeriodAccMap.get(mpKey)!;
+      const mdKey = `${mgrKey}::${toBerlinCivil(row.callCreatedAt)}`;
+      if (!managerDayAccMap.has(mdKey)) managerDayAccMap.set(mdKey, newAcc());
+      const mdAcc = managerDayAccMap.get(mdKey)!;
       if (isAllFunnels) {
-        processCallAsFunnel(mpAcc, row.totalScore, funnelLabelForOkk(department, row.promptType));
+        processCallAsFunnel(mdAcc, row.totalScore, funnelLabelForOkk(department, row.promptType));
       } else {
-        processBlocks(blocks, mpAcc, row.totalScore);
+        processBlocks(blocks, mdAcc, row.totalScore);
       }
     }
   }
@@ -569,7 +591,7 @@ async function fetchOkkData(
     canonical = await loadCanonicalCriteria(promptTypesForCanonical);
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerPeriodAccMap);
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap);
 }
 
 // ─── Roleplay data fetcher ──────────────────────────────────
@@ -596,6 +618,7 @@ async function fetchRoleplayData(
   toCivil: string,
   groupBy: string,
   managerId: string | null,
+  wantTree: boolean,
 ): Promise<AnalyticsResponse> {
   const db = getDbForDepartment(department);
   const callsTable = department === "b2b" ? r1Calls : d1Calls;
@@ -648,9 +671,10 @@ async function fetchRoleplayData(
 
   const isAllFunnels = line === "all" || !line;
 
-  // B2B: аккумулятор «менеджер × период» для таблицы разбивки во времени.
-  const managerPeriodAccMap = new Map<string, PeriodAcc>();
-  const wantManagerTime = department === "b2b";
+  // B2B: аккумулятор «менеджер × день» для дерева неделя→менеджер→дата.
+  // Ключ — civil-день (см. fetchOkkData): дерево не зависит от groupBy.
+  const managerDayAccMap = new Map<string, PeriodAcc>();
+  const wantManagerTime = department === "b2b" && wantTree;
 
   let processedCount = 0;
   for (const row of rows) {
@@ -684,15 +708,15 @@ async function fetchRoleplayData(
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.score ?? null);
     }
 
-    // Тот же звонок → бакет «менеджер × период» (B2B). См. fetchOkkData.
+    // Тот же звонок → бакет «менеджер × день» (B2B). См. fetchOkkData.
     if (wantManagerTime) {
-      const mpKey = `${mgrKey}::${p}`;
-      if (!managerPeriodAccMap.has(mpKey)) managerPeriodAccMap.set(mpKey, newAcc());
-      const mpAcc = managerPeriodAccMap.get(mpKey)!;
+      const mdKey = `${mgrKey}::${toBerlinCivil(row.startedAt)}`;
+      if (!managerDayAccMap.has(mdKey)) managerDayAccMap.set(mdKey, newAcc());
+      const mdAcc = managerDayAccMap.get(mdKey)!;
       if (isAllFunnels) {
-        processCallAsFunnel(mpAcc, row.score ?? null, funnelLabelForRoleplay(department, row.callType));
+        processCallAsFunnel(mdAcc, row.score ?? null, funnelLabelForRoleplay(department, row.callType));
       } else {
-        processBlocks(blocks, mpAcc, row.score ?? null);
+        processBlocks(blocks, mdAcc, row.score ?? null);
       }
     }
   }
@@ -739,7 +763,31 @@ async function fetchRoleplayData(
   } else {
     canonical = EMPTY_CANONICAL;
   }
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerPeriodAccMap);
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap);
+}
+
+// Roll up a set of per-(manager,day) accumulators into call-weighted scores.
+// Summing raw scoreSum/count (not averaging pre-rounded values) keeps the
+// week/manager aggregates correctly call-weighted — a manager with 1 call and
+// one with 10 don't get equal weight. Keys: block name and "block::criterion";
+// overall is the per-call total_score average. Used to build `timeTree`.
+function aggAccs(accs: PeriodAcc[]): { overall: number | null; scores: Record<string, number>; callCount: number } {
+  const blockSum = new Map<string, { s: number; c: number }>();
+  const critSum = new Map<string, { s: number; c: number }>();
+  let overSum = 0;
+  let overCount = 0;
+  let calls = 0;
+  for (const a of accs) {
+    calls += a.callCount;
+    overSum += a.totalScoreSum;
+    overCount += a.totalScoreCount;
+    for (const [k, v] of a.blocks) { const e = blockSum.get(k) ?? { s: 0, c: 0 }; e.s += v.scoreSum; e.c += v.count; blockSum.set(k, e); }
+    for (const [k, v] of a.criteria) { const e = critSum.get(k) ?? { s: 0, c: 0 }; e.s += v.scoreSum; e.c += v.count; critSum.set(k, e); }
+  }
+  const scores: Record<string, number> = {};
+  for (const [k, v] of blockSum) if (v.c > 0) scores[k] = Math.round(v.s / v.c);
+  for (const [k, v] of critSum) if (v.c > 0) scores[k] = Math.round(v.s / v.c);
+  return { overall: overCount > 0 ? Math.round(overSum / overCount) : null, scores, callCount: calls };
 }
 
 // ─── Build response from accumulators ───────────────────────
@@ -754,7 +802,7 @@ function buildResponse(
   totalCalls: number,
   managersForBreakdown: Array<{ id: string; name: string }> | undefined,
   canonical: CanonicalCriteria,
-  managerPeriodAccMap: Map<string, PeriodAcc>,
+  managerDayAccMap: Map<string, PeriodAcc>,
 ): AnalyticsResponse {
   // The dropdown stays scoped to active managers (`managers`); the breakdown
   // uses the full set including inactive/admin/"no-manager" so totals match.
@@ -854,22 +902,49 @@ function buildResponse(
     .filter((m): m is ManagerBreakdown => m !== null)
     .sort((a, b) => (b.overallScore ?? 0) - (a.overallScore ?? 0));
 
-  // B2B-only: менеджер × период × блок (даты — колонки). Пусто, если
-  // managerPeriodAccMap не заполнялся (не B2B). Те же менеджеры и порядок,
-  // что и в managerBreakdown (отсортирован по overallScore).
-  const managerTimeBreakdown: ManagerTimeRow[] = managerPeriodAccMap.size === 0
-    ? []
-    : managerBreakdown.map((mgr) => {
-        const tblocks: ManagerTimeBlock[] = blockOrder.map((blockName) => {
-          const scores: Record<string, number> = {};
-          for (const p of trimmedPeriods) {
-            const be = managerPeriodAccMap.get(`${mgr.id}::${p}`)?.blocks.get(blockName);
-            if (be && be.count > 0) scores[p] = Math.round(be.scoreSum / be.count);
-          }
-          return { name: blockName, scores };
+  // B2B-only: дерево «неделя → менеджер → дата». Пусто, если managerDayAccMap
+  // не заполнялся (не B2B). Колонки задаются blockOrder/blockCriteriaOrder на
+  // фронте (ключи scores: имя блока и "блок::критерий"). Каждый уровень
+  // агрегируется из сырых сумм/счётчиков → call-weighted (см. aggAccs).
+  const nameById = new Map<string, string>(breakdownSource.map((m) => [m.id, m.name]));
+  nameById.set(NO_MANAGER_KEY, "Без менеджера");
+
+  // Группировка: неделя → менеджер → [дни].
+  const weekMap = new Map<string, { label: string; mgrs: Map<string, Array<{ day: string; acc: PeriodAcc }>> }>();
+  for (const [key, acc] of managerDayAccMap) {
+    if (acc.callCount === 0) continue;
+    const sep = key.lastIndexOf("::");
+    const mgrKey = key.slice(0, sep);
+    const day = key.slice(sep + 2);
+    const { key: wk, label } = weekRange(day);
+    let w = weekMap.get(wk);
+    if (!w) { w = { label, mgrs: new Map() }; weekMap.set(wk, w); }
+    let arr = w.mgrs.get(mgrKey);
+    if (!arr) { arr = []; w.mgrs.set(mgrKey, arr); }
+    arr.push({ day, acc });
+  }
+
+  const timeTree: TimeTreeWeek[] = [...weekMap.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([wk, w]) => {
+      const allAccs: PeriodAcc[] = [];
+      const managersArr: TimeTreeManager[] = [...w.mgrs.entries()]
+        .sort((a, b) => (nameById.get(a[0]) ?? "").localeCompare(nameById.get(b[0]) ?? "", "ru"))
+        .map(([mgrKey, days]) => {
+          const mgrAccs = days.map((d) => d.acc);
+          allAccs.push(...mgrAccs);
+          const dates: TimeTreeDate[] = days
+            .sort((a, b) => (a.day < b.day ? -1 : 1))
+            .map((d) => {
+              const agg = aggAccs([d.acc]);
+              return { date: d.day, callCount: agg.callCount, overall: agg.overall, scores: agg.scores };
+            });
+          const magg = aggAccs(mgrAccs);
+          return { id: mgrKey, name: nameById.get(mgrKey) ?? "—", callCount: magg.callCount, overall: magg.overall, scores: magg.scores, dates };
         });
-        return { id: mgr.id, name: mgr.name, callCount: mgr.callCount, blocks: tblocks };
-      });
+      const wagg = aggAccs(allAccs);
+      return { key: wk, label: w.label, callCount: wagg.callCount, overall: wagg.overall, scores: wagg.scores, managers: managersArr };
+    });
 
   // Diagnostic log
   console.log(`[Analytics] ${source}/${department}: ${totalCalls} calls, ${blockOrder.length} blocks, ${managers.length} managers in list, ${managerAccMap.size} managers with data`);
@@ -880,7 +955,7 @@ function buildResponse(
     }
   }
 
-  return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, managerTimeBreakdown, totalCalls, source, department };
+  return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, timeTree, totalCalls, source, department };
 }
 
 // ─── Route handler ──────────────────────────────────────────
@@ -893,6 +968,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const line = sp.get("line") ?? "all";
     const groupBy = sp.get("groupBy") ?? "day";
     const managerId = sp.get("managerId") || null;
+    // tree=1 → строить дерево неделя→менеджер→дата (тяжёлое, нужно только для
+    // B2B-детализации). Сводка (line=all) и режим сравнения его не запрашивают,
+    // поэтому лишняя работа и payload не делаются.
+    const wantTree = sp.get("tree") === "1";
 
     // Civil dates (YYYY-MM-DD) — what the user picks in the calendar — are
     // always interpreted as Berlin civil days here. Both the SQL filter and
@@ -912,12 +991,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerId}`;
+    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerId}:tree=${wantTree}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerId)
-        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerId),
+        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerId, wantTree)
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerId, wantTree),
     );
 
     return NextResponse.json({ success: true, data });
