@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow,
+  CalendarClock, Workflow, Package,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -95,7 +95,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel";
+type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "artifacts";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -110,22 +110,29 @@ interface NavItem {
   adminOnly: boolean;
   /** Если задано — вкладка доступна только этим отделам; не задано → всем. */
   departments?: DepartmentId[];
+  /** Переопределение подписи для отдела (иначе — label). Напр. у Коммерсов
+   *  Аналитика = «Применимость критериев». Госников не затрагивает. */
+  labelByDept?: Partial<Record<DepartmentId, string>>;
 }
 
 const NAV_ITEMS: NavItem[] = [
   { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
   { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
-  { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
+  { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true, labelByDept: { b2b: "Оценка критериев" } },
   { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
   { id: "looker", icon: Database, label: "Looker", adminOnly: true },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
-  { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
+  { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false, labelByDept: { b2b: "Ролевки" } },
   { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
-  { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true },
-  { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true },
-  { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true },
+  { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true, labelByDept: { b2b: "Анализ по транскрибам звонков" } },
+  // У Коммерсов Критерии/Скрипты — не отдельные вкладки, а переключатель внутри
+  // вкладки «Артефакты» (departments:["b2b"]). У Госников — прежние отдельные
+  // вкладки Критерии/Скрипты (departments:["b2g"]).
+  { id: "artifacts", icon: Package, label: "Артефакты", adminOnly: true, departments: ["b2b"] },
+  { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true, departments: ["b2g"] },
+  { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true, departments: ["b2g"] },
 ];
 
 // Деривативы от NAV_ITEMS — один источник правды, списки вручную не дублируем.
@@ -202,6 +209,11 @@ export default function Dashboard() {
   // Global line filter: "all" OR any line group id from tenant config.
   // Stored as a plain string — tenant.ts is the source of truth for valid values.
   const [lineFilter, setLineFilter] = useState<string>("all");
+  // Вкладка «Артефакты» (Коммерсы): внутренний переключатель Критерии/Скрипты.
+  const [artifactView, setArtifactView] = useState<"criteria" | "scripts">("criteria");
+  // Коммерсы: раскрытие группы «ОКК» в сайдбаре (подпункты — Оценка критериев,
+  // Анализ по транскрибам, Ролевки, Артефакты).
+  const [okkExpanded, setOkkExpanded] = useState(true);
 
   // Load session on mount
   useEffect(() => {
@@ -791,6 +803,46 @@ export default function Dashboard() {
     );
   }
 
+  // Навигация: пункты по роли и отделу. У Коммерсов Критерии/Скрипты живут внутри
+  // вкладки «Артефакты», поэтому отдельных пунктов для них нет (см. NAV_ITEMS).
+  const visibleNavItems = NAV_ITEMS
+    .filter((item) => isAdmin || !item.adminOnly)
+    .filter((item) => tabAllowedInDept(item.id, activeDepartment));
+
+  // У Коммерсов «ОКК» (real_calls) — раскрываемая группа; её подпункты:
+  // Оценка критериев, Анализ по транскрибам, Ролевки, Артефакты. У Госников —
+  // плоский список без вложенности.
+  const isB2bNav = activeDepartment === "b2b";
+  const OKK_CHILD_IDS: TabId[] = ["analytics", "call_analysis", "ai_calls", "artifacts"];
+  const okkChildItems = isB2bNav
+    ? OKK_CHILD_IDS.map((id) => visibleNavItems.find((i) => i.id === id)).filter((i): i is NavItem => Boolean(i))
+    : [];
+  const okkChildIdSet = new Set(okkChildItems.map((i) => i.id));
+  const topLevelNavItems = isB2bNav ? visibleNavItems.filter((i) => !okkChildIdSet.has(i.id)) : visibleNavItems;
+
+  const navButtonClass = (active: boolean, nested = false) =>
+    `flex items-center ${nested ? "gap-2 pl-6 pr-2 py-2" : "gap-4 px-4 py-3"} rounded-2xl transition-all duration-300 font-semibold text-[10px] uppercase tracking-widest text-left ${active
+      ? "bg-blue-500/20 text-blue-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] border border-blue-500/30"
+      : "text-slate-400 hover:text-white hover:bg-white/5"
+      } ${!isSidebarOpen ? "justify-center px-0" : ""}`;
+
+  // nested=true → подпункт (меньше иконка, отступ слева). Длинные подписи
+  // переносятся (break-words/leading-tight), а не вылезают за пределы пункта.
+  const renderNavButton = (item: NavItem, nested = false) => {
+    const navLabel = item.labelByDept?.[activeDepartment] ?? item.label;
+    return (
+      <button
+        key={item.id}
+        onClick={() => setActiveTab(item.id)}
+        className={navButtonClass(activeTab === item.id, nested)}
+        title={!isSidebarOpen ? navLabel : undefined}
+      >
+        <item.icon className={`${nested ? "w-4 h-4" : "w-5 h-5"} shrink-0`} />
+        {isSidebarOpen && <span className="leading-tight break-words min-w-0">{navLabel}</span>}
+      </button>
+    );
+  };
+
   return (
     <div className="flex sm:flex-row flex-col min-h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-hidden text-sm">
       {/* BACKGROUND DECORATIONS (GLOWS) - Changed to Blue tones */}
@@ -819,23 +871,38 @@ export default function Dashboard() {
         </div>
 
         <nav className="flex flex-col gap-2 mt-4 w-full">
-          {NAV_ITEMS
-            .filter((item) => isAdmin || !item.adminOnly)
-            .filter((item) => tabAllowedInDept(item.id, activeDepartment))
-            .map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              className={`flex items-center gap-4 px-4 py-3 rounded-2xl transition-all duration-300 font-semibold text-[10px] uppercase tracking-widest whitespace-nowrap ${activeTab === item.id
-                ? "bg-blue-500/20 text-blue-300 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] border border-blue-500/30"
-                : "text-slate-400 hover:text-white hover:bg-white/5"
-                } ${!isSidebarOpen && "justify-center px-0"}`}
-              title={!isSidebarOpen ? item.label : undefined}
-            >
-              <item.icon className="w-5 h-5 shrink-0" />
-              {isSidebarOpen && <span>{item.label}</span>}
-            </button>
-          ))}
+          {!isSidebarOpen
+            ? /* Свёрнутый сайдбар — плоский ряд иконок (без вложенности). */
+              visibleNavItems.map((item) => renderNavButton(item))
+            : topLevelNavItems.map((item) => {
+                const isOkkParent = isB2bNav && item.id === "real_calls" && okkChildItems.length > 0;
+                if (!isOkkParent) return renderNavButton(item);
+                // ОКК как раскрываемая группа: основная кнопка ведёт в ОКК-звонки,
+                // соседняя кнопка-шеврон раскрывает/сворачивает подпункты.
+                const navLabel = item.labelByDept?.[activeDepartment] ?? item.label;
+                return (
+                  <div key={item.id} className="flex flex-col gap-2">
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setActiveTab("real_calls")}
+                        className={`${navButtonClass(activeTab === "real_calls" || okkChildIdSet.has(activeTab))} flex-1`}
+                        title={navLabel}
+                      >
+                        <item.icon className="w-5 h-5 shrink-0" />
+                        <span className="flex-1 leading-tight break-words min-w-0">{navLabel}</span>
+                      </button>
+                      <button
+                        onClick={() => setOkkExpanded((v) => !v)}
+                        className="shrink-0 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5"
+                        aria-label={okkExpanded ? "Свернуть ОКК" : "Развернуть ОКК"}
+                      >
+                        {okkExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    {okkExpanded && okkChildItems.map((child) => renderNavButton(child, true))}
+                  </div>
+                );
+              })}
         </nav>
 
         {/* User info + theme toggle + logout */}
@@ -959,11 +1026,40 @@ export default function Dashboard() {
         {activeTab === "call_analysis" && (
           <AnalysisTab department={activeDepartment} />
         )}
-        {activeTab === "criteria" && (
+        {/* Render-гейт по отделу (как у artifacts/funnel/termins): criteria/scripts
+            теперь departments:["b2g"]; без гейта на B2B мелькнул бы кадр и ушёл
+            лишний /api/criteria-запрос до сброса вкладки safety-net эффектом. */}
+        {activeTab === "criteria" && tabAllowedInDept("criteria", activeDepartment) && (
           <CriteriaTab department={activeDepartment} lineFilter={lineFilter} />
         )}
-        {activeTab === "scripts" && (
+        {activeTab === "scripts" && tabAllowedInDept("scripts", activeDepartment) && (
           <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
+        )}
+        {/* Артефакты (Коммерсы): одна вкладка с переключателем Критерии/Скрипты.
+            Render-гейт по отделу — на B2G вкладки нет (departments:["b2b"]). */}
+        {activeTab === "artifacts" && tabAllowedInDept("artifacts", activeDepartment) && (
+          <div className="flex flex-col gap-4 flex-1 min-h-0 min-w-0">
+            <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 self-start">
+              {(["criteria", "scripts"] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setArtifactView(v)}
+                  className={`px-4 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
+                    artifactView === v
+                      ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {v === "criteria" ? "Критерии" : "Скрипты"}
+                </button>
+              ))}
+            </div>
+            {artifactView === "criteria" ? (
+              <CriteriaTab department={activeDepartment} lineFilter={lineFilter} />
+            ) : (
+              <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
+            )}
+          </div>
         )}
 
         {activeTab === "looker" && <LookerTab department={activeDepartment} />}
