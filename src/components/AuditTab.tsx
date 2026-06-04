@@ -126,7 +126,7 @@ export default function AuditTab({
           <h1 className="text-2xl font-semibold">Аудит оценок</h1>
           <p className="text-sm text-zinc-500">
             Окно: {data.from} → {data.to} · Отдел:{" "}
-            {department === "b2g" ? "B2G (Госники)" : "B2B (Коммерсы)"}
+            {department === "b2g" ? "B2G (Госники)" : "B2C (Коммерсы)"}
           </p>
         </div>
       </div>

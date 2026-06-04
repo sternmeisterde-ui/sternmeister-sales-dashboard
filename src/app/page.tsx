@@ -22,7 +22,6 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
-import AnalyticsLookerSwitch from "@/components/AnalyticsLookerSwitch";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -119,9 +118,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true },
   { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
-  // Looker: у Госников — отдельная вкладка; у Коммерсов вынесен переключателем
-  // внутрь «Аналитики» (departments:["b2g"] прячет пункт для B2B). См. §8.
-  { id: "looker", icon: Database, label: "Looker", adminOnly: true, departments: ["b2g"] },
+  { id: "looker", icon: Database, label: "Looker", adminOnly: true },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false },
@@ -172,6 +169,17 @@ function persistDepartment(dept: "b2g" | "b2b"): void {
     window.localStorage.setItem(DEPT_STORAGE_KEY, dept);
   } catch {
     /* недоступность localStorage не должна ломать переключение отдела */
+  }
+}
+
+// Чистим при выходе: ключ глобальный (не на пользователя), иначе на общем
+// браузере следующий админ/ROP стартанёт в отделе предыдущего.
+function clearStoredDepartment(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(DEPT_STORAGE_KEY);
+  } catch {
+    /* недоступность localStorage не критична */
   }
 }
 
@@ -854,6 +862,7 @@ export default function Dashboard() {
             <button
               onClick={async () => {
                 await fetch("/api/auth/logout", { method: "POST" });
+                clearStoredDepartment();
                 window.location.href = "/login";
               }}
               className="flex items-center gap-3 px-4 py-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all w-full text-sm"
@@ -878,19 +887,19 @@ export default function Dashboard() {
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2g" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Госники (B2G)
+              {DEPARTMENTS.b2g.label}
             </button>
             <button
               onClick={() => { setActiveDepartment("b2b"); setLineFilter("all"); persistDepartment("b2b"); }}
               className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeDepartment === "b2b" ? "bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
                 }`}
             >
-              Коммерсы (B2C)
+              {DEPARTMENTS.b2b.label}
             </button>
           </div>
           ) : (
             <div className="text-sm text-slate-400 px-2">
-              {session?.department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}
+              {session?.department === "b2g" ? DEPARTMENTS.b2g.label : DEPARTMENTS.b2b.label}
             </div>
           )}
 
@@ -933,12 +942,8 @@ export default function Dashboard() {
         )}
 
         {/* --------------------- ANALYTICS VIEW --------------------- */}
-        {/* B2B (Рузанна): Looker встроен в Аналитику переключателем и убран из
-            сайдбара. B2G — без изменений: Аналитика и Looker раздельно. См. §8. */}
         {activeTab === "analytics" && (
-          activeDepartment === "b2b"
-            ? <AnalyticsLookerSwitch department={activeDepartment} />
-            : <AnalyticsTab department={activeDepartment} />
+          <AnalyticsTab department={activeDepartment} />
         )}
 
         {activeTab === "tracking" && (
@@ -961,9 +966,7 @@ export default function Dashboard() {
           <ScriptsTab department={activeDepartment} lineFilter={lineFilter} isAdmin={isAdmin} />
         )}
 
-        {/* B2B: Looker доступен внутри Аналитики (см. выше), как отдельная вкладка
-            не рендерится — гейт по отделу + safety-net сбрасывают #looker на дашборд. */}
-        {activeTab === "looker" && tabAllowedInDept("looker", activeDepartment) && <LookerTab department={activeDepartment} />}
+        {activeTab === "looker" && <LookerTab department={activeDepartment} />}
 
         {/* Render-гейт по отделу — детерминированно, не зависит от порядка эффектов:
             funnel/termins (только Бух Гос) никогда не рендерятся под Коммерсами,

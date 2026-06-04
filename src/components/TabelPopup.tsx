@@ -18,6 +18,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X, Loader2, ChevronLeft, ChevronRight, Save } from "lucide-react";
+import { getDepartment } from "@/lib/config/tenant";
 
 interface MonthEntry {
   equivFullDays: number;
@@ -261,7 +262,7 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
               <ChevronLeft className="w-4 h-4" />
             </button>
             <div>
-              <h2 className="text-lg font-bold text-white">Табель — {department === "b2g" ? "Госники (B2G)" : "Коммерсы (B2B)"}</h2>
+              <h2 className="text-lg font-bold text-white">Табель — {getDepartment(department).label}</h2>
               <p className="text-[11px] text-slate-400">{year} год</p>
             </div>
             <button
