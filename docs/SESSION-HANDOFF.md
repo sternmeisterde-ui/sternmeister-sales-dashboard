@@ -1,8 +1,34 @@
 # Session Handoff — Calls / Daily / Dashboard / Tracking / Looker / Термин / MCP
 
-Last updated: 2026-04-30 (added MCP plan + full per-tab table-source map)
+Last updated: 2026-06-05 (B2G/B2B tab split + B2B scripts initiative — see "Current focus" below). Earlier: 2026-04-30 MCP plan + per-tab table-source map.
 
 This doc is for the next Claude Code session. Read it first.
+
+---
+
+## Current focus (2026-06) — B2G/B2B separation + B2B sales scripts
+
+Active branch: **`feat/tab-visibility-b2g-b2b`** (from fresh `main`, pushed, **not yet merged → no PR**). Two parallel initiatives live here. Detailed specs are in `dev_docs/` (that folder is **gitignored** — local only): `13-РАЗДЕЛЕНИЕ-B2G-B2B.md`, `14-СКРИПТЫ-B2B-ПЛАН.md`, `15-*` (per-manager breakdown spec).
+
+**1. B2G/B2B tab visibility split — DONE + committed + pushed.**
+- Госники (B2G) и Коммерсы (B2B) больше не показывают одинаковый набор вкладок. Единый `NAV_ITEMS: NavItem[]` (id/adminOnly/departments?) питает сайдбар + `VALID_TABS` + `ADMIN_ONLY_TABS` через хелпер `tabAllowedInDept`.
+- **Воронка** (`funnel`) и **Термин** (`termins`) скрыты для B2B (это концепции только Бух Гос). **Аудит** скрыт для обоих (код AuditTab + `/api/okk/audit` сохранён нетронутым — на переиспользование, не удалять).
+- Выбор отдела переживает F5 (`localStorage` ключ `sm_active_department`); менеджер всегда `session.department`.
+- B2B-редизайн ОКК-аналитики (дерево критериев + обзор направлений), «Разбивка по менеджерам» во времени (блок→менеджер, даты в колонках), B2B-сайдбар (переименованные вкладки, вкладка «Артефакты», раскрываемая группа ОКК). Looker — снова standalone-вкладка для обоих отделов (попытка встроить его в Аналитику откачена: ломалась цепочка высот / sticky-шапки).
+- **Осталось:** проверка в браузере → PR в `main` → влитие = деплой Dokploy на прод. Не делать без явного «го» + verification.
+
+**2. B2B sales scripts (Коммерсы) — drafts loaded, awaiting acceptance.**
+- У B2B скриптов продаж не было вовсе. Подход «критерии-первичны»: скрипт строится от критериев OKK B2B (`r2_commercial`/`r2_decisions`/`r2_med_commercial`), формулировки — из реальных успешных R2-транскриптов. План: `dev_docs/14-СКРИПТЫ-B2B-ПЛАН.md`.
+- Черновики 3 линий (buh1/buh2/med1, v1 с 🟡-пометками по ценам/рефералу) залиты в D1 через `scripts/load-b2b-scripts.ts`, видны во вкладке «Скрипты» B2B. Ждут приёмки и правок Рузанны прямо в UI.
+- Diag-тулинг закоммичен (`9da7186`): `diag-b2b-script-samples.ts`, `diag-b2b-validation-set.ts`, `diag-b2b-batch3.ts` (read-only выборки, пишут в gitignored `dev_docs/_b2b-analysis/`).
+
+**Health:** `tsc --noEmit` = 0 (чисто). `npm run lint` = 53 errors + 32 warnings — **пре-существующие, по всему коду** (FunnelChart `any`, useTheme setState-in-effect, telegram/resolve `any`, неиспользуемые импорты в ETL). **Не блокируют сборку** — Next 16 не гоняет ESLint при `next build` (package.json: `"lint": "eslint"`, не `next lint`). Чистка — отдельной задачей, см. "Tech-debt backlog" ниже.
+
+> ⚠️ Локальный `npm run build` на Windows может падать с `EBUSY rmdir '.next/standalone'`, если запущен `next dev`/standalone-сервер, держащий папку. Это окружение, не код — прод собирается в Linux-Docker без проблем.
+
+### Tech-debt backlog (не блокирует прод, на будущее)
+- 53 lint-ошибки / 32 warning по всему коду — `no-explicit-any` в FunnelChart/queries-existing/telegram, `set-state-in-effect` в useTheme, неиспользуемые импорты. Чистить осторожно и по отдельности (затрагивает ETL/telegram/funnel).
+- Пре-существующие `no-explicit-any` в KpiCard. #5 (lineFilter reset asymmetry) — латентное, вне scope split.
 
 ---
 
