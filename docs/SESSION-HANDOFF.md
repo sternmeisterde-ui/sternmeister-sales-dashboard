@@ -8,14 +8,14 @@ This doc is for the next Claude Code session. Read it first.
 
 ## Current focus (2026-06) — B2G/B2B separation + B2B sales scripts
 
-Active branch: **`feat/tab-visibility-b2g-b2b`** (from fresh `main`, pushed, **not yet merged → no PR**). Two parallel initiatives live here. Detailed specs are in `dev_docs/` (that folder is **gitignored** — local only): `13-РАЗДЕЛЕНИЕ-B2G-B2B.md`, `14-СКРИПТЫ-B2B-ПЛАН.md`, `15-*` (per-manager breakdown spec).
+Branch: **`feat/tab-visibility-b2g-b2b`** — **уже влита в `main` и на проде** (инкрементально через PR #4/#5/#6, тип `8a4c5f8`). На ветке выше main остаются только dev-only коммиты (этот handoff + diag-скрипты), не трогающие `src/`. Two parallel initiatives live here. Detailed specs are in `dev_docs/` (that folder is **gitignored** — local only): `13-РАЗДЕЛЕНИЕ-B2G-B2B.md`, `14-СКРИПТЫ-B2B-ПЛАН.md`, `15-*` (per-manager breakdown spec).
 
 **1. B2G/B2B tab visibility split — DONE + committed + pushed.**
 - Госники (B2G) и Коммерсы (B2B) больше не показывают одинаковый набор вкладок. Единый `NAV_ITEMS: NavItem[]` (id/adminOnly/departments?) питает сайдбар + `VALID_TABS` + `ADMIN_ONLY_TABS` через хелпер `tabAllowedInDept`.
 - **Воронка** (`funnel`) и **Термин** (`termins`) скрыты для B2B (это концепции только Бух Гос). **Аудит** скрыт для обоих (код AuditTab + `/api/okk/audit` сохранён нетронутым — на переиспользование, не удалять).
 - Выбор отдела переживает F5 (`localStorage` ключ `sm_active_department`); менеджер всегда `session.department`.
 - B2B-редизайн ОКК-аналитики (дерево критериев + обзор направлений), «Разбивка по менеджерам» во времени (блок→менеджер, даты в колонках), B2B-сайдбар (переименованные вкладки, вкладка «Артефакты», раскрываемая группа ОКК). Looker — снова standalone-вкладка для обоих отделов (попытка встроить его в Аналитику откачена: ломалась цепочка высот / sticky-шапки).
-- **Осталось:** проверка в браузере → PR в `main` → влитие = деплой Dokploy на прод. Не делать без явного «го» + verification.
+- **Статус: на проде.** Логика видимости вычитана (единый `NAV_ITEMS` + `tabAllowedInDept`, 3 слоя: фильтр сайдбара + render-гейт + safety-net useEffect; `audit` намеренно вне `NAV_ITEMS`). Серверный код B2B-аналитики аддитивен и B2G-нейтрален (`timeTree` считается только при `department==="b2b"`).
 
 **2. B2B sales scripts (Коммерсы) — drafts loaded, awaiting acceptance.**
 - У B2B скриптов продаж не было вовсе. Подход «критерии-первичны»: скрипт строится от критериев OKK B2B (`r2_commercial`/`r2_decisions`/`r2_med_commercial`), формулировки — из реальных успешных R2-транскриптов. План: `dev_docs/14-СКРИПТЫ-B2B-ПЛАН.md`.
