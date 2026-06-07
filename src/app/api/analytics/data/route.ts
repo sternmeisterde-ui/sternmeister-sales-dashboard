@@ -29,26 +29,9 @@ const TABLE_CONFIG = {
     schema: "analytics",
     filterCols: ["manager", "pipeline_name", "sla_status"],
   },
-  sales_report: {
-    dateCol: "date",
-    schema: "analytics",
-    filterCols: ["manager"],
-  },
-  ads_report: {
-    dateCol: "date",
-    schema: "analytics",
-    filterCols: ["utm_source", "utm_medium"],
-  },
-  custom_report: {
-    dateCol: "dt",
-    schema: "analytics",
-    filterCols: ["manager", "metric_name", "pipeline_name"],
-  },
-  funnel: {
-    dateCol: "dt_operational",
-    schema: "analytics",
-    filterCols: ["manager", "pipeline_name"],
-  },
+  // NOTE: sales_report / ads_report / custom_report / funnel removed —
+  // never-materialised integrator mirrors (0 rows), dropped in analytics
+  // migration 0024_drop_dead_mirror_tables.sql.
 } as const;
 
 type TableKey = keyof typeof TABLE_CONFIG;

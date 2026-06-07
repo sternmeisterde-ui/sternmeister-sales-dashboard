@@ -291,86 +291,11 @@ export const sla = analyticsSchema.table(
   ],
 );
 
-export const adsReport = analyticsSchema.table(
-  "ads_report",
-  {
-    date: date("date"),
-    utmSource: text("utm_source"),
-    utmMedium: text("utm_medium"),
-    utmCampaign: text("utm_campaign"),
-    utmContent: text("utm_content"),
-    utmTerm: text("utm_term"),
-    impressions: bigint("impressions", { mode: "number" }),
-    clicks: bigint("clicks", { mode: "number" }),
-    spend: doublePrecision("spend"),
-    leadsCount: bigint("leads_count", { mode: "number" }),
-    qualLeadsCount: bigint("qual_leads_count", { mode: "number" }),
-    paymentCnt: bigint("payment_cnt", { mode: "number" }),
-    paymentAmount: doublePrecision("payment_amount"),
-    eLeadsCnt: bigint("e_leads_cnt", { mode: "number" }),
-    pipelineLeadsCnt: bigint("pipeline_leads_cnt", { mode: "number" }),
-    pipelinePaymentCnt: bigint("pipeline_payment_cnt", { mode: "number" }),
-    pipelinePaymentAmount: doublePrecision("pipeline_payment_amount"),
-    webinarLeadsCnt: bigint("webinar_leads_cnt", { mode: "number" }),
-    webinarPaymentCnt: bigint("webinar_payment_cnt", { mode: "number" }),
-    webinarPaymentAmount: doublePrecision("webinar_payment_amount"),
-    usersCnt: bigint("users_cnt", { mode: "number" }),
-  },
-  (t) => [
-    index().on(t.date),
-    index().on(t.utmSource, t.date),
-  ],
-);
-
-export const salesReport = analyticsSchema.table(
-  "sales_report",
-  {
-    date: date("date"),
-    manager: text("manager"),
-    createCnt: bigint("create_cnt", { mode: "number" }),
-    paymentCnt: bigint("payment_cnt", { mode: "number" }),
-    paymentSum: doublePrecision("payment_sum"),
-    salesPlan: bigint("sales_plan", { mode: "number" }),
-    callsCnt: bigint("calls_cnt", { mode: "number" }),
-    totalDuration: bigint("total_duration", { mode: "number" }),
-    successCalls: bigint("success_calls", { mode: "number" }),
-    outgoingCalls: bigint("outgoing_calls", { mode: "number" }),
-    businessHoursSla: bigint("business_hours_sla", { mode: "number" }),
-    businessHoursSlaCnt: bigint("business_hours_sla_cnt", { mode: "number" }),
-    quality: doublePrecision("quality"),
-  },
-  (t) => [index().on(t.date, t.manager)],
-);
-
-// ==================== REPORT (dashboard source) ====================
-
-export const customReport = analyticsSchema.table(
-  "custom_report",
-  {
-    metricName: text("metric_name"),
-    metricType: text("metric_type"),
-    dt: timestamp("dt"),
-    entityId: text("entity_id"),
-    leadId: bigint("lead_id", { mode: "number" }),
-    numericValue: doublePrecision("numeric_value"),
-    manager: text("manager"),
-    currentManager: text("current_manager"),
-    category: text("category"),
-    pipelineId: bigint("pipeline_id", { mode: "number" }),
-    pipelineName: text("pipeline_name"),
-    statusId: bigint("status_id", { mode: "number" }),
-    statusName: text("status_name"),
-    utmSource: text("utm_source"),
-    currentPipelineName: text("current_pipeline_name"),
-    currentStatusName: text("current_status_name"),
-  },
-  (t) => [
-    index().on(t.metricName, t.dt),
-    index().on(t.metricType, t.dt),
-    index().on(t.manager, t.dt),
-    index().on(t.leadId),
-  ],
-);
+// NOTE: analytics.ads_report / sales_report / custom_report / funnel were a
+// never-materialised mirror of the 3rd-party integrator's MySQL (see file
+// header). Confirmed empty (0 rows) and unreferenced — dropped in migration
+// 0024_drop_dead_mirror_tables.sql. The `funnel` table here is unrelated to
+// the Воронка feature (that uses leads_cohort + funnel_target_levels).
 
 /**
  * Enum-option catalog for Kommo lead custom fields used to categorize refusals
@@ -401,26 +326,7 @@ export const enrichSkipPhones = analyticsSchema.table(
   },
 );
 
-export const funnel = analyticsSchema.table(
-  "funnel",
-  {
-    metricName: text("metric_name"),
-    dtOperational: timestamp("dt_operational"),
-    dtCohort: timestamp("dt_cohort"),
-    entityId: text("entity_id"),
-    leadId: bigint("lead_id", { mode: "number" }),
-    numericValue: doublePrecision("numeric_value"),
-    manager: text("manager"),
-    pipelineName: text("pipeline_name"),
-    statusName: text("status_name"),
-  },
-  (t) => [
-    index().on(t.metricName, t.dtOperational),
-    index().on(t.metricName, t.dtCohort),
-    index().on(t.leadId),
-    index().on(t.pipelineName, t.statusName),
-  ],
-);
+// analytics.funnel — dead integrator mirror, dropped (see note above + migration 0024).
 
 // Kommo contact mirror. Populated by sync-contacts.ts via /api/v4/contacts
 // (batched by id, 250 per request, 1 rps). Idempotent — ON CONFLICT updates
