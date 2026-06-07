@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, PhoneIncoming, PhoneOutgoing, Clock, Timer } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -22,7 +22,16 @@ interface ManagerBreakdown { id: string; name: string; overallScore: number | nu
 // B2B-only: дерево «неделя → менеджер → дата». overall = средний % за звонок;
 // scores — баллы по колонкам (ключ = имя блока ИЛИ "блок::критерий").
 interface TimeTreeNode { callCount: number; overall: number | null; scores: Record<string, number> }
-interface TimeTreeDate extends TimeTreeNode { date: string }
+// 4-й уровень — отдельный звонок/сделка (только OKK).
+interface TimeTreeCall extends TimeTreeNode {
+  callId: string;
+  startedAt: string | null;
+  durationSec: number | null;
+  direction: string | null;
+  kommoLeadId: string | null;
+  kommoLeadUrl: string | null;
+}
+interface TimeTreeDate extends TimeTreeNode { date: string; calls: TimeTreeCall[] }
 interface TimeTreeManager extends TimeTreeNode { id: string; name: string; dates: TimeTreeDate[] }
 interface TimeTreeWeek extends TimeTreeNode { key: string; label: string; managers: TimeTreeManager[] }
 interface AnalyticsData {
@@ -54,6 +63,22 @@ function getCriteriaBg(v: number | null | undefined): string {
 function fmtScore(v: number | null | undefined): string {
   if (v === undefined || v === null) return "—";
   return `${v}%`;
+}
+
+// M:SS из секунд (длительность звонка).
+function fmtDuration(sec: number | null | undefined): string {
+  if (sec === undefined || sec === null) return "";
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Время начала звонка ЧЧ:ММ в берлинской зоне (DST-aware).
+function fmtBerlinTime(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Berlin" });
 }
 
 function fmtPeriod(p: string, g: string): string {
@@ -140,6 +165,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   // B2B-дерево: раскрытые недели (ключ = week.key) и менеджеры (ключ = "week::mgrId").
   const [expandedWeeks, setExpandedWeeks] = useState<Set<string>>(new Set());
   const [expandedMgrs, setExpandedMgrs] = useState<Set<string>>(new Set());
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   // B2B OKK: верхняя сводка «Динамика по критериям» — все линии (воронки) × даты.
   // Отдельный fetch line="all", не зависит от выбранной вкладки линии.
   const [overview, setOverview] = useState<AnalyticsData | null>(null);
@@ -579,6 +605,8 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                 onToggleWeek={(k) => toggle(setExpandedWeeks, k)}
                 expandedMgrs={expandedMgrs}
                 onToggleMgr={(k) => toggle(setExpandedMgrs, k)}
+                expandedDates={expandedDates}
+                onToggleDate={(k) => toggle(setExpandedDates, k)}
               />
             ) : (
               data && !loading ? (
@@ -859,12 +887,13 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr,
+  tree, blocks, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
+  expandedDates: Set<string>; onToggleDate: (k: string) => void;
 }) {
   const isExpandedBlock = (b: BlockData) => b.criteria.length > 0 && !collapsedBlocks.has(b.name);
   // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
@@ -982,15 +1011,69 @@ function CriteriaTimeTree({
                           </td>
                           {valueCells(mgr, false)}
                         </tr>
-                        {/* Даты менеджера */}
-                        {mgrOpen && mgr.dates.map((d) => (
-                          <tr key={`${mgrKey}::${d.date}`} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                            <td className="px-3 py-1 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
-                              <span className="block pl-11 text-[10px] text-slate-500 whitespace-nowrap">{d.date} · {d.callCount} зв.</span>
-                            </td>
-                            {valueCells(d, false)}
-                          </tr>
-                        ))}
+                        {/* Даты менеджера — раскрываются в отдельные звонки (4-й уровень) */}
+                        {mgrOpen && mgr.dates.map((d) => {
+                          const dateKey = `${mgrKey}::${d.date}`;
+                          const hasCalls = d.calls.length > 0;
+                          const dateOpen = hasCalls && expandedDates.has(dateKey);
+                          return (
+                            <Fragment key={dateKey}>
+                              <tr
+                                className={`border-b border-white/[0.03] hover:bg-white/[0.02] ${hasCalls ? "cursor-pointer" : ""}`}
+                                onClick={hasCalls ? () => onToggleDate(dateKey) : undefined}
+                              >
+                                <td className="px-3 py-1 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">
+                                  <span className="flex items-center gap-1 pl-11 text-[10px] text-slate-500 whitespace-nowrap">
+                                    {hasCalls
+                                      ? (dateOpen ? <ChevronUp className="w-3 h-3 text-slate-600 shrink-0" /> : <ChevronDown className="w-3 h-3 text-slate-600 shrink-0" />)
+                                      : <span className="w-3 shrink-0" />}
+                                    {d.date} · {d.callCount} зв.
+                                  </span>
+                                </td>
+                                {valueCells(d, false)}
+                              </tr>
+                              {/* Звонки/сделки дня */}
+                              {dateOpen && d.calls.map((c) => (
+                                <tr key={c.callId} className="border-b border-white/[0.02] bg-slate-950/40 hover:bg-white/[0.02]">
+                                  <td className="px-3 py-1 sticky left-0 bg-slate-950/60 backdrop-blur-sm z-10">
+                                    <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
+                                      {c.kommoLeadUrl ? (
+                                        <a
+                                          href={c.kommoLeadUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="text-blue-400 hover:text-blue-300 shrink-0"
+                                          title="Открыть сделку в Kommo"
+                                        >
+                                          <ExternalLink className="w-3 h-3" />
+                                        </a>
+                                      ) : (
+                                        <span className="w-3 shrink-0" />
+                                      )}
+                                      {c.direction === "inbound" ? (
+                                        <PhoneIncoming className="w-3 h-3 text-emerald-500/70 shrink-0" />
+                                      ) : c.direction === "outbound" ? (
+                                        <PhoneOutgoing className="w-3 h-3 text-sky-500/70 shrink-0" />
+                                      ) : null}
+                                      <span className="flex items-center gap-0.5 tabular-nums" title="Время начала звонка">
+                                        <Clock className="w-3 h-3 text-slate-600 shrink-0" />
+                                        {fmtBerlinTime(c.startedAt) || "—"}
+                                      </span>
+                                      {c.durationSec != null && (
+                                        <span className="flex items-center gap-0.5 tabular-nums text-slate-600" title="Продолжительность звонка (мин:сек)">
+                                          <Timer className="w-3 h-3 shrink-0" />
+                                          {fmtDuration(c.durationSec)}
+                                        </span>
+                                      )}
+                                    </span>
+                                  </td>
+                                  {valueCells(c, true)}
+                                </tr>
+                              ))}
+                            </Fragment>
+                          );
+                        })}
                       </Fragment>
                     );
                   })}
