@@ -726,7 +726,10 @@ async function fetchRoleplayData(
 
   const managerAccMap = new Map<string, PeriodAcc>();
 
-  const isAllFunnels = line === "all" || !line;
+  // B2B-ролевки = единственный скрипт (оцениваются движком-портом ОКК по
+  // r2_commercial) → всегда criteria-режим, чтобы показывать те же критерии,
+  // что и у реальных звонков ОКК. B2G-ролевки сохраняют funnels/per-line логику.
+  const isAllFunnels = department === "b2b" ? false : (line === "all" || !line);
 
   // B2B: аккумулятор «менеджер × день» для дерева неделя→менеджер→дата.
   // Ключ — civil-день (см. fetchOkkData): дерево не зависит от groupBy.
@@ -810,7 +813,12 @@ async function fetchRoleplayData(
   // config for roleplay yet, so we fall back to whatever evaluation_json
   // surfaces).
   let canonical: CanonicalCriteria;
-  if (isAllFunnels) {
+  if (department === "b2b") {
+    // Ролевки B2B оцениваются движком-портом ОКК по r2_commercial → грузим тот
+    // же канонический набор критериев, что и у реальных звонков (Бух 1). Так
+    // дерево показывает пооценочный разбор, согласованный с ОКК.
+    canonical = await loadCanonicalCriteria(["r2_commercial"]);
+  } else if (isAllFunnels) {
     const funnels = funnelOrderForRoleplay(department);
     canonical = {
       blockOrder: funnels,
