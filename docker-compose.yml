@@ -33,6 +33,10 @@ services:
       - R2_OKK_DATABASE_URL=${R2_OKK_DATABASE_URL}
       - ANALYTICS_DATABASE_URL=${ANALYTICS_DATABASE_URL}
       - TRACKING_DATABASE_URL=${TRACKING_DATABASE_URL}
+      # "daily" project: daily_active_managers + evaluation_error_reports.
+      # Without this whitelist entry the var is invisible in the container and
+      # src/lib/db/daily-db.ts falls back to a hardcoded URL (to be removed).
+      - DAILY_DATABASE_URL=${DAILY_DATABASE_URL}
 
       # Roleplay audio servers
       - D1_API_URL=${D1_API_URL}
@@ -75,6 +79,10 @@ services:
       # Discord webhook for user-submitted bug reports ("Сообщить об ошибке").
       # Must be set in Dokploy; the server only sends to Discord if present.
       - DISCORD_BUG_REPORT_WEBHOOK_URL=${DISCORD_BUG_REPORT_WEBHOOK_URL}
+      # Discord webhook for call-evaluation complaints (/api/error-report).
+      # Without this whitelist entry the var is invisible in the container and
+      # error-report/route.ts falls back to a hardcoded URL (to be removed).
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
     restart: unless-stopped
     networks:
       - sternmeister-network
