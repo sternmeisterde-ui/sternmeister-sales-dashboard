@@ -3,7 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDailyDb } from "@/lib/db/daily-db";
 import { sql } from "drizzle-orm";
 
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "https://discord.com/api/webhooks/1485520090110759053/Wg9K6VhRz4dgAxiKYk7RawfRrLQ886EckHeX8mKz5E2woPyOZUl8t2L5GZxd0uy6D7TQ";
+// Env-only — no hardcoded fallback. If unset, the send below is skipped
+// (the `if (DISCORD_WEBHOOK_URL)` guard); the report is still saved to the DB.
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 export async function POST(req: NextRequest) {
   try {
