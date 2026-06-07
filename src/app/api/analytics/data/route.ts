@@ -71,6 +71,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     const fromStr = sp.get("from") ?? defaultFrom.toISOString().slice(0, 10);
     const toStr = sp.get("to") ?? now.toISOString().slice(0, 10);
+    // from/to come from the URL and used to be string-concatenated into raw
+    // SQL — reject anything that isn't a bare YYYY-MM-DD civil date so no
+    // user input can reach the query as syntax (defence-in-depth alongside the
+    // parameterised bindings below).
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    if (!DATE_RE.test(fromStr) || !DATE_RE.test(toStr)) {
+      return NextResponse.json({ error: "Invalid from/to date (expected YYYY-MM-DD)" }, { status: 400 });
+    }
     const fromDate = `${fromStr}T00:00:00Z`;
     const toDate = `${toStr}T23:59:59Z`;
 
@@ -83,9 +91,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       if (val) activeFilters.push({ col, value: val });
     }
 
+    // dateCol is a fixed identifier from TABLE_CONFIG (safe via sql.raw); the
+    // date values are bound parameters, never concatenated into the SQL text.
     const whereParts: ReturnType<typeof sql>[] = [
-      sql.raw(`"${dateCol}" >= '${fromDate}'::timestamptz`),
-      sql.raw(`"${dateCol}" <= '${toDate}'::timestamptz`),
+      sql`"${sql.raw(dateCol)}" >= ${fromDate}::timestamptz`,
+      sql`"${sql.raw(dateCol)}" <= ${toDate}::timestamptz`,
     ];
 
     for (const { col, value } of activeFilters) {
