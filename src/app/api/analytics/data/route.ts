@@ -29,26 +29,9 @@ const TABLE_CONFIG = {
     schema: "analytics",
     filterCols: ["manager", "pipeline_name", "sla_status"],
   },
-  sales_report: {
-    dateCol: "date",
-    schema: "analytics",
-    filterCols: ["manager"],
-  },
-  ads_report: {
-    dateCol: "date",
-    schema: "analytics",
-    filterCols: ["utm_source", "utm_medium"],
-  },
-  custom_report: {
-    dateCol: "dt",
-    schema: "analytics",
-    filterCols: ["manager", "metric_name", "pipeline_name"],
-  },
-  funnel: {
-    dateCol: "dt_operational",
-    schema: "analytics",
-    filterCols: ["manager", "pipeline_name"],
-  },
+  // NOTE: sales_report / ads_report / custom_report / funnel removed —
+  // never-materialised integrator mirrors (0 rows), dropped in analytics
+  // migration 0024_drop_dead_mirror_tables.sql.
 } as const;
 
 type TableKey = keyof typeof TABLE_CONFIG;
@@ -88,6 +71,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     const fromStr = sp.get("from") ?? defaultFrom.toISOString().slice(0, 10);
     const toStr = sp.get("to") ?? now.toISOString().slice(0, 10);
+    // from/to come from the URL and used to be string-concatenated into raw
+    // SQL — reject anything that isn't a bare YYYY-MM-DD civil date so no
+    // user input can reach the query as syntax (defence-in-depth alongside the
+    // parameterised bindings below).
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    if (!DATE_RE.test(fromStr) || !DATE_RE.test(toStr)) {
+      return NextResponse.json({ error: "Invalid from/to date (expected YYYY-MM-DD)" }, { status: 400 });
+    }
     const fromDate = `${fromStr}T00:00:00Z`;
     const toDate = `${toStr}T23:59:59Z`;
 
@@ -100,9 +91,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       if (val) activeFilters.push({ col, value: val });
     }
 
+    // dateCol is a fixed identifier from TABLE_CONFIG (safe via sql.raw); the
+    // date values are bound parameters, never concatenated into the SQL text.
     const whereParts: ReturnType<typeof sql>[] = [
-      sql.raw(`"${dateCol}" >= '${fromDate}'::timestamptz`),
-      sql.raw(`"${dateCol}" <= '${toDate}'::timestamptz`),
+      sql`"${sql.raw(dateCol)}" >= ${fromDate}::timestamptz`,
+      sql`"${sql.raw(dateCol)}" <= ${toDate}::timestamptz`,
     ];
 
     for (const { col, value } of activeFilters) {
