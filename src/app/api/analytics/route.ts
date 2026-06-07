@@ -28,6 +28,23 @@ const EXCLUDED_BLOCKS = new Set([
   "Скоринг клиента",
 ]);
 
+// Диагностические/аналитические критерии (в основном type:"info_text",
+// scoring:false) — не метрики качества, скрываем из дерева аналитики по
+// просьбе владельца (2026-06-05). Имена в НОРМАЛИЗОВАННОЙ форме: проверка
+// идёт после stripNumericPrefix + normalizeName(CRITERIA_NAME_MAP), поэтому
+// "Экспертный стиль установновления раппорта" сравнивается уже как
+// "...установления...". Применяется в loadCanonicalCriteria (убрать колонку)
+// и processBlocks (не аккумулировать).
+const EXCLUDED_CRITERIA = new Set([
+  "Какие возражения озвучил Клиент (теги)",
+  "Какие техники отработки возражений стоило бы применить Продавцу",
+  "Оценка звонка по международным методологиям",
+  "Структура звонка: фактический скрипт, который применил Продавец",
+  "Что заставит этого Клиента купить (тип, реакция и болеутоляющая формула)",
+  "Неиспользованные УТП, которые могли бы повлиять",
+  "Экспертный стиль установления раппорта",
+]);
+
 // ─── Types ──────────────────────────────────────────────────
 
 interface CriterionScore {
@@ -319,6 +336,7 @@ async function loadCanonicalCriteria(promptTypes: string[]): Promise<CanonicalCr
           const rawCName = typeof c.name === "string" ? c.name : "";
           if (!rawCName) continue;
           const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
+          if (EXCLUDED_CRITERIA.has(cName)) continue;
           if (!seen.has(cName)) {
             seen.add(cName);
             ordered.push(cName);
@@ -393,6 +411,7 @@ function processBlocks(
       const cMax = typeof c.max_score === "number" ? c.max_score : 0;
       if (!rawCName || cMax <= 0) continue;
       const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
+      if (EXCLUDED_CRITERIA.has(cName)) continue;
 
       const pct = Math.round((cScore / cMax) * 100);
       const key = `${name}::${cName}`;
