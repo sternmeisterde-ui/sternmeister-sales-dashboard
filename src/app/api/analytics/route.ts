@@ -11,7 +11,7 @@ import { eq, sql, and, gte, lte, isNotNull, inArray, desc } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
-import { getLines, type DepartmentId } from "@/lib/config/tenant";
+import { getLines, KOMMO, type DepartmentId } from "@/lib/config/tenant";
 import { parseDateBoundary, addDaysCivil, todayCivil, APP_TZ } from "@/lib/utils/date";
 
 const CACHE_TTL = 2 * 60 * 1000;
@@ -70,7 +70,18 @@ interface TimeTreeNode {
   overall: number | null;
   scores: Record<string, number>;
 }
-interface TimeTreeDate extends TimeTreeNode { date: string }
+// 4-й уровень — отдельный звонок/сделка (только OKK; у roleplay нет
+// kommo-сделок, там `calls` всегда пуст). overall = total_score звонка;
+// scores — его собственные баллы по колонкам.
+interface TimeTreeCall extends TimeTreeNode {
+  callId: string;
+  startedAt: string | null;       // ISO; время начала звонка (call_created_at)
+  durationSec: number | null;
+  direction: string | null;       // 'inbound' | 'outbound'
+  kommoLeadId: string | null;
+  kommoLeadUrl: string | null;    // прямая ссылка на сделку в Kommo
+}
+interface TimeTreeDate extends TimeTreeNode { date: string; calls: TimeTreeCall[] }
 interface TimeTreeManager extends TimeTreeNode { id: string; name: string; dates: TimeTreeDate[] }
 interface TimeTreeWeek extends TimeTreeNode { key: string; label: string; managers: TimeTreeManager[] }
 
@@ -448,6 +459,10 @@ async function fetchOkkData(
       .select({
         callId: okkCalls.id,
         callCreatedAt: okkCalls.callCreatedAt,
+        durationSeconds: okkCalls.durationSeconds,
+        direction: okkCalls.direction,
+        kommoLeadId: okkCalls.kommoLeadId,
+        kommoLeadUrl: okkCalls.kommoLeadUrl,
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
         managerId: okkEvaluations.managerId,
@@ -494,6 +509,8 @@ async function fetchOkkData(
   // Ключ — civil-день (не period), чтобы дерево не зависело от groupBy: неделя
   // выводится из дня в buildResponse (weekRange).
   const managerDayAccMap = new Map<string, PeriodAcc>();
+  // 4-й уровень дерева: список звонков на бакет «менеджер::день».
+  const managerDayCallsMap = new Map<string, TimeTreeCall[]>();
   const wantManagerTime = department === "b2b" && wantTree;
 
   let processedCount = 0;
@@ -536,11 +553,32 @@ async function fetchOkkData(
       const mdKey = `${mgrKey}::${toBerlinCivil(row.callCreatedAt)}`;
       if (!managerDayAccMap.has(mdKey)) managerDayAccMap.set(mdKey, newAcc());
       const mdAcc = managerDayAccMap.get(mdKey)!;
+      // Отдельный аккумулятор на ЭТОТ звонок — считаем тем же путём, что и
+      // дневной бакет, чтобы строка звонка сходилась со своим днём.
+      const callAcc = newAcc();
       if (isAllFunnels) {
-        processCallAsFunnel(mdAcc, row.totalScore, funnelLabelForOkk(department, row.promptType));
+        const funnel = funnelLabelForOkk(department, row.promptType);
+        processCallAsFunnel(mdAcc, row.totalScore, funnel);
+        processCallAsFunnel(callAcc, row.totalScore, funnel);
       } else {
         processBlocks(blocks, mdAcc, row.totalScore);
+        processBlocks(blocks, callAcc, row.totalScore);
       }
+      const cAgg = aggAccs([callAcc]);
+      const list = managerDayCallsMap.get(mdKey) ?? [];
+      list.push({
+        callId: row.callId,
+        startedAt: row.callCreatedAt.toISOString(),
+        durationSec: row.durationSeconds,
+        direction: row.direction,
+        kommoLeadId: row.kommoLeadId,
+        kommoLeadUrl: row.kommoLeadUrl
+          ?? (row.kommoLeadId ? `https://${KOMMO.host}/leads/detail/${row.kommoLeadId}` : null),
+        callCount: 1,
+        overall: cAgg.overall,
+        scores: cAgg.scores,
+      });
+      managerDayCallsMap.set(mdKey, list);
     }
   }
 
@@ -591,7 +629,7 @@ async function fetchOkkData(
     canonical = await loadCanonicalCriteria(promptTypesForCanonical);
   }
 
-  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap);
+  return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap, managerDayCallsMap);
 }
 
 // ─── Roleplay data fetcher ──────────────────────────────────
@@ -763,7 +801,8 @@ async function fetchRoleplayData(
   } else {
     canonical = EMPTY_CANONICAL;
   }
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap);
+  // Roleplay не имеет kommo-сделок → 4-й уровень (звонки) пуст.
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap, new Map());
 }
 
 // Roll up a set of per-(manager,day) accumulators into call-weighted scores.
@@ -803,6 +842,7 @@ function buildResponse(
   managersForBreakdown: Array<{ id: string; name: string }> | undefined,
   canonical: CanonicalCriteria,
   managerDayAccMap: Map<string, PeriodAcc>,
+  managerDayCallsMap: Map<string, TimeTreeCall[]>,
 ): AnalyticsResponse {
   // The dropdown stays scoped to active managers (`managers`); the breakdown
   // uses the full set including inactive/admin/"no-manager" so totals match.
@@ -937,7 +977,11 @@ function buildResponse(
             .sort((a, b) => (a.day < b.day ? -1 : 1))
             .map((d) => {
               const agg = aggAccs([d.acc]);
-              return { date: d.day, callCount: agg.callCount, overall: agg.overall, scores: agg.scores };
+              // Звонки этого дня (4-й уровень), по времени начала.
+              const calls = (managerDayCallsMap.get(`${mgrKey}::${d.day}`) ?? [])
+                .slice()
+                .sort((a, b) => (a.startedAt ?? "").localeCompare(b.startedAt ?? ""));
+              return { date: d.day, callCount: agg.callCount, overall: agg.overall, scores: agg.scores, calls };
             });
           const magg = aggAccs(mgrAccs);
           return { id: mgrKey, name: nameById.get(mgrKey) ?? "—", callCount: magg.callCount, overall: magg.overall, scores: magg.scores, dates };
