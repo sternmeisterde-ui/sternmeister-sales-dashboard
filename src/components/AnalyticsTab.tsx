@@ -588,7 +588,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           )}
           {/* Детализация по линии: вкладки (folder-tabs) вплотную над деревом. */}
           <div className="flex flex-col">
-            {source === "okk" && (
+            {source === "okk" && data && (
               <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
             )}
             {data && data.timeTree.length > 0 ? (
@@ -848,7 +848,7 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute z-50 mt-1 right-0 w-60 max-h-72 overflow-y-auto glass-panel rounded-xl border border-white/10 p-1 shadow-2xl">
+          <div className="absolute z-50 mt-1 right-0 w-60 max-h-72 overflow-y-auto bg-slate-900 rounded-xl border border-white/10 p-1 shadow-2xl">
             <button onClick={() => onChange([])}
               className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-left">
               <span className={`text-[11px] ${selected.length === 0 ? "text-blue-300 font-semibold" : "text-slate-400"}`}>Все менеджеры</span>
