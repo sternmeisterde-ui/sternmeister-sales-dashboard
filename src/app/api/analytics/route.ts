@@ -443,7 +443,7 @@ async function fetchOkkData(
   fromCivil: string,
   toCivil: string,
   groupBy: string,
-  managerId: string | null,
+  managerIds: string[],
   wantTree: boolean,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
@@ -458,8 +458,8 @@ async function fetchOkkData(
   if (promptTypes && promptTypes.length > 0) {
     conditions.push(inArray(okkEvaluations.promptType, promptTypes));
   }
-  if (managerId) {
-    conditions.push(eq(okkEvaluations.managerId, managerId));
+  if (managerIds.length) {
+    conditions.push(inArray(okkEvaluations.managerId, managerIds));
   }
 
   // Manager dropdown lists every currently-active manager/ROP in the
@@ -674,7 +674,7 @@ async function fetchRoleplayData(
   fromCivil: string,
   toCivil: string,
   groupBy: string,
-  managerId: string | null,
+  managerIds: string[],
   wantTree: boolean,
 ): Promise<AnalyticsResponse> {
   const db = getDbForDepartment(department);
@@ -692,8 +692,8 @@ async function fetchRoleplayData(
   if (callTypes && callTypes.length > 0) {
     conditions.push(inArray(callsTable.callType, callTypes));
   }
-  if (managerId) {
-    conditions.push(eq(callsTable.userId, managerId));
+  if (managerIds.length) {
+    conditions.push(inArray(callsTable.userId, managerIds));
   }
 
   // Manager dropdown — full active roster (see OKK comment). Same rationale.
@@ -1038,7 +1038,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const source = sp.get("source") === "roleplay" ? "roleplay" : "okk";
     const line = sp.get("line") ?? "all";
     const groupBy = sp.get("groupBy") ?? "day";
-    const managerId = sp.get("managerId") || null;
+    const managerIdsParam = sp.get("managerIds");
+    const managerIds = managerIdsParam ? managerIdsParam.split(",").filter(Boolean) : [];
     // tree=1 → строить дерево неделя→менеджер→дата (тяжёлое, нужно только для
     // B2B-детализации). Сводка (line=all) и режим сравнения его не запрашивают,
     // поэтому лишняя работа и payload не делаются.
@@ -1062,12 +1063,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerId}:tree=${wantTree}`;
+    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerId, wantTree)
-        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerId, wantTree),
+        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree)
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree),
     );
 
     return NextResponse.json({ success: true, data });

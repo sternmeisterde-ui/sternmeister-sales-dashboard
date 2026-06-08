@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, PhoneIncoming, PhoneOutgoing, Clock, Timer } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -147,7 +147,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   // Госники: кросс-воронка «Все» + опциональный per-line drill-down.
   const [line, setLine] = useState<string>(() => (department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all"));
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
-  const [managerId, setManagerId] = useState("");
+  const [managerIds, setManagerIds] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>(() => {
     // Berlin-civil 30-day window. Browser-local `setDate(now − 30)` produced
     // a Date whose `fmtDate` (now Berlin) read as one day off the picker
@@ -206,10 +206,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     // Дефолт линии при смене отдела: Коммерсы стартуют на первой линии (вид по
     // вкладкам без «Все»); Госники — кросс-воронка «Все» (drill-down опционален).
     setLine(department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all");
-    setManagerId("");
+    setManagerIds([]);
   }, [department]);
   useEffect(() => {
-    setManagerId("");
+    setManagerIds([]);
     if (department === "b2b") {
       // Коммерсы: OKK — по вкладкам линий (Бух1/Бух2/Мед1, без «Все»); ролевки —
       // один скрипт (line="all"). Нормализуем line под выбранный источник.
@@ -229,10 +229,12 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   }, [source, line, department]);
   // If selected manager is not in current list, clear selection
   useEffect(() => {
-    if (managerId && data?.managers && !data.managers.some((m) => m.id === managerId)) {
-      setManagerId("");
+    if (managerIds.length && data?.managers) {
+      const valid = new Set(data.managers.map((m) => m.id));
+      const filtered = managerIds.filter((id) => valid.has(id));
+      if (filtered.length !== managerIds.length) setManagerIds(filtered);
     }
-  }, [data?.managers, managerId]);
+  }, [data?.managers, managerIds]);
 
   const buildParams = useCallback((range: DateRange) => {
     const fromStr = range.start ? fmtDate(range.start) : "";
@@ -243,9 +245,9 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     // is async; doing it here too eliminates the race-window.
     const effectiveLine = source === "roleplay" && (line === "2a" || line === "2b") ? "2" : line;
     const params = new URLSearchParams({ department, source, line: effectiveLine, groupBy, from: fromStr, to: toStr });
-    if (managerId) params.set("managerId", managerId);
+    if (managerIds.length) params.set("managerIds", managerIds.join(","));
     return params;
-  }, [department, source, line, groupBy, managerId]);
+  }, [department, source, line, groupBy, managerIds]);
 
   // Loading-state toggle uses a ref so it doesn't end up in the deps array
   // — having `data` as a dep caused fetchData to get a new identity after
@@ -302,7 +304,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     if (!fromStr || !toStr) return;
     // Сводка всегда по дням (переключателя у Коммерсов нет) — колонки-даты.
     const params = new URLSearchParams({ department, source, line: "all", groupBy: "day", from: fromStr, to: toStr });
-    if (managerId) params.set("managerId", managerId);
+    if (managerIds.length) params.set("managerIds", managerIds.join(","));
     try {
       const res = await fetch(`/api/analytics?${params}`, { signal });
       if (!res.ok) throw new Error(`API error ${res.status}`);
@@ -311,7 +313,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
     }
-  }, [department, source, compareMode, dateRange, managerId]);
+  }, [department, source, compareMode, dateRange, managerIds]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -390,7 +392,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             ведущая «Все» агрегирует все воронки. */}
         {department !== "b2b" && (
           <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
-            <button onClick={() => { setLine("all"); setManagerId(""); }}
+            <button onClick={() => { setLine("all"); setManagerIds([]); }}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
                 line === "all" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
               }`}>
@@ -411,7 +413,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
               }
               return lines;
             })().map((l) => (
-              <button key={l.id} onClick={() => { setLine(l.id); setManagerId(""); }}
+              <button key={l.id} onClick={() => { setLine(l.id); setManagerIds([]); }}
                 className={`px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-widest font-bold transition-all ${
                   line === l.id ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "text-slate-400 hover:text-white"
                 }`}>
@@ -473,13 +475,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 
         {/* Manager dropdown */}
         {data?.managers && data.managers.length > 0 && (
-          <select value={managerId} onChange={(e) => setManagerId(e.target.value)}
-            className="bg-slate-800/50 border border-white/10 rounded-xl px-3 py-1.5 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40 max-w-[170px]">
-            <option value="">Все менеджеры</option>
-            {data.managers.map((m) => (
-              <option key={m.id} value={m.id}>{m.name}</option>
-            ))}
-          </select>
+          <ManagerMultiSelect managers={data.managers} selected={managerIds} onChange={setManagerIds} />
         )}
 
         {/* Refresh + count */}
@@ -524,7 +520,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
             onToggle={(n) => toggle(setCollapsedCompareBlocks, n)}
           />
 
-          {!managerId && (data.managerBreakdown.length > 0 || compareData.managerBreakdown.length > 0) && (
+          {managerIds.length !== 1 &&(data.managerBreakdown.length > 0 || compareData.managerBreakdown.length > 0) && (
             <>
               <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500 mt-2">
                 Сравнение по менеджерам
@@ -637,7 +633,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           )}
 
           {/* ── NORMAL MODE (B2G): Table 2 — разбивка по менеджерам ── */}
-          {data && data.managerBreakdown.length > 0 && !managerId && (
+          {data && data.managerBreakdown.length > 0 && managerIds.length !== 1 &&(
             <>
               <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500 mt-2">
                 Разбивка по менеджерам
@@ -828,6 +824,53 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
 // остальные контролы. Наклоняется только фон-подложка, текст остаётся прямым.
 
 const TAB_SURFACE = "rgb(15, 23, 42)"; // = фон шапки дерева → бесшовный стык
+
+// Мультивыбор менеджеров: дропдаун с чекбоксами. Пустой выбор = «Все менеджеры».
+function ManagerMultiSelect({ managers, selected, onChange }: {
+  managers: { id: string; name: string }[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const label =
+    selected.length === 0 ? "Все менеджеры"
+    : selected.length === 1 ? (managers.find((m) => m.id === selected[0])?.name ?? "1 выбран")
+    : `${selected.length} менеджеров`;
+  const toggle = (id: string) =>
+    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 bg-slate-800/50 border border-white/10 rounded-xl px-3 py-1.5 text-[11px] text-slate-300 hover:border-blue-500/40 focus:outline-none max-w-[190px]">
+        <span className="truncate">{label}</span>
+        <ChevronDown className="w-3 h-3 text-slate-500 shrink-0" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute z-50 mt-1 right-0 w-60 max-h-72 overflow-y-auto glass-panel rounded-xl border border-white/10 p-1 shadow-2xl">
+            <button onClick={() => onChange([])}
+              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-left">
+              <span className={`text-[11px] ${selected.length === 0 ? "text-blue-300 font-semibold" : "text-slate-400"}`}>Все менеджеры</span>
+            </button>
+            {managers.map((m) => {
+              const on = selected.includes(m.id);
+              return (
+                <button key={m.id} onClick={() => toggle(m.id)}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-left">
+                  <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${on ? "bg-blue-500 border-blue-500" : "border-white/20"}`}>
+                    {on && <Check className="w-2.5 h-2.5 text-white" />}
+                  </span>
+                  <span className="truncate text-[11px] text-slate-300">{m.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 function LineTabs({ lines, active, onSelect }: {
   lines: { id: string; label: string }[];
