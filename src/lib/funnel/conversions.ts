@@ -11,6 +11,7 @@ export const CONVERSION_ORDER: ConversionId[] = [
   "C2",
   "C2.1",
   "C3",
+  "C3.1",
   "C4",
   "C5",
 ];
@@ -49,6 +50,16 @@ export const CONVERSIONS: Record<ConversionId, ConversionMeta> = {
     maturityWeeks: 8,
     benchmark: null,
   },
+  // C3.1 — отдельная конверсия: из лидов с РЕАЛЬНО состоявшимся Термином ДЦ
+  // (явный статус 93886075 в Бератере) сколько двинулось дальше в АА. База =
+  // решённые (успех+неудача), «ожидание» (застрял на ДЦ без движения) из базы
+  // исключено. См. compute.ts classifyDcToAa. benchmark null — РОП задаёт сам.
+  "C3.1": {
+    id: "C3.1",
+    label: "Термин ДЦ → дошёл до АА",
+    maturityWeeks: 10,
+    benchmark: null,
+  },
   C4: {
     id: "C4",
     label: "Конс. перед АА → Гутшайн одобрен",
@@ -65,11 +76,11 @@ export const CONVERSIONS: Record<ConversionId, ConversionMeta> = {
 
 /**
  * Семантика «качественной» колонки. См. 03 §9.2.
- * C1/C2/C5 → «Квал %» (сколько лидов НЕ дисквалифицировано)
- * C3/C4   → «Отсев»  (сколько НЕ дошли)
+ * C1/C2/C5    → «Квал %» (сколько лидов НЕ дисквалифицировано)
+ * C3/C3.1/C4  → «Отсев»  (сколько НЕ дошли). Для C3.1 «Отсев» = неудача (база−факт).
  */
 export function usesQualificationRetention(id: ConversionId): boolean {
-  return id !== "C3" && id !== "C4";
+  return id !== "C3" && id !== "C4" && id !== "C3.1";
 }
 
 export function qualityColumnLabel(id: ConversionId): string {

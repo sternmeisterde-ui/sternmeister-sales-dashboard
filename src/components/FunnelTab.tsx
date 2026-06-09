@@ -348,6 +348,10 @@ export default function FunnelTab({
           disqualificationPct: r.disqualificationPct,
           languageLevels: r.languageLevels,
         }));
+        // C3.1: свежие когорты (по неделе создания Гос-лида) ещё не дошли до ДЦ →
+        // база=0. Прячем пустые строки, чтобы хвост не выглядел как потеря данных
+        // (касается таблицы, графика и счётчиков карточки сразу).
+        if (id === "C3.1") cohorts = cohorts.filter((c) => c.baseCount > 0);
       }
       bundles[id] = {
         meta,

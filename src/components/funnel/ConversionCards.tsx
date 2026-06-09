@@ -23,8 +23,9 @@ interface Props {
 }
 
 /**
- * Порядок карточек: C1 → C1.1 → C2 → C2.1 → C3 → C4 → C5 (7 карточек).
+ * Порядок карточек: C1 → C1.1 → C2 → C2.1 → C3 → C3.1 → C4 → C5 (8 карточек).
  * C1.1/C2.1 — «чистые» варианты C1/C2 без лидов с причиной «Игнор».
+ * C3.1 — «Термин ДЦ → дошёл до АА» (отсев после состоявшегося ДЦ).
  */
 const CARD_ORDER: ConversionId[] = [
   "C1",
@@ -32,6 +33,7 @@ const CARD_ORDER: ConversionId[] = [
   "C2",
   "C2.1",
   "C3",
+  "C3.1",
   "C4",
   "C5",
 ];
@@ -66,7 +68,7 @@ export default function ConversionCards({
           <span className="text-slate-400">{sparklinePeriod ?? "—"}</span>
         </span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
         {CARD_ORDER.map((id) => (
           <ConversionCard
             key={id}

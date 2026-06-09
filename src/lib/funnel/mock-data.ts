@@ -57,6 +57,8 @@ const PROFILES: Record<
   C2: { mean: 31, jitter: 8, baseRange: [100, 230] },
   "C2.1": { mean: 35, jitter: 8, baseRange: [80, 200] },
   C3: { mean: 38, jitter: 12, baseRange: [12, 35] },
+  // C3.1 считается на реальных данных — моки не показываются, но Record требует ключ.
+  "C3.1": { mean: 50, jitter: 12, baseRange: [8, 30] },
   C4: { mean: 46, jitter: 10, baseRange: [4, 18] },
   C5: { mean: 4, jitter: 3, baseRange: [100, 230] },
 };
