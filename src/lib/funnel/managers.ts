@@ -117,7 +117,7 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
     leadIds.length ? fetchCloseReasonHistory(leadIds) : Promise.resolve(new Map()),
     leadIds.length ? fetchTargetEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
     leadIds.length ? fetchBeraterContext(leadIds) : Promise.resolve(new Map()),
-    leadIds.length ? fetchTouchesByLead(leadIds) : Promise.resolve(new Map<number, number>()),
+    leadIds.length ? fetchTouchesByLead(leadIds, opts) : Promise.resolve(new Map<number, number>()),
     fetchOkkAllRoles(opts),
     fetchManagerRoster(),
   ]);
@@ -175,9 +175,9 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
       bump("qualifier", qUid, apply);
     }
     // Бератер/Доведение — ответственный Бератер-сделки нужной линии (B2G).
-    const bUid = creditBeraterResponsible(beraters, roster, isB2gManager, "2");
+    const bUid = creditBeraterResponsible(beraters, roster, isB2gManager, ROLE_BERATER_LINE.berater);
     if (bUid !== null) bump("berater", bUid, apply);
-    const dUid = creditBeraterResponsible(beraters, roster, isB2gManager, "3");
+    const dUid = creditBeraterResponsible(beraters, roster, isB2gManager, ROLE_BERATER_LINE.dovedenie);
     if (dUid !== null) bump("dovedenie", dUid, apply);
   }
 
@@ -211,18 +211,24 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
 }
 
 // ── Кредит за клиента для berater/dovedenie ─────────────────────────────────
+// При нескольких Бератер-сделках клиента нужной линии кредит идёт тому, чья
+// сделка достигла Гутшайна (WON), иначе — первому в детерминированном порядке
+// (fetchBeraterContext сортирует по lead_id, см. ORDER BY).
 function creditBeraterResponsible(
   beraters: BeraterLead[],
   roster: Map<number, ManagerMeta>,
   isB2gManager: (uid: number) => boolean,
   expectedLine: string
 ): number | null {
+  let firstMatch: number | null = null;
   for (const b of beraters) {
     const uid = b.responsibleUserId;
     if (uid === null || !isB2gManager(uid)) continue;
-    if (roster.get(uid)!.line === expectedLine) return uid;
+    if (roster.get(uid)!.line !== expectedLine) continue;
+    if (b.events.has(BERATER_STATUSES.WON)) return uid; // достиг Гутшайна → кредит ему
+    if (firstMatch === null) firstMatch = uid;
   }
-  return null;
+  return firstMatch;
 }
 
 // ── Консультации: +1 за каждую проведённую (ДЦ/АА) среди Бератер-сделок клиента ─
@@ -234,8 +240,14 @@ function countConsultations(beraters: BeraterLead[]): number {
   return n;
 }
 
-// ── Касания: distinct communications по каждому лиду (Pattern A, CLAUDE.md #4) ─
-async function fetchTouchesByLead(leadIds: number[]): Promise<Map<number, number>> {
+// ── Касания: distinct communications по каждому лиду ЗА ПЕРИОД ────────────────
+// COUNT(DISTINCT communication_id) — Pattern A fanout иначе двоит (CLAUDE.md #4).
+// Ограничено окном [from,to]: «касания за период», иначе запрос сканирует всю
+// историю по тысячам лидов (риск таймаута Neon на широких диапазонах).
+async function fetchTouchesByLead(
+  leadIds: number[],
+  opts: ComputeOpts
+): Promise<Map<number, number>> {
   const out = new Map<number, number>();
   if (leadIds.length === 0) return out;
   const idsIn = leadIds.join(",");
@@ -245,6 +257,8 @@ async function fetchTouchesByLead(leadIds: number[]): Promise<Map<number, number
       FROM analytics.communications
       WHERE lead_id IN (${sql.raw(idsIn)})
         AND communication_id IS NOT NULL
+        AND created_at >= ${opts.from.toISOString()}
+        AND created_at <  ${opts.to.toISOString()}
       GROUP BY lead_id
     `)
   );
@@ -273,6 +287,7 @@ async function fetchOkkAllRoles(opts: ComputeOpts): Promise<Map<number, OkkAgg>>
       JOIN calls c    ON c.id = e.call_id
       JOIN managers m ON m.id = c.manager_id
       WHERE e.prompt_type IN ('d2_qualifier','d2_berater','d2_berater2','d2_dovedenie')
+        AND e.total_score IS NOT NULL
         AND m.kommo_user_id IS NOT NULL
         AND c.call_created_at >= ${opts.from.toISOString()}
         AND c.call_created_at <  ${opts.to.toISOString()}

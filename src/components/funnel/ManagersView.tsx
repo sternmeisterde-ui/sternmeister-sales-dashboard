@@ -48,7 +48,7 @@ const COLUMNS: Column[] = [
   { key: "reachedGutschein", label: "→ Гутшайн", title: "Доведено до «Гутшайн» (сквозь Бератер)", numeric: true },
   { key: "conversionC5Pct", label: "C5 %", title: "Личная сквозная конверсия: Гутшайн / Клиенты", numeric: true },
   { key: "consultations", label: "Конс.", title: "Проведённых консультаций (ДЦ+АА) по клиентам", numeric: true },
-  { key: "touches", label: "Касания", title: "Касаний по клиентам менеджера", numeric: true },
+  { key: "touches", label: "Касания", title: "Касаний по клиентам менеджера за выбранный период", numeric: true },
   { key: "avgOkk", label: "ОКК", title: "Средний ОКК звонков роли (0–100)", numeric: true },
 ];
 

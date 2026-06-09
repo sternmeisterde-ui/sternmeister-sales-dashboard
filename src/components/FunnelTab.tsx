@@ -468,7 +468,7 @@ export default function FunnelTab({
         managerOptions={managerOptions}
         activeFilterCount={activeFilterCount}
         lastUpdatedAt={lastUpdatedAt}
-        clientsMode={viewMode === "clients"}
+        mode={viewMode}
         onChange={handleFilterChange}
         onReset={handleReset}
       />

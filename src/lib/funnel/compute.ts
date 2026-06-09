@@ -705,6 +705,7 @@ export async function fetchBeraterContext(
        AND berater.pipeline_id = ${BERATER}
       WHERE base_lcl.lead_id IN (${sql.raw(idsIn)})
         AND base_lcl.is_active = TRUE
+      ORDER BY base_lcl.lead_id, berater.lead_id
     `)
   );
 
