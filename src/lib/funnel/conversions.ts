@@ -86,3 +86,24 @@ export function usesQualificationRetention(id: ConversionId): boolean {
 export function qualityColumnLabel(id: ConversionId): string {
   return usesQualificationRetention(id) ? "Квал %" : "Отсев";
 }
+
+/** Краткое пояснение тонкостей конверсии для иконки «?» (null = без пояснения). */
+export interface ConversionNote {
+  title: string;
+  points: string[];
+}
+
+export function conversionNote(id: ConversionId): ConversionNote | null {
+  if (id === "C3.1") {
+    return {
+      title: "C3.1 — Термин ДЦ → дошёл до АА",
+      points: [
+        "Из лидов, у кого Термин ДЦ реально состоялся, — какая доля двинулась дальше в АА.",
+        "⚠ Считается только по лидам с проставленным статусом «Термин ДЦ» (его ставят примерно в трети случаев). Это нижняя оценка — смотри на тренд и сравнение, не на абсолютную цифру.",
+        "Успех = дошёл до АА и далее (консультация АА / Термин АА / Гутшайн). Неудача (Отсев) = отложенный старт / апелляция / закрыто.",
+        "«Завис на ДЦ» без движения не считается ни успехом, ни неудачей — ждём решения, в знаменатель не входит. Поэтому самые свежие недели пустые: лиды ещё физически не дошли до ДЦ.",
+      ],
+    };
+  }
+  return null;
+}
