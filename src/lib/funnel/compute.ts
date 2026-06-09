@@ -144,6 +144,8 @@ export interface BeraterLead {
   leadId: number;
   currentStatusId: number;
   createdAt: Date;
+  /** Ответственный Бератер-сделки (бератер/доведение). null если неизвестен. */
+  responsibleUserId: number | null;
   /** statusId → earliest event_at для этого Бератер-лида. */
   events: Map<number, Date>;
 }
@@ -684,13 +686,15 @@ export async function fetchBeraterContext(
     leadId: string | number;
     statusId: string | number;
     createdAt: string | Date;
+    responsibleUserId: string | number | null;
   }>(
     await analyticsDb.execute(sql`
       SELECT DISTINCT
-        base_lcl.lead_id    AS "baseLeadId",
-        berater.lead_id     AS "leadId",
-        berater.status_id   AS "statusId",
-        berater.created_at  AS "createdAt"
+        base_lcl.lead_id          AS "baseLeadId",
+        berater.lead_id           AS "leadId",
+        berater.status_id         AS "statusId",
+        berater.created_at        AS "createdAt",
+        berater.responsible_user_id AS "responsibleUserId"
       FROM analytics.lead_contact_links AS base_lcl
       INNER JOIN analytics.lead_contact_links AS berater_lcl
         ON berater_lcl.contact_id = base_lcl.contact_id
@@ -755,6 +759,8 @@ export async function fetchBeraterContext(
       currentStatusId: Number(row.statusId),
       createdAt:
         row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
+      responsibleUserId:
+        row.responsibleUserId === null ? null : Number(row.responsibleUserId),
       events: eventsPerLead.get(beraterLid) ?? new Map(),
     };
     const arr = result.get(baseLid);

@@ -12,6 +12,7 @@ import KpiBar from "@/components/funnel/KpiBar";
 import UnifiedFunnel from "@/components/funnel/UnifiedFunnel";
 import ViewModeToggle, { type FunnelViewMode } from "@/components/funnel/ViewModeToggle";
 import ClientsView from "@/components/funnel/ClientsView";
+import ManagersView from "@/components/funnel/ManagersView";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import { CONVERSION_ORDER, CONVERSIONS } from "@/lib/funnel/conversions";
 import {
@@ -477,6 +478,8 @@ export default function FunnelTab({
       </div>
 
       {viewMode === "clients" && <ClientsView filters={filters} />}
+
+      {viewMode === "managers" && <ManagersView filters={filters} />}
 
       {viewMode === "cohorts" && (
         <>
