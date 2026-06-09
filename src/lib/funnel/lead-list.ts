@@ -6,6 +6,7 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
+  classifyDcToAa,
   excludesIgnor,
   fetchBeraterContext,
   fetchQualifiedBaseLeads,
@@ -83,6 +84,7 @@ export async function computeCohortLeads(
   // Бератер-контекст нужен только cross-pipeline конверсиям.
   const needsBerater =
     opts.conversionId === "C3" ||
+    opts.conversionId === "C3.1" ||
     opts.conversionId === "C4" ||
     opts.conversionId === "C5";
   const beraterContext =
@@ -99,6 +101,20 @@ export async function computeCohortLeads(
   const matchingIds: number[] = [];
   for (const lead of baseLeads) {
     if (excludesIgnor(opts.conversionId) && lead.isIgnor) continue;
+
+    // C3.1 — отдельная логика (success/failure/pending без Гос-дисквала):
+    //  • metric "base"   = решённые (success | failure)
+    //  • metric "target" = только success
+    if (opts.conversionId === "C3.1") {
+      const state = classifyDcToAa(lead, beraterContext);
+      if (opts.metric === "target") {
+        if (state !== "success") continue;
+      } else {
+        if (state !== "success" && state !== "failure") continue;
+      }
+      matchingIds.push(lead.leadId);
+      continue;
+    }
 
     const result = processLeadForConversion(
       opts.conversionId,

@@ -17,8 +17,13 @@ interface Props {
   activeFilterCount: number;
   /** Когда в проде появится бэкенд, придёт сюда из last_sync. */
   lastUpdatedAt: Date | null;
-  /** Режим «Клиенты»: зрелость/канал/менеджер не применяются — затемняем. */
-  clientsMode?: boolean;
+  /**
+   * Режим вкладки — определяет, какие фильтры применяются:
+   *   cohorts  — все;
+   *   clients  — только свой фильтр даты термина (всё в шапке затемнено);
+   *   managers — Период + Канал применяются, Зрелость + Менеджер нет.
+   */
+  mode?: "cohorts" | "clients" | "managers";
   onChange: (next: Partial<FunnelFiltersState>) => void;
   onReset: () => void;
 }
@@ -36,16 +41,22 @@ export default function FunnelFilters({
   managerOptions,
   activeFilterCount,
   lastUpdatedAt,
-  clientsMode = false,
+  mode = "cohorts",
   onChange,
   onReset,
 }: Props) {
-  // В режиме «Клиенты» к выборке применяется только Период; остальные фильтры
-  // (зрелость когорт, Гос-канал/менеджер) затемняем и блокируем.
-  const dimCls = clientsMode ? "opacity-40 pointer-events-none" : "";
-  const dimTitle = clientsMode
-    ? "Не применяется к виду «Клиенты» (только Период)"
-    : undefined;
+  const isClients = mode === "clients";
+  const isManagers = mode === "managers";
+  // Период + Канал: применяются в cohorts и managers; в clients — свой фильтр даты.
+  const dimPS = isClients ? "opacity-40 pointer-events-none" : "";
+  const titlePS = isClients ? "Не применяется к виду «Клиенты» (только дата термина)" : undefined;
+  // Зрелость + Менеджер: только в cohorts; в clients и managers не применяются.
+  const dimMM = isClients || isManagers ? "opacity-40 pointer-events-none" : "";
+  const titleMM = isClients
+    ? "Не применяется к виду «Клиенты»"
+    : isManagers
+      ? "Не применяется к виду «Менеджеры»"
+      : undefined;
   return (
     <section
       className="glass-panel rounded-2xl border border-white/5 px-4 py-3 flex flex-wrap items-center gap-2"
@@ -53,7 +64,7 @@ export default function FunnelFilters({
     >
       {/* Period — стандартный CalendarPicker, тот же что в Daily/Analytics/Termin.
           В режиме «Клиенты» затемнён — там свой фильтр по дате термина. */}
-      <div className={dimCls} title={dimTitle}>
+      <div className={dimPS} title={titlePS}>
         <CalendarPicker
           mode="range"
           value={state.dateRange}
@@ -64,8 +75,8 @@ export default function FunnelFilters({
 
       {/* Maturity — button group в стиле granularity TerminTab */}
       <div
-        title={dimTitle}
-        className={`inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 ${dimCls}`}
+        title={titleMM}
+        className={`inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 ${dimMM}`}
       >
         {MATURITY_OPTIONS.map((opt) => {
           const active = state.maturity === opt.value;
@@ -88,7 +99,7 @@ export default function FunnelFilters({
       </div>
 
       {/* Source — кастомный селект в дизайне дашборда */}
-      <div className={dimCls} title={dimTitle}>
+      <div className={dimPS} title={titlePS}>
         <FilterSelect
           value={state.source}
           options={sourceOptions}
@@ -100,7 +111,7 @@ export default function FunnelFilters({
       </div>
 
       {/* Manager — кастомный селект в дизайне дашборда */}
-      <div className={dimCls} title={dimTitle}>
+      <div className={dimMM} title={titleMM}>
         <FilterSelect
           value={state.responsibleUserId}
           options={managerOptions}

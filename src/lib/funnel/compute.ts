@@ -72,6 +72,24 @@ const C4_BASE_STATUSES = [
 const C4_TARGET_STATUSES = [BERATER_STATUSES.WON];
 const C5_TARGET_STATUSES = [BERATER_STATUSES.WON];
 
+// ── C3.1 «Термин ДЦ → дошёл до АА» (на Бератере) ──
+// База — лиды с явным «Термин ДЦ состоялся». Дальше классифицируем судьбу:
+// успех = дошёл до АА-этапа и далее; неудача = отвалился; ожидание = ещё висит.
+const DC_DONE_STATUS = BERATER_STATUSES.TERM_DC_DONE; // 93886075
+const C31_SUCCESS_STATUSES = [
+  BERATER_STATUSES.CONSULT_BEFORE_AA, // 102183943
+  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, // 102183947
+  BERATER_STATUSES.TERM_AA, // 93860879
+  BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 — термин АА был назначен
+  BERATER_STATUSES.BERATER_REVIEW, // 93860887 — пост-АА (до него не дойти без АА)
+  BERATER_STATUSES.WON, // 142 — Гутшайн косвенно подтверждает АА
+];
+const C31_FAILURE_STATUSES = [
+  BERATER_STATUSES.DELAYED_START, // 95515895
+  BERATER_STATUSES.APPEAL, // 93860891
+  BERATER_STATUSES.LOST, // 143
+];
+
 const ALL_BERATER_RELEVANT_STATUSES = [
   ...new Set([
     ...C3_BASE_STATUSES,
@@ -79,6 +97,10 @@ const ALL_BERATER_RELEVANT_STATUSES = [
     ...C4_BASE_STATUSES,
     ...C4_TARGET_STATUSES,
     ...C5_TARGET_STATUSES,
+    // C3.1
+    DC_DONE_STATUS,
+    ...C31_SUCCESS_STATUSES,
+    ...C31_FAILURE_STATUSES,
   ]),
 ];
 
@@ -144,6 +166,8 @@ export interface BeraterLead {
   leadId: number;
   currentStatusId: number;
   createdAt: Date;
+  /** Ответственный Бератер-сделки (бератер/доведение). null если неизвестен. */
+  responsibleUserId: number | null;
   /** statusId → earliest event_at для этого Бератер-лида. */
   events: Map<number, Date>;
 }
@@ -261,8 +285,10 @@ export async function computeCohorts(
       targetEvents,
       beraterContext
     );
+    // C3.1 здесь НЕ участвует — у неё своя 3-состояний логика в цикле ниже
+    // (ветка `if (conversionId === "C3.1")` делает continue до этого доступа).
     const resultsByConv: Record<
-      ConversionId,
+      Exclude<ConversionId, "C3.1">,
       { included: boolean; targetAt: Date | null }
     > = {
       C1: r1,
@@ -294,6 +320,22 @@ export async function computeCohorts(
           langUnknown: 0,
         };
         cohortMap.set(weekKey, bucket);
+      }
+
+      // C3.1 — отдельная 3-состояний логика (success/failure/pending), БЕЗ
+      // Гос-дисквала: база = решённые (success+failure), факт = success,
+      // pending/none исключаем из знаменателя. «Отсев» (=база−факт) = failure.
+      if (conversionId === "C3.1") {
+        const state = classifyDcToAa(lead, beraterContext);
+        if (state === "none" || state === "pending") continue;
+        bucket.base += 1;
+        if (lead.languageBucket === "a2") bucket.langA2 += 1;
+        else if (lead.languageBucket === "b1") bucket.langB1 += 1;
+        else if (lead.languageBucket === "b2") bucket.langB2 += 1;
+        else if (lead.languageBucket === "c1") bucket.langC1 += 1;
+        else bucket.langUnknown += 1;
+        if (state === "success") bucket.target += 1;
+        continue;
       }
 
       const result = resultsByConv[conversionId];
@@ -481,6 +523,46 @@ export function processLeadForConversion(
   }
 
   return { included: false, targetAt: null };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// C3.1: классификация судьбы лида ПОСЛЕ «Термин ДЦ состоялся»
+// ──────────────────────────────────────────────────────────────────────────
+
+export type DcToAaState = "success" | "failure" | "pending" | "none";
+
+/**
+ * Судьба Гос-лида в конверсии C3.1 «Термин ДЦ → дошёл до АА».
+ * Работает по линкованным Бератер-лидам (cross-pipeline, как C3/C4/C5).
+ *
+ *  - `none`    — у Бератера НЕТ явного «Термин ДЦ состоялся» (93886075) после
+ *                якоря → лид вне базы C3.1.
+ *  - `success` — после ДЦ дошёл до АА-этапа и далее (C31_SUCCESS).
+ *  - `failure` — после ДЦ отвалился (Отложенный старт / Апелляция / Закрыто).
+ *  - `pending` — ДЦ был, но движения дальше нет → «ждём решения», ИСКЛЮЧАЕМ из
+ *                знаменателя (рассосётся со временем / окном зрелости).
+ *
+ * Приоритет success > failure: если дошёл до АА (даже потом отвалился) — успех,
+ * т.к. конверсия меряет «дошёл ли до АА», а не финальный исход.
+ */
+export function classifyDcToAa(
+  lead: BaseLead,
+  beraterContext: Map<number, BeraterLead[]>
+): DcToAaState {
+  const berater = beraterContext.get(lead.leadId) ?? [];
+  const dcAt = earliestBeraterEventAfter(
+    berater,
+    [DC_DONE_STATUS],
+    lead.anchorAt
+  );
+  if (dcAt === null) return "none";
+  if (earliestBeraterEventAfter(berater, C31_SUCCESS_STATUSES, dcAt) !== null) {
+    return "success";
+  }
+  if (earliestBeraterEventAfter(berater, C31_FAILURE_STATUSES, dcAt) !== null) {
+    return "failure";
+  }
+  return "pending";
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -684,13 +766,15 @@ export async function fetchBeraterContext(
     leadId: string | number;
     statusId: string | number;
     createdAt: string | Date;
+    responsibleUserId: string | number | null;
   }>(
     await analyticsDb.execute(sql`
       SELECT DISTINCT
-        base_lcl.lead_id    AS "baseLeadId",
-        berater.lead_id     AS "leadId",
-        berater.status_id   AS "statusId",
-        berater.created_at  AS "createdAt"
+        base_lcl.lead_id          AS "baseLeadId",
+        berater.lead_id           AS "leadId",
+        berater.status_id         AS "statusId",
+        berater.created_at        AS "createdAt",
+        berater.responsible_user_id AS "responsibleUserId"
       FROM analytics.lead_contact_links AS base_lcl
       INNER JOIN analytics.lead_contact_links AS berater_lcl
         ON berater_lcl.contact_id = base_lcl.contact_id
@@ -701,6 +785,7 @@ export async function fetchBeraterContext(
        AND berater.pipeline_id = ${BERATER}
       WHERE base_lcl.lead_id IN (${sql.raw(idsIn)})
         AND base_lcl.is_active = TRUE
+      ORDER BY base_lcl.lead_id, berater.lead_id
     `)
   );
 
@@ -755,6 +840,8 @@ export async function fetchBeraterContext(
       currentStatusId: Number(row.statusId),
       createdAt:
         row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
+      responsibleUserId:
+        row.responsibleUserId === null ? null : Number(row.responsibleUserId),
       events: eventsPerLead.get(beraterLid) ?? new Map(),
     };
     const arr = result.get(baseLid);

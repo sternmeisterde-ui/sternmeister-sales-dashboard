@@ -1,6 +1,6 @@
 "use client";
 
-export type FunnelViewMode = "cohorts" | "clients";
+export type FunnelViewMode = "cohorts" | "clients" | "managers";
 
 interface Props {
   value: FunnelViewMode;
@@ -24,6 +24,11 @@ export default function ViewModeToggle({ value, onChange }: Props) {
         active={value === "clients"}
         label="Клиенты"
         onClick={() => onChange("clients")}
+      />
+      <ModeButton
+        active={value === "managers"}
+        label="Менеджеры"
+        onClick={() => onChange("managers")}
       />
     </div>
   );

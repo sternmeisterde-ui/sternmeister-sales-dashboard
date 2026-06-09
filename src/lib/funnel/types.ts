@@ -14,6 +14,7 @@ export type ConversionId =
   | "C2"
   | "C2.1"
   | "C3"
+  | "C3.1"
   | "C4"
   | "C5";
 

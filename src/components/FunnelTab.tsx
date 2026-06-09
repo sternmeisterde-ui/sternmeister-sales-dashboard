@@ -12,6 +12,7 @@ import KpiBar from "@/components/funnel/KpiBar";
 import UnifiedFunnel from "@/components/funnel/UnifiedFunnel";
 import ViewModeToggle, { type FunnelViewMode } from "@/components/funnel/ViewModeToggle";
 import ClientsView from "@/components/funnel/ClientsView";
+import ManagersView from "@/components/funnel/ManagersView";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import { CONVERSION_ORDER, CONVERSIONS } from "@/lib/funnel/conversions";
 import {
@@ -347,6 +348,10 @@ export default function FunnelTab({
           disqualificationPct: r.disqualificationPct,
           languageLevels: r.languageLevels,
         }));
+        // C3.1: свежие когорты (по неделе создания Гос-лида) ещё не дошли до ДЦ →
+        // база=0. Прячем пустые строки, чтобы хвост не выглядел как потеря данных
+        // (касается таблицы, графика и счётчиков карточки сразу).
+        if (id === "C3.1") cohorts = cohorts.filter((c) => c.baseCount > 0);
       }
       bundles[id] = {
         meta,
@@ -467,7 +472,7 @@ export default function FunnelTab({
         managerOptions={managerOptions}
         activeFilterCount={activeFilterCount}
         lastUpdatedAt={lastUpdatedAt}
-        clientsMode={viewMode === "clients"}
+        mode={viewMode}
         onChange={handleFilterChange}
         onReset={handleReset}
       />
@@ -477,6 +482,8 @@ export default function FunnelTab({
       </div>
 
       {viewMode === "clients" && <ClientsView filters={filters} />}
+
+      {viewMode === "managers" && <ManagersView filters={filters} />}
 
       {viewMode === "cohorts" && (
         <>
