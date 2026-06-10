@@ -19,8 +19,13 @@ import type {
   ConversionMeta,
   ConversionSummary,
 } from "@/lib/funnel/types";
-import { qualityColumnLabel, usesQualificationRetention } from "@/lib/funnel/conversions";
+import {
+  conversionNote,
+  qualityColumnLabel,
+  usesQualificationRetention,
+} from "@/lib/funnel/conversions";
 import { fmtCount, fmtPercent, fmtShortDate } from "@/lib/funnel/format";
+import InfoPopover from "@/components/funnel/InfoPopover";
 
 interface Props {
   meta: ConversionMeta;
@@ -81,6 +86,7 @@ export default function FunnelChart({
 
   const matureCount = cohorts.filter((c) => c.maturityState === "mature").length;
   const immatureCount = cohorts.length - matureCount;
+  const note = conversionNote(meta.id);
   const selectedShort = (() => {
     if (!selectedWeekStartIso) return null;
     const point = cohorts.find(
@@ -120,6 +126,7 @@ export default function FunnelChart({
             </div>
           </div>
           {toolbarSlot}
+          {note && <InfoPopover title={note.title} points={note.points} />}
         </div>
       </div>
 
