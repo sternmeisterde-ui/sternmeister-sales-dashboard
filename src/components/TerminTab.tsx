@@ -570,22 +570,20 @@ function TerminDashboardSection({
   // CANCELLED). Only runs once per registry-load.
   const initRef = useRef(false);
   useEffect(() => {
-    if (statusesLoading || initRef.current) return;
+    // Не инициализируемся, пока реестр статусов не пришёл НЕПУСТЫМ. Иначе при
+    // сетевом сбое (berater-statuses вернул []) мы бы выставили пустой выбор и
+    // записали его в localStorage — и «залипли» на «Не выбрано» даже после
+    // восстановления БД (баг: пустой сохранённый выбор не откатывался к дефолту).
+    if (statusesLoading || initRef.current || statusOptions.length === 0) return;
     initRef.current = true;
     const validIds = new Set(statusOptions.map((s) => s.id));
     const stored = loadStoredStatusFilter(storageKey);
-    if (stored) {
-      const reconciled = stored.filter((id) => validIds.has(id));
-      // If localStorage had nothing valid (stale registry), fall back to
-      // default rather than locking the user into an empty selection.
-      setStatusIds(
-        reconciled.length === 0 && stored.length > 0
-          ? defaultStatusIds(statusOptions)
-          : reconciled,
-      );
-    } else {
-      setStatusIds(defaultStatusIds(statusOptions));
-    }
+    const reconciled = stored ? stored.filter((id) => validIds.has(id)) : [];
+    // Пустой результат (нет localStorage, сохранён [] из прошлого сбоя, или все
+    // ID устарели) → дефолт, а не залипание на пустом выборе.
+    setStatusIds(
+      reconciled.length === 0 ? defaultStatusIds(statusOptions) : reconciled,
+    );
   }, [statusOptions, statusesLoading, storageKey]);
 
   useEffect(() => {
@@ -724,14 +722,13 @@ function TerminDashboardSection({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 shrink-0">
           <CalendarDays className="w-4 h-4 text-blue-400 shrink-0" />
           <span className="text-xs text-slate-300 font-medium">
             Выберите период:
           </span>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
           <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
             {(["day", "week"] as const).map((g) => (
               <button
@@ -796,13 +793,12 @@ function TerminDashboardSection({
             type="button"
             onClick={() => fetchData()}
             disabled={loading}
-            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            className="ml-auto p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
             title="Обновить"
             aria-label="Обновить"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           </button>
-        </div>
       </div>
 
       {isRefreshing && (
@@ -1181,14 +1177,13 @@ function QualLeadsDocsSection() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 shrink-0">
           <CalendarDays className="w-4 h-4 text-amber-400 shrink-0" />
           <span className="text-xs text-slate-300 font-medium">
             Выберите период:
           </span>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
           <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
             {(["day", "week"] as const).map((g) => (
               <button
@@ -1219,13 +1214,12 @@ function QualLeadsDocsSection() {
             type="button"
             onClick={() => fetchData()}
             disabled={loading}
-            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            className="ml-auto p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
             title="Обновить"
             aria-label="Обновить"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           </button>
-        </div>
       </div>
 
       {isRefreshing && (
@@ -1519,14 +1513,13 @@ function FunnelTimingSection() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 shrink-0">
           <CalendarDays className="w-4 h-4 text-violet-400 shrink-0" />
           <span className="text-xs text-slate-300 font-medium">
             Выберите период:
           </span>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
           <CalendarPicker
             mode="range"
             value={{ start: range.start, end: range.end }}
@@ -1538,13 +1531,12 @@ function FunnelTimingSection() {
             type="button"
             onClick={() => fetchData()}
             disabled={loading}
-            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            className="ml-auto p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
             title="Обновить"
             aria-label="Обновить"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           </button>
-        </div>
       </div>
 
       {isRefreshing && (
@@ -1729,6 +1721,28 @@ interface UpcomingRow {
 
 function UpcomingTerminsSection() {
   const [days, setDays] = useState<number>(30);
+  // Произвольный диапазон с календаря. Если задан (start+end) — переопределяет
+  // пресеты days и запрашивается через from/to.
+  const [customRange, setCustomRange] = useState<DateRange | null>(null);
+  const isCustom = !!(customRange?.start && customRange?.end);
+  const periodLabel = isCustom
+    ? `${formatRu(customRange!.start!)} — ${formatRu(customRange!.end!)}`
+    : `следующие ${days} дней`;
+  // Календарь всегда показывает активное окно (как у соседних графиков): либо
+  // кастомный диапазон, либо окно пресета [сегодня, сегодня+days-1]. Иначе при
+  // активном пресете он выглядел бы пустым и отличался от соседей.
+  const calendarRange: DateRange = isCustom
+    ? customRange!
+    : (() => {
+        const start = todayBerlinDate();
+        return { start, end: new Date(start.getTime() + (days - 1) * 86_400_000) };
+      })();
+  // Как в соседних секциях: onChange может прийти с незавершённым диапазоном
+  // (end=null на первом клике) — подставляем end=start.
+  const handleCalendarChange = (r: DateRange) => {
+    if (!r.start) return;
+    setCustomRange({ start: r.start, end: r.end ?? r.start });
+  };
   const [data, setData] = useState<UpcomingRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1740,7 +1754,11 @@ function UpcomingTerminsSection() {
       if (!hasDataRef.current) setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/dashboard/termins-upcoming?days=${days}`, {
+        const qs =
+          customRange?.start && customRange?.end
+            ? `from=${formatDate(customRange.start)}&to=${formatDate(customRange.end)}`
+            : `days=${days}`;
+        const res = await fetch(`/api/dashboard/termins-upcoming?${qs}`, {
           signal,
           // Polling-driven refreshes must hit the server. Without no-store the
           // browser HTTP cache could replay a 60s-old response and the
@@ -1762,7 +1780,7 @@ function UpcomingTerminsSection() {
         setLoading(false);
       }
     },
-    [days],
+    [days, customRange],
   );
 
   useEffect(() => {
@@ -1826,36 +1844,41 @@ function UpcomingTerminsSection() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
-          <CalendarDays className="w-4 h-4 text-cyan-400 shrink-0" />
-          {[7, 14, 30, 60, 90].map((d) => (
-            <button
-              key={d}
-              type="button"
-              onClick={() => setDays(d)}
-              className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
-                days === d
-                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
-                  : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
-              }`}
-            >
-              {d} дн
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
+      <div className="glass-panel rounded-2xl border border-white/5 p-4 flex flex-wrap items-center gap-3">
+        <CalendarDays className="w-4 h-4 text-cyan-400 shrink-0" />
+        {[7, 14, 30, 60, 90].map((d) => (
           <button
+            key={d}
             type="button"
-            onClick={() => fetchData()}
-            disabled={loading}
-            className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-            title="Обновить"
-            aria-label="Обновить"
+            onClick={() => {
+              setCustomRange(null);
+              setDays(d);
+            }}
+            className={`text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-colors ${
+              days === d && !isCustom
+                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                : "bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:border-white/20"
+            }`}
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            {d} дн
           </button>
-        </div>
+        ))}
+        <CalendarPicker
+          mode="range"
+          value={calendarRange}
+          onChange={handleCalendarChange}
+          onClear={() => setCustomRange(null)}
+        />
+        <button
+          type="button"
+          onClick={() => fetchData()}
+          disabled={loading}
+          className="ml-auto p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+          title="Обновить"
+          aria-label="Обновить"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
       </div>
 
       {isRefreshing && (
@@ -1881,7 +1904,7 @@ function UpcomingTerminsSection() {
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
                     params: { dateFrom, dateTo, leg: "dc" },
-                    title: `Термин ДЦ · следующие ${days} дней`,
+                    title: `Термин ДЦ · ${periodLabel}`,
                     subtitle: `${stats.totalDc} лидов · по времени слота`,
                   });
                 }
@@ -1900,7 +1923,7 @@ function UpcomingTerminsSection() {
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
                     params: { dateFrom, dateTo, leg: "aa" },
-                    title: `Термин АА · следующие ${days} дней`,
+                    title: `Термин АА · ${periodLabel}`,
                     subtitle: `${stats.totalAa} лидов · по времени слота`,
                   });
                 }
@@ -1938,7 +1961,7 @@ function UpcomingTerminsSection() {
       <div className="glass-panel rounded-2xl p-4 sm:p-5 border border-white/5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-            Запланировано термин — следующие {days} дней
+            Запланировано термин — {periodLabel}
           </h3>
           <span className="text-[10px] text-slate-500 hidden sm:inline">
             ось X — дата термина (Берлин); исключены статус «Термин ДЦ отменен»
