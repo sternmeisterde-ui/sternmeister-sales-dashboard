@@ -45,15 +45,31 @@ interface UpcomingRow {
 
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
+  const fromParam = url.searchParams.get("from");
+  const toParam = url.searchParams.get("to");
   const daysParam = url.searchParams.get("days");
-  const days = (() => {
-    const n = Number(daysParam);
-    if (!Number.isFinite(n) || n <= 0 || n > 180) return 30;
-    return Math.floor(n);
-  })();
+  const isCivil = (s: string | null): s is string =>
+    !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-  const todayBerlin = todayCivil();
-  const lastDay = addDaysCivil(todayBerlin, days - 1);
+  // Окно: произвольный диапазон from/to (приоритет) ИЛИ «N дней вперёд от
+  // сегодня» (fallback — пресеты 7/14/30/60/90). Span ограничен 366 днями,
+  // чтобы generate_series не разрастался на гигантском диапазоне.
+  let fromDay: string;
+  let toDay: string;
+  if (isCivil(fromParam) && isCivil(toParam) && fromParam <= toParam) {
+    fromDay = fromParam;
+    toDay = toParam;
+    const spanDays = (Date.parse(toDay) - Date.parse(fromDay)) / 86_400_000;
+    if (spanDays > 366) toDay = addDaysCivil(fromDay, 366);
+  } else {
+    const days = (() => {
+      const n = Number(daysParam);
+      if (!Number.isFinite(n) || n <= 0 || n > 180) return 30;
+      return Math.floor(n);
+    })();
+    fromDay = todayCivil();
+    toDay = addDaysCivil(fromDay, days - 1);
+  }
 
   const beraterId = B2G_PIPELINES.BERATER;
   // AA exclusion: BERATER_REVIEW (93860887) means the AA appointment already
@@ -70,8 +86,8 @@ export async function GET(req: NextRequest) {
   }>(sql`
     WITH days AS (
       SELECT generate_series(
-        ${todayBerlin}::date,
-        ${lastDay}::date,
+        ${fromDay}::date,
+        ${toDay}::date,
         '1 day'::interval
       )::date AS bday
     ),
@@ -87,8 +103,8 @@ export async function GET(req: NextRequest) {
       WHERE pipeline_id = ${beraterId}
         AND termin_date IS NOT NULL
         AND aa_termin_date IS NULL
-        AND DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${todayBerlin}::date
-        AND DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${lastDay}::date
+        AND DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${fromDay}::date
+        AND DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${toDay}::date
       GROUP BY 1
     ),
     -- AA slot: any lead with aa_termin_date set (regardless of DC date) lands
@@ -102,8 +118,8 @@ export async function GET(req: NextRequest) {
       WHERE pipeline_id = ${beraterId}
         AND status_id <> ${beraterReviewStatus}
         AND aa_termin_date IS NOT NULL
-        AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${todayBerlin}::date
-        AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${lastDay}::date
+        AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${fromDay}::date
+        AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${toDay}::date
       GROUP BY 1
     )
     SELECT
