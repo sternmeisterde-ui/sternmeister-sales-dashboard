@@ -9,7 +9,7 @@
  *   3. Dedup by recording URL/ID
  */
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
@@ -1176,7 +1176,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   const summaryPrompt = mode === "success" ? SUCCESS_SUMMARY_PROMPT : FAILURE_SUMMARY_PROMPT;
 
   try {
-    await db.update(callAnalyses).set({ status: "processing" }).where(eq(callAnalyses.id, analysisId));
+    await db.update(callAnalyses).set({ status: "processing", updatedAt: sql`now()` }).where(eq(callAnalyses.id, analysisId));
 
     // Parse minDuration from URL hash
     const hashMatch = analysis.kommoUrl.match(/#minDur=(\d+)/);
@@ -1445,7 +1445,7 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       const progress = Math.round((processed / cappedCalls.length) * 90);
       await db
         .update(callAnalyses)
-        .set({ processedCalls: processed, progress })
+        .set({ processedCalls: processed, progress, updatedAt: sql`now()` })
         .where(eq(callAnalyses.id, analysisId))
         .catch((err: unknown) => {
           // Progress-update failures are cosmetic — the next worker's update

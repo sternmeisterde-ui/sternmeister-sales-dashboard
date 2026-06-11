@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses } from "@/lib/db/schema-existing";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { runAnalysisPipeline } from "@/lib/analysis/pipeline";
 import { getSession } from "@/lib/auth";
 
@@ -41,21 +41,38 @@ export async function GET() {
   // BEGIN), so the row-lock would release at statement end anyway. The
   // re-evaluation is the actual interlock here.
   //
-  // We deliberately DON'T auto-claim `processing` rows: previously that
-  // mechanism handled SSE-disconnect recovery, but it also let two browsers
-  // concurrently run the pipeline on the same row. Genuinely orphaned
-  // `processing` rows are recovered by the user via Resume (after explicitly
-  // deleting and re-creating, or — when status drifts to error — clicking
-  // Resume which routes back through `pending` here).
+  // Claimable = a `pending` row OR a `processing` row whose heartbeat went
+  // STALE (>2 min without an `updated_at` bump). A live run bumps updated_at
+  // every ~20s (SSE heartbeat below) and on every call, so it's never stale
+  // and can't be double-claimed — this is the precise liveness signal the old
+  // "never auto-claim processing" comment lacked. NULL updated_at = a row that
+  // never heartbeated (legacy, or a worker killed before the heartbeat landed)
+  // → treated as stale. This is what auto-recovers runs the 30-min maxDuration
+  // ceiling kills mid-way: the next poll reclaims and resumes them (the
+  // pipeline skips already-saved files, so no re-transcription cost).
+  //
+  // Interlock against two concurrent /process callers: both subqueries may pick
+  // row X; the UPDATE row-locks X, the loser re-evaluates the outer `AND
+  // (...)` after the lock. Since the winner already bumped updated_at=now()
+  // (no longer stale) and flipped pending→processing, the loser's WHERE no
+  // longer matches → zero rows. pending is prioritised over stale-processing so
+  // fresh work isn't starved by a slow resume.
+  const claimable = sql`(
+    status = 'pending'
+    OR (status = 'processing' AND (updated_at IS NULL OR updated_at < now() - interval '2 minutes'))
+  )`;
   const claimed = await db
     .update(callAnalyses)
-    .set({ status: "processing" })
-    .where(
-      and(
-        eq(callAnalyses.status, "pending"),
-        sql`${callAnalyses.id} = (SELECT id FROM call_analyses WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1)`,
-      ),
-    )
+    .set({ status: "processing", updatedAt: sql`now()` })
+    .where(sql`
+      ${callAnalyses.id} = (
+        SELECT id FROM call_analyses
+        WHERE ${claimable}
+        ORDER BY (status = 'pending') DESC, created_at ASC
+        LIMIT 1
+      )
+      AND ${claimable}
+    `)
     .returning({ id: callAnalyses.id });
 
   if (claimed.length === 0) {
@@ -70,13 +87,23 @@ export async function GET() {
       // Send initial message
       controller.enqueue(encoder.encode(`data: {"status":"started","id":"${pending.id}"}\n\n`));
 
-      // Heartbeat every 20s to prevent proxy timeout
+      // Heartbeat every 20s: keeps the proxy connection alive AND bumps the
+      // row's `updated_at` in the DB so the claim logic above sees this run as
+      // alive and won't reclaim it as orphaned. When the function is killed
+      // (maxDuration / restart), this interval stops → updated_at goes stale
+      // → the next /process poll reclaims the row and resumes it.
       const heartbeat = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(`data: {"heartbeat":true}\n\n`));
         } catch {
           clearInterval(heartbeat);
         }
+        // Fire-and-forget DB heartbeat; swallow errors (a missed bump only
+        // risks a harmless reclaim attempt the live pipeline corrects).
+        db.update(callAnalyses)
+          .set({ updatedAt: sql`now()` })
+          .where(eq(callAnalyses.id, pending.id))
+          .catch(() => {});
       }, 20000);
 
       try {

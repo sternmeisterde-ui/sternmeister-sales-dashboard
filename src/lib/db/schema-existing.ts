@@ -274,6 +274,10 @@ export const callAnalyses = pgTable("call_analyses", {
   resultSummary: text("result_summary"),            // Grok summary markdown
   createdBy: text("created_by"),                    // user name
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  // Heartbeat для recovery застрявших processing-джоб. Бьётся каждые ~20с
+  // SSE-стримом /process и на каждом тике прогресса. NULL = ни разу не бился
+  // (старая строка / убитый воркер) → считается протухшим и реклеймится.
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
 });
 
