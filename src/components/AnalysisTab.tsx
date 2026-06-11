@@ -109,9 +109,15 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     // Poll list every 5s for progress updates
     const listInterval = setInterval(fetchList, 5000);
 
-    // Trigger processing if pending
-    const hasPending = analyses.some(a => a.status === "pending");
-    if (hasPending) {
+    // Trigger /process for pending OR processing rows. Processing is included
+    // so an ORPHANED run (killed at the 30-min maxDuration ceiling) gets picked
+    // back up: the server only reclaims a `processing` row whose heartbeat is
+    // stale (>2 min), so a genuinely live run is never disturbed, and the
+    // `sseRef` guard in triggerProcessing prevents opening a second stream.
+    const hasResumable = analyses.some(
+      (a) => a.status === "pending" || a.status === "processing",
+    );
+    if (hasResumable) {
       triggerProcessing();
     }
 
