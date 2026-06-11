@@ -53,6 +53,29 @@ function getCriteriaColor(v: number | null | undefined): string {
   return "text-rose-400";
 }
 
+// Критерии с особой раскраской (канонические имена из src/criteria/*.json —
+// сервер агрегирует их специальной веткой, см. UNSCORED_BINARY_CRITERIA /
+// VALUE_CRITERIA в /api/analytics):
+//  • инвертированные — значение это «% плохого», выше = хуже («Потеря
+//    клиента…» = % потерянных горячих клиентов);
+//  • нейтральные — информационная метрика без «хорошо/плохо» (talk ratio).
+const INVERTED_CRITERIA = new Set(["Потеря клиента на этапе оплаты"]);
+const NEUTRAL_CRITERIA = new Set(["Talk ratio Продавца"]);
+
+function getCriteriaColorFor(name: string, v: number | null | undefined): string {
+  if (v === undefined || v === null) return "text-slate-600";
+  if (NEUTRAL_CRITERIA.has(name)) return "text-slate-200";
+  if (INVERTED_CRITERIA.has(name)) return getCriteriaColor(100 - v);
+  return getCriteriaColor(v);
+}
+
+function getCriteriaBgFor(name: string, v: number | null | undefined): string {
+  if (v === undefined || v === null) return "";
+  if (NEUTRAL_CRITERIA.has(name)) return "";
+  if (INVERTED_CRITERIA.has(name)) return getCriteriaBg(100 - v);
+  return getCriteriaBg(v);
+}
+
 function getCriteriaBg(v: number | null | undefined): string {
   if (v === undefined || v === null) return "";
   if (v >= 80) return "bg-emerald-500/5";
@@ -727,7 +750,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
             const v = c.scores[p];
-            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(c.name, v)} ${getCriteriaBgFor(c.name, v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
@@ -807,7 +830,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
             const v = m.blocks[blockIdx]?.criteria[ci]?.score;
-            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(cName, v)} ${getCriteriaBgFor(cName, v)}`}>{fmtScore(v)}</td>;
           })}
         </tr>
       ))}
@@ -954,8 +977,13 @@ function CriteriaTimeTree({
     leaves.map((leaf, i) => {
       const v = leaf.kind === "overall" ? node.overall : node.scores[leafColId(leaf)];
       const strong = strongAll || leaf.kind !== "crit";
+      // Критерии с особой семантикой (потеря клиента, talk ratio) красим
+      // по имени; блоки и «ОЦЕНКА» — обычной шкалой.
+      const critName = leaf.kind === "crit" ? leaf.crit.name : null;
+      const color = critName ? getCriteriaColorFor(critName, v) : getCriteriaColor(v);
+      const bg = critName ? getCriteriaBgFor(critName, v) : getCriteriaBg(v);
       return (
-        <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>
+        <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${color} ${bg}`}>
           {fmtScore(v)}
         </td>
       );
@@ -1241,12 +1269,19 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
       {hasChildren && !isCollapsed && criteriaNames.map((cName) => {
         const cA = blockA?.criteria.find((c) => c.name === cName)?.score ?? null;
         const cB = blockB?.criteria.find((c) => c.name === cName)?.score ?? null;
+        // У инвертированных критериев рост = хуже → дельту красим наоборот;
+        // у нейтральных дельта без оценочного цвета.
+        const deltaColor = NEUTRAL_CRITERIA.has(cName)
+          ? "text-slate-400"
+          : INVERTED_CRITERIA.has(cName)
+            ? getDeltaColor(cB, cA)
+            : getDeltaColor(cA, cB);
         return (
           <tr key={`${blockName}-cmp-${cName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cA)} ${getCriteriaBg(cA)}`}>{fmtScore(cA)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColor(cB)} ${getCriteriaBg(cB)}`}>{fmtScore(cB)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getDeltaColor(cA, cB)}`}>{fmtDelta(cA, cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA)} ${getCriteriaBgFor(cName, cA)}`}>{fmtScore(cA)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB)} ${getCriteriaBgFor(cName, cB)}`}>{fmtScore(cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${deltaColor}`}>{fmtDelta(cA, cB)}</td>
           </tr>
         );
       })}
