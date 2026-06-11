@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
 export async function GET(
@@ -28,7 +28,8 @@ export async function GET(
     const files = await db
       .select({ filename: callAnalysisFiles.filename, content: callAnalysisFiles.content })
       .from(callAnalysisFiles)
-      .where(eq(callAnalysisFiles.analysisId, id));
+      // Служебный _calllist.json (fileType='calllist') не включаем в выгрузку.
+      .where(and(eq(callAnalysisFiles.analysisId, id), ne(callAnalysisFiles.fileType, "calllist")));
 
     if (files.length === 0) {
       return NextResponse.json({ error: "No files" }, { status: 404 });

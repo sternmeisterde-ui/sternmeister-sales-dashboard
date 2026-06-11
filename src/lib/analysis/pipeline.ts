@@ -9,7 +9,7 @@
  *   3. Dedup by recording URL/ID
  */
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
@@ -1139,6 +1139,13 @@ async function callGrok(
 
 // ==================== MAIN PIPELINE ====================
 
+/** Один найденный звонок (результат фазы поиска). */
+interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
+
+/** Имя служебного файла со списком найденных звонков (для resume без повторного
+ * поиска). Скрыт от пользователя в detail/download (фильтр по fileType). */
+const CALLLIST_FILENAME = "_calllist.json";
+
 export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   const db = getMainDb("b2g"); // analyses stored in D1 (main DB)
 
@@ -1183,114 +1190,128 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     const minDuration = hashMatch ? Number(hashMatch[1]) * 60 : DEFAULT_MIN_DURATION;
     const cleanUrl = analysis.kommoUrl.replace(/#minDur=\d+/, "");
 
-    // 1. Fetch leads from Kommo
-    await db.update(callAnalyses).set({ errorMessage: "Загрузка лидов из Kommo..." }).where(eq(callAnalyses.id, analysisId));
-    console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
-    const leads = await fetchLeadsFromUrl(cleanUrl);
-    console.log(`[Analysis ${analysisId}] Found ${leads.length} leads`);
+    // 1+2. Собираем список звонков. RESUME-ОПТИМИЗАЦИЯ: фаза Kommo-поиска
+    // (lead-fetch + заметки по каждой сделке) — самая дорогая (тысячи
+    // rate-limited запросов на большом фильтре). Найденный список сохраняем
+    // один раз файлом; при возобновлении сразу грузим его и прыгаем к
+    // транскрипции, минуя поиск. Без этого прогон, убитый на 30/60-мин потолке,
+    // пере-сканировал ВСЕ сделки на каждом reclaim и для большого фильтра не
+    // мог завершиться вовсе (буксовка на «Поиск звонков»).
+    const [persistedList] = await db
+      .select({ content: callAnalysisFiles.content })
+      .from(callAnalysisFiles)
+      .where(and(eq(callAnalysisFiles.analysisId, analysisId), eq(callAnalysisFiles.filename, CALLLIST_FILENAME)));
 
-    if (leads.length === 0) {
-      await db.update(callAnalyses).set({
-        status: "error",
-        errorMessage: "Не найдено лидов по указанной ссылке. Проверьте фильтр в Kommo.",
-      }).where(eq(callAnalyses.id, analysisId));
-      return;
-    }
-
-    // 2. Fetch call notes for each lead in parallel (bounded), dedup across
-    //    leads (same recording can appear on several leads in Kommo), filter
-    //    by duration. Progress is updated every 25 leads so the UI shows
-    //    movement even when the filter returns thousands of deals.
-    //
-    //    Note on date semantics: the URL's filter_date_from/to is applied at
-    //    the LEAD level via Kommo API (when filter_date_switch is present) to
-    //    narrow which deals enter the pipeline. The call notes themselves are
-    //    NOT additionally filtered by date — the user's mental model is
-    //    "filter narrows deals; then pick all qualifying calls (by duration)
-    //    in those deals regardless of when the calls were made." If you ever
-    //    want to add a call-date filter, do it as a separate UI option, not
-    //    silently coupled to the URL date range.
-    await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
-
-    interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
-    let scanned = 0;
-    let multiCallLeads = 0;
-    const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
-      const notes = await fetchCallNotes(lead).catch((e: unknown) => {
-        console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
-        return [] as KommoNote[];
-      });
-      const matched: CallRecord[] = [];
-      // Lower bound on call date: a call attributed to a lead must have
-      // happened DURING that lead's lifetime, not before. Contact-level
-      // notes (which is where PBX integrations log calls — see
-      // fetchCallNotes) include the contact's entire call history across
-      // ALL of the contact's deals. Without this guard a new lead inherits
-      // every old call the contact ever had, polluting the analysis.
-      const leadCreatedAt = lead.created_at || 0;
-      // Upper bound: closed deals — only count calls up to the close date
-      // (`closed_at` is 0 for open deals; ignore in that case).
-      const leadClosedAt = lead.closed_at && lead.closed_at > 0 ? lead.closed_at : Number.POSITIVE_INFINITY;
-      for (const n of notes) {
-        const dur = n.params?.duration || 0;
-        const link = n.params?.link;
-        if (dur < minDuration || !link) continue;
-        if (link.includes("localhost")) continue;
-        if (n.created_at < leadCreatedAt) continue;
-        if (n.created_at > leadClosedAt) continue;
-        matched.push({
-          leadId: lead.id,
-          leadName: (lead.name || "").substring(0, 60),
-          duration: dur,
-          url: link,
-          date: new Date(n.created_at * 1000),
-          direction: n.note_type === "call_in" ? "входящий" : "исходящий",
-        });
+    let cappedCalls: CallRecord[] = [];
+    if (persistedList?.content) {
+      try {
+        const raw = JSON.parse(persistedList.content) as Array<Omit<CallRecord, "date"> & { date: string }>;
+        cappedCalls = raw.map((c) => ({ ...c, date: new Date(c.date) }));
+        console.log(`[Analysis ${analysisId}] Resumed from persisted call list (${cappedCalls.length} calls) — skipping Kommo search.`);
+      } catch {
+        cappedCalls = []; // битый JSON → проваливаемся в свежий поиск ниже
       }
-      if (matched.length > 1) multiCallLeads++;
-      scanned++;
-      if (scanned % 25 === 0 || scanned === leads.length) {
-        await db
-          .update(callAnalyses)
-          .set({ errorMessage: `Поиск звонков: ${scanned}/${leads.length} сделок...` })
-          .where(eq(callAnalyses.id, analysisId))
-          .catch(() => void 0);
-      }
-      return matched;
-    });
-    if (multiCallLeads > 0) {
-      console.log(
-        `[Analysis ${analysisId}] ${multiCallLeads} lead(s) had >1 qualifying call — all will be transcribed`,
-      );
-    }
-
-    // Global dedup by URL — same recording in several leads → count once.
-    const seenUrls = new Set<string>();
-    const calls: CallRecord[] = [];
-    for (const bucket of perLeadResults) {
-      for (const c of bucket) {
-        if (seenUrls.has(c.url)) continue;
-        seenUrls.add(c.url);
-        calls.push(c);
-      }
-    }
-
-    // Cap at MAX_CALLS (most recent first) and log how many were trimmed
-    // so the user knows the filter needs tightening if it hit the ceiling.
-    calls.sort((a, b) => b.date.getTime() - a.date.getTime());
-    const cappedCalls = calls.slice(0, MAX_CALLS);
-    if (calls.length > MAX_CALLS) {
-      console.warn(
-        `[Analysis ${analysisId}] filter produced ${calls.length} calls, trimmed to ${MAX_CALLS} most recent`,
-      );
     }
 
     if (cappedCalls.length === 0) {
-      await db.update(callAnalyses).set({
-        status: "error",
-        errorMessage: `Не найдено звонков ≥${minDuration/60} мин среди ${leads.length} сделок.`,
-      }).where(eq(callAnalyses.id, analysisId));
-      return;
+      // ---- Свежий поиск: lead-fetch + заметки по сделкам ----
+      await db.update(callAnalyses).set({ errorMessage: "Загрузка лидов из Kommo..." }).where(eq(callAnalyses.id, analysisId));
+      console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
+      const leads = await fetchLeadsFromUrl(cleanUrl);
+      console.log(`[Analysis ${analysisId}] Found ${leads.length} leads`);
+
+      if (leads.length === 0) {
+        await db.update(callAnalyses).set({
+          status: "error",
+          errorMessage: "Не найдено лидов по указанной ссылке. Проверьте фильтр в Kommo.",
+        }).where(eq(callAnalyses.id, analysisId));
+        return;
+      }
+
+      // Заметки по каждому лиду (bounded), dedup, фильтр по длительности.
+      // Прогресс каждые 25 лидов. Семантика дат: фильтр сужает СДЕЛКИ на уровне
+      // Kommo-API; сами звонки по дате доп. не фильтруются.
+      await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
+
+      let scanned = 0;
+      let multiCallLeads = 0;
+      const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
+        const notes = await fetchCallNotes(lead).catch((e: unknown) => {
+          console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
+          return [] as KommoNote[];
+        });
+        const matched: CallRecord[] = [];
+        // Нижняя граница: звонок до создания лида = унаследован из истории
+        // контакта (PBX пишет звонки на контакт) — исключаем.
+        const leadCreatedAt = lead.created_at || 0;
+        // Верхняя граница: для закрытых сделок — только звонки до даты закрытия.
+        const leadClosedAt = lead.closed_at && lead.closed_at > 0 ? lead.closed_at : Number.POSITIVE_INFINITY;
+        for (const n of notes) {
+          const dur = n.params?.duration || 0;
+          const link = n.params?.link;
+          if (dur < minDuration || !link) continue;
+          if (link.includes("localhost")) continue;
+          if (n.created_at < leadCreatedAt) continue;
+          if (n.created_at > leadClosedAt) continue;
+          matched.push({
+            leadId: lead.id,
+            leadName: (lead.name || "").substring(0, 60),
+            duration: dur,
+            url: link,
+            date: new Date(n.created_at * 1000),
+            direction: n.note_type === "call_in" ? "входящий" : "исходящий",
+          });
+        }
+        if (matched.length > 1) multiCallLeads++;
+        scanned++;
+        if (scanned % 25 === 0 || scanned === leads.length) {
+          await db
+            .update(callAnalyses)
+            .set({ errorMessage: `Поиск звонков: ${scanned}/${leads.length} сделок...`, updatedAt: sql`now()` })
+            .where(eq(callAnalyses.id, analysisId))
+            .catch(() => void 0);
+        }
+        return matched;
+      });
+      if (multiCallLeads > 0) {
+        console.log(`[Analysis ${analysisId}] ${multiCallLeads} lead(s) had >1 qualifying call — all will be transcribed`);
+      }
+
+      // Глобальный dedup по URL — одна запись в нескольких сделках = один раз.
+      const seenUrls = new Set<string>();
+      const calls: CallRecord[] = [];
+      for (const bucket of perLeadResults) {
+        for (const c of bucket) {
+          if (seenUrls.has(c.url)) continue;
+          seenUrls.add(c.url);
+          calls.push(c);
+        }
+      }
+
+      // Cap MAX_CALLS (свежие первыми).
+      calls.sort((a, b) => b.date.getTime() - a.date.getTime());
+      cappedCalls = calls.slice(0, MAX_CALLS);
+      if (calls.length > MAX_CALLS) {
+        console.warn(`[Analysis ${analysisId}] filter produced ${calls.length} calls, trimmed to ${MAX_CALLS} most recent`);
+      }
+
+      if (cappedCalls.length === 0) {
+        await db.update(callAnalyses).set({
+          status: "error",
+          errorMessage: `Не найдено звонков ≥${minDuration/60} мин среди ${leads.length} сделок.`,
+        }).where(eq(callAnalyses.id, analysisId));
+        return;
+      }
+
+      // Сохраняем список → возобновление пропустит поиск выше.
+      const listJson = JSON.stringify(cappedCalls);
+      await db
+        .insert(callAnalysisFiles)
+        .values({ analysisId, filename: CALLLIST_FILENAME, content: listJson, fileType: "calllist" })
+        .onConflictDoUpdate({
+          target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
+          set: { content: listJson },
+        });
     }
 
     await db.update(callAnalyses).set({ totalCalls: cappedCalls.length, errorMessage: null }).where(eq(callAnalyses.id, analysisId));
