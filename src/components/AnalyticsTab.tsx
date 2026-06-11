@@ -164,6 +164,20 @@ const HIDDEN_DIRECTIONS_KEY = "sm_analytics_b2b_hidden_directions";
 
 // ==================== Main Component ====================
 
+// Дефолтный период по отделу. Коммерсы: «вчера» — РОП утром смотрит результаты
+// прошлого дня (просьба владельца 2026-06-11). Госники: прежнее 30-дневное окно.
+// Всё в Berlin-civil датах: browser-local `setDate(now − N)` давал рассинхрон
+// на ±1 день с подсветкой пикера в не-берлинских браузерах.
+function defaultDateRange(department: "b2g" | "b2b"): DateRange {
+  if (department === "b2b") {
+    const yesterday = berlinCivilDate(addDaysCivil(todayCivil(), -1));
+    return { start: yesterday, end: yesterday };
+  }
+  const end = todayBerlinDate();
+  const start = berlinCivilDate(addDaysCivil(todayCivil(), -30));
+  return { start, end };
+}
+
 export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
   // Коммерсы: вид по вкладкам линий без «Все» → стартуем на первой линии.
@@ -171,14 +185,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   const [line, setLine] = useState<string>(() => (department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all"));
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerIds, setManagerIds] = useState<string[]>([]);
-  const [dateRange, setDateRange] = useState<DateRange>(() => {
-    // Berlin-civil 30-day window. Browser-local `setDate(now − 30)` produced
-    // a Date whose `fmtDate` (now Berlin) read as one day off the picker
-    // highlight in non-Berlin browsers.
-    const end = todayBerlinDate();
-    const start = berlinCivilDate(addDaysCivil(todayCivil(), -30));
-    return { start, end };
-  });
+  const [dateRange, setDateRange] = useState<DateRange>(() => defaultDateRange(department));
 
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -230,6 +237,17 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     // вкладкам без «Все»); Госники — кросс-воронка «Все» (drill-down опционален).
     setLine(department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all");
     setManagerIds([]);
+    // Период тоже отдело-зависимый (b2b «вчера» / b2g 30 дней) — иначе при
+    // переключении отдела остаётся дефолт того, с которого открыли вкладку.
+    // Возвращаем prev, если даты совпали (эффект срабатывает и на маунте —
+    // новый объект с теми же датами дал бы лишний повторный fetch).
+    setDateRange((prev) => {
+      const next = defaultDateRange(department);
+      const same =
+        prev.start?.getTime() === next.start?.getTime() &&
+        prev.end?.getTime() === next.end?.getTime();
+      return same ? prev : next;
+    });
   }, [department]);
   useEffect(() => {
     setManagerIds([]);
@@ -370,12 +388,6 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     return () => ac.abort();
   }, [fetchCompareData, compareMode]);
 
-  const setQuickRange = (days: number) => {
-    const end = todayBerlinDate();
-    const start = berlinCivilDate(addDaysCivil(todayCivil(), -days));
-    setDateRange({ start, end });
-  };
-
   const periods = data?.periods ?? [];
   const isCompareReady = compareMode && data && compareData;
 
@@ -467,7 +479,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           mode="range"
           value={dateRange}
           onChange={setDateRange}
-          onClear={() => setQuickRange(30)}
+          onClear={() => setDateRange(defaultDateRange(department))}
         />
 
         {/* Compare toggle */}
