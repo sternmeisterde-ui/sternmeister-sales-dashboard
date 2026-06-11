@@ -132,7 +132,7 @@ export const masterManagers = pgTable("master_managers", {
   telegramId: text("telegram_id"),
   department: text("department").notNull(),       // 'b2g' | 'b2b'
   team: text("team").notNull().default("all"),
-  role: text("role").notNull().default("manager"), // 'manager' | 'rop' | 'admin'
+  role: text("role").notNull().default("manager"), // 'manager' | 'teamlead' | 'rop' | 'admin'
   line: text("line"),                              // '1' | '2' | '3'
   kommoUserId: integer("kommo_user_id"),
   callgearEmployeeId: text("callgear_employee_id"),

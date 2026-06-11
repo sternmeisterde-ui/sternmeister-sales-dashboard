@@ -48,17 +48,23 @@ async function resolveTelegramId(username: string): Promise<string | null> {
 
 /**
  * Collapse a master-table role into the permission gate used everywhere:
- * ROPs and admins both get full "admin" access, plain managers get "manager".
- * The original master role is preserved separately in session.masterRole
- * so the UI can still show the right badge ("РОП" vs "Админ").
+ * ROPs, teamleads and admins all get full "admin" access, plain managers get
+ * "manager". The original master role is preserved separately in
+ * session.masterRole so the UI can still show the right badge
+ * ("РОП" vs "Тимлид" vs "Админ").
  */
 function gateFromMasterRole(masterRole: string | null | undefined): "admin" | "manager" {
-  return masterRole === "admin" || masterRole === "rop" ? "admin" : "manager";
+  return masterRole === "admin" || masterRole === "rop" || masterRole === "teamlead"
+    ? "admin"
+    : "manager";
 }
 
-function normaliseMasterRole(role: string | null | undefined): "admin" | "rop" | "manager" {
+function normaliseMasterRole(
+  role: string | null | undefined,
+): "admin" | "rop" | "teamlead" | "manager" {
   if (role === "admin") return "admin";
   if (role === "rop") return "rop";
+  if (role === "teamlead") return "teamlead";
   return "manager";
 }
 
@@ -133,7 +139,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Password-bypass is intentionally limited to РОП и Администратор —
+    // Password-bypass is intentionally limited to РОП, Тимлид и Администратор —
     // обычным менеджерам этот канал входа недоступен. Проверяем по
     // master_managers (источник истины), а если пользователь есть только
     // в d1/r1 — по их полю role.
@@ -141,9 +147,9 @@ export async function POST(request: NextRequest) {
       const effectiveRole = normaliseMasterRole(
         masterUser?.role ?? d1User?.role ?? r1User?.role ?? null,
       );
-      if (effectiveRole !== "admin" && effectiveRole !== "rop") {
+      if (effectiveRole !== "admin" && effectiveRole !== "rop" && effectiveRole !== "teamlead") {
         return NextResponse.json(
-          { error: "Вход по паролю доступен только для РОП и Администратора" },
+          { error: "Вход по паролю доступен только для РОП, Тимлида и Администратора" },
           { status: 403 },
         );
       }

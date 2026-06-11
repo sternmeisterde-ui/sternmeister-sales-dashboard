@@ -37,6 +37,8 @@ export async function getDeptManagerWhitelist(
   // Double-status convention: role='rop' + line IS NOT NULL means the person
   // is also a working manager on that line (currently applies to Татьяна
   // Дерикова, b2g, line=2). They must be included in the Looker whitelist.
+  // Teamleads (role='teamlead') get admin-level UI access but work the line
+  // like managers, so they are always counted in analytics.
   const rows = await db
     .select({ name: masterManagers.name, shiftStartTime: masterManagers.shiftStartTime })
     .from(masterManagers)
@@ -46,6 +48,7 @@ export async function getDeptManagerWhitelist(
         eq(masterManagers.isActive, true),
         or(
           eq(masterManagers.role, "manager"),
+          eq(masterManagers.role, "teamlead"),
           and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
         ),
       ),

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkWorstCalls, okkManagers } from "@/lib/db/schema-okk";
-import { eq, and, gte, lte, sql } from "drizzle-orm";
+import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
 
 /**
  * GET /api/okk/worst-calls?department=b2g&from=YYYY-MM-DD&to=YYYY-MM-DD&line=1
@@ -27,10 +27,10 @@ export async function GET(request: NextRequest) {
     const fromDate = fromParam || defaultFrom.toISOString().slice(0, 10);
     const toDate = toParam || now.toISOString().slice(0, 10);
 
-    // Get all active managers (role=manager only) with optional line filter
+    // Get all active line workers (manager + teamlead) with optional line filter
     const managerConditions = [
       eq(okkManagers.isActive, true),
-      eq(okkManagers.role, "manager"),
+      inArray(okkManagers.role, ["manager", "teamlead"]),
     ];
     if (lineParam && lineParam !== "all") {
       managerConditions.push(eq(okkManagers.line, lineParam));

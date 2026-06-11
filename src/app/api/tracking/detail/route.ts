@@ -18,6 +18,7 @@ import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS, EVENT_TYPE_MAP, normalizeEventType } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
 import { tzOffsetMinutes } from "@/lib/utils/date";
+import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +59,18 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Missing managerId or date" }, { status: 400 });
     }
 
+    // Auth mirrors /api/tracking: admin gate sees everyone, plain managers
+    // only their own department + own row (verified below once the master
+    // row is loaded — managerId alone is forgeable).
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const managerOnly = session.role === "manager";
+    if (managerOnly && department !== session.department) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const selectedCrmTypes = new Set<string>(
       typesParam ? typesParam.split(",").filter(Boolean) : DEFAULT_SELECTED_KEYS,
     );
@@ -72,10 +85,28 @@ export async function GET(req: NextRequest) {
         line: masterManagers.line,
         shiftStartTime: masterManagers.shiftStartTime,
         shiftEndTime: masterManagers.shiftEndTime,
+        telegramUsername: masterManagers.telegramUsername,
+        kommoUserId: masterManagers.kommoUserId,
       })
       .from(masterManagers)
       .where(and(eq(masterManagers.id, managerId), eq(masterManagers.department, department)))
       .limit(1);
+
+    // Manager-only sessions may open the loupe only on themselves. Same
+    // match order as /api/tracking: telegram username → kommoUserId → name.
+    if (manager && managerOnly) {
+      const tgSession = session.telegramUsername?.toLowerCase() || null;
+      const tgMaster = manager.telegramUsername?.replace(/^@/, "").toLowerCase() || null;
+      const isSelf =
+        tgSession && tgMaster
+          ? tgMaster === tgSession
+          : session.kommoUserId && manager.kommoUserId
+            ? manager.kommoUserId === session.kommoUserId
+            : manager.name === session.name;
+      if (!isSelf) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+    }
 
     if (!manager) {
       return NextResponse.json({ error: "Manager not found in this department" }, { status: 404 });

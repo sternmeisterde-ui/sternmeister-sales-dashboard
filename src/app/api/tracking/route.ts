@@ -12,6 +12,7 @@ import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
 import { getAnalyticsCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
+import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +50,19 @@ export async function GET(req: NextRequest) {
 
     if (department !== "b2g" && department !== "b2b") {
       return NextResponse.json({ error: "Invalid department" }, { status: 400 });
+    }
+
+    // Auth: admins/ROPs/teamleads (gate role="admin") see the whole team.
+    // Plain managers are limited to their own department AND their own
+    // timeline (filtered below, after the master roster is loaded) —
+    // mirrors the "only own calls" policy of the OKK tab.
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const managerOnly = session.role === "manager";
+    if (managerOnly && department !== session.department) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     if (!fromISO || !toISO || !parseDateStr(fromISO) || !parseDateStr(toISO)) {
       return NextResponse.json({ error: "Invalid date range" }, { status: 400 });
@@ -128,6 +142,10 @@ export async function GET(req: NextRequest) {
         line: masterManagers.line,
         shiftStartTime: masterManagers.shiftStartTime,
         shiftEndTime: masterManagers.shiftEndTime,
+        // Only needed to match the session user for the manager-only filter
+        // below; not echoed back to the client.
+        telegramUsername: masterManagers.telegramUsername,
+        kommoUserId: masterManagers.kommoUserId,
       })
       .from(masterManagers)
       .where(
@@ -136,13 +154,28 @@ export async function GET(req: NextRequest) {
           eq(masterManagers.isActive, true),
           or(
             eq(masterManagers.role, "manager"),
+            eq(masterManagers.role, "teamlead"),
             and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
           ),
         ),
       )
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));
 
-    if (allManagers.length === 0) {
+    // Manager-only sessions: collapse the roster to the caller's own row.
+    // Match by telegram username (the login key) first, then kommoUserId,
+    // then exact name — session.userId can't be used directly because it may
+    // point at a d1_users/r1_users row, not master_managers.
+    const visibleManagers = managerOnly
+      ? allManagers.filter((m) => {
+          const tgSession = session.telegramUsername?.toLowerCase() || null;
+          const tgMaster = m.telegramUsername?.replace(/^@/, "").toLowerCase() || null;
+          if (tgSession && tgMaster) return tgMaster === tgSession;
+          if (session.kommoUserId && m.kommoUserId) return m.kommoUserId === session.kommoUserId;
+          return m.name === session.name;
+        })
+      : allManagers;
+
+    if (visibleManagers.length === 0) {
       return NextResponse.json({
         department, dates: [], managers: [], allManagers: [], synced,
       });
@@ -150,20 +183,22 @@ export async function GET(req: NextRequest) {
 
     // Apply manager filter — `managers=` selects a subset; absence = all.
     // We always echo back `allManagers` so the UI dropdown can render the
-    // full list regardless of the current filter selection.
+    // full list regardless of the current filter selection. For manager-only
+    // sessions both the dropdown and the subset are already collapsed to the
+    // caller's own row, so the `managers=` param can't widen their view.
     const selectedManagerIds = managersParam
       ? new Set(managersParam.split(",").filter(Boolean))
       : null;
     const managers = selectedManagerIds
-      ? allManagers.filter((m) => selectedManagerIds.has(m.id))
-      : allManagers;
+      ? visibleManagers.filter((m) => selectedManagerIds.has(m.id))
+      : visibleManagers;
 
     if (managers.length === 0) {
       return NextResponse.json({
         department,
         dates: [],
         managers: [],
-        allManagers: allManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
+        allManagers: visibleManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
         synced,
       });
     }
@@ -332,7 +367,7 @@ export async function GET(req: NextRequest) {
       // Full list (id+name+line) so the dropdown can render every active
       // manager for this dept regardless of which subset is currently in the
       // `managers=` filter. Stripped of timeline data to keep payload small.
-      allManagers: allManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
+      allManagers: visibleManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
       synced,
       lastSyncedAt: syncState?.lastSyncedAt ?? null,
       lastError: syncState?.lastError ?? null,
