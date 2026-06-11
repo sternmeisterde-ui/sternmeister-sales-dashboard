@@ -4,13 +4,14 @@ export interface SessionUser {
   userId: string;
   name: string;
   // Access gate — kept as "admin" | "manager" so every existing permission
-  // check (`session.role === "admin"`) keeps working. ROPs get access as
-  // admin but the master-table role stays on `masterRole` for UI display.
+  // check (`session.role === "admin"`) keeps working. ROPs and teamleads get
+  // access as admin but the master-table role stays on `masterRole` for UI
+  // display.
   role: "admin" | "manager";
   // Raw role from master_managers (single source of truth from the Managers
-  // tab). Use this to label the user in the UI ("РОП" vs "Админ" vs
-  // "Менеджер") without changing any access gate.
-  masterRole: "admin" | "rop" | "manager";
+  // tab). Use this to label the user in the UI ("РОП" vs "Тимлид" vs "Админ"
+  // vs "Менеджер") without changing any access gate.
+  masterRole: "admin" | "rop" | "teamlead" | "manager";
   department: "b2g" | "b2b";
   telegramUsername: string;
   line: string | null;

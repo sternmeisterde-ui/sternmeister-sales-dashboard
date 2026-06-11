@@ -31,6 +31,7 @@ export async function GET(req: NextRequest) {
           eq(masterManagers.isActive, true),
           or(
             eq(masterManagers.role, "manager"),
+            eq(masterManagers.role, "teamlead"),
             and(eq(masterManagers.role, "rop"), sql`${masterManagers.line} IS NOT NULL`),
           ),
         ),

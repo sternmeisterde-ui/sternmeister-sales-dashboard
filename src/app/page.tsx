@@ -88,7 +88,7 @@ interface SessionUser {
   userId: string;
   name: string;
   role: "admin" | "manager";
-  masterRole: "admin" | "rop" | "manager";
+  masterRole: "admin" | "rop" | "teamlead" | "manager";
   department: "b2g" | "b2b";
   telegramUsername: string;
   line: string | null;
@@ -108,6 +108,9 @@ interface NavItem {
   label: string;
   /** true → пункт виден только админу (роль admin). */
   adminOnly: boolean;
+  /** Переопределение adminOnly для конкретного отдела. Напр. «Активность»
+   *  у Коммерсов открыта и менеджерам (видят только себя — гейт в /api/tracking). */
+  adminOnlyByDept?: Partial<Record<DepartmentId, boolean>>;
   /** Если задано — вкладка доступна только этим отделам; не задано → всем. */
   departments?: DepartmentId[];
   /** Переопределение подписи для отдела (иначе — label). Напр. у Коммерсов
@@ -119,7 +122,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
   { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
   { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true, labelByDept: { b2b: "Оценка критериев" } },
-  { id: "tracking", icon: Activity, label: "Активность", adminOnly: true },
+  { id: "tracking", icon: Activity, label: "Активность", adminOnly: true, adminOnlyByDept: { b2b: false } },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
   { id: "looker", icon: Database, label: "Looker", adminOnly: true },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
@@ -138,9 +141,15 @@ const NAV_ITEMS: NavItem[] = [
 // Деривативы от NAV_ITEMS — один источник правды, списки вручную не дублируем.
 // "audit" нет в NAV_ITEMS → нет в VALID_TABS → deep-link #audit не открывается.
 const VALID_TABS: ReadonlySet<TabId> = new Set(NAV_ITEMS.map((i) => i.id));
-const ADMIN_ONLY_TABS: ReadonlySet<TabId> = new Set(
-  NAV_ITEMS.filter((i) => i.adminOnly).map((i) => i.id),
-);
+
+/** Admin-only ли вкладка в данном отделе. adminOnlyByDept позволяет открыть
+ *  отдельный таб менеджерам одного отдела (сейчас: tracking у Коммерсов),
+ *  не меняя поведение для другого. Вкладки вне NAV_ITEMS гейтит VALID_TABS. */
+function tabAdminOnly(tabId: TabId, dept: DepartmentId): boolean {
+  const item = NAV_ITEMS.find((i) => i.id === tabId);
+  if (!item) return false;
+  return item.adminOnlyByDept?.[dept] ?? item.adminOnly;
+}
 
 /** Доступна ли вкладка в данном отделе (по NAV_ITEMS — единый источник правды).
  *  Вкладки без записи в NAV_ITEMS считаем доступными — их гейтит VALID_TABS. */
@@ -228,7 +237,7 @@ export default function Dashboard() {
             // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
             // fallback на "real_calls".
             const fromHash = readTabFromHash();
-            if (!fromHash || ADMIN_ONLY_TABS.has(fromHash)) {
+            if (!fromHash || tabAdminOnly(fromHash, data.department)) {
               setActiveTab("real_calls");
             }
           } else {
@@ -278,13 +287,13 @@ export default function Dashboard() {
     const onHashChange = () => {
       const tab = readTabFromHash();
       if (tab && tab !== activeTab) {
-        if (!isAdmin && ADMIN_ONLY_TABS.has(tab)) return; // запрещаем manager-у admin-таб
+        if (!isAdmin && tabAdminOnly(tab, activeDepartment)) return; // запрещаем manager-у admin-таб
         setActiveTab(tab);
       }
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [activeTab, isAdmin]);
+  }, [activeTab, isAdmin, activeDepartment]);
 
   // Safety net: если активная вкладка недоступна в текущем отделе (deep-link
   // #funnel при B2B-сессии, ручная правка hash, смена отдела) — сбрасываем на
@@ -572,7 +581,7 @@ export default function Dashboard() {
   const callsDashStats = (() => {
     const allCalls = activeCalls;
     const managers = activeManagers
-      .filter(m => !m.role || m.role === "manager")
+      .filter(m => !m.role || m.role === "manager" || m.role === "teamlead")
       .filter(m => {
         if (lineFilter === "all") return true;
         if (activeDepartment === "b2b") return m.totalCalls > 0;
@@ -672,7 +681,7 @@ export default function Dashboard() {
   // off-line managers visible at "0 calls" — confusing in the bento. When a B2B
   // line is active, hide rows that the server returned with totalCalls === 0.
   const filteredManagers = activeManagers
-    .filter(m => !m.role || m.role === "manager")
+    .filter(m => !m.role || m.role === "manager" || m.role === "teamlead")
     .filter(m => {
       if (lineFilter === "all") return true;
       if (activeDepartment === "b2b") return m.totalCalls > 0;
@@ -806,7 +815,7 @@ export default function Dashboard() {
   // Навигация: пункты по роли и отделу. У Коммерсов Критерии/Скрипты живут внутри
   // вкладки «Артефакты», поэтому отдельных пунктов для них нет (см. NAV_ITEMS).
   const visibleNavItems = NAV_ITEMS
-    .filter((item) => isAdmin || !item.adminOnly)
+    .filter((item) => isAdmin || !tabAdminOnly(item.id, activeDepartment))
     .filter((item) => tabAllowedInDept(item.id, activeDepartment));
 
   // У Коммерсов «ОКК» (real_calls) — раскрываемая группа; её подпункты:
@@ -915,12 +924,14 @@ export default function Dashboard() {
                   className={`ml-2 inline-block align-middle text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
                     session.masterRole === "rop"
                       ? "bg-amber-500/20 text-amber-400"
-                      : session.masterRole === "admin"
-                        ? "bg-purple-500/20 text-purple-400"
-                        : "bg-slate-500/20 text-slate-300"
+                      : session.masterRole === "teamlead"
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : session.masterRole === "admin"
+                          ? "bg-purple-500/20 text-purple-400"
+                          : "bg-slate-500/20 text-slate-300"
                   }`}
                 >
-                  {session.masterRole === "rop" ? "РОП" : session.masterRole === "admin" ? "Админ" : "Менеджер"}
+                  {session.masterRole === "rop" ? "РОП" : session.masterRole === "teamlead" ? "Тимлид" : session.masterRole === "admin" ? "Админ" : "Менеджер"}
                 </span>
                 <br />
                 <span className="text-[10px]">@{session.telegramUsername}</span>
@@ -1099,10 +1110,11 @@ export default function Dashboard() {
                       {manager.role && (
                         <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md ${
                           manager.role === 'rop' ? 'bg-amber-500/20 text-amber-400' :
+                          manager.role === 'teamlead' ? 'bg-emerald-500/20 text-emerald-400' :
                           manager.role === 'admin' ? 'bg-purple-500/20 text-purple-400' :
                           'bg-blue-500/20 text-blue-400'
                         }`}>
-                          {manager.role === 'rop' ? 'РОП' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
+                          {manager.role === 'rop' ? 'РОП' : manager.role === 'teamlead' ? 'Тимлид' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
                         </span>
                       )}
                       {activeDepartment === "b2g" && manager.line && (
@@ -1296,7 +1308,7 @@ export default function Dashboard() {
                     calls={(() => {
                       const allCalls = activeTab === "real_calls" ? realCalls : aiCalls;
                       const managers = activeManagers
-                        .filter(m => !m.role || m.role === "manager")
+                        .filter(m => !m.role || m.role === "manager" || m.role === "teamlead")
                         .filter(m => {
                           if (lineFilter === "all") return true;
                           if (activeDepartment === "b2b") return m.totalCalls > 0;

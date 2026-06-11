@@ -122,12 +122,19 @@ const MAX_BACKFILL_DAYS = 90;        // safety cap — one user request can't pu
 //        Re-backfill purges legacy "note:*" call rows from tracking_events
 //        below so the timeline isn't double-counting historic calls
 //        alongside the new analytics source. (2026-04-30)
-const CURRENT_FILTER_VERSION = 12;
+//   v13 — getManagersForDept now also includes role='teamlead' (new role:
+//        admin-level dashboard access, but works the line like a manager, so
+//        their CRM activity belongs in attribution). Existing teamlead-less
+//        installs are unaffected; bump still forces the standard 90-day
+//        re-backfill per the filter-version contract. (2026-06-11)
+const CURRENT_FILTER_VERSION = 13;
 
 /** Load Kommo-linked managers for a department.
  *
  * Includes:
  *   • role='manager' — the canonical case
+ *   • role='teamlead' — admin-level UI access, but takes calls like a
+ *     manager, so their activity is always attributed
  *   • role='rop' WITH non-null line — the "double-status" convention
  *     documented in memory/project_double_status.md. Татьяна Дерикова is
  *     role='rop', line='2' — she takes line-2 calls AND runs the team, and
@@ -154,6 +161,7 @@ async function getManagersForDept(department: Dept) {
         eq(masterManagers.isActive, true),
         or(
           eq(masterManagers.role, "manager"),
+          eq(masterManagers.role, "teamlead"),
           and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
         ),
       ),

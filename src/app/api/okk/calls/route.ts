@@ -176,7 +176,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .from(okkManagers)
         .where(
           and(
-            sql`${okkManagers.role} IN ('manager', 'rop')`,
+            sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
             or(
               eq(okkManagers.isActive, true),
               sql`${okkManagers.id} IN (

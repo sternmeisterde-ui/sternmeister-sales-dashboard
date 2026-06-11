@@ -13,7 +13,8 @@ export interface ManagerRow {
 
 /**
  * Get active managers for a department from the `master_managers` single source of truth.
- * Includes both `manager` and `rop` roles (ROPs also make calls and count toward line metrics).
+ * Includes `manager`, `teamlead` and `rop` roles (ROPs/teamleads also make calls and count
+ * toward line metrics).
  */
 export async function getManagersWithKommo(department: string = "b2g"): Promise<ManagerRow[]> {
   const rows = await db
@@ -29,7 +30,7 @@ export async function getManagersWithKommo(department: string = "b2g"): Promise<
       and(
         eq(masterManagers.department, department),
         eq(masterManagers.isActive, true),
-        inArray(masterManagers.role, ["manager", "rop"]),
+        inArray(masterManagers.role, ["manager", "teamlead", "rop"]),
       ),
     );
 

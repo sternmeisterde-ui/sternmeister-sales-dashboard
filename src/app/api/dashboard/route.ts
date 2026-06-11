@@ -696,10 +696,11 @@ async function buildDashboardResponse(
     // Step 7: Per-manager breakdown. Include ALL active managers+rops from the
     // master table; analytics matches by name so kommoUserId is no longer required.
     // Managers without a kommoUserId get 0 overdue tasks but still show calls.
-    // Only role='manager' per user policy — ROPs/admins don't appear in the
-    // per-manager tables even if they were carrying calls.
+    // Only role='manager'/'teamlead' per user policy — ROPs/admins don't appear
+    // in the per-manager tables even if they were carrying calls (teamleads work
+    // the line, so they do).
     const perManager = allManagers
-      .filter((m) => m.role === "manager")
+      .filter((m) => m.role === "manager" || m.role === "teamlead")
       .map((mgr) => {
         const cm = todayCallMap.get(mgr.id);
         const tm = mgr.kommoUserId ? taskMap.get(mgr.kommoUserId) : undefined;

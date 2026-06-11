@@ -6,7 +6,7 @@ import { X, Send, Loader2, Bug } from "lucide-react";
 
 interface ReporterInfo {
   name: string;
-  role: "admin" | "rop" | "manager";
+  role: "admin" | "rop" | "teamlead" | "manager";
   department: "b2g" | "b2b";
 }
 
@@ -34,6 +34,7 @@ const SECTIONS: Array<{ id: string; label: string }> = [
 const ROLE_LABEL: Record<string, string> = {
   admin: "Админ",
   rop: "РОП",
+  teamlead: "Тимлид",
   manager: "Менеджер",
 };
 

@@ -81,21 +81,6 @@ export default function ManagersTab({ department }: ManagersTabProps) {
     setSaveSuccess(false);
   };
 
-  const toggleRop = (index: number) => {
-    setManagers((prev) => {
-      const next = [...prev];
-      const current = next[index];
-      const isRop = current.role === "rop";
-      next[index] = {
-        ...current,
-        role: isRop ? "manager" : "rop",
-      };
-      return next;
-    });
-    setDirty(true);
-    setSaveSuccess(false);
-  };
-
   const addManager = () => {
     setManagers((prev) => [
       ...prev,
@@ -263,7 +248,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 <th className="text-left px-4 py-2 font-semibold w-8">#</th>
                 <th className="text-left px-4 py-2 font-semibold">Имя</th>
                 <th className="text-left px-4 py-2 font-semibold">@Telegram</th>
-                <th className="text-center px-4 py-2 font-semibold">РОП</th>
+                <th className="text-center px-4 py-2 font-semibold">Роль</th>
                 {department === "b2g" && <th className="text-center px-4 py-2 font-semibold">Линия</th>}
                 <th className="text-center px-4 py-2 font-semibold">ОКК</th>
                 <th className="text-center px-4 py-2 font-semibold">Ролевки</th>
@@ -276,6 +261,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
             <tbody>
               {managers.map((mgr, i) => {
                 const isRop = mgr.role === "rop";
+                const isTeamlead = mgr.role === "teamlead";
                 const hasNoTelegramId = mgr.inRolevki && !mgr.telegramId && mgr.telegramUsername;
                 const inputClass =
                   "bg-transparent border border-white/10 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:border-blue-500/50 focus:outline-none transition-colors w-full placeholder-slate-600";
@@ -283,7 +269,7 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                 return (
                   <tr
                     key={mgr.id ?? mgr._clientId ?? `row-${i}`}
-                    className={`border-b border-white/5 hover:bg-white/[0.02] transition-colors ${mgr.isNew ? "bg-blue-500/5" : ""} ${isRop ? "bg-amber-500/[0.03]" : ""}`}
+                    className={`border-b border-white/5 hover:bg-white/[0.02] transition-colors ${mgr.isNew ? "bg-blue-500/5" : ""} ${isRop ? "bg-amber-500/[0.03]" : ""} ${isTeamlead ? "bg-emerald-500/[0.03]" : ""}`}
                   >
                     <td className="px-4 py-2 text-xs text-slate-500 font-mono">{i + 1}</td>
                     <td className="px-4 py-2">
@@ -308,16 +294,21 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                       </div>
                     </td>
                     <td className="px-4 py-2 text-center">
-                      <button
-                        onClick={() => toggleRop(i)}
-                        className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                      <select
+                        value={mgr.role || "manager"}
+                        onChange={(e) => updateField(i, "role", e.target.value)}
+                        className={`bg-slate-800 border rounded-lg px-2 py-1.5 text-sm focus:border-blue-500/50 focus:outline-none cursor-pointer ${
                           isRop
-                            ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                            : "bg-slate-800 text-slate-600 border border-white/5 hover:border-amber-500/30 hover:text-amber-400"
+                            ? "border-amber-500/30 text-amber-400"
+                            : isTeamlead
+                              ? "border-emerald-500/30 text-emerald-400"
+                              : "border-white/10 text-slate-200"
                         }`}
                       >
-                        РОП
-                      </button>
+                        <option value="manager">Менеджер</option>
+                        <option value="teamlead">Тимлид</option>
+                        <option value="rop">РОП</option>
+                      </select>
                     </td>
                     {department === "b2g" && (
                       <td className="px-4 py-2 text-center">
