@@ -45,6 +45,42 @@ const EXCLUDED_CRITERIA = new Set([
   "Экспертный стиль установления раппорта",
 ]);
 
+// Критерии со scoring:false (max_score=0 в evaluation JSON), у которых тем не
+// менее есть числовой score — раньше их выкидывал фильтр `cMax <= 0` и в
+// дереве стояло «—» (2026-06-11). Имена в нормализованной форме.
+//
+// Binary без скоринга: LLM пишет score 1/0 (или "1"/"0"), «Пусто» → не число,
+// пропускаем. Семантика на КАЖДОМ критерии своя:
+//   • «Критические ошибки …» — 1 = ошибок НЕ было → агрегат читается как
+//     «% звонков без ошибок», выше = лучше, обычная раскраска подходит.
+//   • «Потеря клиента на этапе оплаты» — 1 = клиент ПОТЕРЯН → агрегат это
+//     «% потерь», выше = хуже. Клиент красит инвертированно (см.
+//     INVERTED_CRITERIA в AnalyticsTab.tsx).
+const UNSCORED_BINARY_CRITERIA = new Set([
+  "Критические ошибки с точки зрения компании",
+  "Критические ошибки с точки зрения клиента",
+  "Критические ошибки с точки зрения закона",
+  "Потеря клиента на этапе оплаты",
+  // Переведён из info_text в binary 2026-06-11: 1 = ответил на все вопросы
+  // Клиента, 0 = были неотвеченные/уклончивые, «Пусто» = вопросов не было.
+  // Старые оценки (текст «Рекомендация») не парсятся как 1/0 и пропускаются,
+  // поэтому колонка наполняется только звонками после смены промпта.
+  "Как Продавец отработал вопросы Клиента (не только возражения)",
+]);
+
+// info_text критерии, где score — готовое число 0–100 (не доля от max_score):
+// усредняем как есть. «Talk ratio Продавца» — % времени речи продавца;
+// информационная метрика, клиент рендерит её нейтральным цветом.
+const VALUE_CRITERIA = new Set(["Talk ratio Продавца"]);
+
+// score у unscored-критериев бывает числом ИЛИ строкой "1"/"0" (разные версии
+// промпта), а «Пусто» приходит текстом/null — это «оценить нельзя», не ноль.
+function parseUnscoredBinary(score: unknown): 0 | 1 | null {
+  if (score === 1 || score === "1") return 1;
+  if (score === 0 || score === "0") return 0;
+  return null;
+}
+
 // ─── Types ──────────────────────────────────────────────────
 
 interface CriterionScore {
@@ -393,13 +429,18 @@ function processBlocks(
     const maxBlockScore = typeof block.max_block_score === "number" ? block.max_block_score
       : typeof block.max_score === "number" ? block.max_score : 0;
 
-    if (maxBlockScore <= 0) continue;
-
-    hadData = true;
-    const blockPct = Math.round((blockScore / maxBlockScore) * 100);
-    const be = acc.blocks.get(name);
-    if (be) { be.scoreSum += blockPct; be.count++; }
-    else acc.blocks.set(name, { scoreSum: blockPct, count: 1 });
+    // Блоки целиком из scoring:false критериев («Критические ошибки»,
+    // «Экспертный блок») имеют max_block_score=0 — у них нет блочного балла,
+    // но их критерии всё равно обрабатываем ниже (раньше continue выкидывал
+    // блок целиком и в дереве стояло «—»).
+    const hasBlockScore = maxBlockScore > 0;
+    if (hasBlockScore) {
+      hadData = true;
+      const blockPct = Math.round((blockScore / maxBlockScore) * 100);
+      const be = acc.blocks.get(name);
+      if (be) { be.scoreSum += blockPct; be.count++; }
+      else acc.blocks.set(name, { scoreSum: blockPct, count: 1 });
+    }
 
     // Criteria — strip numeric prefix and resolve aliases so different
     // prompt versions ("1. Foo" vs "Foo") collapse into the same row.
@@ -407,13 +448,30 @@ function processBlocks(
     for (const rawC of criteria) {
       const c = rawC as Record<string, unknown>;
       const rawCName = typeof c.name === "string" ? c.name : "";
-      const cScore = typeof c.score === "number" ? c.score : 0;
-      const cMax = typeof c.max_score === "number" ? c.max_score : 0;
-      if (!rawCName || cMax <= 0) continue;
+      if (!rawCName) continue;
       const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
       if (EXCLUDED_CRITERIA.has(cName)) continue;
 
-      const pct = Math.round((cScore / cMax) * 100);
+      const cScore = typeof c.score === "number" ? c.score : 0;
+      const cMax = typeof c.max_score === "number" ? c.max_score : 0;
+
+      // Три источника процента:
+      //   1) обычный скоринговый критерий — доля от max_score;
+      //   2) unscored binary (критические ошибки / потеря клиента) — score
+      //      1/0 как 100/0, «Пусто» пропускаем;
+      //   3) value-критерий (talk ratio) — score уже готовый процент.
+      let pct: number | null = null;
+      if (cMax > 0) {
+        pct = Math.round((cScore / cMax) * 100);
+      } else if (UNSCORED_BINARY_CRITERIA.has(cName)) {
+        const v = parseUnscoredBinary(c.score);
+        if (v !== null) pct = v * 100;
+      } else if (VALUE_CRITERIA.has(cName)) {
+        const v = typeof c.score === "number" ? c.score : Number(c.score);
+        if (Number.isFinite(v) && v >= 0 && v <= 100) pct = Math.round(v);
+      }
+      if (pct === null) continue;
+
       const key = `${name}::${cName}`;
       const ce = acc.criteria.get(key);
       if (ce) { ce.scoreSum += pct; ce.count++; }
@@ -470,7 +528,7 @@ async function fetchOkkData(
   // `master_managers` sync (is_active toggle).
   const managerConditions = [
     eq(okkManagers.isActive, true),
-    sql`${okkManagers.role} IN ('manager', 'rop')`,
+    sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
   ];
 
   const [rawRows, managers] = await Promise.all([
@@ -699,7 +757,7 @@ async function fetchRoleplayData(
   // Manager dropdown — full active roster (see OKK comment). Same rationale.
   const managerConditions = [
     eq(usersTable.isActive, true),
-    sql`${usersTable.role} IN ('manager', 'rop')`,
+    sql`${usersTable.role} IN ('manager', 'teamlead', 'rop')`,
   ];
 
   const [rows, managers] = await Promise.all([
