@@ -21,13 +21,12 @@ interface DrillState {
   title: string;
 }
 
-const LOST_KEYS: DcBucketKey[] = ["closed", "delayed", "appeal"];
+const LOST_KEYS: DcBucketKey[] = ["closed", "delayed"];
 const LABELS: Record<DcBucketKey, string> = {
   forward: "Продвинулись в АА",
   stayed: "Остались на этапе ДЦ",
   closed: "Закрыто и не реализовано",
   delayed: "Отложенный старт",
-  appeal: "Апелляция",
 };
 
 export default function DcBreakdownPanel({ drillBaseParams, isMock = false }: Props) {

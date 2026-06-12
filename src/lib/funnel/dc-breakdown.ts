@@ -18,13 +18,7 @@ import type {
   DcBucketKey,
 } from "./api-types";
 
-const BUCKET_KEYS: DcBucketKey[] = [
-  "forward",
-  "stayed",
-  "closed",
-  "delayed",
-  "appeal",
-];
+const BUCKET_KEYS: DcBucketKey[] = ["forward", "stayed", "closed", "delayed"];
 /** Сколько лидов на ведро гидрируем для drill (счётчик — по полному множеству). */
 const DRILL_LIMIT = 25;
 
@@ -43,7 +37,6 @@ export async function computeDcBreakdown(
     stayed: [],
     closed: [],
     delayed: [],
-    appeal: [],
   };
   let total = 0;
   for (const lead of base) {

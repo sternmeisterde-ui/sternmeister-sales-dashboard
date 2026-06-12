@@ -82,11 +82,11 @@ const C31_SUCCESS_STATUSES = [
   BERATER_STATUSES.TERM_AA, // 93860879
   BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 — термин АА был назначен
   BERATER_STATUSES.BERATER_REVIEW, // 93860887 — пост-АА (до него не дойти без АА)
+  BERATER_STATUSES.APPEAL, // 93860891 — апелляция = АА пройден (РОП: НЕ неудача)
   BERATER_STATUSES.WON, // 142 — Гутшайн косвенно подтверждает АА
 ];
 const C31_FAILURE_STATUSES = [
   BERATER_STATUSES.DELAYED_START, // 95515895
-  BERATER_STATUSES.APPEAL, // 93860891
   BERATER_STATUSES.LOST, // 143
 ];
 
@@ -534,7 +534,6 @@ export type DcToAaDetail =
   | "forward"
   | "closed"
   | "delayed"
-  | "appeal"
   | "stayed"
   | "none";
 
@@ -547,11 +546,11 @@ export type DcToAaDetail =
  *  - `forward` — после ДЦ дошёл до АА-этапа и далее (C31_SUCCESS).
  *  - `closed`  — Закрыто и не реализовано (143).
  *  - `delayed` — Отложенный старт (95515895).
- *  - `appeal`  — Апелляция (93860891).
  *  - `stayed`  — ДЦ был, но движения дальше нет → «остался на этапе».
  *
- * Приоритет: forward → closed → delayed → appeal → stayed. forward первым, т.к.
- * измеряем «дошёл ли до АА» (даже если потом отвалился — это всё равно «дошёл»).
+ * Апелляция (93860891) теперь в C31_SUCCESS → попадает в `forward` (АА пройден).
+ * Приоритет: forward → closed → delayed → stayed. forward первым, т.к. измеряем
+ * «дошёл ли до АА» (даже если потом отвалился — это всё равно «дошёл»).
  */
 export function classifyDcToAaDetailed(
   lead: BaseLead,
@@ -575,11 +574,6 @@ export function classifyDcToAaDetailed(
     null
   ) {
     return "delayed";
-  }
-  if (
-    earliestBeraterEventAfter(berater, [BERATER_STATUSES.APPEAL], dcAt) !== null
-  ) {
-    return "appeal";
   }
   return "stayed";
 }

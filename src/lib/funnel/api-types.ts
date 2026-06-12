@@ -80,8 +80,9 @@ export interface OverviewResponse {
 
 // ---------- Разбор когорты C3.1 (куда делись лиды после Термина ДЦ) ----------
 
-/** Вёдра судьбы лида после «Термин ДЦ состоялся». */
-export type DcBucketKey = "forward" | "stayed" | "closed" | "delayed" | "appeal";
+/** Вёдра судьбы лида после «Термин ДЦ состоялся».
+ *  (Апелляция = АА пройден → входит в forward, отдельным ведром не выделяем.) */
+export type DcBucketKey = "forward" | "stayed" | "closed" | "delayed";
 
 /** Лид в drill ведра (форма совместима с LeadDrillPopover.DrillLead). */
 export interface DcBreakdownLead {
