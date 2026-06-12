@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDbForDepartment } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
 export async function GET(
@@ -34,7 +34,9 @@ export async function GET(
         createdAt: callAnalysisFiles.createdAt,
       })
       .from(callAnalysisFiles)
-      .where(eq(callAnalysisFiles.analysisId, id));
+      // 'manifest' = the pipeline's internal _manifest.json checkpoint —
+      // never user-facing.
+      .where(and(eq(callAnalysisFiles.analysisId, id), ne(callAnalysisFiles.fileType, "manifest")));
 
     return NextResponse.json({ success: true, data: { ...analysis, files } });
   } catch (error) {
