@@ -530,25 +530,33 @@ export function processLeadForConversion(
 // ──────────────────────────────────────────────────────────────────────────
 
 export type DcToAaState = "success" | "failure" | "pending" | "none";
+export type DcToAaDetail =
+  | "forward"
+  | "closed"
+  | "delayed"
+  | "appeal"
+  | "stayed"
+  | "none";
 
 /**
- * Судьба Гос-лида в конверсии C3.1 «Термин ДЦ → дошёл до АА».
- * Работает по линкованным Бератер-лидам (cross-pipeline, как C3/C4/C5).
+ * ДЕТАЛЬНАЯ судьба Гос-лида после «Термин ДЦ состоялся» — для панели «Разбор
+ * когорты» (РОП: «куда подевались»). Работает по линкованным Бератер-лидам.
  *
- *  - `none`    — у Бератера НЕТ явного «Термин ДЦ состоялся» (93886075) после
+ *  - `none`    — у Бератера нет явного «Термин ДЦ состоялся» (93886075) после
  *                якоря → лид вне базы C3.1.
- *  - `success` — после ДЦ дошёл до АА-этапа и далее (C31_SUCCESS).
- *  - `failure` — после ДЦ отвалился (Отложенный старт / Апелляция / Закрыто).
- *  - `pending` — ДЦ был, но движения дальше нет → «ждём решения», ИСКЛЮЧАЕМ из
- *                знаменателя (рассосётся со временем / окном зрелости).
+ *  - `forward` — после ДЦ дошёл до АА-этапа и далее (C31_SUCCESS).
+ *  - `closed`  — Закрыто и не реализовано (143).
+ *  - `delayed` — Отложенный старт (95515895).
+ *  - `appeal`  — Апелляция (93860891).
+ *  - `stayed`  — ДЦ был, но движения дальше нет → «остался на этапе».
  *
- * Приоритет success > failure: если дошёл до АА (даже потом отвалился) — успех,
- * т.к. конверсия меряет «дошёл ли до АА», а не финальный исход.
+ * Приоритет: forward → closed → delayed → appeal → stayed. forward первым, т.к.
+ * измеряем «дошёл ли до АА» (даже если потом отвалился — это всё равно «дошёл»).
  */
-export function classifyDcToAa(
+export function classifyDcToAaDetailed(
   lead: BaseLead,
   beraterContext: Map<number, BeraterLead[]>
-): DcToAaState {
+): DcToAaDetail {
   const berater = beraterContext.get(lead.leadId) ?? [];
   const dcAt = earliestBeraterEventAfter(
     berater,
@@ -557,12 +565,39 @@ export function classifyDcToAa(
   );
   if (dcAt === null) return "none";
   if (earliestBeraterEventAfter(berater, C31_SUCCESS_STATUSES, dcAt) !== null) {
-    return "success";
+    return "forward";
   }
-  if (earliestBeraterEventAfter(berater, C31_FAILURE_STATUSES, dcAt) !== null) {
-    return "failure";
+  if (earliestBeraterEventAfter(berater, [BERATER_STATUSES.LOST], dcAt) !== null) {
+    return "closed";
   }
-  return "pending";
+  if (
+    earliestBeraterEventAfter(berater, [BERATER_STATUSES.DELAYED_START], dcAt) !==
+    null
+  ) {
+    return "delayed";
+  }
+  if (
+    earliestBeraterEventAfter(berater, [BERATER_STATUSES.APPEAL], dcAt) !== null
+  ) {
+    return "appeal";
+  }
+  return "stayed";
+}
+
+/**
+ * C3.1: success/failure/pending — ПРОИЗВОДНОЕ от detailed (единый источник
+ * истины, чтобы карточка C3.1 и панель разбора не расходились).
+ *   forward → success; closed/delayed/appeal → failure; stayed → pending.
+ */
+export function classifyDcToAa(
+  lead: BaseLead,
+  beraterContext: Map<number, BeraterLead[]>
+): DcToAaState {
+  const d = classifyDcToAaDetailed(lead, beraterContext);
+  if (d === "none") return "none";
+  if (d === "forward") return "success";
+  if (d === "stayed") return "pending";
+  return "failure"; // closed | delayed | appeal
 }
 
 // ──────────────────────────────────────────────────────────────────────────

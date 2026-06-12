@@ -166,8 +166,9 @@ export async function computeCohortLeads(
   };
 }
 
-/** По массиву lead_id вытягивает имя контакта (active link) + текущий статус. */
-async function hydrateLeadDetails(leadIds: number[]): Promise<DrillLead[]> {
+/** По массиву lead_id вытягивает имя контакта (active link) + текущий статус.
+ *  Экспортируется для переиспользования в dc-breakdown.ts. */
+export async function hydrateLeadDetails(leadIds: number[]): Promise<DrillLead[]> {
   if (leadIds.length === 0) return [];
   const idsIn = leadIds.join(",");
   // Берём по одному (первому по lead_id) контакту на лид через DISTINCT ON.

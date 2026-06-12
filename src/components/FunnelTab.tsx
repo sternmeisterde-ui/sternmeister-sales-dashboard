@@ -8,6 +8,7 @@ import FunnelChart from "@/components/funnel/FunnelChart";
 import TargetLevelInput from "@/components/funnel/TargetLevelInput";
 import ChartModeToggle from "@/components/funnel/ChartModeToggle";
 import CohortTable from "@/components/funnel/CohortTable";
+import DcBreakdownPanel from "@/components/funnel/DcBreakdownPanel";
 import KpiBar from "@/components/funnel/KpiBar";
 import UnifiedFunnel from "@/components/funnel/UnifiedFunnel";
 import ViewModeToggle, { type FunnelViewMode } from "@/components/funnel/ViewModeToggle";
@@ -558,6 +559,14 @@ export default function FunnelTab({
         drillBaseParams={drillBaseParams}
         isMock={activeBundle.isMock}
       />
+
+      {/* Разбор когорты — только C3.1: куда делись лиды после Термина ДЦ. */}
+      {activeId === "C3.1" && (
+        <DcBreakdownPanel
+          drillBaseParams={drillBaseParams}
+          isMock={activeBundle.isMock}
+        />
+      )}
         </>
       )}
     </div>
