@@ -430,14 +430,18 @@ function processBlocks(
       const cName = normalizeName(stripNumericPrefix(rawCName), CRITERIA_NAME_MAP);
       if (EXCLUDED_CRITERIA.has(cName)) continue;
 
-      const cScore = typeof c.score === "number" ? c.score : 0;
       const cMax = typeof c.max_score === "number" ? c.max_score : 0;
 
       // Только критерии с настоящим скорингом (max_score > 0). Нескоринговые
       // сейчас несут score=0 без смысла (см. комментарий к ИСТОРИИ выше) —
       // показываем «—», пока OKK не начнёт писать реальные значения.
       if (cMax <= 0) continue;
-      const pct = Math.round((cScore / cMax) * 100);
+      // Новый формат OKK (с 2026-06-11): у нескоринговых критериев
+      // max_score > 0 и реальный вердикт, а «Пусто» (ситуация не возникла,
+      // оценить нельзя) приходит как score: null — пропускаем, иначе null
+      // коэрсится в 0 и даёт ложный 0%.
+      if (typeof c.score !== "number") continue;
+      const pct = Math.round((c.score / cMax) * 100);
 
       const key = `${name}::${cName}`;
       const ce = acc.criteria.get(key);
