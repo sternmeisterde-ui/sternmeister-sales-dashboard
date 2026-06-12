@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
-  Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2, RotateCw,
+  Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2, RotateCw, Square,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -50,13 +50,6 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
   const [minDuration, setMinDuration] = useState(5);
   const [submitting, setSubmitting] = useState(false);
 
-  // Single in-flight SSE guard. The polling effect re-runs on every analyses
-  // change, and Resume manually calls triggerProcessing — without this ref we
-  // could open two EventSources at once. The server-side atomic claim already
-  // prevents duplicate pipeline runs, but skipping the second SSE here saves
-  // a connection slot and keeps the UI from racing two `done` events.
-  const sseRef = useRef<EventSource | null>(null);
-
   const fetchList = useCallback(async () => {
     try {
       const res = await fetch(`/api/analysis?department=${department}`);
@@ -66,63 +59,36 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     finally { setLoading(false); }
   }, [department]);
 
-  // Trigger processing — SSE stream keeps connection alive
+  // Instant kick: ask the server to claim+start the next queued job right
+  // now instead of waiting for the next analysis-cron tick (≤60s). Fire and
+  // forget — execution is fully server-side (cron-driven, checkpointed), the
+  // browser is just a viewer. {claimed|idle} both mean "nothing else to do".
   const triggerProcessing = useCallback(() => {
-    if (sseRef.current) return; // already streaming — server will pick up the next pending row when the current one finishes
-    const es = new EventSource("/api/analysis/process");
-    sseRef.current = es;
-    const cleanup = () => {
-      if (sseRef.current === es) sseRef.current = null;
-      es.close();
-    };
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.status === "done" || data.status === "error" || data.status === "idle") {
-          cleanup();
-          fetchList();
-        }
-        // heartbeats are ignored (keep-alive)
-      } catch { /* ignore parse errors */ }
-    };
-    es.onerror = () => {
-      cleanup();
-      fetchList();
-    };
-  }, [fetchList]);
-
-  // Tear down any live SSE on unmount.
-  useEffect(() => () => {
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
-    }
+    fetch("/api/analysis/process").catch(() => { /* tick will pick it up */ });
   }, []);
 
   useEffect(() => { setLoading(true); fetchList(); }, [fetchList]);
 
-  // Auto-refresh + auto-trigger processing
+  // Poll the list every 5s while anything is queued/running — the ONLY
+  // feedback channel. Processing itself never depends on this tab being
+  // open: the analysis-cron service resumes yielded/orphaned jobs.
   useEffect(() => {
     const hasActive = analyses.some(a => a.status === "pending" || a.status === "processing");
     if (!hasActive) return;
-
-    // Poll list every 5s for progress updates
     const listInterval = setInterval(fetchList, 5000);
-
-    // Trigger /process for pending OR processing rows. Processing is included
-    // so an ORPHANED run (killed at the 30-min maxDuration ceiling) gets picked
-    // back up: the server only reclaims a `processing` row whose heartbeat is
-    // stale (>2 min), so a genuinely live run is never disturbed, and the
-    // `sseRef` guard in triggerProcessing prevents opening a second stream.
-    const hasResumable = analyses.some(
-      (a) => a.status === "pending" || a.status === "processing",
-    );
-    if (hasResumable) {
-      triggerProcessing();
-    }
-
     return () => clearInterval(listInterval);
-  }, [analyses, fetchList, triggerProcessing]);
+  }, [analyses, fetchList]);
+
+  // FIFO queue position for a pending row: jobs created earlier + the one
+  // currently running ahead of it. Server runs ONE analysis at a time
+  // (global single-flight — see src/lib/analysis/worker.ts), so this is an
+  // honest "ahead of you in line" count, not a guess.
+  const queuePosition = useCallback((a: Analysis) => {
+    const ahead =
+      analyses.filter((x) => x.status === "pending" && x.createdAt < a.createdAt).length +
+      (analyses.some((x) => x.status === "processing") ? 1 : 0);
+    return ahead;
+  }, [analyses]);
 
   const fetchDetail = async (id: string) => {
     setSelectedId(id);
@@ -144,7 +110,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       if (json.success) {
         setKommoUrl("");
         await fetchList();
-        // Start processing — long-running request, runs until done or timeout
+        // Instant kick — otherwise the job waits ≤60s for the next cron tick
         triggerProcessing();
       }
     } catch { /* ignore */ }
@@ -156,6 +122,19 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       await fetch(`/api/analysis/${id}/delete`, { method: "DELETE" });
       setAnalyses((prev) => prev.filter((a) => a.id !== id));
       if (selectedId === id) { setSelectedId(null); setDetail(null); }
+    } catch { /* ignore */ }
+  };
+
+  const handleCancel = async (id: string) => {
+    try {
+      const res = await fetch(`/api/analysis/${id}/cancel`, { method: "POST" });
+      if (!res.ok) return;
+      // Optimistic flip; a RUNNING pipeline notices via its heartbeat and
+      // drains within ~30s. Files/checkpoint stay — Resume continues later.
+      setAnalyses((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: "cancelled", errorMessage: "Отменено пользователем" } : a)),
+      );
+      fetchList();
     } catch { /* ignore */ }
   };
 
@@ -279,6 +258,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                   <div className="flex items-center gap-3">
                     {a.status === "done" && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
                     {a.status === "error" && <XCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                    {a.status === "cancelled" && <Square className="w-4 h-4 text-slate-500 shrink-0" />}
                     {(a.status === "pending" || a.status === "processing") && <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />}
 
                     <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
@@ -320,14 +300,29 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                       </span>
                     )}
 
-                    {/* Resume — only on error rows */}
-                    {a.status === "error" && (
+                    {a.status === "cancelled" && (
+                      <span className="text-[10px] text-slate-500 shrink-0">Отменено</span>
+                    )}
+
+                    {/* Resume — error/cancelled rows (continues from checkpoint) */}
+                    {(a.status === "error" || a.status === "cancelled") && (
                       <button
                         onClick={(e) => { e.stopPropagation(); handleResume(a.id); }}
                         className="p-1.5 rounded-lg text-amber-400 hover:bg-amber-500/10 shrink-0 transition-colors"
                         title="Повторить (продолжит с уже сделанных звонков)"
                       >
                         <RotateCw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+
+                    {/* Cancel — stops a queued/running job, keeps its files */}
+                    {(a.status === "pending" || a.status === "processing") && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleCancel(a.id); }}
+                        className="p-1.5 rounded-lg text-slate-600 hover:text-amber-400 hover:bg-amber-500/10 shrink-0 transition-colors"
+                        title="Остановить (файлы сохранятся, можно продолжить позже)"
+                      >
+                        <Square className="w-3.5 h-3.5" />
                       </button>
                     )}
 
@@ -347,7 +342,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-[13px] text-blue-400 font-bold">
                           {a.errorMessage ? a.errorMessage :
-                           a.status === "pending" ? "Запуск..." :
+                           a.status === "pending" ? (queuePosition(a) > 0 ? `В очереди (№${queuePosition(a)})` : "Запуск...") :
                            a.progress < 10 ? "Транскрибация звонков..." :
                            a.progress < 90 ? `Анализ звонков: ${a.processedCalls}/${a.totalCalls}` :
                            "Генерация сводного отчёта..."}

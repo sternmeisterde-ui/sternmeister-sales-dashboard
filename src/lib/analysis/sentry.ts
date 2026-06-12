@@ -8,7 +8,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 
-export type AnalysisStep = "transcription" | "grok-per-call" | "grok-summary";
+export type AnalysisStep = "discovery" | "transcription" | "grok-per-call" | "grok-summary";
 /** non_fatal: caller has a fallback path / will retry. fatal: this call is lost. */
 export type AnalysisSeverity = "non_fatal" | "fatal" | "warning";
 

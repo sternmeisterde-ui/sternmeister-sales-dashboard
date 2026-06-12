@@ -9,7 +9,7 @@
  *   3. Dedup by recording URL/ID
  */
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
 import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
@@ -58,6 +58,46 @@ const MAX_CALLS = 500;
 const KOMMO_CONCURRENCY = 5;
 const TRANSCRIBE_CONCURRENCY = 4;
 const GROK_CONCURRENCY = 3;
+
+// ==================== CHUNKED EXECUTION / CHECKPOINTS ====================
+// Large runs (hundreds of leads at the GLOBAL 1 req/sec Kommo budget shared
+// with the ETL cron — see src/lib/kommo/client.ts) cannot finish inside one
+// request lifetime. Platform timeouts are no help: `maxDuration` is a Vercel
+// hint that Dokploy's standalone node server ignores, so the old failure mode
+// was an unbounded run that died only with the process (deploy/crash) and
+// then restarted discovery from zero — forever. Instead the pipeline
+// time-boxes itself: work ~SOFT_DEADLINE, checkpoint into `_manifest.json`,
+// yield; the next /process (or cron tick) claim resumes from the checkpoint.
+const SOFT_DEADLINE_MS =
+  Number(process.env.ANALYSIS_SOFT_DEADLINE_MS) > 0
+    ? Number(process.env.ANALYSIS_SOFT_DEADLINE_MS)
+    : 20 * 60_000;
+// Hard ceiling for the in-pipeline heartbeat: soft deadline + the worst-case
+// in-flight unit (15-min Scribe + 6-min Grok + drain margin). Past it the
+// heartbeat STOPS REFRESHING itself, so even a pipeline frozen in a way the
+// per-request timeouts didn't catch goes stale and becomes reclaimable.
+const HARD_DEADLINE_EXTRA_MS = 45 * 60_000;
+// Must stay well under the 2-min staleness window in claimNextAnalysis()
+// (src/lib/analysis/worker.ts) — a live run may never look stale.
+const HEARTBEAT_INTERVAL_MS = 20_000;
+// Discovery checkpoint, stored as a row in call_analysis_files (no schema
+// change needed; the (analysis_id, filename) unique index already exists).
+// Excluded from the details/download endpoints; deleted when the run is done.
+const MANIFEST_FILENAME = "_manifest.json";
+const MANIFEST_FILE_TYPE = "manifest";
+// When >10% of leads fail the call-note scan (Kommo token down / outage) we
+// refuse to freeze a half-empty call list and retry next chunk — but give up
+// loudly after this many consecutive failed chunks instead of looping forever.
+const MAX_DISCOVERY_FAIL_STREAK = 3;
+// Feature flag: batched discovery via the bulk /leads/notes + /contacts/notes
+// endpoints with filter[entity_id][] (50 ids per request) instead of 2-3
+// requests PER LEAD. At the global 1 req/sec Kommo budget that's ~2 min vs
+// ~40+ min for a 769-deal filter. Behind a flag (default OFF) so a Kommo API
+// surprise (entity_id filter silently ignored, like the created_at gotcha on
+// /notes) can be rolled back from Dokploy env without a deploy. Verify before
+// enabling: bulk response counts must match the per-entity path on a couple
+// of known contacts (see dev_docs/18, Phase 5 verification).
+const ANALYSIS_BATCH_DISCOVERY = process.env.ANALYSIS_BATCH_DISCOVERY === "1";
 
 // Minimal worker-pool helper — keeps memory flat (results array pre-sized)
 // and cancels-on-throw behaviour, unlike naive Promise.all that fans out
@@ -143,7 +183,7 @@ interface KommoLead {
   custom_fields_values?: KommoLeadCustomField[] | null;
   _embedded?: { contacts?: KommoEmbeddedContact[] };
 }
-interface KommoNote { id: number; note_type: string; params: { duration?: number; link?: string }; created_at: number; responsible_user_id: number }
+interface KommoNote { id: number; note_type: string; params: { duration?: number; link?: string }; created_at: number; responsible_user_id: number; entity_id?: number }
 
 /** Result of translating a Kommo frontend URL: the API query string (filters
  * that Kommo's API understands) and the client-side filter rules that the API
@@ -828,6 +868,54 @@ async function fetchCallNotes(lead: KommoLead): Promise<KommoNote[]> {
   return all;
 }
 
+/**
+ * Batched alternative to fetchCallNotesForEntity: one bulk request per ~50
+ * entity ids via `/{entity}/notes?filter[entity_id][]=…` instead of one
+ * request per entity. Returns notes bucketed by entity_id. Same note_type
+ * filter as the per-entity path; the response's `entity_id` field maps each
+ * note back to its owner. Used only when ANALYSIS_BATCH_DISCOVERY=1.
+ *
+ * NOTE the Kommo /notes filter gotcha precedent (filter[created_at] is
+ * silently ignored there — cost a week, commit f4bd662): if filter[entity_id]
+ * were silently ignored too, this would return the account-wide note firehose.
+ * Guard: any note whose entity_id is missing or not in `ids` is dropped, and
+ * if >50% of a page is dropped we throw so the caller falls back to marking
+ * the batch failed rather than silently mis-attributing calls.
+ */
+async function fetchNotesBulk(
+  entity: "leads" | "contacts",
+  ids: number[],
+): Promise<Map<number, KommoNote[]>> {
+  const byEntity = new Map<number, KommoNote[]>();
+  if (ids.length === 0) return byEntity;
+  const idSet = new Set(ids);
+  const qs = ids.map((id) => `filter[entity_id][]=${id}`).join("&");
+  // Page cap: 40 × 250 = 10k notes per batch — far beyond any real 50-entity
+  // call history; hitting it means the filter is being ignored (see guard).
+  for (let page = 1; page <= 40; page++) {
+    const data = await kommoFetchPath(
+      `/${entity}/notes?limit=250&page=${page}` +
+        `&filter[note_type][]=call_in&filter[note_type][]=call_out&${qs}`,
+    ) as { _embedded?: { notes?: KommoNote[] } } | null;
+    const batch = data?._embedded?.notes ?? [];
+    if (batch.length === 0) break;
+    let dropped = 0;
+    for (const n of batch) {
+      if (!n.entity_id || !idSet.has(n.entity_id)) { dropped++; continue; }
+      const arr = byEntity.get(n.entity_id);
+      if (arr) arr.push(n);
+      else byEntity.set(n.entity_id, [n]);
+    }
+    if (dropped > batch.length / 2) {
+      throw new Error(
+        `bulk ${entity}/notes: ${dropped}/${batch.length} notes outside the requested entity_id set — filter likely ignored`,
+      );
+    }
+    if (batch.length < 250) break;
+  }
+  return byEntity;
+}
+
 // ==================== TRANSCRIPTION ====================
 
 async function transcribeAudio(audioUrl: string): Promise<{ text: string; speakers: string } | null> {
@@ -1137,9 +1225,138 @@ async function callGrok(
   throw new Error("Grok API: exhausted retries");
 }
 
+// ==================== CHECKPOINT MANIFEST ====================
+
+type Db = ReturnType<typeof getMainDb>;
+
+interface CallRecord {
+  leadId: number;
+  leadName: string;
+  duration: number;
+  url: string;
+  date: Date;
+  direction: string;
+}
+// Same shape with `date` as an ISO string (JSON-serializable).
+interface ManifestCall extends Omit<CallRecord, "date"> { date: string }
+// Slimmed lead — only the fields the discovery loop reads (~150 bytes/lead,
+// so even 5000 leads stay well under Postgres text-column comfort).
+interface ManifestLead {
+  id: number;
+  name: string;
+  created_at: number;
+  closed_at: number; // 0 = open deal
+  contacts: number[];
+}
+interface AnalysisManifest {
+  version: 1;
+  /** "discovery" = scanning leads for calls; "calls" = call list frozen. */
+  phase: "discovery" | "calls";
+  minDuration: number;
+  leads: ManifestLead[];
+  scannedLeadIds: number[];
+  failedLeadIds: number[];
+  foundCalls: ManifestCall[];
+  /** Deduped + sorted + capped final list; only present when phase="calls".
+   * Freezing it pins the call_NN numbering across resumes — re-running
+   * discovery after Kommo data changed could shift indexes and orphan
+   * already-saved call files. */
+  callsManifest?: ManifestCall[];
+  discoveryFailStreak: number;
+}
+
+function manifestCallToRecord(c: ManifestCall): CallRecord {
+  return { ...c, date: new Date(c.date) };
+}
+
+/**
+ * Filter a lead's raw call notes down to qualifying calls.
+ *
+ * Lower bound on call date: a call attributed to a lead must have happened
+ * DURING that lead's lifetime, not before. Contact-level notes (which is
+ * where PBX integrations log calls — see fetchCallNotes) include the
+ * contact's entire call history across ALL of the contact's deals. Without
+ * this guard a new lead inherits every old call the contact ever had,
+ * polluting the analysis. Upper bound: closed deals — only count calls up to
+ * the close date (closed_at = 0 for open deals → no upper bound).
+ */
+function matchCallsFromNotes(lead: ManifestLead, notes: KommoNote[], minDuration: number): ManifestCall[] {
+  const leadCreatedAt = lead.created_at || 0;
+  const leadClosedAt = lead.closed_at > 0 ? lead.closed_at : Number.POSITIVE_INFINITY;
+  const matched: ManifestCall[] = [];
+  for (const n of notes) {
+    const dur = n.params?.duration || 0;
+    const link = n.params?.link;
+    if (dur < minDuration || !link) continue;
+    if (link.includes("localhost")) continue;
+    if (n.created_at < leadCreatedAt) continue;
+    if (n.created_at > leadClosedAt) continue;
+    matched.push({
+      leadId: lead.id,
+      leadName: lead.name,
+      duration: dur,
+      url: link,
+      date: new Date(n.created_at * 1000).toISOString(),
+      direction: n.note_type === "call_in" ? "входящий" : "исходящий",
+    });
+  }
+  return matched;
+}
+
+async function loadManifest(db: Db, analysisId: string): Promise<AnalysisManifest | null> {
+  const rows = await db
+    .select({ content: callAnalysisFiles.content })
+    .from(callAnalysisFiles)
+    .where(and(
+      eq(callAnalysisFiles.analysisId, analysisId),
+      eq(callAnalysisFiles.filename, MANIFEST_FILENAME),
+    ));
+  if (rows.length === 0) return null;
+  try {
+    const parsed = JSON.parse(rows[0].content) as AnalysisManifest;
+    if (parsed.version !== 1 || !Array.isArray(parsed.leads)) {
+      throw new Error("unexpected manifest shape");
+    }
+    return parsed;
+  } catch (err) {
+    // Corrupt manifest → treat as absent: discovery restarts from zero.
+    // Bounded cost, no crash — but loud in Sentry because it should never
+    // happen (we are the only writer).
+    captureAnalysisMessage(
+      `Corrupt ${MANIFEST_FILENAME}, restarting discovery: ${err instanceof Error ? err.message : String(err)}`,
+      "warning",
+      { step: "discovery", severity: "non_fatal", extra: { analysisId } },
+    );
+    return null;
+  }
+}
+
+async function saveManifest(db: Db, analysisId: string, manifest: AnalysisManifest): Promise<void> {
+  const content = JSON.stringify(manifest);
+  await db
+    .insert(callAnalysisFiles)
+    .values({ analysisId, filename: MANIFEST_FILENAME, content, fileType: MANIFEST_FILE_TYPE })
+    .onConflictDoUpdate({
+      target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
+      set: { content },
+    });
+}
+
+async function deleteManifest(db: Db, analysisId: string): Promise<void> {
+  await db
+    .delete(callAnalysisFiles)
+    .where(and(
+      eq(callAnalysisFiles.analysisId, analysisId),
+      eq(callAnalysisFiles.filename, MANIFEST_FILENAME),
+    ));
+}
+
 // ==================== MAIN PIPELINE ====================
 
-export async function runAnalysisPipeline(analysisId: string): Promise<void> {
+export async function runAnalysisPipeline(
+  analysisId: string,
+  opts?: { softDeadlineMs?: number },
+): Promise<void> {
   const db = getMainDb("b2g"); // analyses stored in D1 (main DB)
 
   const [analysis] = await db
@@ -1175,125 +1392,327 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
   const perCallPrompt = mode === "success" ? SUCCESS_PER_CALL_PROMPT : FAILURE_PER_CALL_PROMPT;
   const summaryPrompt = mode === "success" ? SUCCESS_SUMMARY_PROMPT : FAILURE_SUMMARY_PROMPT;
 
+  // ---- Time-boxing + liveness ----
+  // Soft deadline: workers stop picking up new units past it; the run
+  // checkpoints and yields (status stays 'processing', next claim resumes).
+  const softDeadlineMs = opts?.softDeadlineMs ?? SOFT_DEADLINE_MS;
+  const softDeadlineAt = Date.now() + softDeadlineMs;
+  const hardDeadlineAt = softDeadlineAt + HARD_DEADLINE_EXTRA_MS;
+  // Set by the heartbeat when the row vanished or left 'processing'
+  // (cancelled/deleted by the user) — workers drain without new work.
+  let aborted = false;
+  const shouldStop = () => aborted || Date.now() >= softDeadlineAt;
+
+  // The pipeline owns its DB heartbeat (the old SSE-route heartbeat died with
+  // the browser connection while the pipeline kept running, letting a second
+  // claim start a DUPLICATE run). Every beat:
+  //   • bumps updated_at so claimNextAnalysis() sees this run as alive;
+  //   • the conditional WHERE doubles as the cancel/delete detector — zero
+  //     rows back means the row is gone or no longer 'processing';
+  //   • past hardDeadlineAt it stops refreshing, so a pipeline frozen in a
+  //     way the per-request timeouts didn't catch goes stale and gets
+  //     reclaimed instead of looking alive forever.
+  const heartbeat = setInterval(() => {
+    if (Date.now() >= hardDeadlineAt) {
+      clearInterval(heartbeat);
+      console.warn(`[Analysis ${analysisId}] hard deadline passed — heartbeat stopped, run is reclaimable`);
+      return;
+    }
+    db.update(callAnalyses)
+      .set({ updatedAt: sql`now()` })
+      .where(sql`${callAnalyses.id} = ${analysisId} AND status = 'processing'`)
+      .returning({ id: callAnalyses.id })
+      .then((rows) => {
+        if (rows.length === 0) {
+          aborted = true;
+          console.log(`[Analysis ${analysisId}] row cancelled/deleted — draining workers`);
+        }
+      })
+      // A missed bump only risks a harmless reclaim attempt the next beat corrects.
+      .catch(() => {});
+  }, HEARTBEAT_INTERVAL_MS);
+
+  // Graceful yield: stop the heartbeat FIRST (otherwise a beat 20s later
+  // would un-stale the row again), then backdate updated_at past the 2-min
+  // staleness window so the very next claim resumes this run without waiting.
+  const yieldRun = async (message: string) => {
+    clearInterval(heartbeat);
+    await db.update(callAnalyses)
+      .set({ errorMessage: message, updatedAt: sql`now() - interval '3 minutes'` })
+      .where(sql`${callAnalyses.id} = ${analysisId} AND status = 'processing'`)
+      .catch(() => {});
+    console.log(`[Analysis ${analysisId}] yielded: ${message}`);
+  };
+
   try {
-    await db.update(callAnalyses).set({ status: "processing", updatedAt: sql`now()` }).where(eq(callAnalyses.id, analysisId));
+    // Conditional on purpose: a cancel/delete landing in the claim→start gap
+    // must not be resurrected back to 'processing' by this write.
+    await db.update(callAnalyses)
+      .set({ status: "processing", updatedAt: sql`now()` })
+      .where(sql`${callAnalyses.id} = ${analysisId} AND status IN ('pending', 'processing')`);
 
     // Parse minDuration from URL hash
     const hashMatch = analysis.kommoUrl.match(/#minDur=(\d+)/);
     const minDuration = hashMatch ? Number(hashMatch[1]) * 60 : DEFAULT_MIN_DURATION;
     const cleanUrl = analysis.kommoUrl.replace(/#minDur=\d+/, "");
 
-    // 1. Fetch leads from Kommo
-    await db.update(callAnalyses).set({ errorMessage: "Загрузка лидов из Kommo..." }).where(eq(callAnalyses.id, analysisId));
-    console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
-    const leads = await fetchLeadsFromUrl(cleanUrl);
-    console.log(`[Analysis ${analysisId}] Found ${leads.length} leads`);
+    // ---- Load checkpoint manifest (resume support) ----
+    let manifest = await loadManifest(db, analysisId);
 
-    if (leads.length === 0) {
-      await db.update(callAnalyses).set({
-        status: "error",
-        errorMessage: "Не найдено лидов по указанной ссылке. Проверьте фильтр в Kommo.",
-      }).where(eq(callAnalyses.id, analysisId));
-      return;
-    }
+    let cappedCalls: CallRecord[];
+    if (manifest?.phase === "calls" && manifest.callsManifest) {
+      // Call list already frozen by an earlier chunk — reuse it verbatim and
+      // skip discovery entirely (this is what makes resumes cheap: zero Kommo
+      // requests, and the call_NN numbering can't drift).
+      cappedCalls = manifest.callsManifest.map(manifestCallToRecord);
+      console.log(`[Analysis ${analysisId}] Resumed from manifest: ${cappedCalls.length} calls (discovery skipped)`);
+    } else {
+      // 1. Fetch leads from Kommo (or reuse the checkpointed list)
+      let leads: ManifestLead[];
+      if (manifest) {
+        leads = manifest.leads;
+        console.log(`[Analysis ${analysisId}] Resumed discovery: ${manifest.scannedLeadIds.length}/${leads.length} leads scanned`);
+      } else {
+        await db.update(callAnalyses).set({ errorMessage: "Загрузка лидов из Kommo..." }).where(eq(callAnalyses.id, analysisId));
+        console.log(`[Analysis ${analysisId}] Fetching leads (minDur=${minDuration/60}min)...`);
+        const fetched = await fetchLeadsFromUrl(cleanUrl);
+        console.log(`[Analysis ${analysisId}] Found ${fetched.length} leads`);
 
-    // 2. Fetch call notes for each lead in parallel (bounded), dedup across
-    //    leads (same recording can appear on several leads in Kommo), filter
-    //    by duration. Progress is updated every 25 leads so the UI shows
-    //    movement even when the filter returns thousands of deals.
-    //
-    //    Note on date semantics: the URL's filter_date_from/to is applied at
-    //    the LEAD level via Kommo API (when filter_date_switch is present) to
-    //    narrow which deals enter the pipeline. The call notes themselves are
-    //    NOT additionally filtered by date — the user's mental model is
-    //    "filter narrows deals; then pick all qualifying calls (by duration)
-    //    in those deals regardless of when the calls were made." If you ever
-    //    want to add a call-date filter, do it as a separate UI option, not
-    //    silently coupled to the URL date range.
-    await db.update(callAnalyses).set({ errorMessage: `Поиск звонков в ${leads.length} сделках...` }).where(eq(callAnalyses.id, analysisId));
+        if (fetched.length === 0) {
+          await db.update(callAnalyses).set({
+            status: "error",
+            errorMessage: "Не найдено лидов по указанной ссылке. Проверьте фильтр в Kommo.",
+          }).where(eq(callAnalyses.id, analysisId));
+          return;
+        }
 
-    interface CallRecord { leadId: number; leadName: string; duration: number; url: string; date: Date; direction: string }
-    let scanned = 0;
-    let multiCallLeads = 0;
-    const perLeadResults = await mapConcurrent(leads, KOMMO_CONCURRENCY, async (lead) => {
-      const notes = await fetchCallNotes(lead).catch((e: unknown) => {
-        console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
-        return [] as KommoNote[];
-      });
-      const matched: CallRecord[] = [];
-      // Lower bound on call date: a call attributed to a lead must have
-      // happened DURING that lead's lifetime, not before. Contact-level
-      // notes (which is where PBX integrations log calls — see
-      // fetchCallNotes) include the contact's entire call history across
-      // ALL of the contact's deals. Without this guard a new lead inherits
-      // every old call the contact ever had, polluting the analysis.
-      const leadCreatedAt = lead.created_at || 0;
-      // Upper bound: closed deals — only count calls up to the close date
-      // (`closed_at` is 0 for open deals; ignore in that case).
-      const leadClosedAt = lead.closed_at && lead.closed_at > 0 ? lead.closed_at : Number.POSITIVE_INFINITY;
-      for (const n of notes) {
-        const dur = n.params?.duration || 0;
-        const link = n.params?.link;
-        if (dur < minDuration || !link) continue;
-        if (link.includes("localhost")) continue;
-        if (n.created_at < leadCreatedAt) continue;
-        if (n.created_at > leadClosedAt) continue;
-        matched.push({
-          leadId: lead.id,
-          leadName: (lead.name || "").substring(0, 60),
-          duration: dur,
-          url: link,
-          date: new Date(n.created_at * 1000),
-          direction: n.note_type === "call_in" ? "входящий" : "исходящий",
-        });
+        // Checkpoint the lead list immediately (slimmed to what the scan
+        // reads) — a resume must not re-pull 20 pages of leads from Kommo.
+        leads = fetched.map((l) => ({
+          id: l.id,
+          name: (l.name || "").substring(0, 60),
+          created_at: l.created_at || 0,
+          closed_at: l.closed_at && l.closed_at > 0 ? l.closed_at : 0,
+          contacts: (l._embedded?.contacts ?? []).map((c) => c.id),
+        }));
+        manifest = {
+          version: 1,
+          phase: "discovery",
+          minDuration,
+          leads,
+          scannedLeadIds: [],
+          failedLeadIds: [],
+          foundCalls: [],
+          discoveryFailStreak: 0,
+        };
+        await saveManifest(db, analysisId, manifest);
       }
-      if (matched.length > 1) multiCallLeads++;
-      scanned++;
-      if (scanned % 25 === 0 || scanned === leads.length) {
+
+      // 2. Fetch call notes for each unscanned lead in parallel (bounded),
+      //    checkpointing every 25 leads. Dedup across leads happens at the
+      //    freeze step below (same recording can appear on several leads).
+      //
+      //    Note on date semantics: the URL's filter_date_from/to is applied at
+      //    the LEAD level via Kommo API (when filter_date_switch is present) to
+      //    narrow which deals enter the pipeline. The call notes themselves are
+      //    NOT additionally filtered by date — the user's mental model is
+      //    "filter narrows deals; then pick all qualifying calls (by duration)
+      //    in those deals regardless of when the calls were made." If you ever
+      //    want to add a call-date filter, do it as a separate UI option, not
+      //    silently coupled to the URL date range.
+      // Non-null alias: TS can't narrow the `let manifest` capture inside the
+      // async worker closure below, but at this point it is always set
+      // (loaded above, or freshly created in the branch we just left).
+      const mf: AnalysisManifest = manifest;
+      const scannedSet = new Set(mf.scannedLeadIds);
+      const failedSet = new Set(mf.failedLeadIds);
+      const foundCalls = mf.foundCalls;
+      const toScan = leads.filter((l) => !scannedSet.has(l.id));
+      let scanned = scannedSet.size;
+      let multiCallLeads = 0;
+      let discoveryYielded = false;
+
+      await db.update(callAnalyses)
+        .set({ errorMessage: `Поиск звонков в ${leads.length} сделках...`, updatedAt: sql`now()` })
+        .where(eq(callAnalyses.id, analysisId));
+
+      // Checkpoint + progress + liveness in one beat. Concurrent workers may
+      // interleave these writes; last-write-wins can lose ≤ one checkpoint
+      // interval of scan state — harmless (re-scanned next chunk), so no
+      // locking. Errors swallowed: a missed checkpoint only costs a re-scan.
+      const checkpoint = async () => {
+        mf.scannedLeadIds = [...scannedSet];
+        mf.failedLeadIds = [...failedSet];
+        await saveManifest(db, analysisId, mf).catch(() => void 0);
         await db
           .update(callAnalyses)
-          .set({ errorMessage: `Поиск звонков: ${scanned}/${leads.length} сделок...` })
+          .set({ errorMessage: `Поиск звонков: ${scanned}/${leads.length} сделок...`, updatedAt: sql`now()` })
           .where(eq(callAnalyses.id, analysisId))
           .catch(() => void 0);
-      }
-      return matched;
-    });
-    if (multiCallLeads > 0) {
-      console.log(
-        `[Analysis ${analysisId}] ${multiCallLeads} lead(s) had >1 qualifying call — all will be transcribed`,
-      );
-    }
+      };
 
-    // Global dedup by URL — same recording in several leads → count once.
-    const seenUrls = new Set<string>();
-    const calls: CallRecord[] = [];
-    for (const bucket of perLeadResults) {
-      for (const c of bucket) {
+      if (ANALYSIS_BATCH_DISCOVERY) {
+        // Batched path: 2 bulk requests per 50 leads (leads + their contacts)
+        // instead of ~2.6 requests PER LEAD — see the flag comment up top.
+        const BATCH = 50;
+        for (let i = 0; i < toScan.length; i += BATCH) {
+          if (shouldStop()) { discoveryYielded = true; break; }
+          const batch = toScan.slice(i, i + BATCH);
+          try {
+            const leadNotes = await fetchNotesBulk("leads", batch.map((l) => l.id));
+            const contactIds = [...new Set(batch.flatMap((l) => l.contacts))];
+            const contactNotes = await fetchNotesBulk("contacts", contactIds);
+            for (const lead of batch) {
+              // Merge lead-level + contact-level notes, dedup by note id —
+              // Kommo PBX integrations sometimes attach the same call to
+              // several entities (same rule as fetchCallNotes).
+              const seen = new Set<number>();
+              const notes: KommoNote[] = [];
+              for (const n of leadNotes.get(lead.id) ?? []) {
+                if (!seen.has(n.id)) { seen.add(n.id); notes.push(n); }
+              }
+              for (const cid of lead.contacts) {
+                for (const n of contactNotes.get(cid) ?? []) {
+                  if (!seen.has(n.id)) { seen.add(n.id); notes.push(n); }
+                }
+              }
+              const matched = matchCallsFromNotes(lead, notes, minDuration);
+              foundCalls.push(...matched);
+              if (matched.length > 1) multiCallLeads++;
+              scannedSet.add(lead.id);
+              failedSet.delete(lead.id);
+              scanned++;
+            }
+          } catch (e: unknown) {
+            console.warn(`[Analysis ${analysisId}] bulk notes batch failed:`, e);
+            for (const lead of batch) {
+              if (failedSet.has(lead.id)) {
+                // Second failure: give up (scanned, zero calls) so a broken
+                // batch can't block the freeze forever.
+                scannedSet.add(lead.id);
+                failedSet.delete(lead.id);
+                scanned++;
+              } else {
+                // First failure: leave unscanned — the next chunk retries.
+                failedSet.add(lead.id);
+              }
+            }
+          }
+          await checkpoint();
+        }
+      } else {
+        await mapConcurrent(toScan, KOMMO_CONCURRENCY, async (lead) => {
+          // Soft-deadline / cancel check at unit pickup: returning without work
+          // lets the pool drain naturally (in-flight units finish, no new starts).
+          if (shouldStop()) { discoveryYielded = true; return; }
+
+          let notes: KommoNote[];
+          try {
+            notes = await fetchCallNotes({
+              id: lead.id,
+              name: lead.name,
+              created_at: lead.created_at,
+              closed_at: lead.closed_at,
+              _embedded: { contacts: lead.contacts.map((id) => ({ id })) },
+            } as KommoLead);
+          } catch (e: unknown) {
+            console.warn(`[Analysis ${analysisId}] fetchCallNotes(${lead.id}) failed:`, e);
+            if (!failedSet.has(lead.id)) {
+              // First failure: leave the lead unscanned — the next chunk retries it.
+              failedSet.add(lead.id);
+              return;
+            }
+            // Second failure: give up on this lead (scanned, zero calls) so a
+            // permanently broken lead can't block the freeze forever.
+            notes = [];
+          }
+
+          const matched = matchCallsFromNotes(lead, notes, minDuration);
+          foundCalls.push(...matched);
+          if (matched.length > 1) multiCallLeads++;
+          scannedSet.add(lead.id);
+          failedSet.delete(lead.id);
+          scanned++;
+          if (scanned % 25 === 0 || scanned === leads.length) {
+            await checkpoint();
+          }
+        });
+      }
+
+      // Persist the final scan state before deciding what happens next.
+      mf.scannedLeadIds = [...scannedSet];
+      mf.failedLeadIds = [...failedSet];
+
+      if (discoveryYielded || aborted) {
+        await saveManifest(db, analysisId, mf).catch(() => void 0);
+        await yieldRun(`Пауза: просканировано ${scannedSet.size}/${leads.length} сделок — продолжится автоматически...`);
+        return;
+      }
+
+      const unscanned = leads.length - scannedSet.size;
+      if (unscanned > 0 && unscanned > Math.ceil(leads.length * 0.1)) {
+        // Mass discovery failure (Kommo token down / outage): refuse to
+        // freeze a half-empty call list — that would silently produce
+        // "0 звонков" or a truncated analysis. Retry next chunk, give up
+        // loudly after MAX_DISCOVERY_FAIL_STREAK consecutive failed chunks.
+        mf.discoveryFailStreak = (mf.discoveryFailStreak || 0) + 1;
+        await saveManifest(db, analysisId, mf).catch(() => void 0);
+        if (mf.discoveryFailStreak >= MAX_DISCOVERY_FAIL_STREAK) {
+          await db.update(callAnalyses).set({
+            status: "error",
+            errorMessage: `Kommo не отдал звонки по ${unscanned} из ${leads.length} сделок после ${MAX_DISCOVERY_FAIL_STREAK} попыток. Проверьте доступ к Kommo и нажмите «Повторить».`,
+          }).where(eq(callAnalyses.id, analysisId));
+          return;
+        }
+        await yieldRun(`Сбой Kommo: не просканировано ${unscanned} сделок — авто-повтор (попытка ${mf.discoveryFailStreak}/${MAX_DISCOVERY_FAIL_STREAK})...`);
+        return;
+      }
+      mf.discoveryFailStreak = 0;
+
+      if (multiCallLeads > 0) {
+        console.log(
+          `[Analysis ${analysisId}] ${multiCallLeads} lead(s) had >1 qualifying call — all will be transcribed`,
+        );
+      }
+
+      // 3. Freeze the call list: global dedup by URL (same recording in
+      //    several leads → count once), cap at MAX_CALLS (most recent first)
+      //    and log how many were trimmed so the user knows the filter needs
+      //    tightening if it hit the ceiling.
+      const seenUrls = new Set<string>();
+      const calls: ManifestCall[] = [];
+      for (const c of foundCalls) {
         if (seenUrls.has(c.url)) continue;
         seenUrls.add(c.url);
         calls.push(c);
       }
+      // ISO-8601 strings sort lexicographically = chronologically.
+      calls.sort((a, b) => b.date.localeCompare(a.date));
+      const capped = calls.slice(0, MAX_CALLS);
+      if (calls.length > MAX_CALLS) {
+        console.warn(
+          `[Analysis ${analysisId}] filter produced ${calls.length} calls, trimmed to ${MAX_CALLS} most recent`,
+        );
+      }
+
+      if (capped.length === 0) {
+        await db.update(callAnalyses).set({
+          status: "error",
+          errorMessage: `Не найдено звонков ≥${minDuration/60} мин среди ${leads.length} сделок.`,
+        }).where(eq(callAnalyses.id, analysisId));
+        return;
+      }
+
+      mf.phase = "calls";
+      mf.callsManifest = capped;
+      mf.foundCalls = []; // superseded by callsManifest — keep the row slim
+      await saveManifest(db, analysisId, mf);
+      cappedCalls = capped.map(manifestCallToRecord);
     }
 
-    // Cap at MAX_CALLS (most recent first) and log how many were trimmed
-    // so the user knows the filter needs tightening if it hit the ceiling.
-    calls.sort((a, b) => b.date.getTime() - a.date.getTime());
-    const cappedCalls = calls.slice(0, MAX_CALLS);
-    if (calls.length > MAX_CALLS) {
-      console.warn(
-        `[Analysis ${analysisId}] filter produced ${calls.length} calls, trimmed to ${MAX_CALLS} most recent`,
-      );
-    }
-
-    if (cappedCalls.length === 0) {
-      await db.update(callAnalyses).set({
-        status: "error",
-        errorMessage: `Не найдено звонков ≥${minDuration/60} мин среди ${leads.length} сделок.`,
-      }).where(eq(callAnalyses.id, analysisId));
-      return;
-    }
-
-    await db.update(callAnalyses).set({ totalCalls: cappedCalls.length, errorMessage: null }).where(eq(callAnalyses.id, analysisId));
+    await db.update(callAnalyses)
+      .set({ totalCalls: cappedCalls.length, errorMessage: null, updatedAt: sql`now()` })
+      .where(eq(callAnalyses.id, analysisId));
     console.log(`[Analysis ${analysisId}] ${cappedCalls.length} calls to process`);
 
     // 3. Transcribe + analyze each call
@@ -1344,8 +1763,13 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     // the final status without poisoning the run.
     let transcribeFailures = 0;
     let grokFailures = 0;
+    let processingYielded = false;
 
     await mapConcurrent(cappedCalls, perCallLimit, async (call, idx) => {
+      // Soft-deadline / cancel check at unit pickup: in-flight calls finish
+      // (their files get saved), no new transcriptions start, pool drains.
+      if (shouldStop()) { processingYielded = true; return; }
+
       const num = String(idx + 1).padStart(2, "0");
       const dateStr = call.date.toLocaleDateString("ru-RU");
       const durMin = Math.round(call.duration / 60);
@@ -1456,6 +1880,13 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
         });
     });
 
+    if (processingYielded || aborted) {
+      // Per-call progress lives in call_analysis_files (idempotent skip on
+      // resume) — no extra checkpoint needed here, just yield.
+      await yieldRun(`Пауза: обработано ${processed}/${cappedCalls.length} звонков — продолжится автоматически...`);
+      return;
+    }
+
     // 4. Generate aggregate summary. Only if we have at least one successful
     // per-call analysis — otherwise we'd burn another Grok call on an empty
     // input and get back generic noise.
@@ -1524,6 +1955,10 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     }).where(eq(callAnalyses.id, analysisId));
 
+    // Checkpoint no longer needed — drop it so the files list stays clean
+    // even if an exclusion filter is missed somewhere.
+    await deleteManifest(db, analysisId).catch(() => void 0);
+
     console.log(
       `[Analysis ${analysisId}] ✅ Complete! ${allAnalyses.length}/${cappedCalls.length} calls analyzed ` +
         `(grok fails: ${grokFailures}, transcribe fails: ${transcribeFailures}).`,
@@ -1533,5 +1968,10 @@ export async function runAnalysisPipeline(analysisId: string): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Analysis ${analysisId}] ERROR:`, msg);
     await db.update(callAnalyses).set({ status: "error", errorMessage: msg }).where(eq(callAnalyses.id, analysisId));
+  } finally {
+    // Idempotent: yieldRun may have cleared it already. Without this, a
+    // throw path would leave the interval alive, bumping updated_at forever
+    // on an 'error' row (harmless for claims, but a leaked timer per run).
+    clearInterval(heartbeat);
   }
 }
