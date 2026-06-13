@@ -18,7 +18,7 @@ import type {
   DcBucketKey,
 } from "./api-types";
 
-const BUCKET_KEYS: DcBucketKey[] = ["forward", "stayed", "closed", "delayed"];
+const BUCKET_KEYS: DcBucketKey[] = ["forward", "stuck", "closed", "aa_cancelled"];
 /** Сколько лидов на ведро гидрируем для drill (счётчик — по полному множеству). */
 const DRILL_LIMIT = 25;
 
@@ -34,9 +34,9 @@ export async function computeDcBreakdown(
   // Раскладываем по вёдрам (detailed). «none» (нет явного Термина ДЦ) — вне разбора.
   const idsByBucket: Record<DcBucketKey, number[]> = {
     forward: [],
-    stayed: [],
+    stuck: [],
     closed: [],
-    delayed: [],
+    aa_cancelled: [],
   };
   let total = 0;
   for (const lead of base) {

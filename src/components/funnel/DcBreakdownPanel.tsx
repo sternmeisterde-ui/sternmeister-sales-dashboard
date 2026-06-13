@@ -21,12 +21,13 @@ interface DrillState {
   title: string;
 }
 
-const LOST_KEYS: DcBucketKey[] = ["closed", "delayed"];
+// Потери (определение РОПа): застрял на ДЦ + сразу в закрыто + Термин АА отменён.
+const LOST_KEYS: DcBucketKey[] = ["stuck", "closed", "aa_cancelled"];
 const LABELS: Record<DcBucketKey, string> = {
   forward: "Продвинулись в АА",
-  stayed: "Остались на этапе ДЦ",
-  closed: "Закрыто и не реализовано",
-  delayed: "Отложенный старт",
+  stuck: "Застряли на «Термин ДЦ»",
+  closed: "Сразу в «Закрыто» (без АА)",
+  aa_cancelled: "Термин АА отменён/перенесён",
 };
 
 export default function DcBreakdownPanel({ drillBaseParams, isMock = false }: Props) {
@@ -110,14 +111,6 @@ export default function DcBreakdownPanel({ drillBaseParams, isMock = false }: Pr
             active={drill?.bucket === "forward"}
             onClick={(e) => openDrill(e, "forward")}
           />
-          <BucketRow
-            label="⏳ Остались на этапе ДЦ"
-            count={data.buckets.stayed.count}
-            pct={pct(data.buckets.stayed.count)}
-            tone="amber"
-            active={drill?.bucket === "stayed"}
-            onClick={(e) => openDrill(e, "stayed")}
-          />
           <div className="flex items-center justify-between gap-2 px-2.5 pt-1.5 text-sm">
             <span className="text-rose-300 font-medium">❌ Потеряны</span>
             <span className="tabular-nums shrink-0">
@@ -141,8 +134,8 @@ export default function DcBreakdownPanel({ drillBaseParams, isMock = false }: Pr
       )}
 
       <p className="text-[10px] text-slate-500 leading-snug">
-        За выбранный период. Свежие недели ещё дозревают — «остались на этапе»
-        будет завышено, пока лиды в полёте.
+        За выбранный период. Свежие недели ещё дозревают — «застряли на ДЦ»
+        будет завышено, пока лиды в полёте (они ещё не успели продвинуться).
       </p>
 
       {drill && data && (
