@@ -2,27 +2,13 @@
 
 import { useState, useEffect, useCallback } from "react";
 import {
-  Search, Download, Loader2, CheckCircle2, XCircle, Clock, FileText, TrendingDown, TrendingUp, RefreshCw, Trash2, RotateCw, Square,
+  Search, Download, Loader2, CheckCircle2, XCircle, Clock, RefreshCw, Trash2, RotateCw, Square,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
-
-// Re-flow Grok summaries that emitted markdown tables on a single line
-// (rows separated only by `| |`, no newlines). Without this even GFM can't
-// parse them — markdown table rows MUST live on their own line. Triggered
-// only when a `|---` delimiter row is present, so legitimate inline `| |`
-// content elsewhere stays untouched.
-function normalizeMarkdownTables(md: string): string {
-  if (!md.includes("|---") && !md.includes("| ---")) return md;
-  return md.replace(/\|[ \t]+\|/g, "|\n|");
-}
 
 interface Analysis {
   id: string;
   department: string;
   kommoUrl: string;
-  mode: string;
   status: string;
   progress: number;
   totalCalls: number;
@@ -34,7 +20,6 @@ interface Analysis {
 }
 
 interface AnalysisDetail extends Analysis {
-  resultSummary: string | null;
   files: Array<{ id: string; filename: string; fileType: string; leadId: string | null }>;
 }
 
@@ -46,7 +31,6 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
 
   // Form state
   const [kommoUrl, setKommoUrl] = useState("");
-  const [mode, setMode] = useState<"failure" | "success">("failure");
   const [minDuration, setMinDuration] = useState(5);
   const [submitting, setSubmitting] = useState(false);
 
@@ -104,7 +88,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       const res = await fetch("/api/analysis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ department, kommoUrl, mode, minDuration }),
+        body: JSON.stringify({ department, kommoUrl, minDuration }),
       });
       const json = await res.json();
       if (json.success) {
@@ -162,7 +146,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
     <div className="flex flex-col gap-5 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
       {/* Create form */}
       <div className="glass-panel rounded-2xl border border-white/5 p-5">
-        <h3 className="text-sm font-bold uppercase tracking-widest text-slate-300 mb-4">Новый анализ звонков</h3>
+        <h3 className="text-sm font-bold uppercase tracking-widest text-slate-300 mb-4">Новая транскрибация звонков</h3>
 
         <div className="flex flex-col gap-3">
           <input
@@ -174,31 +158,6 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
           />
 
           <div className="flex flex-wrap gap-3 items-center">
-            <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5">
-              <button
-                onClick={() => setMode("failure")}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
-                  mode === "failure"
-                    ? "bg-rose-500/20 text-rose-400 border border-rose-500/30"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <TrendingDown className="w-3.5 h-3.5" />
-                Почему не получилось
-              </button>
-              <button
-                onClick={() => setMode("success")}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
-                  mode === "success"
-                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                <TrendingUp className="w-3.5 h-3.5" />
-                Почему получилось
-              </button>
-            </div>
-
             {/* Min duration filter */}
             <div className="flex items-center gap-1.5 bg-slate-800/50 px-3 py-1.5 rounded-xl border border-white/5">
               <span className="text-[10px] text-slate-400 uppercase tracking-wider">от</span>
@@ -223,7 +182,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-500 text-white text-xs font-bold uppercase tracking-wider hover:bg-blue-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-              Анализировать
+              Транскрибировать
             </button>
           </div>
         </div>
@@ -232,14 +191,14 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
       {/* Analyses list */}
       <div className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
         <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-          <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">История анализов</span>
+          <span className="text-[11px] uppercase tracking-widest font-bold text-slate-400">История транскрибаций</span>
           <button onClick={fetchList} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
         </div>
 
         {analyses.length === 0 && !loading && (
-          <div className="p-8 text-center text-slate-500 text-sm">Нет анализов. Вставьте ссылку выше.</div>
+          <div className="p-8 text-center text-slate-500 text-sm">Нет транскрибаций. Вставьте ссылку выше.</div>
         )}
 
         <div className="divide-y divide-white/5">
@@ -254,18 +213,12 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                     isActive ? "bg-blue-500/10" : "hover:bg-white/[0.02]"
                   } ${a.status !== "done" ? "cursor-default" : "cursor-pointer"}`}
                 >
-                  {/* Row 1: status + mode + url + calls count + actions */}
+                  {/* Row 1: status + url + calls count + actions */}
                   <div className="flex items-center gap-3">
                     {a.status === "done" && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
                     {a.status === "error" && <XCircle className="w-4 h-4 text-rose-400 shrink-0" />}
                     {a.status === "cancelled" && <Square className="w-4 h-4 text-slate-500 shrink-0" />}
                     {(a.status === "pending" || a.status === "processing") && <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />}
-
-                    <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
-                      a.mode === "success" ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"
-                    }`}>
-                      {a.mode === "success" ? "Успех" : "Потеря"}
-                    </span>
 
                     <div className="flex-1 min-w-0">
                       <span className="text-[12px] text-white truncate block">{a.kommoUrl.substring(0, 60)}...</span>
@@ -343,9 +296,8 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                         <span className="text-[13px] text-blue-400 font-bold">
                           {a.errorMessage ? a.errorMessage :
                            a.status === "pending" ? (queuePosition(a) > 0 ? `В очереди (№${queuePosition(a)})` : "Запуск...") :
-                           a.progress < 10 ? "Транскрибация звонков..." :
-                           a.progress < 90 ? `Анализ звонков: ${a.processedCalls}/${a.totalCalls}` :
-                           "Генерация сводного отчёта..."}
+                           a.totalCalls > 0 ? `Транскрибация звонков: ${a.processedCalls}/${a.totalCalls}` :
+                           "Поиск звонков..."}
                         </span>
                         <span className="text-[14px] text-blue-300 font-bold">
                           {a.totalCalls > 0 && a.processedCalls > 0 ? (
@@ -369,90 +321,16 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
                 {/* Detail view */}
                 {isActive && detail && (
                   <div className="px-4 pb-5 bg-slate-900/30 space-y-4">
-                    {/* Summary — rendered markdown */}
-                    {detail.resultSummary && (
-                      <div className="mt-2 space-y-3">
-                        <div className="text-[11px] uppercase tracking-widest text-blue-400 font-bold">Сводный анализ</div>
-                        <div className="max-h-[700px] overflow-y-auto space-y-3">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={{
-                            h1: ({ children }) => (
-                              <div className="p-4 bg-blue-500/10 rounded-xl border border-blue-500/20 mt-6 mb-4">
-                                <h2 className="text-[16px] font-bold text-blue-300">{children}</h2>
-                              </div>
-                            ),
-                            h2: ({ children }) => (
-                              <div className="p-4 bg-slate-800/50 rounded-xl border border-white/5 mt-6 mb-3">
-                                <h3 className="text-[14px] font-bold text-blue-300">{children}</h3>
-                              </div>
-                            ),
-                            h3: ({ children }) => (
-                              <div className="px-4 pt-4 pb-1">
-                                <h4 className="text-[13px] font-bold text-white">{children}</h4>
-                              </div>
-                            ),
-                            p: ({ children }) => (
-                              <p className="text-[12px] text-slate-300 leading-[1.8] px-4 mb-3">{children}</p>
-                            ),
-                            ul: ({ children }) => (
-                              <ul className="space-y-2.5 px-4 mb-4">{children}</ul>
-                            ),
-                            ol: ({ children }) => (
-                              <ol className="space-y-2.5 px-4 mb-4">{children}</ol>
-                            ),
-                            li: ({ children }) => (
-                              <li className="text-[12px] text-slate-300 leading-[1.8] flex gap-2">
-                                <span className="text-blue-400 shrink-0 mt-0.5">•</span>
-                                <span>{children}</span>
-                              </li>
-                            ),
-                            strong: ({ children }) => (
-                              <strong className="text-white font-bold">{children}</strong>
-                            ),
-                            em: ({ children }) => (
-                              <em className="text-slate-400 italic">{children}</em>
-                            ),
-                            blockquote: ({ children }) => (
-                              <blockquote className="border-l-2 border-blue-500/30 pl-4 mx-4 my-3 text-[11px] text-slate-400 italic">{children}</blockquote>
-                            ),
-                            hr: () => <hr className="border-white/10 my-5" />,
-                            table: ({ children }) => (
-                              <div className="mx-4 my-4 overflow-x-auto rounded-xl border border-white/10">
-                                <table className="w-full border-collapse text-[12px]">{children}</table>
-                              </div>
-                            ),
-                            thead: ({ children }) => (
-                              <thead className="bg-slate-800/60">{children}</thead>
-                            ),
-                            tbody: ({ children }) => (
-                              <tbody className="divide-y divide-white/5">{children}</tbody>
-                            ),
-                            tr: ({ children }) => (
-                              <tr className="align-top">{children}</tr>
-                            ),
-                            th: ({ children }) => (
-                              <th className="px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wider text-blue-300 border-b border-white/10">{children}</th>
-                            ),
-                            td: ({ children }) => (
-                              <td className="px-3 py-2 text-slate-300 leading-[1.6]">{children}</td>
-                            ),
-                            code: ({ children }) => (
-                              <code className="px-1.5 py-0.5 rounded bg-slate-800/80 text-blue-300 text-[11px]">{children}</code>
-                            ),
-                          }}>{normalizeMarkdownTables(detail.resultSummary)}</ReactMarkdown>
-                        </div>
-                      </div>
-                    )}
-
                     {/* Files + Download */}
                     <div className="flex items-center gap-3 flex-wrap">
                       <a
                         href={`/api/analysis/${detail.id}/download`}
                         className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-500 text-white text-xs font-bold hover:bg-blue-400 transition-colors"
                       >
-                        <Download className="w-4 h-4" /> Скачать все файлы
+                        <Download className="w-4 h-4" /> Скачать все транскрипты
                       </a>
                       <span className="text-[11px] text-slate-500">
-                        {detail.files.filter(f => f.fileType === "transcript").length} транскриптов + сводка
+                        {detail.files.filter(f => f.fileType === "transcript").length} транскриптов
                       </span>
                     </div>
                   </div>

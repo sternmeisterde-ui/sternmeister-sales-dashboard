@@ -129,7 +129,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false, labelByDept: { b2b: "Ролевки" } },
   { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
-  { id: "call_analysis", icon: Search, label: "Анализ", adminOnly: true, labelByDept: { b2b: "Анализ по транскрибам звонков" } },
+  { id: "call_analysis", icon: Search, label: "Транскрибация", adminOnly: true },
   // У Коммерсов Критерии/Скрипты — не отдельные вкладки, а переключатель внутри
   // вкладки «Артефакты» (departments:["b2b"]). У Госников — прежние отдельные
   // вкладки Критерии/Скрипты (departments:["b2g"]).
@@ -221,7 +221,7 @@ export default function Dashboard() {
   // Вкладка «Артефакты» (Коммерсы): внутренний переключатель Критерии/Скрипты.
   const [artifactView, setArtifactView] = useState<"criteria" | "scripts">("criteria");
   // Коммерсы: раскрытие группы «ОКК» в сайдбаре (подпункты — Оценка критериев,
-  // Анализ по транскрибам, Ролевки, Артефакты).
+  // Транскрибация, Ролевки, Артефакты).
   const [okkExpanded, setOkkExpanded] = useState(true);
 
   // Load session on mount
@@ -819,7 +819,7 @@ export default function Dashboard() {
     .filter((item) => tabAllowedInDept(item.id, activeDepartment));
 
   // У Коммерсов «ОКК» (real_calls) — раскрываемая группа; её подпункты:
-  // Оценка критериев, Анализ по транскрибам, Ролевки, Артефакты. У Госников —
+  // Оценка критериев, Транскрибация, Ролевки, Артефакты. У Госников —
   // плоский список без вложенности.
   const isB2bNav = activeDepartment === "b2b";
   const OKK_CHILD_IDS: TabId[] = ["analytics", "call_analysis", "ai_calls", "artifacts"];

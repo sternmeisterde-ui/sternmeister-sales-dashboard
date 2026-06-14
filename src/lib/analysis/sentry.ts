@@ -1,14 +1,14 @@
 // Tagged Sentry capture helpers for the call-analysis pipeline.
 //
 // Mirrors the pattern in src/lib/etl/sentry.ts: every analysis signal needs
-// the same `component: 'analysis'` tag plus a `step` (transcription, grok-
-// per-call, grok-summary) and severity, so dashboards / alerts can filter
-// them as a group. Direct Sentry.captureException calls scattered across
-// pipeline.ts would bypass this and land in the general bucket.
+// the same `component: 'analysis'` tag plus a `step` (discovery, transcription)
+// and severity, so dashboards / alerts can filter them as a group. Direct
+// Sentry.captureException calls scattered across pipeline.ts would bypass this
+// and land in the general bucket.
 
 import * as Sentry from "@sentry/nextjs";
 
-export type AnalysisStep = "discovery" | "transcription" | "grok-per-call" | "grok-summary";
+export type AnalysisStep = "discovery" | "transcription";
 /** non_fatal: caller has a fallback path / will retry. fatal: this call is lost. */
 export type AnalysisSeverity = "non_fatal" | "fatal" | "warning";
 
