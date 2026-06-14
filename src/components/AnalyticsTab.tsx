@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -977,6 +977,18 @@ function CriteriaTimeTree({
   // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
   const hasTwoRows = blocks.some(isExpandedBlock);
 
+  // Кнопка «скопировать ссылку на сделку» у строки звонка — короткий ✓-фидбэк.
+  const [copiedCallId, setCopiedCallId] = useState<string | null>(null);
+  const copyLeadUrl = (callId: string, url: string) => {
+    navigator.clipboard?.writeText(url).then(
+      () => {
+        setCopiedCallId(callId);
+        setTimeout(() => setCopiedCallId((cur) => (cur === callId ? null : cur)), 1500);
+      },
+      () => { /* clipboard отклонён браузером — тихо игнорируем */ },
+    );
+  };
+
   // Плоский список колонок-листьев — тело таблицы итерирует его же.
   const leaves: TreeLeaf[] = [{ kind: "overall" }];
   for (const b of blocks) {
@@ -1121,16 +1133,28 @@ function CriteriaTimeTree({
                                   <td className="px-3 py-1 sticky left-0 bg-slate-950/60 backdrop-blur-sm z-10">
                                     <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
                                       {c.kommoLeadUrl ? (
-                                        <a
-                                          href={c.kommoLeadUrl}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="text-blue-400 hover:text-blue-300 shrink-0"
-                                          title="Открыть сделку в Kommo"
-                                        >
-                                          <ExternalLink className="w-3 h-3" />
-                                        </a>
+                                        <>
+                                          <a
+                                            href={c.kommoLeadUrl}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="text-blue-400 hover:text-blue-300 shrink-0"
+                                            title="Открыть сделку в Kommo"
+                                          >
+                                            <ExternalLink className="w-3 h-3" />
+                                          </a>
+                                          <button
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); copyLeadUrl(c.callId, c.kommoLeadUrl!); }}
+                                            className="text-slate-500 hover:text-blue-300 shrink-0"
+                                            title={copiedCallId === c.callId ? "Скопировано" : "Копировать ссылку"}
+                                          >
+                                            {copiedCallId === c.callId
+                                              ? <Check className="w-3 h-3 text-emerald-400" />
+                                              : <Copy className="w-3 h-3" />}
+                                          </button>
+                                        </>
                                       ) : (
                                         <span className="w-3 shrink-0" />
                                       )}
