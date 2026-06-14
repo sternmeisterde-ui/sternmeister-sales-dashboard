@@ -36,10 +36,12 @@ const DEFAULT_MIN_DURATION = 300; // 5 min
 // 15-min call, ~3-5min for a 60-min call. We give it 15min headroom so a
 // long call doesn't fail spuriously.
 const SCRIBE_TIMEOUT_MS = 15 * 60 * 1000;
-// Hard ceiling to avoid runaway cost — raised from 100 because filters with
-// 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
-// the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
-const MAX_CALLS = 500;
+// Hard ceiling to avoid runaway ElevenLabs cost. Raised 500 → 1000 (2026-06-14)
+// for larger filters; the run is chunked + checkpointed (SOFT_DEADLINE_MS), so
+// it spans multiple cron ticks rather than one request — wall-clock grows
+// (~6-8h at 1000) but stability doesn't. Main constraint is the transcription
+// bill, not runtime.
+const MAX_CALLS = 1000;
 // Concurrency limits per external service. Kommo is the strictest
 // (7 req/s per docs, we stay well under). Scribe tolerates 10+ parallel.
 const KOMMO_CONCURRENCY = 5;
