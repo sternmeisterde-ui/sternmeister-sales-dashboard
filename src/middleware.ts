@@ -33,6 +33,13 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Analysis worker tick (analysis-cron compose service, ~60s loop) — also
+  // CRON_SECRET-authed. Exact match on purpose: the rest of /api/analysis/**
+  // stays session-protected.
+  if (pathname === "/api/analysis/process/tick") {
+    return NextResponse.next();
+  }
+
   // Always allow the login page
   if (pathname === "/login") {
     return NextResponse.next();

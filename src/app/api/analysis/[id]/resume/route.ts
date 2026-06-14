@@ -7,16 +7,15 @@ import { getSession } from "@/lib/auth";
 /**
  * POST /api/analysis/[id]/resume
  *
- * Flips an `error` analysis back to `pending` so /api/analysis/process picks
- * it up again. The pipeline already has resume support (it skips files that
- * already exist in call_analysis_files), so partially-transcribed runs
- * (e.g. the Grok-credits-exhausted case where 4/7 calls were done) finish
- * the remaining work without re-paying for transcription/analysis on the
- * already-done ones.
+ * Flips an `error` or `cancelled` analysis back to `pending` so the worker
+ * picks it up again. The pipeline already has resume support (discovery
+ * checkpoint manifest + skipping files that already exist in
+ * call_analysis_files), so partially-transcribed runs finish the remaining
+ * work without re-paying for transcription/analysis on the already-done ones.
  *
- * Only `error` is resumable. Stuck `processing` rows must be killed first
- * (DELETE) — we can't tell from the DB whether the SSE stream is still alive
- * on another connection, and resuming a live one would race the pipeline.
+ * `processing` is NOT resumable here: live runs heartbeat every ~20s and a
+ * stale-heartbeated (orphaned) one is auto-reclaimed by the next worker
+ * claim — no manual action needed.
  */
 export async function POST(
   _request: NextRequest,
@@ -39,9 +38,9 @@ export async function POST(
     if (!existing) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    if (existing.status !== "error") {
+    if (existing.status !== "error" && existing.status !== "cancelled") {
       return NextResponse.json(
-        { error: `Can only resume from 'error' status (current: ${existing.status})` },
+        { error: `Can only resume from 'error'/'cancelled' status (current: ${existing.status})` },
         { status: 400 },
       );
     }

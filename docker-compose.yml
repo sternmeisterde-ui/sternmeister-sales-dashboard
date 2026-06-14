@@ -45,6 +45,15 @@ services:
       # ETL cron secret — protects /api/analytics/sync/cron from unauthorized calls
       - CRON_SECRET=${CRON_SECRET}
 
+      # Call-analysis worker: soft time-box per chunk (ms). The pipeline
+      # checkpoints and yields at this deadline; the analysis-cron tick
+      # resumes it. Default 20 min (set in code) — override only for testing.
+      - ANALYSIS_SOFT_DEADLINE_MS=${ANALYSIS_SOFT_DEADLINE_MS}
+      # Set to "1" to enable batched Kommo discovery (bulk notes endpoints,
+      # ~50x fewer requests). Keep unset until verified against prod Kommo —
+      # see the flag comment in src/lib/analysis/pipeline.ts.
+      - ANALYSIS_BATCH_DISCOVERY=${ANALYSIS_BATCH_DISCOVERY}
+
       # Kommo CRM
       - KOMMO_ACCESS_TOKEN=${KOMMO_ACCESS_TOKEN}
       - KOMMO_SUBDOMAIN=${KOMMO_SUBDOMAIN}
@@ -155,6 +164,37 @@ services:
             http://app:3008/api/analytics/sync/cron || echo '000')";
           echo "[etl-cron] $${ts} http=$${http_status} body=$$(head -c 200 /tmp/sync.out)";
           sleep "$${SYNC_INTERVAL_SECONDS}";
+        done
+    networks:
+      - sternmeister-network
+
+  # Analysis cron — calls /api/analysis/process/tick every ANALYSIS_TICK_SECONDS
+  # (default 60s). The tick claims at most one analysis job (global single-
+  # flight FIFO, see src/lib/analysis/worker.ts) and runs one ~20-min chunk of
+  # the transcription/analysis pipeline. Without this service, analysis jobs
+  # only progress while someone keeps the Анализ tab open in a browser.
+  # The tick itself answers in <1s ({claimed|idle}); the chunk runs detached.
+  analysis-cron:
+    image: curlimages/curl:8.7.1
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      - CRON_SECRET=${CRON_SECRET}
+      - ANALYSIS_TICK_SECONDS=${ANALYSIS_TICK_SECONDS:-60}
+      - ANALYSIS_START_DELAY_SECONDS=${ANALYSIS_START_DELAY_SECONDS:-20}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[analysis-cron] starting, interval=$${ANALYSIS_TICK_SECONDS}s";
+        sleep "$${ANALYSIS_START_DELAY_SECONDS}";
+        while true; do
+          ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)";
+          http_status="$$(curl -sS -o /tmp/tick.out -w '%{http_code}' --max-time 30 \
+            -H "x-cron-secret: $${CRON_SECRET}" \
+            http://app:3008/api/analysis/process/tick || echo '000')";
+          echo "[analysis-cron] $${ts} http=$${http_status} body=$$(head -c 200 /tmp/tick.out)";
+          sleep "$${ANALYSIS_TICK_SECONDS}";
         done
     networks:
       - sternmeister-network
