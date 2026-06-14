@@ -73,22 +73,24 @@ const C4_TARGET_STATUSES = [BERATER_STATUSES.WON];
 const C5_TARGET_STATUSES = [BERATER_STATUSES.WON];
 
 // ── C3.1 «Термин ДЦ → дошёл до АА» (на Бератере) ──
-// База — лиды с явным «Термин ДЦ состоялся». Дальше классифицируем судьбу:
-// успех = дошёл до АА-этапа и далее; неудача = отвалился; ожидание = ещё висит.
+// Определение РОПа: база — лиды с явным «Термин ДЦ состоялся»; считаем долю
+// «продвинувшихся дальше».
+//  • forward (продвинулись) = реальный АА-этап. «Термин АА отменён/перенесён»
+//    (93860883) и «Термин АА (на этапе)» (93860879) НЕ считаются продвижением.
+//    «Отложенный старт» (95515895) — считается (РОП отметил его в фильтре).
+//  • потеря = всё, что НЕ forward: застрял на ДЦ / сразу в «Закрыто» (143) /
+//    «Термин АА отменён». Знаменатель = ВСЕ с ДЦ (застрявшие тоже в нём).
 const DC_DONE_STATUS = BERATER_STATUSES.TERM_DC_DONE; // 93886075
-const C31_SUCCESS_STATUSES = [
+const C31_FORWARD_STATUSES = [
   BERATER_STATUSES.CONSULT_BEFORE_AA, // 102183943
   BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, // 102183947
-  BERATER_STATUSES.TERM_AA, // 93860879
-  BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 — термин АА был назначен
-  BERATER_STATUSES.BERATER_REVIEW, // 93860887 — пост-АА (до него не дойти без АА)
-  BERATER_STATUSES.WON, // 142 — Гутшайн косвенно подтверждает АА
+  BERATER_STATUSES.BERATER_REVIEW, // 93860887 — пост-АА
+  BERATER_STATUSES.DELAYED_START, // 95515895 — РОП считает продвижением
+  BERATER_STATUSES.APPEAL, // 93860891 — апелляция = АА пройден
+  BERATER_STATUSES.WON, // 142 — Гутшайн
 ];
-const C31_FAILURE_STATUSES = [
-  BERATER_STATUSES.DELAYED_START, // 95515895
-  BERATER_STATUSES.APPEAL, // 93860891
-  BERATER_STATUSES.LOST, // 143
-];
+const C31_CLOSED_STATUS = BERATER_STATUSES.LOST; // 143 — «Закрыто и не реализовано»
+const C31_AA_CANCELLED_STATUS = BERATER_STATUSES.TERM_AA_CANCELLED; // 93860883 — НЕ продвижение
 
 const ALL_BERATER_RELEVANT_STATUSES = [
   ...new Set([
@@ -99,8 +101,9 @@ const ALL_BERATER_RELEVANT_STATUSES = [
     ...C5_TARGET_STATUSES,
     // C3.1
     DC_DONE_STATUS,
-    ...C31_SUCCESS_STATUSES,
-    ...C31_FAILURE_STATUSES,
+    ...C31_FORWARD_STATUSES,
+    C31_CLOSED_STATUS,
+    C31_AA_CANCELLED_STATUS,
   ]),
 ];
 
@@ -322,12 +325,13 @@ export async function computeCohorts(
         cohortMap.set(weekKey, bucket);
       }
 
-      // C3.1 — отдельная 3-состояний логика (success/failure/pending), БЕЗ
-      // Гос-дисквала: база = решённые (success+failure), факт = success,
-      // pending/none исключаем из знаменателя. «Отсев» (=база−факт) = failure.
+      // C3.1 — отдельная логика, БЕЗ Гос-дисквала: база = ВСЕ с ДЦ (success +
+      // failure), факт = success. Из знаменателя исключаем только `none` (нет
+      // ДЦ). Застрявшие на ДЦ входят в базу как потеря. «Отсев» (=база−факт) =
+      // все потери (застрял / закрыто / Термин АА отменён).
       if (conversionId === "C3.1") {
         const state = classifyDcToAa(lead, beraterContext);
-        if (state === "none" || state === "pending") continue;
+        if (state === "none") continue;
         bucket.base += 1;
         if (lead.languageBucket === "a2") bucket.langA2 += 1;
         else if (lead.languageBucket === "b1") bucket.langB1 += 1;
@@ -529,26 +533,34 @@ export function processLeadForConversion(
 // C3.1: классификация судьбы лида ПОСЛЕ «Термин ДЦ состоялся»
 // ──────────────────────────────────────────────────────────────────────────
 
-export type DcToAaState = "success" | "failure" | "pending" | "none";
+export type DcToAaState = "success" | "failure" | "none";
+export type DcToAaDetail =
+  | "forward"
+  | "closed"
+  | "aa_cancelled"
+  | "stuck"
+  | "none";
 
 /**
- * Судьба Гос-лида в конверсии C3.1 «Термин ДЦ → дошёл до АА».
- * Работает по линкованным Бератер-лидам (cross-pipeline, как C3/C4/C5).
+ * ДЕТАЛЬНАЯ судьба Гос-лида после «Термин ДЦ состоялся» — для панели «Разбор
+ * когорты» (РОП: «куда подевались»). Работает по линкованным Бератер-лидам.
  *
- *  - `none`    — у Бератера НЕТ явного «Термин ДЦ состоялся» (93886075) после
- *                якоря → лид вне базы C3.1.
- *  - `success` — после ДЦ дошёл до АА-этапа и далее (C31_SUCCESS).
- *  - `failure` — после ДЦ отвалился (Отложенный старт / Апелляция / Закрыто).
- *  - `pending` — ДЦ был, но движения дальше нет → «ждём решения», ИСКЛЮЧАЕМ из
- *                знаменателя (рассосётся со временем / окном зрелости).
+ *  - `none`         — у Бератера нет явного «Термин ДЦ состоялся» (93886075)
+ *                     после якоря → лид вне базы C3.1.
+ *  - `forward`      — продвинулся в АА (C31_FORWARD: консультации АА, на
+ *                     рассмотрении, отложенный старт, апелляция, Гутшайн).
+ *  - `closed`       — сразу в «Закрыто и не реализовано» (143) без АА.
+ *  - `aa_cancelled` — «Термин АА отменён/перенесён» (93860883) — НЕ продвижение
+ *                     (по РОПу), но и не «застрял на ДЦ». Обычно ~0 лидов.
+ *  - `stuck`        — ДЦ был, движения дальше нет → застрял на «Термин ДЦ».
  *
- * Приоритет success > failure: если дошёл до АА (даже потом отвалился) — успех,
- * т.к. конверсия меряет «дошёл ли до АА», а не финальный исход.
+ * Приоритет: forward → closed → aa_cancelled → stuck. forward первым, т.к.
+ * измеряем «дошёл ли до АА» (даже если потом отвалился — всё равно «дошёл»).
  */
-export function classifyDcToAa(
+export function classifyDcToAaDetailed(
   lead: BaseLead,
   beraterContext: Map<number, BeraterLead[]>
-): DcToAaState {
+): DcToAaDetail {
   const berater = beraterContext.get(lead.leadId) ?? [];
   const dcAt = earliestBeraterEventAfter(
     berater,
@@ -556,13 +568,33 @@ export function classifyDcToAa(
     lead.anchorAt
   );
   if (dcAt === null) return "none";
-  if (earliestBeraterEventAfter(berater, C31_SUCCESS_STATUSES, dcAt) !== null) {
-    return "success";
+  if (earliestBeraterEventAfter(berater, C31_FORWARD_STATUSES, dcAt) !== null) {
+    return "forward";
   }
-  if (earliestBeraterEventAfter(berater, C31_FAILURE_STATUSES, dcAt) !== null) {
-    return "failure";
+  if (earliestBeraterEventAfter(berater, [C31_CLOSED_STATUS], dcAt) !== null) {
+    return "closed";
   }
-  return "pending";
+  if (
+    earliestBeraterEventAfter(berater, [C31_AA_CANCELLED_STATUS], dcAt) !== null
+  ) {
+    return "aa_cancelled";
+  }
+  return "stuck";
+}
+
+/**
+ * C3.1: success/failure — ПРОИЗВОДНОЕ от detailed (единый источник истины).
+ * forward → success; всё прочее (closed/aa_cancelled/stuck) → failure.
+ * «Застрявшие на ДЦ» теперь В ЗНАМЕНАТЕЛЕ (потеря), а не исключаются — по
+ * определению РОПа: отрицательный исход = застрял на ДЦ ИЛИ сразу в «Закрыто».
+ */
+export function classifyDcToAa(
+  lead: BaseLead,
+  beraterContext: Map<number, BeraterLead[]>
+): DcToAaState {
+  const d = classifyDcToAaDetailed(lead, beraterContext);
+  if (d === "none") return "none";
+  return d === "forward" ? "success" : "failure";
 }
 
 // ──────────────────────────────────────────────────────────────────────────

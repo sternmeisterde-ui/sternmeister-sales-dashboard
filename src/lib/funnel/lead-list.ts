@@ -102,9 +102,9 @@ export async function computeCohortLeads(
   for (const lead of baseLeads) {
     if (excludesIgnor(opts.conversionId) && lead.isIgnor) continue;
 
-    // C3.1 — отдельная логика (success/failure/pending без Гос-дисквала):
-    //  • metric "base"   = решённые (success | failure)
-    //  • metric "target" = только success
+    // C3.1 — отдельная логика (success/failure без Гос-дисквала):
+    //  • metric "base"   = все с ДЦ (success | failure)
+    //  • metric "target" = только success (продвинулись)
     if (opts.conversionId === "C3.1") {
       const state = classifyDcToAa(lead, beraterContext);
       if (opts.metric === "target") {
@@ -166,8 +166,9 @@ export async function computeCohortLeads(
   };
 }
 
-/** По массиву lead_id вытягивает имя контакта (active link) + текущий статус. */
-async function hydrateLeadDetails(leadIds: number[]): Promise<DrillLead[]> {
+/** По массиву lead_id вытягивает имя контакта (active link) + текущий статус.
+ *  Экспортируется для переиспользования в dc-breakdown.ts. */
+export async function hydrateLeadDetails(leadIds: number[]): Promise<DrillLead[]> {
   if (leadIds.length === 0) return [];
   const idsIn = leadIds.join(",");
   // Берём по одному (первому по lead_id) контакту на лид через DISTINCT ON.

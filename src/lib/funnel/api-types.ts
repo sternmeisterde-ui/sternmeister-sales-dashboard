@@ -77,3 +77,32 @@ export interface OverviewResponse {
   kpi: OverviewKpi;
   funnel: OverviewFunnelStage[];
 }
+
+// ---------- Разбор когорты C3.1 (куда делись лиды после Термина ДЦ) ----------
+
+/** Вёдра судьбы лида после «Термин ДЦ состоялся» (определение РОПа).
+ *  forward = продвинулись (вкл. отложенный старт, апелляцию); остальные —
+ *  потеря. stuck = застряли на ДЦ; closed = сразу в «Закрыто»;
+ *  aa_cancelled = «Термин АА отменён» (не продвижение). */
+export type DcBucketKey = "forward" | "stuck" | "closed" | "aa_cancelled";
+
+/** Лид в drill ведра (форма совместима с LeadDrillPopover.DrillLead). */
+export interface DcBreakdownLead {
+  leadId: number;
+  name: string;
+  kommoUrl: string;
+  currentStatus: string | null;
+}
+
+export interface DcBreakdownBucket {
+  /** Полное число лидов в ведре (может быть больше длины leads). */
+  count: number;
+  /** Первые N лидов для drill (cap на бэке). */
+  leads: DcBreakdownLead[];
+}
+
+export interface DcBreakdownResponse {
+  /** Всего лидов с состоявшимся Термином ДЦ (= 100% разбора). */
+  total: number;
+  buckets: Record<DcBucketKey, DcBreakdownBucket>;
+}
