@@ -53,17 +53,21 @@ export async function GET(req: NextRequest) {
     }
 
     // Auth: admins/ROPs/teamleads (gate role="admin") see the whole team.
-    // Plain managers are limited to their own department AND their own
-    // timeline (filtered below, after the master roster is loaded) —
-    // mirrors the "only own calls" policy of the OKK tab.
+    // Plain managers are always locked to their OWN department. Within it:
+    //   • B2C (b2b) managers see the WHOLE department's activity (read-only) —
+    //     the team is small and peer visibility is wanted (2026-06-14).
+    //   • B2G managers stay restricted to their own timeline (unchanged),
+    //     mirroring the "only own calls" policy of the OKK tab.
     const session = await getSession();
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    const managerOnly = session.role === "manager";
-    if (managerOnly && department !== session.department) {
+    const isManager = session.role === "manager";
+    if (isManager && department !== session.department) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
+    // Only B2G managers are collapsed to their own row; B2C managers see all.
+    const ownTimelineOnly = isManager && department === "b2g";
     if (!fromISO || !toISO || !parseDateStr(fromISO) || !parseDateStr(toISO)) {
       return NextResponse.json({ error: "Invalid date range" }, { status: 400 });
     }
@@ -161,11 +165,11 @@ export async function GET(req: NextRequest) {
       )
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));
 
-    // Manager-only sessions: collapse the roster to the caller's own row.
-    // Match by telegram username (the login key) first, then kommoUserId,
-    // then exact name — session.userId can't be used directly because it may
-    // point at a d1_users/r1_users row, not master_managers.
-    const visibleManagers = managerOnly
+    // Own-timeline-only sessions (B2G managers): collapse the roster to the
+    // caller's own row. Match by telegram username (the login key) first, then
+    // kommoUserId, then exact name — session.userId can't be used directly
+    // because it may point at a d1_users/r1_users row, not master_managers.
+    const visibleManagers = ownTimelineOnly
       ? allManagers.filter((m) => {
           const tgSession = session.telegramUsername?.toLowerCase() || null;
           const tgMaster = m.telegramUsername?.replace(/^@/, "").toLowerCase() || null;
@@ -183,9 +187,10 @@ export async function GET(req: NextRequest) {
 
     // Apply manager filter — `managers=` selects a subset; absence = all.
     // We always echo back `allManagers` so the UI dropdown can render the
-    // full list regardless of the current filter selection. For manager-only
+    // full list regardless of the current filter selection. For B2G manager
     // sessions both the dropdown and the subset are already collapsed to the
-    // caller's own row, so the `managers=` param can't widen their view.
+    // caller's own row (ownTimelineOnly), so `managers=` can't widen their
+    // view; B2C managers see and can filter the whole department.
     const selectedManagerIds = managersParam
       ? new Set(managersParam.split(",").filter(Boolean))
       : null;
