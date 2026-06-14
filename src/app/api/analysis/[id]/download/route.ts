@@ -48,8 +48,7 @@ export async function GET(
     const encoder = new TextEncoder();
     const bytes = encoder.encode(combined);
 
-    const modeLabel = analysis.mode === "success" ? "success" : "failure";
-    const filename = `analysis_${analysis.department}_${modeLabel}_${analysis.id.substring(0, 8)}.md`;
+    const filename = `transcripts_${analysis.department}_${analysis.id.substring(0, 8)}.md`;
 
     return new NextResponse(bytes, {
       headers: {

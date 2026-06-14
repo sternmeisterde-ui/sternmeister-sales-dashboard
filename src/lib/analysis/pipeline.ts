@@ -1,12 +1,17 @@
 /**
- * Call Analysis Pipeline
+ * Call Transcription Pipeline
  *
- * Flow: parse Kommo URL → fetch leads → fetch calls → transcribe → analyze → summary
+ * Flow: parse Kommo URL → fetch leads → fetch calls → transcribe → save files
  *
  * Call sourcing priority:
  *   1. Kommo lead notes (call_in/call_out) — ~80%
  *   2. OKK DB (D2/R2) by kommo_lead_id — fallback
  *   3. Dedup by recording URL/ID
+ *
+ * The Grok-based per-call analysis + aggregate summary were removed
+ * (2026-06-14) — this tab is now used purely for transcription. Legacy DB
+ * columns `mode` / `result_summary` are kept for old rows but no longer
+ * written with analysis content.
  */
 
 import { and, eq, sql } from "drizzle-orm";
@@ -15,17 +20,9 @@ import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
 import { kommoFetchPath } from "@/lib/kommo/client";
 import { parseDateBoundary } from "@/lib/utils/date";
-import {
-  FAILURE_PER_CALL_PROMPT, SUCCESS_PER_CALL_PROMPT,
-  FAILURE_SUMMARY_PROMPT, SUCCESS_SUMMARY_PROMPT,
-  PER_CALL_MODEL, SUMMARY_MODEL,
-  PER_CALL_MAX_TOKENS, SUMMARY_MAX_TOKENS,
-  PER_CALL_MAX_INPUT_CHARS, SUMMARY_MAX_INPUT_CHARS,
-} from "./prompts";
 import { captureAnalysisException, captureAnalysisMessage } from "./sentry";
 
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY || "";
-const XAI_API_KEY = process.env.XAI_API_KEY || "";
 const DEFAULT_MIN_DURATION = 300; // 5 min
 
 // Per-request fetch timeouts. AbortSignal.timeout is Node 20+ / Next.js 16
@@ -39,16 +36,6 @@ const DEFAULT_MIN_DURATION = 300; // 5 min
 // 15-min call, ~3-5min for a 60-min call. We give it 15min headroom so a
 // long call doesn't fail spuriously.
 const SCRIBE_TIMEOUT_MS = 15 * 60 * 1000;
-// Raised from 120s/180s after the 2026-05-22 incident: a single 60-min
-// transcript per-call analysis tripped the 120s per-attempt ceiling on grok-4
-// and exhausted the 180s total budget on a single attempt, throwing
-// "Grok API timeout after 120000ms" and (pre-isolation) killing the whole
-// 74-call run on the 8th call. 180s/attempt + 360s total gives two real
-// attempts at the long tail of generation while still bounding worker
-// freezes — and the per-call try/catch added in the same patch ensures one
-// stuck call never aborts the rest regardless.
-const GROK_TIMEOUT_MS = 180_000;
-const GROK_TOTAL_TIMEOUT_MS = 360_000;
 // Hard ceiling to avoid runaway cost — raised from 100 because filters with
 // 300–500 qualifying deals commonly yield 150–300 matching calls and dropping
 // the tail silently hid "older" qualifying calls. Still fits in ~30 min window.
@@ -57,7 +44,6 @@ const MAX_CALLS = 500;
 // (7 req/s per docs, we stay well under). Scribe tolerates 10+ parallel.
 const KOMMO_CONCURRENCY = 5;
 const TRANSCRIBE_CONCURRENCY = 4;
-const GROK_CONCURRENCY = 3;
 
 // ==================== CHUNKED EXECUTION / CHECKPOINTS ====================
 // Large runs (hundreds of leads at the GLOBAL 1 req/sec Kommo budget shared
@@ -73,7 +59,7 @@ const SOFT_DEADLINE_MS =
     ? Number(process.env.ANALYSIS_SOFT_DEADLINE_MS)
     : 20 * 60_000;
 // Hard ceiling for the in-pipeline heartbeat: soft deadline + the worst-case
-// in-flight unit (15-min Scribe + 6-min Grok + drain margin). Past it the
+// in-flight unit (15-min Scribe + drain margin). Past it the
 // heartbeat STOPS REFRESHING itself, so even a pipeline frozen in a way the
 // per-request timeouts didn't catch goes stale and becomes reclaimable.
 const HARD_DEADLINE_EXTRA_MS = 45 * 60_000;
@@ -166,8 +152,6 @@ export function parseKommoUrl(url: string): { pipelineId: string; filters: Recor
 //   • picks up rotated tokens from the kommo_tokens DB table when env is empty;
 //   • shares the same global rate-limiter + 401-resets-config behaviour the
 //     rest of the dashboard relies on.
-
-async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 interface KommoLeadCustomFieldValue { value?: string; enum_id?: number; enum_code?: string }
 interface KommoLeadCustomField { field_id: number; values: KommoLeadCustomFieldValue[] }
@@ -1116,115 +1100,6 @@ async function tryTranscribe(url: string): Promise<{ text: string; speakers: str
   return { text, speakers };
 }
 
-// ==================== GROK ANALYSIS ====================
-
-// xAI quota-exhausted responses don't set Retry-After (the 429 isn't transient
-// rate-limit; it's a billing condition). Detect them and fail fast — burning
-// 4 attempts against a known-out account just delays the operator-visible
-// error by ~10 seconds and adds noise to logs.
-const QUOTA_EXHAUSTED_RE = /spending limit|out of credit|insufficient[_ ]?(?:credit|funds|quota)|exhausted/i;
-
-async function callGrok(
-  systemPrompt: string,
-  userContent: string,
-  model: string,
-  maxTokens: number,
-  maxInputChars: number = PER_CALL_MAX_INPUT_CHARS,
-): Promise<string> {
-  // Two-level timeout strategy:
-  //   • Per-fetch (GROK_TIMEOUT_MS = 120s): bounds a single attempt against
-  //     a stuck connection.
-  //   • Total (GROK_TOTAL_TIMEOUT_MS = 180s): bounds the whole retry chain.
-  //     Without this, 4 consecutive timeouts would block a worker for ~487s
-  //     (4 × 120s + backoff), and 3 such cascading workers could freeze the
-  //     pipeline for ~8 min during a partial xAI outage.
-  //
-  // 429 / 5xx with exponential backoff. xAI returns Retry-After on real
-  // rate limits; respect it. Quota-exhaustion (no Retry-After + body matches
-  // QUOTA_EXHAUSTED_RE) bails immediately so partially-done runs save their
-  // state via the caller's try/catch and the user can resume after topping
-  // up the account.
-  const body = JSON.stringify({
-    model,
-    max_tokens: maxTokens,
-    temperature: 0.1,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userContent.substring(0, maxInputChars) },
-    ],
-  });
-
-  const overallDeadline = Date.now() + GROK_TOTAL_TIMEOUT_MS;
-  let waitMs = 1000;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (Date.now() >= overallDeadline) {
-      throw new Error(`Grok API: total budget ${GROK_TOTAL_TIMEOUT_MS}ms exceeded after ${attempt} attempt(s)`);
-    }
-    // Squeeze the per-attempt timeout into whatever's left of the overall
-    // budget so the last attempt can't blow past the cap.
-    const perAttemptMs = Math.min(GROK_TIMEOUT_MS, overallDeadline - Date.now());
-
-    let res: Response;
-    try {
-      res = await fetch("https://api.x.ai/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${XAI_API_KEY}`, "Content-Type": "application/json" },
-        body,
-        signal: AbortSignal.timeout(perAttemptMs),
-      });
-    } catch (err: unknown) {
-      // Treat timeout / abort like a transient network error: retry within
-      // the same retry budget instead of aborting the whole run on one
-      // stuck connection. Other unexpected errors (TLS, DNS) get the same
-      // treatment for the same reason.
-      const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (attempt === 3 || Date.now() >= overallDeadline) {
-        throw new Error(`Grok API ${isTimeout ? `timeout after ${perAttemptMs}ms` : "network error"}: ${errMsg.slice(0, 200)}`);
-      }
-      console.warn(`[callGrok] ${isTimeout ? "timeout" : "network error"} (attempt ${attempt + 1}/4): ${errMsg.slice(0, 100)}`);
-      await sleep(waitMs);
-      waitMs *= 2;
-      continue;
-    }
-    if (res.ok) {
-      // res.json() is awaited here, but AbortSignal.timeout keeps observing
-      // the signal even after fetch() resolves — if the timer fires while
-      // body chunks are still draining (Grok generates near the 120s
-      // deadline, body arrives a few hundred ms later), undici aborts the
-      // body read and throws AbortError. That throw must be caught here so
-      // it's classified as transient and retried, not bubbled up to the
-      // outer pipeline catch which would fail the whole run.
-      try {
-        const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-        return data.choices?.[0]?.message?.content || "";
-      } catch (err: unknown) {
-        const isAbort = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
-        if (attempt === 3 || Date.now() >= overallDeadline) {
-          throw new Error(`Grok body read ${isAbort ? "aborted" : "failed"}: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`);
-        }
-        console.warn(`[callGrok] body read ${isAbort ? "aborted" : "failed"} (attempt ${attempt + 1}/4) — retrying`);
-        await sleep(waitMs);
-        waitMs *= 2;
-        continue;
-      }
-    }
-    const errText = await res.text().catch(() => "");
-    const retryAfter = Number(res.headers.get("retry-after") ?? "0");
-    const isQuotaExhausted = res.status === 429 && retryAfter === 0 && QUOTA_EXHAUSTED_RE.test(errText);
-    const retriable = (res.status === 429 || res.status >= 500) && !isQuotaExhausted;
-    if (!retriable || attempt === 3) {
-      const tag = isQuotaExhausted ? " (quota exhausted — top up xAI account or rotate XAI_API_KEY)" : "";
-      throw new Error(`Grok API ${res.status}${tag}: ${errText.substring(0, 200)}`);
-    }
-    const backoff = retryAfter > 0 ? retryAfter * 1000 : waitMs;
-    console.warn(`[callGrok] ${res.status} (attempt ${attempt + 1}/4), retrying in ${backoff}ms`);
-    await sleep(backoff);
-    waitMs *= 2;
-  }
-  throw new Error("Grok API: exhausted retries");
-}
-
 // ==================== CHECKPOINT MANIFEST ====================
 
 type Db = ReturnType<typeof getMainDb>;
@@ -1378,19 +1253,12 @@ export async function runAnalysisPipeline(
   // the rest of the dashboard uses). Missing-token errors will surface from
   // ensureKommoConfig() at the first Kommo API call instead, with a clearer
   // message than "env var not set".
-  const missingKeys = [];
-  if (!ELEVENLABS_KEY) missingKeys.push("ELEVENLABS_API_KEY");
-  if (!XAI_API_KEY) missingKeys.push("XAI_API_KEY");
-  if (missingKeys.length > 0) {
-    const msg = `Не настроены переменные окружения: ${missingKeys.join(", ")}. Добавьте в Dokploy Environment.`;
+  if (!ELEVENLABS_KEY) {
+    const msg = "Не настроена переменная окружения: ELEVENLABS_API_KEY. Добавьте в Dokploy Environment.";
     await db.update(callAnalyses).set({ status: "error", errorMessage: msg }).where(eq(callAnalyses.id, analysisId));
     console.error(`[Analysis ${analysisId}] ${msg}`);
     return;
   }
-
-  const mode = analysis.mode as "success" | "failure";
-  const perCallPrompt = mode === "success" ? SUCCESS_PER_CALL_PROMPT : FAILURE_PER_CALL_PROMPT;
-  const summaryPrompt = mode === "success" ? SUCCESS_SUMMARY_PROMPT : FAILURE_SUMMARY_PROMPT;
 
   // ---- Time-boxing + liveness ----
   // Soft deadline: workers stop picking up new units past it; the run
@@ -1715,54 +1583,27 @@ export async function runAnalysisPipeline(
       .where(eq(callAnalyses.id, analysisId));
     console.log(`[Analysis ${analysisId}] ${cappedCalls.length} calls to process`);
 
-    // 3. Transcribe + analyze each call
-    // Resume support: check which files already exist
+    // 3. Transcribe each call
+    // Resume support: skip files that already exist so a re-run doesn't re-pay
+    // for transcription on already-done calls.
     const existingFiles = await db
-      .select({ filename: callAnalysisFiles.filename, content: callAnalysisFiles.content })
+      .select({ filename: callAnalysisFiles.filename })
       .from(callAnalysisFiles)
       .where(eq(callAnalysisFiles.analysisId, analysisId));
     const existingSet = new Set(existingFiles.map(f => f.filename));
 
-    // Index-keyed slot array — preserves call order in the final summary
-    // regardless of which concurrent worker finished first. Pre-populate from
-    // already-saved files (resume) and from any newly-processed call below.
-    const allAnalysesByIdx: (string | null)[] = new Array(cappedCalls.length).fill(null);
-
-    // Recover analyses from already-processed files. The filename is
-    // `call_NN_leadXXXX.md` where NN matches the index+1 in cappedCalls.
-    // Using a regex on filename is more robust than trying to match by leadId
-    // (a single lead can have multiple matching calls; lead-id is not unique).
-    const fileByName = new Map(existingFiles.map((f) => [f.filename, f.content]));
-    for (let i = 0; i < cappedCalls.length; i++) {
-      const num = String(i + 1).padStart(2, "0");
-      const fname = `call_${num}_lead${cappedCalls[i].leadId}.md`;
-      const content = fileByName.get(fname);
-      if (!content) continue;
-      const match = content.match(/## Анализ\n\n([\s\S]+)$/);
-      if (match) {
-        const dateStr = cappedCalls[i].date.toLocaleDateString("ru-RU");
-        const durMin = Math.round(cappedCalls[i].duration / 60);
-        allAnalysesByIdx[i] = `### Звонок ${num} (Lead ${cappedCalls[i].leadId}, ${dateStr}, ${durMin} мин)\n\n${match[1].trim()}`;
-      }
-    }
-
     // Concurrency is the difference between a ~30-min run and a 3-hour run.
     // Scribe is synchronous, but a single 60-min call still takes 3-5min on
     // their side; running N in parallel reclaims most of that wait, so a
-    // small worker pool gives a big speed-up. Use the narrower of
-    // TRANSCRIBE / GROK limits.
+    // small worker pool gives a big speed-up.
     let processed = analysis.processedCalls || 0;
-    const perCallLimit = Math.min(TRANSCRIBE_CONCURRENCY, GROK_CONCURRENCY);
+    const perCallLimit = TRANSCRIBE_CONCURRENCY;
 
-    // Per-call failure isolation. Historically a single xAI timeout (one stuck
-    // generation past GROK_TOTAL_TIMEOUT_MS=180s) bubbled out of the worker
-    // through Promise.all and aborted the entire run — losing 60+ already-
-    // transcribed calls' worth of work. Wrap callGrok/transcribe in per-call
-    // try/catch so one bad call records itself as ⚠️ and the rest finish.
-    // Track failure counts to detect a partial xAI outage and surface it in
-    // the final status without poisoning the run.
+    // Per-call failure isolation. A single transcription error records itself
+    // as ⚠️ and lets the rest finish — it must never abort the whole run via
+    // Promise.all aggregation. Track failures to surface a degraded final
+    // status without poisoning the run.
     let transcribeFailures = 0;
-    let grokFailures = 0;
     let processingYielded = false;
 
     await mapConcurrent(cappedCalls, perCallLimit, async (call, idx) => {
@@ -1808,31 +1649,10 @@ export async function runAnalysisPipeline(
         // Network/HTTP failure for both primary and fallback URL.
         md += `## Транскрипт\n\n⚠️ Не удалось транскрибировать запись.\n`;
       } else if (!transcript.text) {
-        // Scribe responded but the audio is silent or unintelligible. Skip
-        // Grok analysis on empty content — saves the API call and avoids a
-        // misleading "patterns of failure" entry in the summary.
+        // Scribe responded but the audio is silent or unintelligible.
         md += `## Транскрипт\n\n⚠️ Запись транскрибирована, но текст пустой (тишина / неразборчивый звук).\n`;
       } else {
-        md += `## Транскрипт\n\n${transcript.speakers}\n\n`;
-        console.log(`[Analysis ${analysisId}] [${num}] Analyzing with Grok...`);
-        try {
-          const analysisText = await callGrok(perCallPrompt, md, PER_CALL_MODEL, PER_CALL_MAX_TOKENS);
-          md += `## Анализ\n\n${analysisText}\n`;
-          allAnalysesByIdx[idx] = `### Звонок ${num} (Lead ${call.leadId}, ${dateStr}, ${durMin} мин)\n\n${analysisText}`;
-        } catch (err) {
-          grokFailures++;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          console.warn(`[Analysis ${analysisId}] [${num}] Grok per-call failed: ${errMsg.slice(0, 200)}`);
-          captureAnalysisException(err, {
-            step: "grok-per-call",
-            severity: "non_fatal",
-            extra: { analysisId, callIdx: idx, leadId: call.leadId, duration: call.duration },
-          });
-          // Persist the failure inline so the user can see WHICH call broke
-          // and the rest of the pipeline (file save + progress update + final
-          // summary) keeps moving.
-          md += `## Анализ\n\n⚠️ Grok API недоступен для этого звонка: ${errMsg.slice(0, 200)}\n`;
-        }
+        md += `## Транскрипт\n\n${transcript.speakers}\n`;
       }
 
       // DB ops MUST NOT throw out of the worker — that would kill the whole
@@ -1859,7 +1679,7 @@ export async function runAnalysisPipeline(
           `[Analysis ${analysisId}] [${num}] DB insert failed: ${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
         );
         captureAnalysisException(err, {
-          step: "grok-per-call", // closest existing step tag; file persistence
+          step: "transcription", // file persistence for a transcribed call
           severity: "non_fatal",
           extra: { analysisId, callIdx: idx, leadId: call.leadId, kind: "db_insert" },
         });
@@ -1887,70 +1707,16 @@ export async function runAnalysisPipeline(
       return;
     }
 
-    // 4. Generate aggregate summary. Only if we have at least one successful
-    // per-call analysis — otherwise we'd burn another Grok call on an empty
-    // input and get back generic noise.
-    console.log(`[Analysis ${analysisId}] Generating summary...`);
-    const allAnalyses = allAnalysesByIdx.filter((s): s is string => s !== null);
-    let summary = "";
-    let summaryError: string | null = null;
-    if (allAnalyses.length === 0) {
-      summary = `⚠️ Ни один звонок не удалось проанализировать (Grok timeouts: ${grokFailures}, transcribe failures: ${transcribeFailures}). Запустите Resume позже, когда xAI восстановится, либо проверьте Sentry на детали.`;
-    } else {
-      const allAnalysesText = allAnalyses.join("\n\n---\n\n");
-      try {
-        summary = await callGrok(
-          summaryPrompt,
-          `Всего проанализировано ${allAnalyses.length} звонков из ${cappedCalls.length}.\n\n${allAnalysesText}`,
-          SUMMARY_MODEL,
-          SUMMARY_MAX_TOKENS,
-          SUMMARY_MAX_INPUT_CHARS,
-        );
-      } catch (err) {
-        // Summary Grok call failed too — keep the run as 'done' with all
-        // per-call files saved and a placeholder summary, so the user doesn't
-        // lose hours of transcription work to a single end-of-run timeout.
-        summaryError = err instanceof Error ? err.message : String(err);
-        console.warn(`[Analysis ${analysisId}] summary Grok failed: ${summaryError.slice(0, 200)}`);
-        captureAnalysisException(err, {
-          step: "grok-summary",
-          severity: "non_fatal",
-          extra: { analysisId, perCallCount: allAnalyses.length },
-        });
-        summary = `⚠️ Сводный анализ Grok не удался: ${summaryError.slice(0, 200)}. Per-call analyses (${allAnalyses.length}) сохранены в файлах ниже.`;
-      }
-    }
-
-    // Save summary file. Use onConflictDoUpdate against the same
-    // (analysis_id, filename) unique index the per-call files use — without
-    // this, a Resume run hitting an already-existing SUMMARY.md would crash
-    // with a duplicate-key violation and lose the whole batch's progress.
-    await db
-      .insert(callAnalysisFiles)
-      .values({
-        analysisId,
-        filename: "SUMMARY.md",
-        content: `# Сводный анализ\n\n${summary}`,
-        fileType: "summary",
-      })
-      .onConflictDoUpdate({
-        target: [callAnalysisFiles.analysisId, callAnalysisFiles.filename],
-        set: { content: `# Сводный анализ\n\n${summary}` },
-      });
-
-    // Final status. Even if some Grok calls failed, mark the run as 'done'
-    // so the user can read what we have. Surface degraded state via
-    // error_message (kept alongside status='done' for the UI to render as a
-    // warning chip) so the operator knows to inspect failures.
-    const degraded = grokFailures > 0 || transcribeFailures > 0 || summaryError;
-    const degradedMsg = degraded
-      ? `Завершено с предупреждениями: Grok timeouts ${grokFailures}, transcribe ошибок ${transcribeFailures}` +
-        (summaryError ? `, summary failed (${summaryError.slice(0, 60)})` : "")
+    // 4. Final status. Mark the run as 'done' so the user can download the
+    // transcripts. Surface degraded state via error_message (kept alongside
+    // status='done' for the UI to render as a warning chip) so the operator
+    // knows some recordings failed to transcribe.
+    const degradedMsg = transcribeFailures > 0
+      ? `Завершено с предупреждениями: не удалось транскрибировать ${transcribeFailures} запис(и/ей)`
       : null;
     await db.update(callAnalyses).set({
       status: "done",
       progress: 100,
-      resultSummary: summary,
       errorMessage: degradedMsg,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     }).where(eq(callAnalyses.id, analysisId));
@@ -1960,8 +1726,8 @@ export async function runAnalysisPipeline(
     await deleteManifest(db, analysisId).catch(() => void 0);
 
     console.log(
-      `[Analysis ${analysisId}] ✅ Complete! ${allAnalyses.length}/${cappedCalls.length} calls analyzed ` +
-        `(grok fails: ${grokFailures}, transcribe fails: ${transcribeFailures}).`,
+      `[Analysis ${analysisId}] ✅ Complete! ${cappedCalls.length} calls transcribed ` +
+        `(transcribe fails: ${transcribeFailures}).`,
     );
 
   } catch (err: unknown) {

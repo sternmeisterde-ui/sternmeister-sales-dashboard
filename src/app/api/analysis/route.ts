@@ -14,17 +14,14 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { department, kommoUrl, mode, minDuration } = body;
+    const { department, kommoUrl, minDuration } = body;
     const minDur = Math.max(1, Math.min(60, Number(minDuration) || 5));
 
-    if (!department || !kommoUrl || !mode) {
+    if (!department || !kommoUrl) {
       return NextResponse.json({ error: "Missing fields" }, { status: 400 });
     }
     if (!["b2g", "b2b"].includes(department)) {
       return NextResponse.json({ error: "Invalid department" }, { status: 400 });
-    }
-    if (!["success", "failure"].includes(mode)) {
-      return NextResponse.json({ error: "mode must be success or failure" }, { status: 400 });
     }
     // Validate Kommo URL domain
     try {
@@ -43,7 +40,10 @@ export async function POST(request: NextRequest) {
       .values({
         department,
         kommoUrl: `${kommoUrl}#minDur=${minDur}`,
-        mode,
+        // `mode` is a legacy NOT NULL column from when this tab also ran Grok
+        // analysis (removed 2026-06-14). Kept filled with a fixed value so old
+        // rows/queries stay valid; it no longer affects the pipeline.
+        mode: "failure",
         status: "pending",
         createdBy: session.name,
       })
@@ -74,7 +74,6 @@ export async function GET(request: NextRequest) {
         id: callAnalyses.id,
         department: callAnalyses.department,
         kommoUrl: callAnalyses.kommoUrl,
-        mode: callAnalyses.mode,
         status: callAnalyses.status,
         progress: callAnalyses.progress,
         totalCalls: callAnalyses.totalCalls,
