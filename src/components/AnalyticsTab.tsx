@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -730,6 +730,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
               <CriteriaTimeTree
                 tree={data.timeTree}
                 blocks={data.blocks}
+                department={department}
                 highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
@@ -1066,15 +1067,38 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
+  tree, blocks, department, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
+  department: "b2g" | "b2b";
   highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
   expandedDates: Set<string>; onToggleDate: (k: string) => void;
 }) {
+  // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
+  // нужном режиме; внутри можно переключаться.
+  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
+
+  // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
+  // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
+  // absolute-дропдаун обрезался бы контейнером.
+  const [menu, setMenu] = useState<{ callId: string; kommoLeadUrl: string | null; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    // Скролл/ресайз уводят меню от кнопки — проще закрыть.
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
   const isExpandedBlock = (b: BlockData) => b.criteria.length > 0 && !collapsedBlocks.has(b.name);
   // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
   const hasTwoRows = blocks.some(isExpandedBlock);
@@ -1116,6 +1140,7 @@ function CriteriaTimeTree({
     });
 
   return (
+    <>
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
       <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="text-left border-collapse">
@@ -1236,32 +1261,19 @@ function CriteriaTimeTree({
                                 <tr key={c.callId} id={`okk-call-${c.callId}`} className={`border-b border-white/[0.02] ${isHi ? "bg-amber-500/15 ring-1 ring-amber-400/40" : "bg-slate-950/40 hover:bg-white/[0.02]"}`}>
                                   <td className={`px-3 py-1 sticky left-0 backdrop-blur-sm z-10 ${isHi ? "bg-amber-500/15" : "bg-slate-950/60"}`}>
                                     <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
-                                      {c.kommoLeadUrl ? (
-                                        <>
-                                          <a
-                                            href={c.kommoLeadUrl}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="text-blue-400 hover:text-blue-300 shrink-0"
-                                            title="Открыть сделку в Kommo"
-                                          >
-                                            <ExternalLink className="w-3 h-3" />
-                                          </a>
-                                          <button
-                                            type="button"
-                                            onClick={(e) => { e.stopPropagation(); copyLeadUrl(c.callId, c.kommoLeadUrl!); }}
-                                            className="text-slate-500 hover:text-blue-300 shrink-0"
-                                            title={copiedCallId === c.callId ? "Скопировано" : "Копировать ссылку"}
-                                          >
-                                            {copiedCallId === c.callId
-                                              ? <Check className="w-3 h-3 text-emerald-400" />
-                                              : <Copy className="w-3 h-3" />}
-                                          </button>
-                                        </>
-                                      ) : (
-                                        <span className="w-3 shrink-0" />
-                                      )}
+                                      {/* Действия по звонку — одно меню «⋯» */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const r = e.currentTarget.getBoundingClientRect();
+                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, x: r.left, y: r.bottom + 4 });
+                                        }}
+                                        className="text-slate-500 hover:text-white shrink-0"
+                                        title="Действия"
+                                      >
+                                        <MoreHorizontal className="w-3.5 h-3.5" />
+                                      </button>
                                       {c.direction === "inbound" ? (
                                         <PhoneIncoming className="w-3 h-3 text-emerald-500/70 shrink-0" />
                                       ) : c.direction === "outbound" ? (
@@ -1294,6 +1306,174 @@ function CriteriaTimeTree({
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+    {/* Меню действий по звонку */}
+    {menu && (
+      <>
+        <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+        <div
+          className="fixed z-50 w-[320px] glass-panel rounded-xl border border-white/10 py-1 shadow-2xl text-[12px]"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          {menu.kommoLeadUrl && (
+            <a
+              href={menu.kommoLeadUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setMenu(null)}
+              className="flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Открыть в Kommo
+            </a>
+          )}
+          {menu.kommoLeadUrl && (
+            <div className="px-3 py-2 border-y border-white/5">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Ссылка на сделку</div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  readOnly
+                  value={menu.kommoLeadUrl}
+                  onClick={(e) => e.currentTarget.select()}
+                  className="flex-1 min-w-0 bg-slate-800/60 border border-white/10 rounded px-2 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyLeadUrl(menu.callId, menu.kommoLeadUrl!)}
+                  className="shrink-0 flex items-center gap-1 px-2 py-1 rounded bg-blue-500/80 hover:bg-blue-500 text-white text-[11px] font-semibold"
+                  title="Копировать ссылку"
+                >
+                  {copiedCallId === menu.callId
+                    ? <Check className="w-3.5 h-3.5" />
+                    : <Copy className="w-3.5 h-3.5" />}
+                  {copiedCallId === menu.callId ? "Скоп." : "Копир."}
+                </button>
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "audio" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <Play className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> Прослушать
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "transcript" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
+          </button>
+        </div>
+      </>
+    )}
+    {mediaModal && (
+      <CallMediaModal
+        callId={mediaModal.callId}
+        dept={department}
+        initialView={mediaModal.view}
+        onClose={() => setMediaModal(null)}
+      />
+    )}
+    </>
+  );
+}
+
+// ==================== Call media modal (audio + transcript) ====================
+
+function CallMediaModal({ callId, dept, initialView, onClose }: {
+  callId: string;
+  dept: "b2g" | "b2b";
+  initialView: "audio" | "transcript";
+  onClose: () => void;
+}) {
+  const [view, setView] = useState<"audio" | "transcript">(initialView);
+  const [data, setData] = useState<{
+    name: string; date: string; callDuration: string;
+    transcript: string; audioUrl: string; hasRecording: boolean;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Свежий монтаж при каждом открытии → loading=true/error=null уже выставлены
+    // начальным useState; здесь только асинхронный фетч (без sync setState в эффекте).
+    let cancelled = false;
+    fetch(`/api/okk/calls/${callId}?dept=${dept}`)
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        if (j.success) setData(j.data);
+        else setError(j.error || "Не удалось загрузить звонок");
+      })
+      .catch(() => { if (!cancelled) setError("Ошибка загрузки"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [callId, dept]);
+
+  // Esc закрывает модалку.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+      <div
+        className="glass-panel rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Шапка */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
+          <div className="min-w-0">
+            <div className="text-sm font-bold text-slate-200 truncate">{data?.name || "Звонок"}</div>
+            {data && <div className="text-[11px] text-slate-500">{data.date} · {data.callDuration}</div>}
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 shrink-0" title="Закрыть">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Переключатель Аудио / Транскрипт */}
+        <div className="flex gap-1 px-5 pt-3">
+          <button
+            onClick={() => setView("audio")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "audio" ? "bg-emerald-500/20 text-emerald-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <Play className="w-3.5 h-3.5" /> Аудио
+          </button>
+          <button
+            onClick={() => setView("transcript")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "transcript" ? "bg-blue-500/20 text-blue-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <FileText className="w-3.5 h-3.5" /> Транскрипт
+          </button>
+        </div>
+
+        {/* Тело */}
+        <div className="p-5 overflow-y-auto">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-slate-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : error ? (
+            <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
+          ) : view === "audio" ? (
+            data?.hasRecording ? (
+              <audio controls preload="none" src={data.audioUrl} className="w-full">
+                Ваш браузер не поддерживает аудио.
+              </audio>
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Запись недоступна</div>
+            )
+          ) : (
+            data?.transcript ? (
+              <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">{data.transcript}</div>
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Транскрипт недоступен</div>
+            )
+          )}
+        </div>
       </div>
     </div>
   );
