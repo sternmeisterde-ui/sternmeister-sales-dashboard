@@ -1267,7 +1267,14 @@ function CriteriaTimeTree({
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           const r = e.currentTarget.getBoundingClientRect();
-                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, x: r.left, y: r.bottom + 4 });
+                                          const MENU_W = 320, MENU_H = 280, GAP = 4;
+                                          // По умолчанию под кнопкой; если не влезает вниз — открываем вверх.
+                                          let y = r.bottom + GAP;
+                                          if (y + MENU_H > window.innerHeight - 8) y = Math.max(8, r.top - MENU_H - GAP);
+                                          // Не вылезать за правый край.
+                                          let x = r.left;
+                                          if (x + MENU_W > window.innerWidth - 8) x = Math.max(8, window.innerWidth - MENU_W - 8);
+                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, x, y });
                                         }}
                                         className="text-slate-500 hover:text-white shrink-0"
                                         title="Действия"
@@ -1313,7 +1320,7 @@ function CriteriaTimeTree({
       <>
         <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
         <div
-          className="fixed z-50 w-[320px] glass-panel rounded-xl border border-white/10 py-1 shadow-2xl text-[12px]"
+          className="fixed z-50 w-[320px] bg-slate-900 rounded-xl border border-white/15 py-1 shadow-2xl shadow-black/50 text-[12px]"
           style={{ left: menu.x, top: menu.y }}
         >
           {menu.kommoLeadUrl && (
