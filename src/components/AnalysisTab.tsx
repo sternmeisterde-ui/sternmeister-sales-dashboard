@@ -31,7 +31,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
 
   // Form state
   const [kommoUrl, setKommoUrl] = useState("");
-  const [minDuration, setMinDuration] = useState(5);
+  const [minDuration, setMinDuration] = useState(1);
   const [submitting, setSubmitting] = useState(false);
 
   const fetchList = useCallback(async () => {
@@ -161,7 +161,7 @@ export default function AnalysisTab({ department }: { department: "b2g" | "b2b" 
             {/* Min duration filter */}
             <div className="flex items-center gap-1.5 bg-slate-800/50 px-3 py-1.5 rounded-xl border border-white/5">
               <span className="text-[10px] text-slate-400 uppercase tracking-wider">от</span>
-              {[5, 10, 15, 20].map((d) => (
+              {[1, 2, 3, 5, 10].map((d) => (
                 <button
                   key={d}
                   onClick={() => setMinDuration(d)}
