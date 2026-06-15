@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -1077,9 +1077,28 @@ function CriteriaTimeTree({
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
   expandedDates: Set<string>; onToggleDate: (k: string) => void;
 }) {
-  // Модалка «Аудио / Транскрипт» для звонка — открывается из строки одной из
-  // двух иконок (▶ / 📄) в нужном режиме; внутри можно переключаться.
+  // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
+  // нужном режиме; внутри можно переключаться.
   const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
+
+  // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
+  // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
+  // absolute-дропдаун обрезался бы контейнером.
+  const [menu, setMenu] = useState<{ callId: string; kommoLeadUrl: string | null; x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    // Скролл/ресайз уводят меню от кнопки — проще закрыть.
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
   const isExpandedBlock = (b: BlockData) => b.criteria.length > 0 && !collapsedBlocks.has(b.name);
   // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
   const hasTwoRows = blocks.some(isExpandedBlock);
@@ -1242,48 +1261,18 @@ function CriteriaTimeTree({
                                 <tr key={c.callId} id={`okk-call-${c.callId}`} className={`border-b border-white/[0.02] ${isHi ? "bg-amber-500/15 ring-1 ring-amber-400/40" : "bg-slate-950/40 hover:bg-white/[0.02]"}`}>
                                   <td className={`px-3 py-1 sticky left-0 backdrop-blur-sm z-10 ${isHi ? "bg-amber-500/15" : "bg-slate-950/60"}`}>
                                     <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
-                                      {c.kommoLeadUrl ? (
-                                        <>
-                                          <a
-                                            href={c.kommoLeadUrl}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="text-blue-400 hover:text-blue-300 shrink-0"
-                                            title="Открыть сделку в Kommo"
-                                          >
-                                            <ExternalLink className="w-3 h-3" />
-                                          </a>
-                                          <button
-                                            type="button"
-                                            onClick={(e) => { e.stopPropagation(); copyLeadUrl(c.callId, c.kommoLeadUrl!); }}
-                                            className="text-slate-500 hover:text-blue-300 shrink-0"
-                                            title={copiedCallId === c.callId ? "Скопировано" : "Копировать ссылку"}
-                                          >
-                                            {copiedCallId === c.callId
-                                              ? <Check className="w-3 h-3 text-emerald-400" />
-                                              : <Copy className="w-3 h-3" />}
-                                          </button>
-                                        </>
-                                      ) : (
-                                        <span className="w-3 shrink-0" />
-                                      )}
-                                      {/* Прослушать запись / открыть транскрипт */}
+                                      {/* Действия по звонку — одно меню «⋯» */}
                                       <button
                                         type="button"
-                                        onClick={(e) => { e.stopPropagation(); setMediaModal({ callId: c.callId, view: "audio" }); }}
-                                        className="text-slate-500 hover:text-emerald-300 shrink-0"
-                                        title="Прослушать запись"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const r = e.currentTarget.getBoundingClientRect();
+                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, x: r.left, y: r.bottom + 4 });
+                                        }}
+                                        className="text-slate-500 hover:text-white shrink-0"
+                                        title="Действия"
                                       >
-                                        <Play className="w-3 h-3" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); setMediaModal({ callId: c.callId, view: "transcript" }); }}
-                                        className="text-slate-500 hover:text-blue-300 shrink-0"
-                                        title="Транскрипт"
-                                      >
-                                        <FileText className="w-3 h-3" />
+                                        <MoreHorizontal className="w-3.5 h-3.5" />
                                       </button>
                                       {c.direction === "inbound" ? (
                                         <PhoneIncoming className="w-3 h-3 text-emerald-500/70 shrink-0" />
@@ -1319,6 +1308,54 @@ function CriteriaTimeTree({
         </table>
       </div>
     </div>
+    {/* Меню действий по звонку */}
+    {menu && (
+      <>
+        <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+        <div
+          className="fixed z-50 min-w-[210px] glass-panel rounded-xl border border-white/10 py-1 shadow-2xl text-[12px]"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          {menu.kommoLeadUrl && (
+            <a
+              href={menu.kommoLeadUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setMenu(null)}
+              className="flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+            >
+              <ExternalLink className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Открыть в Kommo
+            </a>
+          )}
+          {menu.kommoLeadUrl && (
+            <button
+              type="button"
+              onClick={() => copyLeadUrl(menu.callId, menu.kommoLeadUrl!)}
+              className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+            >
+              {copiedCallId === menu.callId
+                ? <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                : <Copy className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+              {copiedCallId === menu.callId ? "Скопировано" : "Копировать ссылку"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "audio" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <Play className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> Прослушать
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "transcript" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
+          </button>
+        </div>
+      </>
+    )}
     {mediaModal && (
       <CallMediaModal
         callId={mediaModal.callId}
