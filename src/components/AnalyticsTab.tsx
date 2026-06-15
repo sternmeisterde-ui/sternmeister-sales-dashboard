@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -178,6 +178,18 @@ function defaultDateRange(department: "b2g" | "b2b"): DateRange {
   return { start, end };
 }
 
+// Вытащить Kommo lead-id из вставленной строки. Поддерживает форматы:
+//   .../leads/detail/12345678  /  .../leads/12345678  /  голый номер.
+// Фолбэк — самая длинная группа цифр (≥4), чтобы ловить нестандартные URL.
+function extractKommoLeadId(input: string): string | null {
+  const s = input.trim();
+  if (!s) return null;
+  const m = s.match(/leads\/(?:detail\/)?(\d+)/);
+  if (m) return m[1];
+  const m2 = s.match(/(\d{4,})/);
+  return m2 ? m2[1] : null;
+}
+
 export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
   // Коммерсы: вид по вкладкам линий без «Все» → стартуем на первой линии.
@@ -196,6 +208,10 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   const [expandedWeeks, setExpandedWeeks] = useState<Set<string>>(new Set());
   const [expandedMgrs, setExpandedMgrs] = useState<Set<string>>(new Set());
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  // Поиск строки по ссылке из Kommo: поле, подсвеченные звонки, статус.
+  const [findLink, setFindLink] = useState("");
+  const [highlightedCallIds, setHighlightedCallIds] = useState<Set<string>>(new Set());
+  const [findStatus, setFindStatus] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   // B2B OKK: верхняя сводка «Динамика по критериям» — все линии (воронки) × даты.
   // Отдельный fetch line="all", не зависит от выбранной вкладки линии.
   const [overview, setOverview] = useState<AnalyticsData | null>(null);
@@ -219,6 +235,53 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 
   const toggle = (set: React.Dispatch<React.SetStateAction<Set<string>>>, name: string) => {
     set((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
+  };
+
+  // Найти строку звонка по ссылке из Kommo: парсим lead-id, ищем совпадения в
+  // дереве, раскрываем путь (неделя → менеджер → дата), подсвечиваем строки и
+  // прокручиваем к первой. Работает по уже загруженному data.timeTree — если
+  // сделки нет в текущей выборке (другая линия/период/фильтр), скажем об этом.
+  const findByLink = () => {
+    const leadId = extractKommoLeadId(findLink);
+    if (!leadId) { setFindStatus({ kind: "error", text: "Не похоже на ссылку Kommo" }); return; }
+    if (!data) return;
+    const weeks = new Set<string>(), mgrs = new Set<string>(), dates = new Set<string>(), calls = new Set<string>();
+    for (const wk of data.timeTree) {
+      for (const mgr of wk.managers) {
+        for (const d of mgr.dates) {
+          for (const c of d.calls) {
+            const hit = c.kommoLeadId === leadId || (c.kommoLeadUrl?.includes(leadId) ?? false);
+            if (!hit) continue;
+            const mgrKey = `${wk.key}::${mgr.id}`;
+            weeks.add(wk.key);
+            mgrs.add(mgrKey);
+            dates.add(`${mgrKey}::${d.date}`);
+            calls.add(c.callId);
+          }
+        }
+      }
+    }
+    if (calls.size === 0) {
+      setHighlightedCallIds(new Set());
+      setFindStatus({ kind: "error", text: "Сделка не найдена в текущей выборке (проверьте линию/период)" });
+      return;
+    }
+    setExpandedWeeks((prev) => new Set([...prev, ...weeks]));
+    setExpandedMgrs((prev) => new Set([...prev, ...mgrs]));
+    setExpandedDates((prev) => new Set([...prev, ...dates]));
+    setHighlightedCallIds(calls);
+    setFindStatus({ kind: "ok", text: `Найдено строк: ${calls.size}` });
+    // Скролл к первой строке — после того как раскрытие отрисуется.
+    const first = [...calls][0];
+    setTimeout(() => {
+      document.getElementById(`okk-call-${first}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 120);
+  };
+
+  const clearFind = () => {
+    setFindLink("");
+    setHighlightedCallIds(new Set());
+    setFindStatus(null);
   };
 
   // Переключить видимость направления в сводке + сохранить выбор.
@@ -623,6 +686,43 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
           )}
           {/* Детализация по линии: вкладки (folder-tabs) вплотную над деревом. */}
           <div className="flex flex-col">
+            {/* Поиск строки по ссылке из Kommo */}
+            {data && data.timeTree.length > 0 && (
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <div className="relative flex-1 min-w-[240px] max-w-md">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={findLink}
+                    onChange={(e) => setFindLink(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") findByLink(); }}
+                    placeholder="Вставьте ссылку из Kommo, чтобы найти сделку в таблице..."
+                    className="w-full bg-slate-800/50 border border-white/10 rounded-lg pl-8 pr-8 py-1.5 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500/40"
+                  />
+                  {findLink && (
+                    <button
+                      onClick={clearFind}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white"
+                      title="Сбросить"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  onClick={findByLink}
+                  disabled={!findLink.trim()}
+                  className="px-3 py-1.5 rounded-lg bg-blue-500/80 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed text-white text-[11px] font-bold uppercase tracking-wider"
+                >
+                  Найти
+                </button>
+                {findStatus && (
+                  <span className={`text-[11px] ${findStatus.kind === "ok" ? "text-emerald-400" : "text-amber-400"}`}>
+                    {findStatus.text}
+                  </span>
+                )}
+              </div>
+            )}
             {source === "okk" && data && (
               <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
             )}
@@ -630,6 +730,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
               <CriteriaTimeTree
                 tree={data.timeTree}
                 blocks={data.blocks}
+                highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
                 expandedWeeks={expandedWeeks}
@@ -965,9 +1066,10 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
+  tree, blocks, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
+  highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
@@ -1128,9 +1230,11 @@ function CriteriaTimeTree({
                                 {valueCells(d, false)}
                               </tr>
                               {/* Звонки/сделки дня */}
-                              {dateOpen && d.calls.map((c) => (
-                                <tr key={c.callId} className="border-b border-white/[0.02] bg-slate-950/40 hover:bg-white/[0.02]">
-                                  <td className="px-3 py-1 sticky left-0 bg-slate-950/60 backdrop-blur-sm z-10">
+                              {dateOpen && d.calls.map((c) => {
+                                const isHi = highlightedCallIds.has(c.callId);
+                                return (
+                                <tr key={c.callId} id={`okk-call-${c.callId}`} className={`border-b border-white/[0.02] ${isHi ? "bg-amber-500/15 ring-1 ring-amber-400/40" : "bg-slate-950/40 hover:bg-white/[0.02]"}`}>
+                                  <td className={`px-3 py-1 sticky left-0 backdrop-blur-sm z-10 ${isHi ? "bg-amber-500/15" : "bg-slate-950/60"}`}>
                                     <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
                                       {c.kommoLeadUrl ? (
                                         <>
@@ -1177,7 +1281,8 @@ function CriteriaTimeTree({
                                   </td>
                                   {valueCells(c, true)}
                                 </tr>
-                              ))}
+                                );
+                              })}
                             </Fragment>
                           );
                         })}
