@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -730,6 +730,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
               <CriteriaTimeTree
                 tree={data.timeTree}
                 blocks={data.blocks}
+                department={department}
                 highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
@@ -1066,15 +1067,19 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
+  tree, blocks, department, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
+  department: "b2g" | "b2b";
   highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
   expandedDates: Set<string>; onToggleDate: (k: string) => void;
 }) {
+  // Модалка «Аудио / Транскрипт» для звонка — открывается из строки одной из
+  // двух иконок (▶ / 📄) в нужном режиме; внутри можно переключаться.
+  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
   const isExpandedBlock = (b: BlockData) => b.criteria.length > 0 && !collapsedBlocks.has(b.name);
   // Вторая строка шапки нужна только если есть развёрнутый блок с критериями.
   const hasTwoRows = blocks.some(isExpandedBlock);
@@ -1116,6 +1121,7 @@ function CriteriaTimeTree({
     });
 
   return (
+    <>
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
       <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
         <table className="text-left border-collapse">
@@ -1262,6 +1268,23 @@ function CriteriaTimeTree({
                                       ) : (
                                         <span className="w-3 shrink-0" />
                                       )}
+                                      {/* Прослушать запись / открыть транскрипт */}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setMediaModal({ callId: c.callId, view: "audio" }); }}
+                                        className="text-slate-500 hover:text-emerald-300 shrink-0"
+                                        title="Прослушать запись"
+                                      >
+                                        <Play className="w-3 h-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); setMediaModal({ callId: c.callId, view: "transcript" }); }}
+                                        className="text-slate-500 hover:text-blue-300 shrink-0"
+                                        title="Транскрипт"
+                                      >
+                                        <FileText className="w-3 h-3" />
+                                      </button>
                                       {c.direction === "inbound" ? (
                                         <PhoneIncoming className="w-3 h-3 text-emerald-500/70 shrink-0" />
                                       ) : c.direction === "outbound" ? (
@@ -1294,6 +1317,114 @@ function CriteriaTimeTree({
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+    {mediaModal && (
+      <CallMediaModal
+        callId={mediaModal.callId}
+        dept={department}
+        initialView={mediaModal.view}
+        onClose={() => setMediaModal(null)}
+      />
+    )}
+    </>
+  );
+}
+
+// ==================== Call media modal (audio + transcript) ====================
+
+function CallMediaModal({ callId, dept, initialView, onClose }: {
+  callId: string;
+  dept: "b2g" | "b2b";
+  initialView: "audio" | "transcript";
+  onClose: () => void;
+}) {
+  const [view, setView] = useState<"audio" | "transcript">(initialView);
+  const [data, setData] = useState<{
+    name: string; date: string; callDuration: string;
+    transcript: string; audioUrl: string; hasRecording: boolean;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Свежий монтаж при каждом открытии → loading=true/error=null уже выставлены
+    // начальным useState; здесь только асинхронный фетч (без sync setState в эффекте).
+    let cancelled = false;
+    fetch(`/api/okk/calls/${callId}?dept=${dept}`)
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        if (j.success) setData(j.data);
+        else setError(j.error || "Не удалось загрузить звонок");
+      })
+      .catch(() => { if (!cancelled) setError("Ошибка загрузки"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [callId, dept]);
+
+  // Esc закрывает модалку.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+      <div
+        className="glass-panel rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Шапка */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
+          <div className="min-w-0">
+            <div className="text-sm font-bold text-slate-200 truncate">{data?.name || "Звонок"}</div>
+            {data && <div className="text-[11px] text-slate-500">{data.date} · {data.callDuration}</div>}
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 shrink-0" title="Закрыть">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Переключатель Аудио / Транскрипт */}
+        <div className="flex gap-1 px-5 pt-3">
+          <button
+            onClick={() => setView("audio")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "audio" ? "bg-emerald-500/20 text-emerald-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <Play className="w-3.5 h-3.5" /> Аудио
+          </button>
+          <button
+            onClick={() => setView("transcript")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "transcript" ? "bg-blue-500/20 text-blue-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <FileText className="w-3.5 h-3.5" /> Транскрипт
+          </button>
+        </div>
+
+        {/* Тело */}
+        <div className="p-5 overflow-y-auto">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-slate-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
+          ) : error ? (
+            <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
+          ) : view === "audio" ? (
+            data?.hasRecording ? (
+              <audio controls preload="none" src={data.audioUrl} className="w-full">
+                Ваш браузер не поддерживает аудио.
+              </audio>
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Запись недоступна</div>
+            )
+          ) : (
+            data?.transcript ? (
+              <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">{data.transcript}</div>
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Транскрипт недоступен</div>
+            )
+          )}
+        </div>
       </div>
     </div>
   );
