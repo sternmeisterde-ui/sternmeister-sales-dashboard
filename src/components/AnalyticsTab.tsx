@@ -1313,7 +1313,7 @@ function CriteriaTimeTree({
       <>
         <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
         <div
-          className="fixed z-50 min-w-[210px] glass-panel rounded-xl border border-white/10 py-1 shadow-2xl text-[12px]"
+          className="fixed z-50 w-[320px] glass-panel rounded-xl border border-white/10 py-1 shadow-2xl text-[12px]"
           style={{ left: menu.x, top: menu.y }}
         >
           {menu.kommoLeadUrl && (
@@ -1328,16 +1328,28 @@ function CriteriaTimeTree({
             </a>
           )}
           {menu.kommoLeadUrl && (
-            <button
-              type="button"
-              onClick={() => copyLeadUrl(menu.callId, menu.kommoLeadUrl!)}
-              className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
-            >
-              {copiedCallId === menu.callId
-                ? <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                : <Copy className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
-              {copiedCallId === menu.callId ? "Скопировано" : "Копировать ссылку"}
-            </button>
+            <div className="px-3 py-2 border-y border-white/5">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Ссылка на сделку</div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  readOnly
+                  value={menu.kommoLeadUrl}
+                  onClick={(e) => e.currentTarget.select()}
+                  className="flex-1 min-w-0 bg-slate-800/60 border border-white/10 rounded px-2 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-blue-500/40"
+                />
+                <button
+                  type="button"
+                  onClick={() => copyLeadUrl(menu.callId, menu.kommoLeadUrl!)}
+                  className="shrink-0 flex items-center gap-1 px-2 py-1 rounded bg-blue-500/80 hover:bg-blue-500 text-white text-[11px] font-semibold"
+                  title="Копировать ссылку"
+                >
+                  {copiedCallId === menu.callId
+                    ? <Check className="w-3.5 h-3.5" />
+                    : <Copy className="w-3.5 h-3.5" />}
+                  {copiedCallId === menu.callId ? "Скоп." : "Копир."}
+                </button>
+              </div>
+            </div>
           )}
           <button
             type="button"
