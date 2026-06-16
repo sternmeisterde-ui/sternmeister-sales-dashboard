@@ -16,7 +16,7 @@
 
 import { and, eq, sql } from "drizzle-orm";
 import { getDbForDepartment as getMainDb } from "@/lib/db";
-import { callAnalyses, callAnalysisFiles } from "@/lib/db/schema-existing";
+import { callAnalyses, callAnalysisFiles, masterManagers } from "@/lib/db/schema-existing";
 import { KOMMO } from "@/lib/config/tenant";
 import { kommoFetchPath } from "@/lib/kommo/client";
 import { parseDateBoundary } from "@/lib/utils/date";
@@ -1003,6 +1003,35 @@ function formatSpeakerBlocks(words: ScribeWord[] | undefined): string {
     .join("\n\n");
 }
 
+/**
+ * Превратить блоки «**Speaker A:** … / **Speaker B:** …» в диалог
+ * «**Продавец:** … / **Клиент:** …» — выгрузка читается как переписка в
+ * мессенджере. Кто продавец, определяем по направлению звонка (та же эвристика,
+ * что в ОКК, src/app/api/okk/calls/[callId]/route.ts):
+ *   исходящий → первым отвечает Клиент → продавец = второй спикер;
+ *   входящий  → первым отвечает Менеджер → продавец = первый спикер.
+ */
+function formatChatTranscript(speakers: string, direction: string): string {
+  const blocks: { speaker: string; text: string }[] = [];
+  const re = /\*\*Speaker ([A-Z]):\*\*\s*([\s\S]*?)(?=\n\n\*\*Speaker [A-Z]:\*\*|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(speakers)) !== null) {
+    const text = m[2].trim();
+    if (text) blocks.push({ speaker: m[1], text });
+  }
+  if (blocks.length === 0) return speakers.trim();
+
+  const isInbound = direction === "входящий" || direction === "inbound";
+  const firstSpeaker = blocks[0].speaker;
+  const managerSpeaker = isInbound
+    ? firstSpeaker
+    : (blocks.find((b) => b.speaker !== firstSpeaker)?.speaker ?? firstSpeaker);
+
+  return blocks
+    .map((b) => `**${b.speaker === managerSpeaker ? "Продавец" : "Клиент"}:** ${b.text}`)
+    .join("\n\n");
+}
+
 async function tryTranscribe(url: string): Promise<{ text: string; speakers: string } | null> {
   // ElevenLabs Scribe v2 — synchronous batch transcription.
   //   - `cloud_storage_url` instead of file upload (CloudTalk S3 mp3s are
@@ -1113,6 +1142,9 @@ interface CallRecord {
   url: string;
   date: Date;
   direction: string;
+  /** Kommo user id ответственного за заметку звонка → ФИ менеджера в шапке
+   *  выгрузки. На старых манифестах поле отсутствует → имя «—». */
+  responsibleUserId?: number;
 }
 // Same shape with `date` as an ISO string (JSON-serializable).
 interface ManifestCall extends Omit<CallRecord, "date"> { date: string }
@@ -1175,6 +1207,7 @@ function matchCallsFromNotes(lead: ManifestLead, notes: KommoNote[], minDuration
       url: link,
       date: new Date(n.created_at * 1000).toISOString(),
       direction: n.note_type === "call_in" ? "входящий" : "исходящий",
+      responsibleUserId: n.responsible_user_id,
     });
   }
   return matched;
@@ -1594,6 +1627,18 @@ export async function runAnalysisPipeline(
       .where(eq(callAnalysisFiles.analysisId, analysisId));
     const existingSet = new Set(existingFiles.map(f => f.filename));
 
+    // Карта kommo_user_id → ФИ менеджера для шапки выгрузки. Берём всех
+    // менеджеров отдела (включая уволенных), чтобы исторический звонок всё
+    // равно получил имя. master_managers живёт в D1 — это тот же `db`.
+    const mgrRows = await db
+      .select({ kommoUserId: masterManagers.kommoUserId, name: masterManagers.name })
+      .from(masterManagers)
+      .where(eq(masterManagers.department, analysis.department));
+    const managerNameByKommoId = new Map<number, string>();
+    for (const r of mgrRows) {
+      if (r.kommoUserId != null) managerNameByKommoId.set(r.kommoUserId, r.name);
+    }
+
     // Concurrency is the difference between a ~30-min run and a 3-hour run.
     // Scribe is synchronous, but a single 60-min call still takes 3-5min on
     // their side; running N in parallel reclaims most of that wait, so a
@@ -1615,7 +1660,6 @@ export async function runAnalysisPipeline(
 
       const num = String(idx + 1).padStart(2, "0");
       const dateStr = call.date.toLocaleDateString("ru-RU");
-      const durMin = Math.round(call.duration / 60);
       const filename = `call_${num}_lead${call.leadId}.md`;
 
       if (existingSet.has(filename)) {
@@ -1623,11 +1667,14 @@ export async function runAnalysisPipeline(
         return;
       }
 
-      let md = `# Звонок ${num} — Lead ${call.leadId}\n\n`;
-      md += `- **Дата:** ${dateStr}\n`;
-      md += `- **Длительность:** ${durMin} мин\n`;
-      md += `- **Направление:** ${call.direction}\n`;
-      md += `- **Lead:** ${call.leadName}\n\n`;
+      // Шапка — только: Дата звонка, ФИ менеджера, ссылка на сделку.
+      const managerName = (call.responsibleUserId != null
+        ? managerNameByKommoId.get(call.responsibleUserId)
+        : null) ?? "—";
+      const dealUrl = `https://${KOMMO.host}/leads/detail/${call.leadId}`;
+      let md = `**Дата звонка:** ${dateStr}\n`;
+      md += `**ФИ менеджера:** ${managerName}\n`;
+      md += `**Ссылка на сделку:** ${dealUrl}\n\n`;
 
       // Transcription: failures are already non-throwing (returns null), but
       // wrap defensively so an unexpected error (e.g. fetch DNS hiccup that
@@ -1649,12 +1696,13 @@ export async function runAnalysisPipeline(
 
       if (!transcript) {
         // Network/HTTP failure for both primary and fallback URL.
-        md += `## Транскрипт\n\n⚠️ Не удалось транскрибировать запись.\n`;
+        md += `⚠️ Не удалось транскрибировать запись.\n`;
       } else if (!transcript.text) {
         // Scribe responded but the audio is silent or unintelligible.
-        md += `## Транскрипт\n\n⚠️ Запись транскрибирована, но текст пустой (тишина / неразборчивый звук).\n`;
+        md += `⚠️ Запись транскрибирована, но текст пустой (тишина / неразборчивый звук).\n`;
       } else {
-        md += `## Транскрипт\n\n${transcript.speakers}\n`;
+        // Диалог «Продавец/Клиент» — выгрузка читается как переписка.
+        md += `${formatChatTranscript(transcript.speakers, call.direction)}\n`;
       }
 
       // DB ops MUST NOT throw out of the worker — that would kill the whole
