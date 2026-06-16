@@ -3,8 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown } from "lucide-react";
 import { fmtLocalDate } from "@/lib/utils/date";
-import type { FunnelFiltersState } from "@/lib/funnel/types";
+import type { ConversionId, FunnelFiltersState } from "@/lib/funnel/types";
+import { CONVERSIONS } from "@/lib/funnel/conversions";
 import type { ManagerRoleKey, ManagerRow, ManagersResult } from "@/lib/funnel/managers";
+
+// Профильная конверсия роли. ⚠ Дубль серверного ROLE_CONVERSION (managers.ts):
+// тот модуль серверный (импорты БД), runtime-значения в клиент тащить нельзя.
+// При смене мапы синхронить оба места.
+const ROLE_CONVERSION: Record<ManagerRoleKey, ConversionId> = {
+  qualifier: "C2",
+  berater: "C3",
+  dovedenie: "C4",
+};
 
 // Фон-сюрфейс табов = фон таблицы (бесшовный стык, как в «Аналитике»).
 const TAB_SURFACE = "rgb(15, 23, 42)";
@@ -28,9 +38,12 @@ type SortKey =
   | "reachedDocs"
   | "reachedTermDc"
   | "reachedGutschein"
+  | "roleBase"
+  | "roleConversionPct"
   | "conversionC5Pct"
   | "consultations"
   | "touches"
+  | "touchesPerDay"
   | "avgOkk";
 
 interface Column {
@@ -40,17 +53,26 @@ interface Column {
   numeric: boolean;
 }
 
-const COLUMNS: Column[] = [
-  { key: "name", label: "Менеджер", title: "Менеджер в выбранной роли", numeric: false },
-  { key: "clients", label: "Клиенты", title: "Активных клиентов (без дисквала)", numeric: true },
-  { key: "reachedDocs", label: "→ Док", title: "Доведено до «Документы в ДЦ»", numeric: true },
-  { key: "reachedTermDc", label: "→ Термин ДЦ", title: "Доведено до «Термин ДЦ»", numeric: true },
-  { key: "reachedGutschein", label: "→ Гутшайн", title: "Доведено до «Гутшайн» (сквозь Бератер)", numeric: true },
-  { key: "conversionC5Pct", label: "C5 %", title: "Личная сквозная конверсия: Гутшайн / Клиенты", numeric: true },
-  { key: "consultations", label: "Конс.", title: "Проведённых консультаций (ДЦ+АА) по клиентам", numeric: true },
-  { key: "touches", label: "Касания", title: "Касаний по клиентам менеджера за выбранный период", numeric: true },
-  { key: "avgOkk", label: "ОКК", title: "Средний ОКК звонков роли (0–100)", numeric: true },
-];
+// Колонки зависят от роли: профильная конверсия (база + %) переименовывается под
+// C2/C3/C4. Остальные колонки статичны.
+function buildColumns(role: ManagerRoleKey): Column[] {
+  const conv = ROLE_CONVERSION[role];
+  const convLabel = CONVERSIONS[conv].label;
+  return [
+    { key: "name", label: "Менеджер", title: "Менеджер в выбранной роли", numeric: false },
+    { key: "clients", label: "Клиенты", title: "Активных клиентов (без дисквала)", numeric: true },
+    { key: "reachedDocs", label: "→ Док", title: "Доведено до «Документы в ДЦ»", numeric: true },
+    { key: "reachedTermDc", label: "→ Термин ДЦ", title: "Доведено до «Термин ДЦ»", numeric: true },
+    { key: "reachedGutschein", label: "→ Гутшайн", title: "Доведено до «Гутшайн» (сквозь Бератер)", numeric: true },
+    { key: "roleBase", label: `База ${conv}`, title: `База конверсии ${conv}: ${convLabel} (знаменатель)`, numeric: true },
+    { key: "roleConversionPct", label: `${conv} %`, title: `Профильная конверсия роли — ${convLabel} (цель ÷ база)`, numeric: true },
+    { key: "conversionC5Pct", label: "C5 %", title: "Личная сквозная конверсия: Гутшайн / Клиенты", numeric: true },
+    { key: "consultations", label: "Конс.", title: "Проведённых консультаций (ДЦ+АА) по клиентам", numeric: true },
+    { key: "touches", label: "Касания", title: "Касаний по клиентам менеджера за выбранный период", numeric: true },
+    { key: "touchesPerDay", label: "Кас./день", title: "Среднее касаний в активный рабочий день (касания ÷ дни с касаниями)", numeric: true },
+    { key: "avgOkk", label: "ОКК", title: "Средний ОКК звонков роли (0–100)", numeric: true },
+  ];
+}
 
 export default function ManagersView({ filters }: Props) {
   const [data, setData] = useState<ManagersResult | null>(null);
@@ -130,6 +152,7 @@ export default function ManagersView({ filters }: Props) {
   };
 
   const activeRole = ROLES.find((r) => r.key === role)!;
+  const columns = useMemo(() => buildColumns(role), [role]);
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -193,7 +216,7 @@ export default function ManagersView({ filters }: Props) {
           <table className="w-full text-xs">
             <thead className="sticky top-0 z-10" style={{ background: TAB_SURFACE }}>
               <tr className="text-slate-400 border-b border-white/10">
-                {COLUMNS.map((col) => (
+                {columns.map((col) => (
                   <th
                     key={col.key}
                     title={col.title}
@@ -226,9 +249,12 @@ export default function ManagersView({ filters }: Props) {
                   <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{r.reachedDocs}</td>
                   <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{r.reachedTermDc}</td>
                   <td className="px-3 py-2 text-right text-emerald-300 tabular-nums">{r.reachedGutschein}</td>
+                  <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{r.roleBase}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtProfilePct(r.roleConversionPct, r.roleTarget, r.roleBase)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{fmtPct(r.conversionC5Pct)}</td>
                   <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{r.consultations}</td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{r.touches}</td>
+                  <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{fmtPerDay(r.touchesPerDay, r.activeDays)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{fmtOkk(r.avgOkk, r.okkScored)}</td>
                 </tr>
               ))}
@@ -246,9 +272,12 @@ function valueOf(r: ManagerRow, key: SortKey): number | null {
     case "reachedDocs": return r.reachedDocs;
     case "reachedTermDc": return r.reachedTermDc;
     case "reachedGutschein": return r.reachedGutschein;
+    case "roleBase": return r.roleBase;
+    case "roleConversionPct": return r.roleConversionPct;
     case "conversionC5Pct": return r.conversionC5Pct;
     case "consultations": return r.consultations;
     case "touches": return r.touches;
+    case "touchesPerDay": return r.touchesPerDay;
     case "avgOkk": return r.avgOkk;
     default: return null;
   }
@@ -258,6 +287,35 @@ function fmtPct(v: number | null): React.ReactNode {
   if (v === null) return <span className="text-slate-600">—</span>;
   const cls = v >= 4 ? "text-emerald-300" : v >= 2 ? "text-amber-300" : "text-slate-400";
   return <span className={cls}>{v.toFixed(1)}%</span>;
+}
+
+// Профильная конверсия (C2/C3/C4) — десятки процентов, пороги C5 тут не годятся.
+// Нейтральный цвет + тултип «цель из базы», чтобы % читался.
+function fmtProfilePct(v: number | null, target: number, base: number): React.ReactNode {
+  if (v === null) return <span className="text-slate-600">—</span>;
+  return (
+    <span title={`${target} из ${base}`} className="text-slate-200">
+      {v.toFixed(1)}%
+    </span>
+  );
+}
+
+// Среднее касаний в рабочий день. Тултип раскрывает знаменатель (активные дни).
+function fmtPerDay(v: number | null, activeDays: number): React.ReactNode {
+  if (v === null) return <span className="text-slate-600">—</span>;
+  return (
+    <span title={`за ${activeDays} ${pluralDays(activeDays)} с касаниями`}>
+      {v.toFixed(1)}
+    </span>
+  );
+}
+
+function pluralDays(n: number): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return "день";
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return "дня";
+  return "дней";
 }
 
 function fmtOkk(v: number | null, n: number): React.ReactNode {
