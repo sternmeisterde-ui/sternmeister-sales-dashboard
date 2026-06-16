@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { getDbForDepartment } from "@/lib/db";
+import { getDbForDepartment, db as d1Db } from "@/lib/db";
 import {
   okkCalls,
   okkEvaluations,
   okkManagers,
 } from "@/lib/db/schema-okk";
-import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
-import { eq, sql, and, gte, lte, isNotNull, inArray, desc } from "drizzle-orm";
+import { d1Users, d1Calls, r1Users, r1Calls, masterManagers } from "@/lib/db/schema-existing";
+import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
@@ -478,11 +478,27 @@ async function fetchOkkData(
   const db = getOkkDbForDepartment(department);
   const promptTypes = getOkkPromptTypes(department, line);
 
+  // Источник правды по менеджерам — master_managers (D1). Уволенных (is_active
+  // = false) и удалённых из master не показываем нигде в ОКК: их звонки
+  // выпадают из выборки целиком, чтобы итоги периода сходились с разбивкой по
+  // менеджерам (как в Дейли / Активности). Звонки без менеджера (NULL) —
+  // оставляем («Без менеджера»).
+  const activeMaster = await d1Db
+    .select({ id: masterManagers.id })
+    .from(masterManagers)
+    .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
+  const activeMasterIds = activeMaster.map((m) => m.id);
+  const activeMasterSet = new Set(activeMasterIds);
+
   const conditions = [
     sql`${okkCalls.callCreatedAt} >= ${from}`,
     sql`${okkCalls.callCreatedAt} <= ${to}`,
     sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
     isNotNull(okkEvaluations.totalScore),
+    or(
+      inArray(okkEvaluations.managerId, activeMasterIds),
+      isNull(okkEvaluations.managerId),
+    ),
   ];
   if (promptTypes && promptTypes.length > 0) {
     conditions.push(inArray(okkEvaluations.promptType, promptTypes));
@@ -502,7 +518,7 @@ async function fetchOkkData(
     sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
   ];
 
-  const [rawRows, managers] = await Promise.all([
+  const [rawRows, managersRaw] = await Promise.all([
     db
       .select({
         callId: okkCalls.id,
@@ -529,6 +545,10 @@ async function fetchOkkData(
       .from(okkManagers)
       .where(and(...managerConditions)),
   ]);
+
+  // Дропдаун — только активные в master_managers (на случай рассинхрона
+  // okk-флага is_active с master, который и есть источник правды).
+  const managers = managersRaw.filter((m) => activeMasterSet.has(m.id));
 
   const seenCallIds = new Set<string>();
   const rows = rawRows.filter((r) => {
@@ -650,12 +670,12 @@ async function fetchOkkData(
       .from(okkManagers)
       .where(inArray(okkManagers.id, missingIds));
   }
+  // extras теперь — только активные в master менеджеры, не попавшие в дропдаун
+  // из-за рассинхрона okk-флага (уволенные отфильтрованы ещё на уровне выборки
+  // звонков), поэтому метку «(уволен)» больше не добавляем.
   const allManagersForBreakdown: Array<{ id: string; name: string }> = [
     ...managers,
-    ...extras.map((e) => ({
-      id: e.id,
-      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
-    })),
+    ...extras.map((e) => ({ id: e.id, name: e.name })),
   ];
   if (managerAccMap.has(NO_MANAGER_KEY)) {
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
@@ -827,12 +847,12 @@ async function fetchRoleplayData(
       .from(usersTable)
       .where(inArray(usersTable.id, missingIds));
   }
+  // extras теперь — только активные в master менеджеры, не попавшие в дропдаун
+  // из-за рассинхрона okk-флага (уволенные отфильтрованы ещё на уровне выборки
+  // звонков), поэтому метку «(уволен)» больше не добавляем.
   const allManagersForBreakdown: Array<{ id: string; name: string }> = [
     ...managers,
-    ...extras.map((e) => ({
-      id: e.id,
-      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
-    })),
+    ...extras.map((e) => ({ id: e.id, name: e.name })),
   ];
   if (managerAccMap.has(NO_MANAGER_KEY)) {
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
