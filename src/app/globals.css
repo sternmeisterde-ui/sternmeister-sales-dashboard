@@ -190,6 +190,44 @@ body {
   background-color: #dbeafe !important;
 }
 
+/* ─────────────────────────────────────────────────────────────
+   «Оценка критериев» (AnalyticsTab) — подсветка найденной по ссылке
+   строки звонка.
+   Почему рамкой, а не фоном/тенью: таблица border-collapse → box-shadow
+   на <td> не рендерится; а background затирает цвета ячеек-оценок и
+   сбрасывается правилом `.theme-light td { background: transparent }`.
+   border при collapse работает в обеих темах и не трогает цвета оценок.
+   ───────────────────────────────────────────────────────────── */
+tr.okk-row-hl td {
+  border-top: 2px solid #f59e0b !important;    /* amber-500 — сплошная рамка строки */
+  border-bottom: 2px solid #f59e0b !important;
+}
+tr.okk-row-hl td.sticky {
+  border-left: 3px solid #f59e0b !important;
+  background-color: rgba(245, 158, 11, 0.35) !important; /* янтарный якорь у залипающей колонки */
+}
+tr.okk-row-hl td:last-child {
+  border-right: 2px solid #f59e0b !important;
+}
+.theme-light tr.okk-row-hl td.sticky {
+  background-color: #fcd34d !important;        /* amber-300 — заметно на белом */
+}
+
+/* LineTabs (вкладки линий БУХ/МЕД над таблицей). Фон задаётся inline-стилем
+   через эти переменные, чтобы переключаться по теме (обычные .theme-light
+   правила inline-стиль не перебивают). */
+:root {
+  --okk-tab-surface: rgb(15, 23, 42);            /* = фон шапки дерева (тёмная) */
+  --okk-tab-surface-inactive: rgba(30, 41, 59, 0.4);
+}
+.theme-light {
+  --okk-tab-surface: #bedcff;                    /* = thead bg → бесшовный стык */
+  --okk-tab-surface-inactive: #e8f1ff;
+}
+.theme-light .okk-line-tab-active { color: #1e3a8a !important; }   /* blue-900 на светлом */
+.theme-light .okk-line-tab-inactive { color: #475569 !important; } /* slate-600 */
+.theme-light .okk-line-tab-bg { border-color: #bfdbfe !important; }
+
 /* Managers dropdown inside "По менеджерам" sub-tab. Dark mode inline bg
    was #0f172a; light mode needs solid white with dark text. Also bump
    z-index via inline style to beat sticky table headers (z-40/z-50). */

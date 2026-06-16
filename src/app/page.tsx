@@ -881,33 +881,30 @@ export default function Dashboard() {
 
         <nav className="flex flex-col gap-2 mt-4 w-full">
           {!isSidebarOpen
-            ? /* Свёрнутый сайдбар — плоский ряд иконок (без вложенности). */
-              visibleNavItems.map((item) => renderNavButton(item))
+            ? /* Свёрнутый сайдбар — плоский ряд иконок (без вложенности).
+                 У Коммерсов «ОКК» (real_calls) — только заголовок-аккордеон,
+                 без своей вкладки, поэтому в свёрнутом ряду его иконку не
+                 показываем (подпункты доступны как отдельные иконки). */
+              (isB2bNav ? visibleNavItems.filter((i) => i.id !== "real_calls") : visibleNavItems).map((item) => renderNavButton(item))
             : topLevelNavItems.map((item) => {
                 const isOkkParent = isB2bNav && item.id === "real_calls" && okkChildItems.length > 0;
                 if (!isOkkParent) return renderNavButton(item);
-                // ОКК как раскрываемая группа: основная кнопка ведёт в ОКК-звонки,
-                // соседняя кнопка-шеврон раскрывает/сворачивает подпункты.
+                // ОКК — только заголовок-аккордеон: клик раскрывает/сворачивает
+                // подпункты (Оценка критериев, Транскрибация, Ролевки, Артефакты).
+                // Самого списка звонков ОКК у Коммерсов нет — кнопка никуда не ведёт.
                 const navLabel = item.labelByDept?.[activeDepartment] ?? item.label;
                 return (
                   <div key={item.id} className="flex flex-col gap-2">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setActiveTab("real_calls")}
-                        className={`${navButtonClass(activeTab === "real_calls" || okkChildIdSet.has(activeTab))} flex-1`}
-                        title={navLabel}
-                      >
-                        <item.icon className="w-5 h-5 shrink-0" />
-                        <span className="flex-1 leading-tight break-words min-w-0">{navLabel}</span>
-                      </button>
-                      <button
-                        onClick={() => setOkkExpanded((v) => !v)}
-                        className="shrink-0 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/5"
-                        aria-label={okkExpanded ? "Свернуть ОКК" : "Развернуть ОКК"}
-                      >
-                        {okkExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => setOkkExpanded((v) => !v)}
+                      className={navButtonClass(okkChildIdSet.has(activeTab))}
+                      title={navLabel}
+                      aria-label={okkExpanded ? "Свернуть ОКК" : "Развернуть ОКК"}
+                    >
+                      <item.icon className="w-5 h-5 shrink-0" />
+                      <span className="flex-1 leading-tight break-words min-w-0">{navLabel}</span>
+                      {okkExpanded ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronRight className="w-4 h-4 shrink-0" />}
+                    </button>
                     {okkExpanded && okkChildItems.map((child) => renderNavButton(child, true))}
                   </div>
                 );
