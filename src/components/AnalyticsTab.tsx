@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -237,6 +237,58 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     set((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n; });
   };
 
+  // Скролл к строке звонка. Двигаем ТОЛЬКО ближайший вертикальный скролл-
+  // контейнер таблицы — не нативный scrollIntoView: он пузырём прокручивает и
+  // внешний layout с overflow-hidden (page.tsx), из-за чего дашборд "уезжает"
+  // вниз без возможности вернуться.
+  const scrollToCall = useCallback((callId: string) => {
+    const el = document.getElementById(`okk-call-${callId}`);
+    if (!el) return;
+    let scroller: HTMLElement | null = el.parentElement;
+    while (scroller) {
+      const oy = getComputedStyle(scroller).overflowY;
+      if ((oy === "auto" || oy === "scroll") && scroller.scrollHeight > scroller.clientHeight) break;
+      scroller = scroller.parentElement;
+    }
+    if (scroller) {
+      const elRect = el.getBoundingClientRect();
+      const scRect = scroller.getBoundingClientRect();
+      const delta = (elRect.top - scRect.top) - (scroller.clientHeight - el.offsetHeight) / 2;
+      scroller.scrollBy({ top: delta, behavior: "smooth" });
+    } else {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, []);
+
+  // Все ключи узлов дерева (недели / менеджеры / даты) — для кнопки «Развернуть
+  // всё». Раскрытие всех веток нужно, чтобы полные ссылки звонков попали в DOM
+  // и нативный поиск браузера (Ctrl+F) их нашёл — кросс-браузерно, без хаков.
+  const allTreeKeys = useMemo(() => {
+    const weeks = new Set<string>(), mgrs = new Set<string>(), dates = new Set<string>();
+    if (data) for (const wk of data.timeTree) {
+      weeks.add(wk.key);
+      for (const mgr of wk.managers) {
+        const mgrKey = `${wk.key}::${mgr.id}`;
+        mgrs.add(mgrKey);
+        for (const d of mgr.dates) dates.add(`${mgrKey}::${d.date}`);
+      }
+    }
+    return { weeks, mgrs, dates };
+  }, [data]);
+
+  const allExpanded = allTreeKeys.dates.size > 0 && expandedDates.size >= allTreeKeys.dates.size;
+  const toggleExpandAll = () => {
+    if (allExpanded) {
+      setExpandedWeeks(new Set());
+      setExpandedMgrs(new Set());
+      setExpandedDates(new Set());
+    } else {
+      setExpandedWeeks(new Set(allTreeKeys.weeks));
+      setExpandedMgrs(new Set(allTreeKeys.mgrs));
+      setExpandedDates(new Set(allTreeKeys.dates));
+    }
+  };
+
   // Найти строку звонка по ссылке из Kommo: парсим lead-id, ищем совпадения в
   // дереве, раскрываем путь (неделя → менеджер → дата), подсвечиваем строки и
   // прокручиваем к первой. Работает по уже загруженному data.timeTree — если
@@ -273,9 +325,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     setFindStatus({ kind: "ok", text: `Найдено строк: ${calls.size}` });
     // Скролл к первой строке — после того как раскрытие отрисуется.
     const first = [...calls][0];
-    setTimeout(() => {
-      document.getElementById(`okk-call-${first}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, 120);
+    setTimeout(() => scrollToCall(first), 120);
   };
 
   const clearFind = () => {
@@ -712,7 +762,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                 <button
                   onClick={findByLink}
                   disabled={!findLink.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-blue-500/80 hover:bg-blue-500 disabled:opacity-30 disabled:cursor-not-allowed text-white text-[11px] font-bold uppercase tracking-wider"
+                  className="px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-[11px] font-bold uppercase tracking-wider"
                 >
                   Найти
                 </button>
@@ -721,6 +771,16 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                     {findStatus.text}
                   </span>
                 )}
+                {/* Развернуть всё — чтобы все строки (с полными ссылками) попали в
+                    DOM и нашлись через нативный Ctrl+F в любом браузере. */}
+                <button
+                  onClick={toggleExpandAll}
+                  className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 border border-white/10 text-slate-300 text-[11px] font-bold uppercase tracking-wider"
+                  title={allExpanded ? "Свернуть все ветки" : "Развернуть все ветки (для поиска через Ctrl+F)"}
+                >
+                  {allExpanded ? <ChevronsDownUp className="w-3.5 h-3.5" /> : <ChevronsUpDown className="w-3.5 h-3.5" />}
+                  {allExpanded ? "Свернуть всё" : "Развернуть всё"}
+                </button>
               </div>
             )}
             {source === "okk" && data && (
@@ -959,8 +1019,8 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
 // нижней границы, текст blue-400 (синий акцент дашборда — тоггл источника,
 // заголовок «Оценка»). Неактивные — приглушённый slate-800/40 + slate-400, как
 // остальные контролы. Наклоняется только фон-подложка, текст остаётся прямым.
-
-const TAB_SURFACE = "rgb(15, 23, 42)"; // = фон шапки дерева → бесшовный стык
+// Цвет подложки — через CSS-переменную --okk-tab-surface (тёмная/светлая тема
+// задаются в globals.css), иначе inline-фон не переключался бы по теме.
 
 // Мультивыбор менеджеров: дропдаун с чекбоксами. Пустой выбор = «Все менеджеры».
 function ManagerMultiSelect({ managers, selected, onChange }: {
@@ -1023,15 +1083,15 @@ function LineTabs({ lines, active, onSelect }: {
             key={l.id}
             type="button"
             onClick={() => onSelect(l.id)}
-            className={`relative px-5 pt-2 pb-2.5 text-[10px] uppercase tracking-widest font-bold transition-colors focus:outline-none ${
-              sel ? "text-blue-400" : "text-slate-400 hover:text-white"
+            className={`okk-line-tab relative px-5 pt-2 pb-2.5 text-[10px] uppercase tracking-widest font-bold transition-colors focus:outline-none ${
+              sel ? "okk-line-tab-active text-blue-400" : "okk-line-tab-inactive text-slate-400 hover:text-white"
             }`}
           >
             <span
               aria-hidden
-              className={`absolute inset-0 rounded-t-xl border-t border-x ${sel ? "border-white/10" : "border-white/5"}`}
+              className={`okk-line-tab-bg absolute inset-0 rounded-t-xl border-t border-x ${sel ? "border-white/10" : "border-white/5"}`}
               style={{
-                background: sel ? TAB_SURFACE : "rgba(30, 41, 59, 0.4)",
+                background: sel ? "var(--okk-tab-surface)" : "var(--okk-tab-surface-inactive)",
                 transform: "perspective(16px) rotateX(1.5deg)",
                 transformOrigin: "bottom",
               }}
@@ -1258,8 +1318,8 @@ function CriteriaTimeTree({
                               {dateOpen && d.calls.map((c) => {
                                 const isHi = highlightedCallIds.has(c.callId);
                                 return (
-                                <tr key={c.callId} id={`okk-call-${c.callId}`} className={`border-b border-white/[0.02] ${isHi ? "bg-amber-500/15 ring-1 ring-amber-400/40" : "bg-slate-950/40 hover:bg-white/[0.02]"}`}>
-                                  <td className={`px-3 py-1 sticky left-0 backdrop-blur-sm z-10 ${isHi ? "bg-amber-500/15" : "bg-slate-950/60"}`}>
+                                <tr key={c.callId} id={`okk-call-${c.callId}`} className={`border-b border-white/[0.02] ${isHi ? "okk-row-hl" : "bg-slate-950/40 hover:bg-white/[0.02]"}`}>
+                                  <td className={`px-3 py-1 sticky left-0 backdrop-blur-sm z-10 bg-slate-950/60`}>
                                     <span className="flex items-center gap-1.5 pl-[68px] text-[10px] text-slate-400 whitespace-nowrap">
                                       {/* Действия по звонку — одно меню «⋯» */}
                                       <button
@@ -1295,6 +1355,20 @@ function CriteriaTimeTree({
                                           <Timer className="w-3 h-3 shrink-0" />
                                           {fmtDuration(c.durationSec)}
                                         </span>
+                                      )}
+                                      {/* Полная ссылка Kommo — обрезана визуально, но полный текст
+                                          в DOM, чтобы нативный Ctrl+F нашёл сделку по ссылке. */}
+                                      {c.kommoLeadUrl && (
+                                        <a
+                                          href={c.kommoLeadUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="min-w-0 max-w-[150px] truncate text-[9px] text-blue-400/50 hover:text-blue-300"
+                                          title={c.kommoLeadUrl}
+                                        >
+                                          {c.kommoLeadUrl}
+                                        </a>
                                       )}
                                     </span>
                                   </td>

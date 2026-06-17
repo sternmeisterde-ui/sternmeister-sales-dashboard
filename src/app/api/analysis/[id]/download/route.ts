@@ -30,20 +30,18 @@ export async function GET(
       .from(callAnalysisFiles)
       // 'manifest' = the pipeline's internal _manifest.json checkpoint —
       // never user-facing.
-      .where(and(eq(callAnalysisFiles.analysisId, id), ne(callAnalysisFiles.fileType, "manifest")));
+      .where(and(eq(callAnalysisFiles.analysisId, id), ne(callAnalysisFiles.fileType, "manifest")))
+      // Сохраняем порядок звонков (call_01, call_02, …).
+      .orderBy(callAnalysisFiles.filename);
 
     if (files.length === 0) {
       return NextResponse.json({ error: "No files" }, { status: 404 });
     }
 
-    // Build a simple ZIP using raw deflate-store (no compression, pure JS)
-    // For simplicity, create a tar-like concatenation in a single .md file
-    // OR use proper ZIP — let's do a proper one with the fflate library if available
-    // Fallback: return all files as a single combined markdown
-    let combined = "";
-    for (const f of files) {
-      combined += `\n\n${"=".repeat(80)}\n# ${f.filename}\n${"=".repeat(80)}\n\n${f.content}\n`;
-    }
+    // Склейка звонков в один .md. Без технических заголовков с именем файла —
+    // у каждого звонка уже своя шапка (Дата / Менеджер / Ссылка). Разделяем
+    // горизонтальной линией, чтобы выгрузка читалась как лента переписок.
+    const combined = files.map((f) => f.content.trim()).join("\n\n---\n\n") + "\n";
 
     const encoder = new TextEncoder();
     const bytes = encoder.encode(combined);

@@ -7,7 +7,7 @@ import {
   okkManagers,
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
-import { eq, sql, and, gte, lte, isNotNull, inArray, desc } from "drizzle-orm";
+import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
@@ -478,11 +478,28 @@ async function fetchOkkData(
   const db = getOkkDbForDepartment(department);
   const promptTypes = getOkkPromptTypes(department, line);
 
+  // Уволенных менеджеров не показываем нигде в ОКК. Флаг okkManagers.isActive
+  // синкается из master_managers (источник правды): при увольнении sync ставит
+  // is_active=false в R2/D2.managers. Поэтому фильтруем по okk-стороне (тот же
+  // R2/D2-коннекшн — id okk-менеджеров НЕ равны master.id, связь по
+  // kommoUserId/telegramId/name, см. /api/managers). Звонки уволенных выпадают
+  // из выборки целиком, чтобы итоги периода сходились с разбивкой по менеджерам
+  // (как в Дейли/Активности). Звонки без менеджера (NULL) — оставляем.
+  const activeOkk = await db
+    .select({ id: okkManagers.id })
+    .from(okkManagers)
+    .where(eq(okkManagers.isActive, true));
+  const activeOkkIds = activeOkk.map((m) => m.id);
+
   const conditions = [
     sql`${okkCalls.callCreatedAt} >= ${from}`,
     sql`${okkCalls.callCreatedAt} <= ${to}`,
     sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
     isNotNull(okkEvaluations.totalScore),
+    or(
+      inArray(okkEvaluations.managerId, activeOkkIds),
+      isNull(okkEvaluations.managerId),
+    ),
   ];
   if (promptTypes && promptTypes.length > 0) {
     conditions.push(inArray(okkEvaluations.promptType, promptTypes));
@@ -650,12 +667,12 @@ async function fetchOkkData(
       .from(okkManagers)
       .where(inArray(okkManagers.id, missingIds));
   }
+  // extras теперь — только активные менеджеры с данными, не попавшие в дропдаун
+  // (уволенные отфильтрованы ещё на уровне выборки звонков по okkManagers.isActive),
+  // поэтому метку «(уволен)» больше не добавляем.
   const allManagersForBreakdown: Array<{ id: string; name: string }> = [
     ...managers,
-    ...extras.map((e) => ({
-      id: e.id,
-      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
-    })),
+    ...extras.map((e) => ({ id: e.id, name: e.name })),
   ];
   if (managerAccMap.has(NO_MANAGER_KEY)) {
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
@@ -827,12 +844,12 @@ async function fetchRoleplayData(
       .from(usersTable)
       .where(inArray(usersTable.id, missingIds));
   }
+  // extras теперь — только активные менеджеры с данными, не попавшие в дропдаун
+  // (уволенные отфильтрованы ещё на уровне выборки звонков по okkManagers.isActive),
+  // поэтому метку «(уволен)» больше не добавляем.
   const allManagersForBreakdown: Array<{ id: string; name: string }> = [
     ...managers,
-    ...extras.map((e) => ({
-      id: e.id,
-      name: e.isActive === false ? `${e.name} (уволен)` : e.name,
-    })),
+    ...extras.map((e) => ({ id: e.id, name: e.name })),
   ];
   if (managerAccMap.has(NO_MANAGER_KEY)) {
     allManagersForBreakdown.push({ id: NO_MANAGER_KEY, name: "Без менеджера" });
