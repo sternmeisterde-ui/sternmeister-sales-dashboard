@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { db as d1Db } from "@/lib/db";
 import { okkCalls, okkEvaluations, okkManagers } from "@/lib/db/schema-okk";
-import { masterManagers } from "@/lib/db/schema-existing";
 import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
@@ -33,21 +31,23 @@ export async function GET(request: NextRequest) {
 async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) {
     const db = getOkkDbForDepartment(department);
 
-    // Источник правды по менеджерам — master_managers (D1). Уволенных
-    // (is_active=false) и удалённых из master не показываем: ни в списке
-    // звонков, ни в дропдауне. Это согласует ОКК с Дейли/Активностью, где
-    // менеджеры тоже фильтруются по is_active.
-    const activeMaster = await d1Db
-      .select({ id: masterManagers.id })
-      .from(masterManagers)
-      .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
-    const activeMasterIds = activeMaster.map((m) => m.id);
+    // Уволенных менеджеров не показываем (ни звонки, ни дропдаун). Флаг
+    // okkManagers.isActive синкается из master_managers (источник правды) — при
+    // увольнении sync ставит is_active=false. Фильтруем по okk-стороне (тот же
+    // коннекшн; id okk-менеджеров НЕ равны master.id — связь по
+    // kommoUserId/telegramId/name, см. /api/managers). Согласует ОКК с
+    // Дейли/Активностью.
+    const activeOkk = await db
+      .select({ id: okkManagers.id })
+      .from(okkManagers)
+      .where(eq(okkManagers.isActive, true));
+    const activeOkkIds = activeOkk.map((m) => m.id);
 
     // Build WHERE conditions
     const conditions: ReturnType<typeof eq>[] = [];
 
-    // Только звонки активных в master менеджеров (уволенные выпадают целиком).
-    conditions.push(inArray(okkCalls.managerId, activeMasterIds));
+    // Только звонки активных менеджеров (уволенные выпадают целиком).
+    conditions.push(inArray(okkCalls.managerId, activeOkkIds));
 
     const fromParam = sp.get("from");
     if (fromParam) {
@@ -134,9 +134,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         // counters and broke payroll attribution).
         .limit(5000),
 
-      // Query 2: Managers visible in the dropdown — только активные в
-      // master_managers (источник правды). Уволенных не показываем по запросу
-      // бизнеса (раньше тут был «исторический» leg, тащивший уволенных ради
+      // Query 2: Managers visible in the dropdown — только активные (is_active
+      // синкается из master). Уволенных не показываем по запросу бизнеса
+      // (раньше тут был «исторический» leg, тащивший уволенных ради
       // payroll-атрибуции — теперь их звонки и так отфильтрованы выше).
       db
         .select({
@@ -149,7 +149,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .where(
           and(
             sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
-            inArray(okkManagers.id, activeMasterIds),
+            eq(okkManagers.isActive, true),
           ),
         )
         .orderBy(okkManagers.name),
