@@ -17,18 +17,6 @@ function seedNoise(seed: number, idx: number): number {
   return x - Math.floor(x);
 }
 
-/** Дата ISO-понедельника (UTC) для заданного года/недели. */
-function isoMondayUTC(year: number, week: number): Date {
-  // 4 января всегда в W1 (по ISO).
-  const jan4 = new Date(Date.UTC(year, 0, 4));
-  const jan4Day = jan4.getUTCDay() || 7;
-  const w1Mon = new Date(jan4);
-  w1Mon.setUTCDate(jan4.getUTCDate() - jan4Day + 1);
-  const mon = new Date(w1Mon);
-  mon.setUTCDate(w1Mon.getUTCDate() + (week - 1) * 7);
-  return mon;
-}
-
 /** Сегодня в Europe/Berlin (без часового пояса в локали). */
 function todayBerlin(): Date {
   const parts = new Intl.DateTimeFormat("en-CA", {

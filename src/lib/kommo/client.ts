@@ -74,7 +74,7 @@ export async function rateLimitedFetch(url: string, options: RequestInit): Promi
   let res: Response;
   try {
     res = await fetchWithTimeout(url, options);
-  } catch (err) {
+  } catch {
     // Retry once on network errors (socket closed, timeout, etc.)
     await new Promise<void>((r) => setTimeout(r, 500));
     res = await fetchWithTimeout(url, options);

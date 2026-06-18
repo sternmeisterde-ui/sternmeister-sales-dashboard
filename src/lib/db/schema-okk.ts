@@ -1,6 +1,5 @@
 import {
   pgTable,
-  serial,
   text,
   uuid,
   integer,

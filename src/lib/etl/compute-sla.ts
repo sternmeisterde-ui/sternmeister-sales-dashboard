@@ -16,8 +16,8 @@
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
-import { leadsCohort, sla, communications } from "@/lib/db/schema-analytics";
-import { and, gte, lte, sql, eq, inArray } from "drizzle-orm";
+import { leadsCohort, sla } from "@/lib/db/schema-analytics";
+import { and, gte, lte, sql, inArray } from "drizzle-orm";
 import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
 import { withDbRetry } from "@/lib/db/with-retry";
 

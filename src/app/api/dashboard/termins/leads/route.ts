@@ -158,7 +158,6 @@ export async function GET(req: NextRequest) {
 
   if (mode === "leg") {
     const slotCol = leg === "dc" ? dcCol : aaCol;
-    const slotRange = leg === "dc" ? dcSlotRange : aaSlotRange;
 
     if (bucketBy === "created_at") {
       // Chart 1 cohort + future-termin guard. AA baseline = created_at.

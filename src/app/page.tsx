@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
-  Clock, X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
+  X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
   CalendarClock, Workflow, Package,
 } from "lucide-react";
 import Image from "next/image";
@@ -279,7 +279,6 @@ export default function Dashboard() {
   }, [activeTab]);
 
   const isAdmin = session?.role === "admin";
-  const isManager = session?.role === "manager";
 
   // Browser navigation (back/forward, ручное редактирование hash) → синхронизируем state.
   useEffect(() => {
@@ -314,7 +313,7 @@ export default function Dashboard() {
   const [isLoadingAI, setIsLoadingAI] = useState(true);
 
   // Client-side cache per department
-  const [dataCache, setDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
+  const [, setDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
   // UI States
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -424,7 +423,7 @@ export default function Dashboard() {
   const [realCalls, setRealCalls] = useState<ManagerCall[]>([]);
   const [realManagers, setRealManagers] = useState<ManagerStat[]>([]);
   const [isLoadingReal, setIsLoadingReal] = useState(true);
-  const [realDataCache, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
+  const [, setRealDataCache] = useState<Record<string, { calls: ManagerCall[]; managers: ManagerStat[] }>>({});
 
   // Compute OKK date range from period/custom range — Berlin civil days.
   // `to` is one day past the upper bound so calls timestamped at 23:59 Berlin
@@ -2434,31 +2433,6 @@ export default function Dashboard() {
           ? { name: session.name, role: session.masterRole, department: session.department }
           : null}
       />
-    </div>
-  );
-}
-
-// Sub-Component for Dashboard KPI Card
-function KpiCard({ title, value, subValue, dG, wG, icon: Icon }: any) {
-  const isPos = (val: string) => val.includes("+");
-  return (
-    <div className="glass-panel rounded-2xl p-4 border border-white/5 flex flex-col justify-between group hover:border-blue-500/30 transition-all">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-slate-400 font-semibold tracking-wider text-[10px] uppercase">{title}</span>
-        <div className="p-1.5 bg-blue-500/10 rounded-md text-blue-400">
-          <Icon className="w-3.5 h-3.5" />
-        </div>
-      </div>
-      <div>
-        <div className="text-2xl font-bold text-white tracking-tight flex items-baseline gap-2">
-          {value}
-          {subValue && <span className="text-sm font-medium text-slate-400">{subValue}</span>}
-        </div>
-        <div className="flex gap-3 mt-2 text-[10px] font-semibold text-slate-500">
-          <span className="flex items-center gap-1">Д: <span className={isPos(dG) ? "text-emerald-400" : "text-rose-400"}>{dG}</span></span>
-          <span className="flex items-center gap-1">Н: <span className={isPos(wG) ? "text-emerald-400" : "text-rose-400"}>{wG}</span></span>
-        </div>
-      </div>
     </div>
   );
 }

@@ -64,8 +64,6 @@ drizzle/            миграции (по папке на каждую БД)
 scripts/            оперативные tsx-скрипты (бэкфилы, аудиты, ротация токенов)
 public/             статика
 docs/               per-tab архитектурные доки + initiatives
-иксели/             исходные .xlsx (планы, скрипты, KPI)
-ref/                референсные скриншоты (Looker, Kommo UI)
 docker-compose.yml          production (3 сервиса: app, mcp, etl-cron)
 docker-compose.dev.yml      dev (Postgres сайдкар для локалки)
 Dockerfile                  app image
@@ -76,7 +74,7 @@ drizzle.analytics.config.ts analytics.* схема (отдельный config)
 
 ## Деплой
 
-Dokploy → Docker Compose → Traefik (TLS). См. [`DOCKER.md`](./DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
+Dokploy → Docker Compose → Traefik (TLS). См. [`docs/DOCKER.md`](./docs/DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
 
 Production URLs: `dashboard.sternmeister.online` (app), `mcp.sternmeister.online` (MCP).
 

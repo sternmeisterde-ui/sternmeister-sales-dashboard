@@ -345,7 +345,6 @@ export default function TabelPopup({ isOpen, onClose, department, initialYear }:
                       {data.months.map((m) => {
                         const entry = r.monthly[m];
                         const gross = entry?.grossAmount ?? 0;
-                        const base = entry?.baseAmount ?? 0;
                         const bonus = entry?.bonusAmount ?? 0;
                         const days = entry?.equivFullDays ?? 0;
                         const hasBonus = bonus > 0;

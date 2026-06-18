@@ -354,18 +354,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // TLT (Time between Latest Touches) uses different per-pipeline status
     // sets than SLA — defined as BLACKLIST per spec («не учитываются
     // этапы…»). Whitelist for the gate = «pipeline status NOT in blacklist».
-    const TLT_BUH_GOS_BLACKLIST = [
-      "База",
-      "Отложенный старт",
-      "Термин ДЦ",
-      "Закрыто и не реализовано",
-    ];
-    const TLT_BUH_BERATER_BLACKLIST = [
-      "Апелляция",
-      "Отложенный старт",
-      "Гутшайн одобрен",
-      "Закрыто и не реализовано",
-    ];
     const slaEligibilityCte = needSlaEligibility
       ? `,
       sla_eligibility AS (

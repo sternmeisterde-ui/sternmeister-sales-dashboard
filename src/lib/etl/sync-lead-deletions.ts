@@ -96,7 +96,7 @@ async function markDeleted(byLead: Map<number, Date>): Promise<number> {
     const values = slice
       .map(([leadId, at]) => `(${leadId}, '${at.toISOString()}'::timestamp)`)
       .join(", ");
-    const r = await analyticsDb.execute(sql`
+    await analyticsDb.execute(sql`
       UPDATE analytics.leads_cohort lc
       SET
         is_deleted = TRUE,

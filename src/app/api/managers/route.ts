@@ -515,7 +515,6 @@ async function syncToTargets(
 
   for (const row of rows) {
     const oldRecord = row.id ? existingMap.get(row.id) : null;
-    const nameChanged = oldRecord && oldRecord.name !== row.name;
     const telegramIdChanged = oldRecord && oldRecord.telegramId && oldRecord.telegramId !== row.telegramId;
 
     // ── Sync to OKK (D2/R2) ──
