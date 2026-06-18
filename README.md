@@ -76,7 +76,7 @@ drizzle.analytics.config.ts analytics.* схема (отдельный config)
 
 ## Деплой
 
-Dokploy → Docker Compose → Traefik (TLS). См. [`DOCKER.md`](./DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
+Dokploy → Docker Compose → Traefik (TLS). См. [`docs/DOCKER.md`](./docs/DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
 
 Production URLs: `dashboard.sternmeister.online` (app), `mcp.sternmeister.online` (MCP).
 
