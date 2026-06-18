@@ -52,6 +52,23 @@ const ROLE_BERATER_LINE: Record<"berater" | "dovedenie", string> = {
   dovedenie: "3",
 };
 
+/**
+ * Профильная конверсия роли (ТЗ «помимо C5 — конверсия, за которую отвечает
+ * сам менеджер»). База/цель считаются ровно как в «Когортах» (через
+ * processLeadForConversion), поэтому % сходится 1-в-1 с вкладкой Когорты:
+ *   qualifier → C2 (Квал лид → Термин ДЦ; база = все его квал-клиенты)
+ *   berater   → C3 (Конс. перед ДЦ → Термин ДЦ состоялся; база — подмножество)
+ *   dovedenie → C4 (Конс. перед АА → Гутшайн; база — подмножество)
+ * Значения C2/C3/C4 ⊂ ConversionId, без C3.1 (у неё своя 3-состояний логика).
+ * ⚠ Дубль есть в ManagersView.tsx (клиент) — managers.ts серверный, импортить
+ * его runtime-значения в клиент нельзя. При смене мапы править оба места.
+ */
+export const ROLE_CONVERSION: Record<ManagerRoleKey, "C2" | "C3" | "C4"> = {
+  qualifier: "C2",
+  berater: "C3",
+  dovedenie: "C4",
+};
+
 /** prompt_type ОКК-звонка → роль (см. 02 §3.8). */
 const PROMPT_TYPE_ROLE: Record<string, ManagerRoleKey> = {
   d2_qualifier: "qualifier",
@@ -69,7 +86,15 @@ export interface ManagerRow {
   reachedTermDc: number;
   reachedGutschein: number;
   conversionC5Pct: number | null;
+  /** Профильная конверсия роли (см. ROLE_CONVERSION): база/цель и %. */
+  roleBase: number;
+  roleTarget: number;
+  roleConversionPct: number | null;
   touches: number;
+  /** Дней с ≥1 касанием по клиентам менеджера (знаменатель «касаний/день»). */
+  activeDays: number;
+  /** Среднее касаний в активный рабочий день = touches / activeDays. */
+  touchesPerDay: number | null;
   consultations: number;
   avgOkk: number | null;
   okkScored: number;
@@ -94,7 +119,11 @@ interface Accum {
   reachedDocs: number;
   reachedTermDc: number;
   reachedGutschein: number;
+  roleBase: number;
+  roleTarget: number;
   touches: number;
+  /** Объединение дат касаний по всем клиентам менеджера → size = активные дни. */
+  touchDays: Set<string>;
   consultations: number;
 }
 
@@ -117,7 +146,7 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
     leadIds.length ? fetchCloseReasonHistory(leadIds) : Promise.resolve(new Map()),
     leadIds.length ? fetchTargetEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
     leadIds.length ? fetchBeraterContext(leadIds) : Promise.resolve(new Map()),
-    leadIds.length ? fetchTouchesByLead(leadIds, opts) : Promise.resolve(new Map<number, number>()),
+    leadIds.length ? fetchTouchesByLead(leadIds, opts) : Promise.resolve(new Map<number, LeadTouches>()),
     fetchOkkAllRoles(opts),
     fetchManagerRoster(),
   ]);
@@ -141,7 +170,7 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
   const bump = (role: ManagerRoleKey, uid: number, apply: (a: Accum) => void) => {
     let a = accByRole[role].get(uid);
     if (!a) {
-      a = { clients: 0, reachedDocs: 0, reachedTermDc: 0, reachedGutschein: 0, touches: 0, consultations: 0 };
+      a = { clients: 0, reachedDocs: 0, reachedTermDc: 0, reachedGutschein: 0, roleBase: 0, roleTarget: 0, touches: 0, touchDays: new Set<string>(), consultations: 0 };
       accByRole[role].set(uid, a);
     }
     apply(a);
@@ -150,35 +179,58 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
   for (const lead of baseLeads) {
     if (lead.isDisqualified) continue;
     const beraters: BeraterLead[] = beraterContext.get(lead.leadId) ?? [];
-    const touches = touchesByLead.get(lead.leadId) ?? 0;
+    const touchInfo = touchesByLead.get(lead.leadId);
+    const touches = touchInfo?.total ?? 0;
+    const touchDays = touchInfo?.days ?? [];
     const consult = countConsultations(beraters);
 
+    // Результаты конверсий по лиду. C2/C3/C4 нужны и для общего пути, и как
+    // профильные конверсии ролей (см. ROLE_CONVERSION).
     const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext);
-    const c2 = processLeadForConversion("C2", lead, targetEvents, beraterContext);
+    const byConv = {
+      C2: processLeadForConversion("C2", lead, targetEvents, beraterContext),
+      C3: processLeadForConversion("C3", lead, targetEvents, beraterContext),
+      C4: processLeadForConversion("C4", lead, targetEvents, beraterContext),
+    };
     const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext);
     const reachedDocs = c1.included && c1.targetAt !== null;
-    const reachedTermDc = c2.included && c2.targetAt !== null;
+    const reachedTermDc = byConv.C2.included && byConv.C2.targetAt !== null;
     const reachedGutschein = c5.included && c5.targetAt !== null;
 
-    const apply = (a: Accum) => {
+    // applyFor(role) — общий клиентский путь + профильная конверсия роли.
+    // База/цель профильной конверсии повторяют логику когорт (compute.ts):
+    // дисквал-лиды уже отброшены выше (continue), поэтому здесь только проверка
+    // target_at ≤ disqualified_at для temporal-корректности (как _target_counts).
+    const applyFor = (role: ManagerRoleKey) => (a: Accum) => {
       a.clients += 1;
       a.touches += touches;
+      for (const d of touchDays) a.touchDays.add(d);
       a.consultations += consult;
       if (reachedDocs) a.reachedDocs += 1;
       if (reachedTermDc) a.reachedTermDc += 1;
       if (reachedGutschein) a.reachedGutschein += 1;
+      const rc = byConv[ROLE_CONVERSION[role]];
+      if (rc.included) {
+        a.roleBase += 1;
+        if (
+          rc.targetAt !== null &&
+          (lead.disqualifiedAt === null || rc.targetAt <= lead.disqualifiedAt)
+        ) {
+          a.roleTarget += 1;
+        }
+      }
     };
 
     // Квалификатор — ответственный Гос-сделки, линия 1 (B2G).
     const qUid = lead.responsibleUserId;
     if (qUid !== null && isB2gManager(qUid) && roster.get(qUid)!.line === "1") {
-      bump("qualifier", qUid, apply);
+      bump("qualifier", qUid, applyFor("qualifier"));
     }
     // Бератер/Доведение — ответственный Бератер-сделки нужной линии (B2G).
     const bUid = creditBeraterResponsible(beraters, roster, isB2gManager, ROLE_BERATER_LINE.berater);
-    if (bUid !== null) bump("berater", bUid, apply);
+    if (bUid !== null) bump("berater", bUid, applyFor("berater"));
     const dUid = creditBeraterResponsible(beraters, roster, isB2gManager, ROLE_BERATER_LINE.dovedenie);
-    if (dUid !== null) bump("dovedenie", dUid, apply);
+    if (dUid !== null) bump("dovedenie", dUid, applyFor("dovedenie"));
   }
 
   // 4. Сборка строк по ролям (все uid уже прошли B2G-фильтр при накоплении).
@@ -197,7 +249,12 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
         reachedTermDc: a.reachedTermDc,
         reachedGutschein: a.reachedGutschein,
         conversionC5Pct: a.clients > 0 ? (a.reachedGutschein / a.clients) * 100 : null,
+        roleBase: a.roleBase,
+        roleTarget: a.roleTarget,
+        roleConversionPct: a.roleBase > 0 ? (a.roleTarget / a.roleBase) * 100 : null,
         touches: a.touches,
+        activeDays: a.touchDays.size,
+        touchesPerDay: a.touchDays.size > 0 ? a.touches / a.touchDays.size : null,
         consultations: a.consultations,
         avgOkk: okk && okk.n > 0 ? Math.round((okk.sum / okk.n) * 10) / 10 : null,
         okkScored: okk ? okk.n : 0,
@@ -244,25 +301,49 @@ function countConsultations(beraters: BeraterLead[]): number {
 // COUNT(DISTINCT communication_id) — Pattern A fanout иначе двоит (CLAUDE.md #4).
 // Ограничено окном [from,to]: «касания за период», иначе запрос сканирует всю
 // историю по тысячам лидов (риск таймаута Neon на широких диапазонах).
+//
+// Группируем дополнительно по дню (Europe/Berlin, CLAUDE.md #1): total = сумма
+// distinct-касаний по дням лида (= distinct по лиду, т.к. каждое касание в одном
+// дне), days = список дат → объединение по менеджеру даёт «активные дни».
+interface LeadTouches {
+  total: number;
+  days: string[];
+}
 async function fetchTouchesByLead(
   leadIds: number[],
   opts: ComputeOpts
-): Promise<Map<number, number>> {
-  const out = new Map<number, number>();
+): Promise<Map<number, LeadTouches>> {
+  const out = new Map<number, LeadTouches>();
   if (leadIds.length === 0) return out;
   const idsIn = leadIds.join(",");
-  const rows = unwrapRows<{ leadId: string | number; n: string | number }>(
+  const rows = unwrapRows<{
+    leadId: string | number;
+    day: string;
+    n: string | number;
+  }>(
     await analyticsDb.execute(sql`
-      SELECT lead_id AS "leadId", COUNT(DISTINCT communication_id)::int AS "n"
+      SELECT
+        lead_id AS "leadId",
+        ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date::text AS "day",
+        COUNT(DISTINCT communication_id)::int AS "n"
       FROM analytics.communications
       WHERE lead_id IN (${sql.raw(idsIn)})
         AND communication_id IS NOT NULL
         AND created_at >= ${opts.from.toISOString()}
         AND created_at <  ${opts.to.toISOString()}
-      GROUP BY lead_id
+      GROUP BY lead_id, "day"
     `)
   );
-  for (const r of rows) out.set(Number(r.leadId), Number(r.n));
+  for (const r of rows) {
+    const id = Number(r.leadId);
+    let lt = out.get(id);
+    if (!lt) {
+      lt = { total: 0, days: [] };
+      out.set(id, lt);
+    }
+    lt.total += Number(r.n);
+    lt.days.push(r.day);
+  }
   return out;
 }
 
