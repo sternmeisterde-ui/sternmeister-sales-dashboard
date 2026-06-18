@@ -25,7 +25,6 @@ Next.js admin dashboard для OKK (call quality control) и Roleplay (AI traini
 | Styling | Tailwind CSS | 4 |
 | Charts | Recharts | 3.7 |
 | Icons | lucide-react | latest |
-| Slides | pptxgenjs | 4.0 |
 | AI | xAI Grok (analysis), ElevenLabs Scribe v2 (transcription) | — |
 | Telegram | `telegram` (MTProto) — username→ID resolver | — |
 | Monitoring | `@sentry/nextjs` (отдельные DSN для `app` и `mcp`) | 10.45 |
