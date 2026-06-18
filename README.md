@@ -64,8 +64,6 @@ drizzle/            миграции (по папке на каждую БД)
 scripts/            оперативные tsx-скрипты (бэкфилы, аудиты, ротация токенов)
 public/             статика
 docs/               per-tab архитектурные доки + initiatives
-иксели/             исходные .xlsx (планы, скрипты, KPI)
-ref/                референсные скриншоты (Looker, Kommo UI)
 docker-compose.yml          production (3 сервиса: app, mcp, etl-cron)
 docker-compose.dev.yml      dev (Postgres сайдкар для локалки)
 Dockerfile                  app image
