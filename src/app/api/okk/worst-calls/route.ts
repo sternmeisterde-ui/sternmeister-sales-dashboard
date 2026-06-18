@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkWorstCalls, okkManagers } from "@/lib/db/schema-okk";
-import { eq, and, gte, lte, sql, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, inArray } from "drizzle-orm";
 
 /**
  * GET /api/okk/worst-calls?department=b2g&from=YYYY-MM-DD&to=YYYY-MM-DD&line=1

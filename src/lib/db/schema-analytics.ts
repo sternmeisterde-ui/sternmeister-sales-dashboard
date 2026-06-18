@@ -9,7 +9,6 @@ import {
   pgSchema,
   bigint,
   boolean,
-  date,
   doublePrecision,
   index,
   integer,

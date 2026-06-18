@@ -1054,7 +1054,6 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
         // pipeline_total = cohort size (leads created in period); lead_count can exceed
         // it because one lead may pass through multiple statuses (true funnel).
         const total = Number(pipeRows[0]?.pipeline_total ?? 0);
-        const maxLeads = Math.max(...pipeRows.map((r) => Number(r.lead_count)));
 
         return (
           <div key={pipeline} className="glass-panel rounded-2xl overflow-hidden border border-white/5">

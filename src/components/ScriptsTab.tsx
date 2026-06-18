@@ -6,7 +6,6 @@ import {
   BookOpen,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   ExternalLink,
   FileText,
   Headphones,
@@ -377,7 +376,6 @@ interface SectionBlockProps {
 function SectionBlock({
   section,
   readOnly,
-  sectionIdx,
   hasMultipleSections,
   onItemChange,
   onItemDelete,
