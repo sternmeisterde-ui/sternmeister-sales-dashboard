@@ -119,9 +119,11 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true },
+  // Коммерсы: «Звонки» и «Оценка критериев» открыты всем (в т.ч. менеджерам) —
+  // adminOnlyByDept.b2b=false. У Госников остаются admin-only.
+  { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true, adminOnlyByDept: { b2b: false } },
   { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
-  { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true, labelByDept: { b2b: "Оценка критериев" } },
+  { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true, adminOnlyByDept: { b2b: false }, labelByDept: { b2b: "Оценка критериев" } },
   { id: "tracking", icon: Activity, label: "Активность", adminOnly: true, adminOnlyByDept: { b2b: false } },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
   { id: "looker", icon: Database, label: "Looker", adminOnly: true },
