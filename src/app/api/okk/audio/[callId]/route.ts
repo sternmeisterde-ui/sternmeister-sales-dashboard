@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls } from "@/lib/db/schema-okk";
 import { eq } from "drizzle-orm";
+import { recordingAuthHeaders } from "@/lib/telephony/recordings";
 
 // UUID validation regex
 const UUID_RE =
@@ -46,6 +47,10 @@ export async function GET(
     const fetchHeaders: Record<string, string> = { Accept: "audio/mpeg, audio/ogg, audio/webm, audio/*" };
     const rangeHeader = request.headers.get("Range");
     if (rangeHeader) fetchHeaders["Range"] = rangeHeader;
+    // Provider-specific auth: CloudTalk recordings need Basic-auth, otherwise
+    // the upstream returns 401 (b2b playback was silently broken). CallGear
+    // media URLs need none. See src/lib/telephony/recordings.ts.
+    Object.assign(fetchHeaders, recordingAuthHeaders(recordingUrl));
 
     const upstream = await fetch(recordingUrl, { headers: fetchHeaders });
 
