@@ -385,3 +385,31 @@ export const leadContactLinks = analyticsSchema.table(
       .where(sql`is_active = TRUE`),
   ],
 );
+
+// Состояние выгрузки звонков контакта на Google Drive. Заполняется ETL-шагом
+// detect-won-exports (B2B-лид в Рассрочка/WON → pending) и обрабатывается
+// воркером /api/exports/process/tick. См. migration 0025 и docs ниже.
+// Идемпотентность по lead_id (одна won-сделка = одна папка по дате оплаты).
+export const contactCallExports = analyticsSchema.table(
+  "contact_call_exports",
+  {
+    leadId: bigint("lead_id", { mode: "number" }).primaryKey(),
+    contactId: bigint("contact_id", { mode: "number" }),
+    contactName: text("contact_name"),
+    // 'YYYY-MM-DD' в Berlin — она же часть имени папки (без TZ-двусмысленности).
+    paymentDate: text("payment_date"),
+    pipelineId: bigint("pipeline_id", { mode: "number" }),
+    statusId: bigint("status_id", { mode: "number" }),
+    status: text("status").default("pending").notNull(), // pending | done | error
+    gdriveFolderId: text("gdrive_folder_id"),
+    folderName: text("folder_name"),
+    callCount: integer("call_count").default(0).notNull(),
+    uploadedCount: integer("uploaded_count").default(0).notNull(),
+    attempts: integer("attempts").default(0).notNull(),
+    error: text("error"),
+    detectedAt: timestamp("detected_at").defaultNow().notNull(),
+    completedAt: timestamp("completed_at"),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => [index("idx_cce_status").on(t.status)],
+);

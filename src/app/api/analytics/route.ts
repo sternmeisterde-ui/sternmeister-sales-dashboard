@@ -101,9 +101,9 @@ interface TimeTreeNode {
   overall: number | null;
   scores: Record<string, number>;
 }
-// 4-й уровень — отдельный звонок/сделка (только OKK; у roleplay нет
-// kommo-сделок, там `calls` всегда пуст). overall = total_score звонка;
-// scores — его собственные баллы по колонкам.
+// 4-й уровень — отдельный звонок/сделка. У OKK несёт kommo-ссылку; у roleplay
+// kommoLead* = null (нет сделки), только аудио + транскрипт. overall =
+// total_score звонка; scores — его собственные баллы по колонкам.
 interface TimeTreeCall extends TimeTreeNode {
   callId: string;
   startedAt: string | null;       // ISO; время начала звонка (call_created_at)
@@ -751,7 +751,9 @@ async function fetchRoleplayData(
   const [rows, managers] = await Promise.all([
     db
       .select({
+        callId: callsTable.id,
         startedAt: callsTable.startedAt,
+        durationSeconds: callsTable.durationSeconds,
         score: callsTable.score,
         evaluationJson: callsTable.evaluationJson,
         userId: callsTable.userId,
@@ -780,6 +782,11 @@ async function fetchRoleplayData(
   // B2B: аккумулятор «менеджер × день» для дерева неделя→менеджер→дата.
   // Ключ — civil-день (см. fetchOkkData): дерево не зависит от groupBy.
   const managerDayAccMap = new Map<string, PeriodAcc>();
+  // 4-й уровень дерева: список ролевок на бакет «менеджер::день». В отличие от
+  // ОКК у ролевок нет kommo-сделки и направления — звонок несёт только аудио и
+  // транскрипт (читаются модалкой из R1/D1), kommoLead* остаются null, поэтому
+  // секции «Открыть в Kommo» / «Ссылка на сделку» в меню не рендерятся.
+  const managerDayCallsMap = new Map<string, TimeTreeCall[]>();
   const wantManagerTime = department === "b2b" && wantTree;
 
   let processedCount = 0;
@@ -819,11 +826,31 @@ async function fetchRoleplayData(
       const mdKey = `${mgrKey}::${toBerlinCivil(row.startedAt)}`;
       if (!managerDayAccMap.has(mdKey)) managerDayAccMap.set(mdKey, newAcc());
       const mdAcc = managerDayAccMap.get(mdKey)!;
+      // Отдельный аккумулятор на ЭТОТ звонок — тем же путём, что и дневной
+      // бакет, чтобы строка звонка сходилась со своим днём (см. fetchOkkData).
+      const callAcc = newAcc();
       if (isAllFunnels) {
-        processCallAsFunnel(mdAcc, row.score ?? null, funnelLabelForRoleplay(department, row.callType));
+        const funnel = funnelLabelForRoleplay(department, row.callType);
+        processCallAsFunnel(mdAcc, row.score ?? null, funnel);
+        processCallAsFunnel(callAcc, row.score ?? null, funnel);
       } else {
         processBlocks(blocks, mdAcc, row.score ?? null);
+        processBlocks(blocks, callAcc, row.score ?? null);
       }
+      const cAgg = aggAccs([callAcc]);
+      const list = managerDayCallsMap.get(mdKey) ?? [];
+      list.push({
+        callId: row.callId,
+        startedAt: row.startedAt.toISOString(),
+        durationSec: row.durationSeconds,
+        direction: null,       // ролевка — нет inbound/outbound
+        kommoLeadId: null,     // нет kommo-сделки
+        kommoLeadUrl: null,
+        callCount: 1,
+        overall: cAgg.overall,
+        scores: cAgg.scores,
+      });
+      managerDayCallsMap.set(mdKey, list);
     }
   }
 
@@ -874,8 +901,10 @@ async function fetchRoleplayData(
   } else {
     canonical = EMPTY_CANONICAL;
   }
-  // Roleplay не имеет kommo-сделок → 4-й уровень (звонки) пуст.
-  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap, new Map());
+  // 4-й уровень (отдельные ролевки) заполнен только для B2B (wantManagerTime);
+  // у ролевок нет kommo-сделки, поэтому в меню звонка доступны лишь
+  // «Прослушать» / «Транскрипт» (читаются модалкой из R1/D1).
+  return buildResponse(periods, accMap, managers, managerAccMap, "roleplay", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap, managerDayCallsMap);
 }
 
 // Roll up a set of per-(manager,day) accumulators into call-weighted scores.

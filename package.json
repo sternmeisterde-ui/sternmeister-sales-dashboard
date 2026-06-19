@@ -28,6 +28,7 @@
     "analytics:backfill:comms": "tsx scripts/backfill-comms.ts"
   },
   "dependencies": {
+    "@googleapis/drive": "^20.2.0",
     "@neondatabase/serverless": "^1.0.2",
     "@sentry/nextjs": "^10.45.0",
     "dotenv": "^17.3.1",
