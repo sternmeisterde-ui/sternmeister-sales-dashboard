@@ -22,7 +22,8 @@ interface ManagerBreakdown { id: string; name: string; overallScore: number | nu
 // B2B-only: дерево «неделя → менеджер → дата». overall = средний % за звонок;
 // scores — баллы по колонкам (ключ = имя блока ИЛИ "блок::критерий").
 interface TimeTreeNode { callCount: number; overall: number | null; scores: Record<string, number> }
-// 4-й уровень — отдельный звонок/сделка (только OKK).
+// 4-й уровень — отдельный звонок/сделка. У ролевок kommoLead* = null (нет
+// сделки) — в меню остаются только «Прослушать» / «Транскрипт».
 interface TimeTreeCall extends TimeTreeNode {
   callId: string;
   startedAt: string | null;
@@ -791,6 +792,7 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                 tree={data.timeTree}
                 blocks={data.blocks}
                 department={department}
+                source={source}
                 highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
@@ -1127,10 +1129,11 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, department, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
+  tree, blocks, department, source, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
   department: "b2g" | "b2b";
+  source: "okk" | "roleplay";
   highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
@@ -1453,6 +1456,7 @@ function CriteriaTimeTree({
       <CallMediaModal
         callId={mediaModal.callId}
         dept={department}
+        source={source}
         initialView={mediaModal.view}
         onClose={() => setMediaModal(null)}
       />
@@ -1463,9 +1467,10 @@ function CriteriaTimeTree({
 
 // ==================== Call media modal (audio + transcript) ====================
 
-function CallMediaModal({ callId, dept, initialView, onClose }: {
+function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   callId: string;
   dept: "b2g" | "b2b";
+  source: "okk" | "roleplay";
   initialView: "audio" | "transcript";
   onClose: () => void;
 }) {
@@ -1481,7 +1486,14 @@ function CallMediaModal({ callId, dept, initialView, onClose }: {
     // Свежий монтаж при каждом открытии → loading=true/error=null уже выставлены
     // начальным useState; здесь только асинхронный фетч (без sync setState в эффекте).
     let cancelled = false;
-    fetch(`/api/okk/calls/${callId}?dept=${dept}`)
+    // Ролевки живут в R1/D1 (эндпоинт `/api/calls/[id]?department=`), реальные
+    // звонки ОКК — в R2/D2 (`/api/okk/calls/[id]?dept=`). Обе ручки возвращают
+    // совместимую форму для модалки (name/date/callDuration/transcript/
+    // audioUrl/hasRecording).
+    const url = source === "roleplay"
+      ? `/api/calls/${callId}?department=${dept}`
+      : `/api/okk/calls/${callId}?dept=${dept}`;
+    fetch(url)
       .then((r) => r.json())
       .then((j) => {
         if (cancelled) return;
@@ -1491,7 +1503,7 @@ function CallMediaModal({ callId, dept, initialView, onClose }: {
       .catch(() => { if (!cancelled) setError("Ошибка загрузки"); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [callId, dept]);
+  }, [callId, dept, source]);
 
   // Esc закрывает модалку.
   useEffect(() => {
