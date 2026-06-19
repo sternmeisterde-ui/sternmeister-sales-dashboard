@@ -31,6 +31,7 @@ import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncClientRoleplays } from "./sync-client-roleplays";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
+import { detectWonExports } from "./detect-won-exports";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
 import { enrichTelephonyLeads } from "./enrich-telephony-leads";
 import { analyticsDb } from "@/lib/db/analytics";
@@ -73,7 +74,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays" | "detect-exports")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -101,6 +102,8 @@ export interface SyncResult {
   telephonyRowsLinked: number;
   /** Additional rows INSERTed by enrichment fan-out (one per extra lead) */
   telephonyRowsFannedOut: number;
+  /** B2B won/installment leads newly queued for Google Drive call export. */
+  exportsQueued: number;
   durationMs: number;
   /** Steps that threw — each kept the rest of the pipeline alive. */
   stepErrors: { step: string; message: string }[];
@@ -400,6 +403,13 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         stepErrors,
       );
 
+  // Очередь выгрузки звонков на Drive: B2B-сделки, попавшие в Рассрочка/WON.
+  // Лёгкий шаг (SELECT+INSERT), не зависит от Kommo-окна — гоняем каждый тик.
+  // Тяжёлую работу (скачать+залить) делает воркер /api/exports/process/tick.
+  const exportsQueued = skip.has("detect-exports")
+    ? 0
+    : await runStep("detect-won-exports", () => detectWonExports(), 0, stepErrors);
+
   const result: SyncResult = {
     leads: leadsCount,
     contacts: contactsCount,
@@ -410,6 +420,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     telephonyLegs,
     telephonyRowsLinked,
     telephonyRowsFannedOut,
+    exportsQueued,
     durationMs: Date.now() - t0,
     stepErrors,
   };
@@ -425,6 +436,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `linked=${result.telephonyRowsLinked}`,
     `fannedOut=${result.telephonyRowsFannedOut}`,
     `sla=${result.slaRows}`,
+    `exportsQueued=${result.exportsQueued}`,
     `stepErrors=${stepErrors.length}`,
   );
 

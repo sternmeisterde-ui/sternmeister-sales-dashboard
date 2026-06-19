@@ -40,6 +40,12 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Call-export worker tick (etl-cron compose service) — CRON_SECRET-authed.
+  // Exact match: the rest of /api/exports/** stays session-protected.
+  if (pathname === "/api/exports/process/tick") {
+    return NextResponse.next();
+  }
+
   // Always allow the login page
   if (pathname === "/login") {
     return NextResponse.next();
