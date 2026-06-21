@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy } from "lucide-react";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie } from "lucide-react";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -74,6 +75,7 @@ type SortKey =
   | "language"
   | "dc"
   | "aa"
+  | "roleplays"
   | "activity"
   | "score";
 type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
@@ -101,6 +103,7 @@ const COLUMNS: {
   { key: "language", label: "Язык", align: "center", value: (c) => LANG_RANK[c.languageBucket] },
   { key: "dc", label: "ДЦ", align: "center", value: (c) => c.dc.latest ?? -1 },
   { key: "aa", label: "АА", align: "center", value: (c) => c.aa.latest ?? -1 },
+  { key: "roleplays", label: "Ролевки", align: "center", value: (c) => c.roleplayCount },
   { key: "activity", label: "Активность", align: "right", value: (c) => c.daysSinceLastTouch ?? Number.POSITIVE_INFINITY },
   { key: "score", label: "Готовность", align: "right", value: (c) => c.score },
 ];
@@ -207,6 +210,12 @@ function ClientTable({
                   <td className="px-3 py-2 text-center text-slate-300">{LANG_LABEL[c.languageBucket]}</td>
                   <td className="px-3 py-2 text-center"><SideCell side={c.dc} /></td>
                   <td className="px-3 py-2 text-center"><SideCell side={c.aa} /></td>
+                  <td
+                    className="px-3 py-2 text-center text-slate-300 tabular-nums"
+                    title={`бот: ${c.botRoleplayCount} · со звонков: ${c.roleplayCount - c.botRoleplayCount}`}
+                  >
+                    {c.roleplayCount || <span className="text-slate-600">—</span>}
+                  </td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
                     {c.daysSinceLastTouch === null
                       ? "—"
@@ -242,6 +251,57 @@ function ClientTable({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Распределение клиентов по числу проведённых ролевок (бот + звонки). Считается
+// из уже загруженных клиентов, поэтому уважает фильтр по дате термина.
+const RP_BUCKETS: { key: string; label: string; min: number; max: number; color: string }[] = [
+  { key: "0", label: "0 ролевок", min: 0, max: 0, color: "#64748b" },
+  { key: "1-2", label: "1–2", min: 1, max: 2, color: "#f0b63d" },
+  { key: "3-4", label: "3–4", min: 3, max: 4, color: "#8fbe91" },
+  { key: "5+", label: "5+", min: 5, max: Number.POSITIVE_INFINITY, color: "#18a98b" },
+];
+
+function RoleplayDistribution({ data }: { data: ClientsResult }) {
+  const dist = useMemo(() => {
+    const all = [...data.active.clients, ...data.won.clients];
+    return RP_BUCKETS.map((b) => ({
+      label: b.label,
+      color: b.color,
+      value: all.filter((c) => c.roleplayCount >= b.min && c.roleplayCount <= b.max).length,
+    }));
+  }, [data]);
+  const total = dist.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <ChartPie className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Распределение по числу ролевок</span>
+        <span className="text-xs text-slate-500 tabular-nums">{total} клиентов</span>
+      </div>
+      <div className="h-52">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie data={dist} dataKey="value" nameKey="label" innerRadius={48} outerRadius={78} paddingAngle={2}>
+              {dist.map((d) => (
+                <Cell key={d.label} fill={d.color} stroke="transparent" />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              formatter={(v) => {
+                const n = typeof v === "number" ? v : 0;
+                return [`${n} (${total ? Math.round((n / total) * 100) : 0}%)`, "клиентов"];
+              }}
+            />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -355,6 +415,7 @@ export default function ClientsView({ filters: _filters }: Props) {
 
       {data && (
         <>
+          <RoleplayDistribution data={data} />
           <ClientTable
             group={data.active}
             title="Клиенты в работе"
