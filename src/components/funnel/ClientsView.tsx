@@ -16,6 +16,13 @@ import ClientDrawer from "@/components/funnel/ClientDrawer";
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
 const cache = new Map<string, ClientsResult>();
 
+// Сколько строк добавляет «Показать ещё».
+const PAGE_SIZE = 50;
+// Потолок выдачи бэка (роут принимает limit≤1000). Компьют считает всех, режет
+// здесь — без лимита потеряли бы хвост низкого score. Клиентская пагинация ниже
+// постранично показывает уже полученный набор.
+const FETCH_LIMIT = 1000;
+
 interface Props {
   filters: FunnelFiltersState;
 }
@@ -132,6 +139,19 @@ function ClientTable({
     return sort.dir === "desc" ? sorted.reverse() : sorted;
   }, [group.clients, sort]);
 
+  // Клиентская пагинация: показываем первые `visible`, «Показать ещё» добавляет PAGE_SIZE.
+  const [visible, setVisible] = useState(PAGE_SIZE);
+  // Новая порция данных (смена периода) — сбрасываем на первую страницу. Приём
+  // React «скорректировать state при смене пропа» без эффекта: сверяем с предыдущей
+  // ссылкой прямо в рендере (см. react.dev/learn/you-might-not-need-an-effect).
+  const [seenClients, setSeenClients] = useState(group.clients);
+  if (seenClients !== group.clients) {
+    setSeenClients(group.clients);
+    setVisible(PAGE_SIZE);
+  }
+  const shownRows = rows.slice(0, visible);
+  const hasMore = visible < rows.length;
+
   if (group.shown === 0) return null;
 
   return (
@@ -140,7 +160,7 @@ function ClientTable({
         {icon}
         <span className="text-sm font-medium text-slate-200">{title}</span>
         <span className="text-xs text-slate-500 tabular-nums">
-          показано {group.shown} из {group.total}
+          показано {Math.min(visible, rows.length)} из {group.total}
         </span>
       </div>
       <div className="overflow-auto max-h-[440px]">
@@ -166,7 +186,7 @@ function ClientTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((c) => {
+            {shownRows.map((c) => {
               const cat = CATEGORY[c.category];
               return (
                 <tr
@@ -206,6 +226,22 @@ function ClientTable({
           </tbody>
         </table>
       </div>
+      {hasMore && (
+        <div className="border-t border-white/5 px-4 py-2 flex items-center justify-center gap-3">
+          <button
+            onClick={() => setVisible((v) => v + PAGE_SIZE)}
+            className="text-xs text-slate-300 hover:text-white px-3 py-1 rounded-md border border-white/10 hover:border-white/20"
+          >
+            Показать ещё {Math.min(PAGE_SIZE, rows.length - visible)}
+          </button>
+          <button
+            onClick={() => setVisible(rows.length)}
+            className="text-xs text-slate-500 hover:text-slate-300"
+          >
+            Показать все ({rows.length})
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -249,7 +285,7 @@ export default function ClientsView({ filters: _filters }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ termin_from: tFrom });
+      const params = new URLSearchParams({ termin_from: tFrom, limit: String(FETCH_LIMIT) });
       if (tTo) params.set("termin_to", tTo);
       const res = await fetch(`/api/funnel/clients?${params}`, { signal: ctrl.signal });
       if (!res.ok) {
