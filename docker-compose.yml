@@ -37,6 +37,9 @@ services:
       # Without this whitelist entry the var is invisible in the container and
       # src/lib/db/daily-db.ts falls back to a hardcoded URL (to be removed).
       - DAILY_DATABASE_URL=${DAILY_DATABASE_URL}
+      # berater_bot Neon (read-only) — bot-roleplay enrichment of the funnel
+      # «Клиенты» scoring. OPTIONAL: absent → graceful no-op. Set value in Dokploy.
+      - BERATER_BOT_DATABASE_URL=${BERATER_BOT_DATABASE_URL}
 
       # Roleplay audio servers
       - D1_API_URL=${D1_API_URL}
