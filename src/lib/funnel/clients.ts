@@ -16,6 +16,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { unwrapRows } from "./compute";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
+import { getBotRoleplaysForLeads } from "./bot-roleplays";
 import {
   computeReadiness,
   type LanguageBucket,
@@ -54,6 +55,12 @@ export interface ClientRow {
   terminAtIso: string | null;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
+  /** Тренировок с ботом ролевок (репо berater_bot). */
+  botRoleplayCount: number;
+  /** Последняя самооценка готовности ботом (overall_readiness). */
+  botLatestReadiness: string | null;
+  /** Суммарно ролевок (бот + звонковые) — фактор скоринга. */
+  roleplayCount: number;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -92,6 +99,9 @@ interface ScoredLead {
   terminAtIso: string | null;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
+  botRoleplayCount: number;
+  botLatestReadiness: string | null;
+  roleplayCount: number;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -137,9 +147,10 @@ export async function computeClients(
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
-  const [roleplays, lastTouch] = await Promise.all([
+  const [roleplays, lastTouch, botRoleplays] = await Promise.all([
     getRoleplaysForLeads(ids),
     fetchLastTouchMap(ids),
+    getBotRoleplaysForLeads(ids), // graceful no-op без BERATER_BOT_DATABASE_URL
   ]);
 
   const nowMs = Date.now();
@@ -168,11 +179,17 @@ export async function computeClients(
         ? null
         : Math.max(0, Math.floor((nowMs - Date.parse(lastTouchIso)) / 86_400_000));
 
+    // Суммарная практика: тренировки с ботом + звонковые ролевки (обе стороны).
+    const bot = botRoleplays.get(leadId);
+    const botCount = bot?.count ?? 0;
+    const roleplayCount = botCount + dc.attempts.length + aa.attempts.length;
+
     const readiness = computeReadiness({
       languageBucket: bucket,
       activeSide,
       activeAvg,
       daysSinceLastTouch: days,
+      roleplayCount,
     });
 
     const lead: ScoredLead = {
@@ -184,6 +201,9 @@ export async function computeClients(
       terminAtIso,
       lastTouchAtIso: lastTouchIso,
       daysSinceLastTouch: days,
+      botRoleplayCount: botCount,
+      botLatestReadiness: bot?.latestReadiness ?? null,
+      roleplayCount,
       score: readiness.score,
       category: readiness.category,
       factors: readiness.factors,
@@ -248,6 +268,9 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     terminAtIso: s.terminAtIso,
     lastTouchAtIso: s.lastTouchAtIso,
     daysSinceLastTouch: s.daysSinceLastTouch,
+    botRoleplayCount: s.botRoleplayCount,
+    botLatestReadiness: s.botLatestReadiness,
+    roleplayCount: s.roleplayCount,
     score: s.score,
     category: s.category,
     factors: s.factors,

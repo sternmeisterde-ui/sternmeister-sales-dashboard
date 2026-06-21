@@ -12,8 +12,14 @@
  * Если на актуальной стадии ролевки НЕТ — это реальный пробел (клиент не
  * подготовлен) → вклад 0, а не исключение.
  *
+ * Фактор «Количество ролевок» (10%) — суммарная практика клиента: тренировки с
+ * ботом (репо berater_bot) + звонковые ролевки с менеджером. Количество ≠ качество
+ * (его даёт фактор «Готовность ролевок»), но больше практики → выше готовность
+ * (как roleplay-коэффициент в berater-dashboard).
+ *
  * Отложены вне-MVP факторы (исключены из знаменателя): ОКК-агрегаты (§8 даёт 15%)
- * и «Стадия CRM» (5%). MVP-знаменатель = язык 20 + ролевки 35 + активность 5 = 0.60.
+ * и «Стадия CRM» (5%). Знаменатель = язык 20 + ролевки 35 + активность 5 +
+ * количество 10 = 0.70.
  *
  * Score всегда с breakdown — правило §8 «должен быть объяснимым».
  */
@@ -44,6 +50,8 @@ export interface ReadinessInput {
   activeAvg: number | null;
   /** Дней с последнего касания или null. */
   daysSinceLastTouch: number | null;
+  /** Суммарно ролевок (бот + звонковые), или null если неизвестно. */
+  roleplayCount: number | null;
 }
 
 // §8: B2/C1/C2 = 100, B1 = 80, A2 = 50, A1 = 10, unknown = 30 (a1→a2, c2→c1).
@@ -63,6 +71,17 @@ function activityScore(days: number | null): number | null {
   return 0;
 }
 
+// Кол-во проведённых ролевок → 0..100 (кривая вовлечённости, как roleplay-коэф
+// в berater-dashboard: 0 / 1–2 / 3–4 / 5+).
+function roleplayCountScore(count: number | null): number | null {
+  if (count === null) return null;
+  if (count <= 0) return 0;
+  if (count <= 1) return 40;
+  if (count <= 2) return 60;
+  if (count <= 4) return 80;
+  return 100;
+}
+
 function categorize(score: number): ReadinessCategory {
   if (score >= 75) return "hot";
   if (score >= 50) return "warm";
@@ -73,11 +92,13 @@ export function computeReadiness(input: ReadinessInput): ReadinessScore {
   const roleplay =
     input.activeAvg === null ? 0 : Math.min(100, Math.max(0, input.activeAvg * 20));
   const activity = activityScore(input.daysSinceLastTouch);
+  const count = roleplayCountScore(input.roleplayCount);
   const sideLabel = input.activeSide === "dc" ? "ДЦ" : "АА";
 
   const factors: ScoreFactor[] = [
     { key: "language", label: "Язык", weight: 0.2, value: LANGUAGE_SCORE[input.languageBucket], present: true },
     { key: "roleplay", label: `Готовность ролевок ${sideLabel}`, weight: 0.35, value: roleplay, present: input.activeAvg !== null },
+    { key: "roleplay_count", label: "Количество ролевок", weight: 0.1, value: count ?? 0, present: count !== null },
     { key: "activity", label: "Активность 7 дней", weight: 0.05, value: activity ?? 0, present: activity !== null },
   ];
 
