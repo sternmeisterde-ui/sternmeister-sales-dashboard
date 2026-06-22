@@ -231,6 +231,8 @@ export async function getCallsByDate(
 
       const billsec = Number(cdr.billsec) || 0;
       const talk = Number(cdr.talking_time) || 0;
+      // CloudTalk gives an exact ring/queue time before pickup.
+      const wait = Math.max(0, Number(cdr.waiting_time) || 0);
 
       calls.push({
         source: "cloudtalk",
@@ -244,6 +246,7 @@ export async function getCallsByDate(
         startedAt: parseStartedAt(cdr.started_at),
         durationSec: billsec,
         talkDurationSec: talk,
+        waitSec: wait,
         status: classifyStatus(cdr),
         finishReason: cdr.is_voicemail ? "voicemail" : "",
         recordingUrl: cdr.recorded && cdr.recording_link ? cdr.recording_link : null,

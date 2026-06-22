@@ -32,6 +32,7 @@ interface AnalyticsRow {
   calls_total: string | number;
   calls_connected: string | number;
   outgoing_total: string | number;
+  outgoing_connected: string | number;
   incoming_total: string | number;
   missed_incoming: string | number;
   total_duration_s: string | number;
@@ -114,6 +115,7 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type LIKE 'call%')                                       AS calls_total,
       COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                     AS calls_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                     AS outgoing_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
       COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s
@@ -137,6 +139,7 @@ async function fetchCallMetricsByMaster(
       missedIncoming: Number(row.missed_incoming),
       incomingTotal: Number(row.incoming_total),
       outgoingTotal: Number(row.outgoing_total),
+      outgoingConnected: Number(row.outgoing_connected),
     });
   }
 
@@ -586,6 +589,168 @@ export async function getFrozenLeadsTeam(
 ): Promise<number> {
   const { team } = await getFrozenLeadsCombined([], department, fromTs, toTs);
   return team;
+}
+
+/**
+ * Dept-wide average answer-wait (ring/queue seconds before pickup) for the
+ * B2B «Ожидание (сек)» tile. Averaged over ANSWERED calls only (duration >= 1)
+ * since "ожидание ответа" is undefined for calls nobody picked up. Deduped by
+ * communication_id so Pattern-A fan-out doesn't skew the mean. wait_seconds is
+ * NULL on Kommo/message rows — AVG skips those automatically.
+ */
+export async function getAnalyticsAvgWaitSeconds(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return 0;
+  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(pipelineIds, fromTs, toTs));
+}
+
+async function fetchAvgWaitSeconds(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ avg_wait: string | number | null }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, duration, wait_seconds
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
+    SELECT AVG(wait_seconds)::float AS avg_wait
+    FROM deduped
+    WHERE communication_type LIKE 'call%' AND duration >= 1
+  `);
+
+  const v = result.rows[0]?.avg_wait;
+  return v == null ? 0 : Math.round(Number(v));
+}
+
+/**
+ * Dept-wide average "time-to-first-call" SLA in MINUTES — creation → first
+ * outbound call, business-hours seconds. Reads analytics.sla, preferring the
+ * frozen integrator snapshot (COALESCE) like the Looker views so historical
+ * leads match. Averaged over leads CREATED in [from, to] whose pipeline is in
+ * the department and that actually got a first call (value not null).
+ */
+export async function getAnalyticsSlaFirstCallMinutes(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return 0;
+  const cacheKey = `sla-first-call-min:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs));
+}
+
+async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ avg_min: string | number | null }>(sql`
+    SELECT AVG(
+      COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds)
+    )::float / 60.0 AS avg_min
+    FROM analytics.sla
+    WHERE lead_created_at >= ${fromDate}
+      AND lead_created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+      AND COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds) IS NOT NULL
+  `);
+
+  const v = result.rows[0]?.avg_min;
+  return v == null ? 0 : Math.round(Number(v));
+}
+
+/**
+ * Dept-wide "lost calls" count for the B2B «Потерянные» tile.
+ *
+ * Definition (per user spec 2026-06-23): an OUTBOUND no-answer attempt
+ * (call_out, duration < 1) made during business hours 09:00–19:00 Berlin,
+ * for which NO further outbound call to the same number happened within the
+ * next 15 minutes. "Перезвонили" = any call_out to that number in the window,
+ * connected or not — so only the trailing abandoned attempt to a number counts.
+ *
+ * Phone match is on the last 10 digits (numbers arrive in mixed formats:
+ * `+4915120489078`, `015120489078`, `49…`), which collapses country-code /
+ * leading-zero variants. Pattern-A fan-out is collapsed via DISTINCT ON before
+ * counting so one CDR isn't counted N times.
+ *
+ * Note: the 15-min callback window is wall-clock — a 18:55 miss whose callback
+ * lands 19:05 still counts as answered. Only the ORIGINAL miss must be in hours.
+ */
+export async function getAnalyticsLostCalls(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return 0;
+  const cacheKey = `lost-calls:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCalls(pipelineIds, fromTs, toTs));
+}
+
+async function fetchLostCalls(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ lost: string | number }>(sql`
+    WITH outs AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id,
+        created_at,
+        duration,
+        right(regexp_replace(phone, '\D', '', 'g'), 10) AS pnorm
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND communication_type = 'call_out'
+        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND phone IS NOT NULL AND phone <> ''
+      ORDER BY communication_id, lead_id NULLS LAST
+    ),
+    candidates AS (
+      SELECT communication_id, created_at, pnorm
+      FROM outs
+      WHERE (duration IS NULL OR duration < 1)
+        AND pnorm <> ''
+        AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
+        AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
+    )
+    SELECT COUNT(*) AS lost
+    FROM candidates c
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM analytics.communications cb
+      WHERE cb.communication_type = 'call_out'
+        AND (cb.pipeline_id IN (${pipelineList}) OR cb.pipeline_id IS NULL)
+        AND cb.communication_id <> c.communication_id
+        AND cb.created_at > c.created_at
+        AND cb.created_at <= c.created_at + interval '15 minutes'
+        AND right(regexp_replace(cb.phone, '\D', '', 'g'), 10) = c.pnorm
+    )
+  `);
+
+  return Number(result.rows[0]?.lost ?? 0);
 }
 
 export interface DailyCallBucket {

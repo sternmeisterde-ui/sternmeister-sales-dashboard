@@ -36,6 +36,9 @@ import {
   getAnalyticsDailyTrendByLine,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
+  getAnalyticsAvgWaitSeconds,
+  getAnalyticsSlaFirstCallMinutes,
+  getAnalyticsLostCalls,
   type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
@@ -588,7 +591,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, cohortStatusRows, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw] = await Promise.all([
+    const [snapshotLeads, cohortStatusRows, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -646,6 +649,29 @@ async function buildDashboardResponse(
             return null;
           })
         : Promise.resolve(null),
+      // B2B-only KPI tiles: average answer-wait (sec) and time-to-first-call
+      // SLA (min). Cheap dept-wide aggregates; skipped on B2G (those tiles
+      // aren't shown there).
+      department === "b2b"
+        ? getAnalyticsAvgWaitSeconds(department, from, to).catch((e) => {
+            console.error("[Dashboard] avg wait failed:", e);
+            return 0;
+          })
+        : Promise.resolve(0),
+      department === "b2b"
+        ? getAnalyticsSlaFirstCallMinutes(department, from, to).catch((e) => {
+            console.error("[Dashboard] sla first-call failed:", e);
+            return 0;
+          })
+        : Promise.resolve(0),
+      // B2B «Потерянные»: outbound no-answer attempts with no callback to the
+      // same number within 15 min (business hours 09–19 Berlin).
+      department === "b2b"
+        ? getAnalyticsLostCalls(department, from, to).catch((e) => {
+            console.error("[Dashboard] lost calls failed:", e);
+            return 0;
+          })
+        : Promise.resolve(0),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -798,6 +824,13 @@ async function buildDashboardResponse(
         missedIncoming: todaySummary.missedIncoming,
         incomingTotal: todaySummary.incomingTotal,
         outgoingTotal: todaySummary.outgoingTotal,
+        // Outgoing answered + answer-wait + first-call SLA drive the B2B
+        // 7-tile layout. outgoingConnected sums fine across managers;
+        // avgWaitSeconds / slaFirstCallMin are dept-wide averages (0 on B2G).
+        outgoingConnected: todaySummary.outgoingConnected ?? 0,
+        avgWaitSeconds,
+        slaFirstCallMin,
+        lostCalls,
         overdueTasks: totalOverdue,
         revenue: todayRevenue,
         managersCount: allManagers.length,

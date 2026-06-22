@@ -117,6 +117,9 @@ function callToCommRow(
     // row (raw + fanned-out enriched copies) so the enrichment scan can find
     // un-enriched rows by `WHERE lead_id IS NULL AND phone IS NOT NULL`.
     phone: call.phone ?? null,
+    // Ring/queue seconds before pickup — copied verbatim into fan-out rows by
+    // enrich-telephony-leads so the per-CDR value is consistent across copies.
+    waitSeconds: call.waitSec ?? null,
   };
 }
 

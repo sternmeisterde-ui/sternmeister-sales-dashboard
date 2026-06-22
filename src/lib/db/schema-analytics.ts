@@ -153,6 +153,10 @@ export const communications = analyticsSchema.table(
     // enrichTelephonyLeads consumes it to resolve phone→lead via Kommo
     // contacts). NULL on Kommo-sourced and message rows. Added in 0005.
     phone: text("phone"),
+    // Время ожидания ответа абонентом (сек) — только телефонные строки.
+    // CloudTalk: точное `waiting_time`. CallGear: приближение total−talk.
+    // NULL на Kommo-строках и сообщениях. Added in 0026.
+    waitSeconds: integer("wait_seconds"),
   },
   (t) => [
     index().on(t.leadId),

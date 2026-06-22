@@ -90,6 +90,10 @@ export interface UserCallMetrics {
   missedIncoming: number;      // missed incoming calls
   incomingTotal: number;       // total incoming calls
   outgoingTotal: number;       // total outgoing calls
+  // Outgoing calls that were answered (call_out with duration >= 1). Drives the
+  // B2B «Принятых» tile and the «% дозвона» = outgoingConnected / outgoingTotal.
+  // Optional: only the analytics-sourced paths populate it. Defaults to 0.
+  outgoingConnected?: number;
 }
 
 export interface UserLeadMetrics {
@@ -350,6 +354,7 @@ export function sumCallMetrics(metrics: UserCallMetrics[]): UserCallMetrics {
     missedIncoming: 0,
     incomingTotal: 0,
     outgoingTotal: 0,
+    outgoingConnected: 0,
   };
 
   for (const m of metrics) {
@@ -359,6 +364,7 @@ export function sumCallMetrics(metrics: UserCallMetrics[]): UserCallMetrics {
     sum.missedIncoming += m.missedIncoming;
     sum.incomingTotal += m.incomingTotal;
     sum.outgoingTotal += m.outgoingTotal;
+    sum.outgoingConnected = (sum.outgoingConnected ?? 0) + (m.outgoingConnected ?? 0);
   }
 
   sum.dialPercent = sum.callsTotal > 0
