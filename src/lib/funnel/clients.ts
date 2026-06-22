@@ -13,9 +13,12 @@
 
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
+import { db } from "@/lib/db/index";
 import { unwrapRows } from "./compute";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
+import { getBotRoleplaysForLeads } from "./bot-roleplays";
+import { getOkkByLead } from "./okk-by-lead";
 import {
   computeReadiness,
   type LanguageBucket,
@@ -25,6 +28,25 @@ import {
 
 const BERATER = B2G_PIPELINES.BERATER;
 const KOMMO_BASE = "https://sternmeister.kommo.com/leads/detail";
+
+// «Стадия CRM» (ТЗ §7): позиция статуса Бератера по пути к Гутшайну → 0..100.
+// Немапленные статусы (LOST и пр.) → фактор исключается из скоринга.
+const STAGE_SCORE: Record<number, number> = {
+  [BERATER_STATUSES.RECEIVED_FROM_FIRST]: 15,
+  [BERATER_STATUSES.DELAYED_START]: 18,
+  [BERATER_STATUSES.DOVEDENIE]: 22,
+  [BERATER_STATUSES.CONSULT_BEFORE_DC]: 35,
+  [BERATER_STATUSES.TERM_DC_CANCELLED]: 40,
+  [BERATER_STATUSES.CONSULT_BEFORE_DC_DONE]: 50,
+  [BERATER_STATUSES.TERM_DC_DONE]: 60,
+  [BERATER_STATUSES.CONSULT_BEFORE_AA]: 70,
+  [BERATER_STATUSES.TERM_AA]: 75,
+  [BERATER_STATUSES.TERM_AA_CANCELLED]: 65,
+  [BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]: 85,
+  [BERATER_STATUSES.BERATER_REVIEW]: 90,
+  [BERATER_STATUSES.APPEAL]: 55,
+  [BERATER_STATUSES.WON]: 100,
+};
 
 /**
  * Фильтр по дате термина (YYYY-MM-DD, Berlin).
@@ -52,8 +74,21 @@ export interface ClientRow {
   aa: ClientSideReadiness;
   /** Дата термина (попавшего в диапазон). */
   terminAtIso: string | null;
+  /** Есть ли термин (ДЦ/АА) в выбранном диапазоне = «актуальный» клиент.
+   *  false у won-бэклога, попавшего только по статусу WON. */
+  terminInRange: boolean;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
+  /** Тренировок с ботом ролевок (репо berater_bot). */
+  botRoleplayCount: number;
+  /** Последняя самооценка готовности ботом (overall_readiness). */
+  botLatestReadiness: string | null;
+  /** Ответственный менеджер (имя из master_managers) или null. */
+  managerName: string | null;
+  /** Дней на текущей стадии Бератера (по последней смене статуса). */
+  daysOnStage: number | null;
+  /** Проведённых консультаций (статусы ДЦ/АА «проведена»). */
+  consultations: number;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -77,6 +112,7 @@ type BaseRow = {
   statusId: string | number;
   status: string | null;
   languageLevel: string | null;
+  responsibleUserId: string | number | null;
   terminDate: string | Date | null;
   aaTerminDate: string | Date | null;
   dcInRange: boolean | null;
@@ -90,8 +126,14 @@ interface ScoredLead {
   dc: ClientSideReadiness;
   aa: ClientSideReadiness;
   terminAtIso: string | null;
+  terminInRange: boolean;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
+  botRoleplayCount: number;
+  botLatestReadiness: string | null;
+  managerName: string | null;
+  daysOnStage: number | null;
+  consultations: number;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -112,11 +154,12 @@ export async function computeClients(
   const baseRows = unwrapRows<BaseRow>(
     await analyticsDb.execute(sql`
       SELECT
-        lead_id        AS "leadId",
-        status_id      AS "statusId",
-        status         AS "status",
-        language_level AS "languageLevel",
-        termin_date    AS "terminDate",
+        lead_id             AS "leadId",
+        status_id           AS "statusId",
+        status              AS "status",
+        language_level      AS "languageLevel",
+        responsible_user_id AS "responsibleUserId",
+        termin_date         AS "terminDate",
         aa_termin_date AS "aaTerminDate",
         ${dcCond} AS "dcInRange",
         ${aaCond} AS "aaInRange"
@@ -137,12 +180,20 @@ export async function computeClients(
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
-  const [roleplays, lastTouch] = await Promise.all([
-    getRoleplaysForLeads(ids),
-    fetchLastTouchMap(ids),
-  ]);
+  const [roleplays, lastTouch, botRoleplays, roster, stageEntered, consults, okkByLead] =
+    await Promise.all([
+      getRoleplaysForLeads(ids),
+      fetchLastTouchMap(ids),
+      getBotRoleplaysForLeads(ids), // graceful no-op без BERATER_BOT_DATABASE_URL
+      fetchManagerNames(),
+      fetchCurrentStageEntered(ids),
+      fetchConsultationCounts(ids),
+      getOkkByLead(ids), // ОКК-агрегаты из D2
+    ]);
 
   const nowMs = Date.now();
+  // Без BERATER_BOT_DATABASE_URL бот-фактор не штрафует, а исключается (null).
+  const botConfigured = !!process.env.BERATER_BOT_DATABASE_URL;
   const activeScored: ScoredLead[] = [];
   const wonScored: ScoredLead[] = [];
 
@@ -168,11 +219,33 @@ export async function computeClients(
         ? null
         : Math.max(0, Math.floor((nowMs - Date.parse(lastTouchIso)) / 86_400_000));
 
+    // Бот-ролевки — отдельная сущность от звонковых (их качество в dc/aa). Не склеиваем.
+    const bot = botRoleplays.get(leadId);
+    const botCount = bot?.count ?? 0;
+
+    const uid = r.responsibleUserId === null ? null : Number(r.responsibleUserId);
+    const managerName = uid !== null ? roster.get(uid) ?? null : null;
+    const stageIso = stageEntered.get(leadId) ?? null;
+    const daysOnStage =
+      stageIso === null
+        ? null
+        : Math.max(0, Math.floor((nowMs - Date.parse(stageIso)) / 86_400_000));
+    const consultations = consults.get(leadId) ?? 0;
+    const okk = okkByLead.get(leadId);
+    const crmStageScore = STAGE_SCORE[Number(r.statusId)] ?? null;
+
     const readiness = computeReadiness({
       languageBucket: bucket,
       activeSide,
       activeAvg,
+      hasManagerRoleplay: dc.avg !== null || aa.avg !== null,
       daysSinceLastTouch: days,
+      botRoleplayCount: botConfigured ? botCount : null,
+      botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
+      consultationDone: consultations > 0,
+      consultOkk: okk?.consultOkk ?? null,
+      dealOkk: okk?.dealOkk ?? null,
+      crmStageScore,
     });
 
     const lead: ScoredLead = {
@@ -182,8 +255,14 @@ export async function computeClients(
       dc,
       aa,
       terminAtIso,
+      terminInRange: dcInRange || r.aaInRange === true,
       lastTouchAtIso: lastTouchIso,
       daysSinceLastTouch: days,
+      botRoleplayCount: botCount,
+      botLatestReadiness: bot?.latestReadiness ?? null,
+      managerName,
+      daysOnStage,
+      consultations,
       score: readiness.score,
       category: readiness.category,
       factors: readiness.factors,
@@ -196,7 +275,7 @@ export async function computeClients(
   const activeTop = activeScored.slice(0, limit);
   const wonTop = wonScored.slice(0, limit);
 
-  const names = await hydrateNames([
+  const names = await getLeadNames([
     ...activeTop.map((s) => s.leadId),
     ...wonTop.map((s) => s.leadId),
   ]);
@@ -246,8 +325,14 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     dc: s.dc,
     aa: s.aa,
     terminAtIso: s.terminAtIso,
+    terminInRange: s.terminInRange,
     lastTouchAtIso: s.lastTouchAtIso,
     daysSinceLastTouch: s.daysSinceLastTouch,
+    botRoleplayCount: s.botRoleplayCount,
+    botLatestReadiness: s.botLatestReadiness,
+    managerName: s.managerName,
+    daysOnStage: s.daysOnStage,
+    consultations: s.consultations,
     score: s.score,
     category: s.category,
     factors: s.factors,
@@ -279,6 +364,61 @@ function sideReadiness(
   };
 }
 
+// Имена менеджеров (master_managers, D1) по kommo_user_id — для колонки «Менеджер».
+async function fetchManagerNames(): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  const rows = unwrapRows<{ uid: string | number | null; name: string | null }>(
+    await db.execute(sql`
+      SELECT kommo_user_id AS "uid", name AS "name"
+      FROM master_managers
+      WHERE kommo_user_id IS NOT NULL
+    `)
+  );
+  for (const r of rows) {
+    if (r.uid === null || !r.name) continue;
+    out.set(Number(r.uid), r.name);
+  }
+  return out;
+}
+
+// Вход в ТЕКУЩУЮ стадию = последняя смена статуса (max event_at) по сделке.
+async function fetchCurrentStageEntered(leadIds: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (leadIds.length === 0) return out;
+  const idsIn = leadIds.join(",");
+  const rows = unwrapRows<{ leadId: string | number; entered: string | Date | null }>(
+    await analyticsDb.execute(sql`
+      SELECT lead_id AS "leadId", max(event_at) AS "entered"
+      FROM analytics.lead_status_changes
+      WHERE lead_id IN (${sql.raw(idsIn)}) AND event_at IS NOT NULL
+      GROUP BY lead_id
+    `)
+  );
+  for (const r of rows) {
+    if (r.entered === null) continue;
+    out.set(Number(r.leadId), toIso(r.entered) as string);
+  }
+  return out;
+}
+
+// Проведённых консультаций: входы в статусы ДЦ/АА «проведена».
+async function fetchConsultationCounts(leadIds: number[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (leadIds.length === 0) return out;
+  const idsIn = leadIds.join(",");
+  const rows = unwrapRows<{ leadId: string | number; c: string | number }>(
+    await analyticsDb.execute(sql`
+      SELECT lead_id AS "leadId", count(*) AS "c"
+      FROM analytics.lead_status_changes
+      WHERE lead_id IN (${sql.raw(idsIn)})
+        AND status_id IN (${BERATER_STATUSES.CONSULT_BEFORE_DC_DONE}, ${BERATER_STATUSES.CONSULT_BEFORE_AA_DONE})
+      GROUP BY lead_id
+    `)
+  );
+  for (const r of rows) out.set(Number(r.leadId), Number(r.c) || 0);
+  return out;
+}
+
 async function fetchLastTouchMap(leadIds: number[]): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (leadIds.length === 0) return out;
@@ -298,7 +438,7 @@ async function fetchLastTouchMap(leadIds: number[]): Promise<Map<number, string>
   return out;
 }
 
-async function hydrateNames(leadIds: number[]): Promise<Map<number, string>> {
+export async function getLeadNames(leadIds: number[]): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (leadIds.length === 0) return out;
   const idsIn = leadIds.join(",");

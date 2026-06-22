@@ -187,6 +187,14 @@ export default function ClientDrawer({ client, onClose }: Props) {
             />
             <SideDynamics label="ДЦ" side={client.dc} />
             <SideDynamics label="АА" side={client.aa} />
+            <Row
+              label="Ролевки с ботом"
+              value={
+                client.botRoleplayCount > 0
+                  ? `${client.botRoleplayCount}${client.botLatestReadiness ? ` · ${client.botLatestReadiness}` : ""}`
+                  : "нет"
+              }
+            />
           </div>
 
           {/* Breakdown score */}

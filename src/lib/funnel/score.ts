@@ -1,21 +1,32 @@
 /**
- * Скоринг «готовности» клиента к ближайшему термину (ТЗ §8).
+ * Скоринг «готовности» клиента к ближайшему термину (ТЗ §8), перевешенный на
+ * ВОВЛЕЧЁННОСТЬ по калибровке (2026-06-22). Бот и менеджер — РАЗДЕЛЬНО.
  *
- * ВАЖНО: это **«готовность»** (индикатор подготовленности/коучинга), НЕ предиктор
- * гутшайна — калибровка ОКК (n=36) показала AUC~0.51 (см. 02-доку §3.4).
+ * КАЛИБРОВКА по сделкам Бератера, ЗАКРЫТЫМ с 2026-04-01 (бот-эра; до апреля бота
+ * не было — старые сделки = шум): won=97 / lost=321. Сильнейшие дискриминаторы
+ * гутшайна — САМ ФАКТ ролевки: с менеджером (была у 25% won vs 7% lost, 3.6×) и с
+ * ботом (19% vs 5%, 3.8×). Значения (язык +6, качество ±0, ОКК +3) различают слабо.
+ * Поэтому главные веса — у факта менеджерской ролевки и у КОЛИЧЕСТВА бот-ролевок
+ * (берём кол-во, как в berater-dashboard), а качество-факторы малы.
  *
- * СТАДИЙНАЯ УСЛОВНОСТЬ: готовность считаем по той ролевке, что актуальна на
- * текущей стадии. ДЦ-фаза → смотрим ролевку ДЦ; АА-фаза (ДЦ-термин пройден) →
- * ролевку АА. Неактуальная сторона НЕ штрафует (исключена из знаменателя) —
- * иначе клиент на стадии ДЦ терял бы 20% за «отсутствие» АА-ролевки.
+ * Бот и менеджер — РАЗНЫЕ сущности, считаем РАЗДЕЛЬНО (НЕ склеиваем в один сигнал):
+ * — менеджер: «ролевка проведена» (бинарно, любая сторона) 20% + качество
+ *   (актуальная сторона, +10 за консультацию) 10%
+ * — бот: «кол-во ролевок» (0/40/60/80/100 по числу) 25% + качество (readiness) 5%
+ * Бот-факторы активны только при заданном BERATER_BOT_DATABASE_URL (иначе count=null
+ * → фактор исключается, не штрафует).
  *
- * Если на актуальной стадии ролевки НЕТ — это реальный пробел (клиент не
- * подготовлен) → вклад 0, а не исключение.
+ * СТАДИЙНАЯ УСЛОВНОСТЬ: качество менеджерской ролевки берём по актуальной стороне
+ * (ДЦ-фаза→ДЦ, АА-фаза→АА); неактуальная не штрафует. Но «ролевка проведена» —
+ * по ЛЮБОЙ стороне (факт практики важнее, чем на какой стадии).
  *
- * Отложены вне-MVP факторы (исключены из знаменателя): ОКК-агрегаты (§8 даёт 15%)
- * и «Стадия CRM» (5%). MVP-знаменатель = язык 20 + ролевки 35 + активность 5 = 0.60.
+ * Прочее: язык 15 + ОКК консультаций 10 + ОКК сделки 5 + стадия CRM 5 + активность 5.
+ * Σ весов = 1.00. Знаменатель = сумма весов ПРИСУТСТВУЮЩИХ факторов (нет данных →
+ * фактор исключается; «менеджер проведена» и «язык» есть всегда; «кол-во бота» —
+ * БОНУС: только при наличии тренировок, отсутствие не штрафует, штраф несёт mgr_done).
  *
- * Score всегда с breakdown — правило §8 «должен быть объяснимым».
+ * ⚠ Это РАНЖИРОВАНИЕ по готовности/вовлечённости, не точный предиктор гутшайна.
+ * Категории Hot≥75/Warm≥50/Cold<50. Score объясним (breakdown), §8.
  */
 
 export type LanguageBucket = "a2" | "b1" | "b2" | "c1" | "unknown";
@@ -42,8 +53,23 @@ export interface ReadinessInput {
   activeSide: "dc" | "aa";
   /** Средняя оценка ролевок актуальной стороны (1..5) или null. */
   activeAvg: number | null;
+  /** Была ли проведена ХОТЬ ОДНА ролевка с менеджером (любая сторона ДЦ/АА).
+   *  Для фактора «ролевка проведена» — факт практики, независимо от стадии. */
+  hasManagerRoleplay: boolean;
   /** Дней с последнего касания или null. */
   daysSinceLastTouch: number | null;
+  /** Тренировок с ботом ролевок, или null если неизвестно. */
+  botRoleplayCount: number | null;
+  /** Последняя самооценка готовности ботом (overall_readiness) или null. */
+  botReadiness: string | null;
+  /** Проведена ли консультация (для бонуса +10 к готовности ролевок, §4.2). */
+  consultationDone: boolean;
+  /** Средний ОКК консультационных звонков (0..100) или null. */
+  consultOkk: number | null;
+  /** Средний ОКК по всем звонкам сделки (0..100) или null. */
+  dealOkk: number | null;
+  /** Стадия в CRM → 0..100 (ближе к Гутшайну = выше) или null. */
+  crmStageScore: number | null;
 }
 
 // §8: B2/C1/C2 = 100, B1 = 80, A2 = 50, A1 = 10, unknown = 30 (a1→a2, c2→c1).
@@ -63,6 +89,28 @@ function activityScore(days: number | null): number | null {
   return 0;
 }
 
+// Кол-во тренировок с ботом → 0..100 (кривая вовлечённости, как roleplay-коэф
+// в berater-dashboard: 0 / 1–2 / 3–4 / 5+).
+function botCountScore(count: number | null): number | null {
+  if (count === null) return null;
+  if (count <= 0) return 0;
+  if (count <= 1) return 40;
+  if (count <= 2) return 60;
+  if (count <= 4) return 80;
+  return 100;
+}
+
+// Самооценка готовности ботом (overall_readiness) → 0..100.
+// «недостаточно данных»/неизвестно → null (фактор исключается).
+function botQualityScore(readiness: string | null): number | null {
+  if (!readiness) return null;
+  const r = readiness.toLowerCase();
+  if (r.includes("почти")) return 66; // «почти готов»
+  if (r.includes("нужна") || r.includes("подготов")) return 33; // «нужна подготовка»
+  if (r.includes("готов")) return 100; // «готов»
+  return null; // «недостаточно данных» и пр.
+}
+
 function categorize(score: number): ReadinessCategory {
   if (score >= 75) return "hot";
   if (score >= 50) return "warm";
@@ -70,19 +118,41 @@ function categorize(score: number): ReadinessCategory {
 }
 
 export function computeReadiness(input: ReadinessInput): ReadinessScore {
+  // Готовность ролевок актуальной стороны + бонус +10 за факт консультации (§4.2, cap 100).
   const roleplay =
-    input.activeAvg === null ? 0 : Math.min(100, Math.max(0, input.activeAvg * 20));
+    input.activeAvg === null
+      ? 0
+      : Math.min(100, Math.max(0, input.activeAvg * 20) + (input.consultationDone ? 10 : 0));
   const activity = activityScore(input.daysSinceLastTouch);
+  const botCount = botCountScore(input.botRoleplayCount);
+  const botQuality = botQualityScore(input.botReadiness);
   const sideLabel = input.activeSide === "dc" ? "ДЦ" : "АА";
 
+  // Бот и менеджер РАЗДЕЛЬНО (калибровка: факт менеджерской 3.6×, бот 3.8×). Главные
+  // веса — факт менеджерской ролевки (бинарно) и КОЛИЧЕСТВО бот-ролевок (градуировано
+  // по числу, как в berater-dashboard). Качество-факторы — слабые (±0..+6) → малый вес.
+  // bot_count — БОНУС: учитывается только при count>0 (поднимает тренировавшихся), а
+  // отсутствие бот-тренировок НЕ штрафует (как коэф 0.8–1.1 в berater-dashboard) —
+  // штраф за «не вовлечён» несёт «mgr_done»=0. Так же при не-сконфигуренном боте (null).
   const factors: ScoreFactor[] = [
-    { key: "language", label: "Язык", weight: 0.2, value: LANGUAGE_SCORE[input.languageBucket], present: true },
-    { key: "roleplay", label: `Готовность ролевок ${sideLabel}`, weight: 0.35, value: roleplay, present: input.activeAvg !== null },
+    { key: "bot_count", label: "Кол-во ролевок с ботом", weight: 0.25, value: botCount ?? 0, present: (input.botRoleplayCount ?? 0) > 0 },
+    { key: "mgr_done", label: "Ролевка с менеджером проведена", weight: 0.2, value: input.hasManagerRoleplay ? 100 : 0, present: true },
+    { key: "language", label: "Язык", weight: 0.15, value: LANGUAGE_SCORE[input.languageBucket], present: true },
+    { key: "roleplay", label: `Качество ролевок с менеджером (${sideLabel})`, weight: 0.1, value: roleplay, present: input.activeAvg !== null },
+    { key: "consult_okk", label: "ОКК консультаций", weight: 0.1, value: input.consultOkk ?? 0, present: input.consultOkk !== null },
+    { key: "bot_quality", label: "Качество ролевок с ботом", weight: 0.05, value: botQuality ?? 0, present: botQuality !== null },
+    { key: "deal_okk", label: "ОКК по сделке", weight: 0.05, value: input.dealOkk ?? 0, present: input.dealOkk !== null },
+    { key: "crm_stage", label: "Стадия CRM", weight: 0.05, value: input.crmStageScore ?? 0, present: input.crmStageScore !== null },
     { key: "activity", label: "Активность 7 дней", weight: 0.05, value: activity ?? 0, present: activity !== null },
   ];
 
-  const denom = factors.reduce((s, f) => s + f.weight, 0);
-  const acc = factors.reduce((s, f) => s + f.weight * f.value, 0);
-  const score = Math.round(acc / denom);
+  // Знаменатель — только присутствующие факторы. Отсутствующие данные (нет ОКК/
+  // касаний/бот-тренировок) НЕ тянут score вниз — фактор исключается из нормировки.
+  // Всегда присутствуют «Менеджер проведена» (0 если ролевки не было — штраф за
+  // невовлечённость) и «Язык»; «кол-во бота» — только при наличии тренировок (бонус).
+  const counted = factors.filter((f) => f.present);
+  const denom = counted.reduce((s, f) => s + f.weight, 0);
+  const acc = counted.reduce((s, f) => s + f.weight * f.value, 0);
+  const score = denom > 0 ? Math.round(acc / denom) : 0;
   return { score, category: categorize(score), factors };
 }

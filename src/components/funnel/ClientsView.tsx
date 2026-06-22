@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy } from "lucide-react";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X } from "lucide-react";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -11,6 +12,7 @@ import type {
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
+import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
 import ClientDrawer from "@/components/funnel/ClientDrawer";
 
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
@@ -40,6 +42,15 @@ const LANG_LABEL: Record<ClientRow["languageBucket"], string> = {
   c1: "C1",
   unknown: "—",
 };
+
+// Текст-подсказка «откуда статус»: показывает разбивку готовности по факторам
+// (вес + вклад каждого), чтобы Hot/Warm/Cold был объяснимым (ТЗ §8).
+function breakdownTitle(c: ClientRow): string {
+  const lines = c.factors.map(
+    (f) => `  • ${f.label} (${Math.round(f.weight * 100)}%): ${f.present ? f.value : "нет данных"}`,
+  );
+  return `Готовность ${c.score} → ${CATEGORY[c.category].label}\nИз чего складывается:\n${lines.join("\n")}`;
+}
 const LANG_RANK: Record<ClientRow["languageBucket"], number> = {
   unknown: 0,
   a2: 1,
@@ -70,10 +81,14 @@ function SideCell({ side }: { side: ClientSideReadiness }) {
 type SortKey =
   | "name"
   | "status"
+  | "manager"
+  | "stage_days"
   | "termin"
   | "language"
   | "dc"
   | "aa"
+  | "roleplays"
+  | "consultations"
   | "activity"
   | "score";
 type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
@@ -97,10 +112,14 @@ const COLUMNS: {
 }[] = [
   { key: "name", label: "Клиент", align: "left", value: (c) => c.name.toLowerCase() },
   { key: "status", label: "Этап", align: "left", value: (c) => (c.status ?? "").toLowerCase() },
+  { key: "manager", label: "Менеджер", align: "left", value: (c) => (c.managerName ?? "").toLowerCase() },
+  { key: "stage_days", label: "Дней на стадии", align: "right", value: (c) => c.daysOnStage ?? Number.POSITIVE_INFINITY },
   { key: "termin", label: "Термин", align: "center", value: (c) => (c.terminAtIso ? Date.parse(c.terminAtIso) : Number.POSITIVE_INFINITY) },
   { key: "language", label: "Язык", align: "center", value: (c) => LANG_RANK[c.languageBucket] },
   { key: "dc", label: "ДЦ", align: "center", value: (c) => c.dc.latest ?? -1 },
   { key: "aa", label: "АА", align: "center", value: (c) => c.aa.latest ?? -1 },
+  { key: "roleplays", label: "С ботом", align: "center", value: (c) => c.botRoleplayCount },
+  { key: "consultations", label: "Конс.", align: "center", value: (c) => c.consultations },
   { key: "activity", label: "Активность", align: "right", value: (c) => c.daysSinceLastTouch ?? Number.POSITIVE_INFINITY },
   { key: "score", label: "Готовность", align: "right", value: (c) => c.score },
 ];
@@ -203,10 +222,20 @@ function ClientTable({
                 >
                   <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate">{c.name}</td>
                   <td className="px-3 py-2 text-slate-400 max-w-[190px] truncate">{c.status ?? "—"}</td>
+                  <td className="px-3 py-2 text-slate-400 max-w-[150px] truncate">{c.managerName ?? "—"}</td>
+                  <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
+                    {c.daysOnStage === null ? "—" : `${c.daysOnStage}д`}
+                  </td>
                   <td className="px-3 py-2 text-center text-slate-300 tabular-nums">{fmtTermin(c.terminAtIso)}</td>
                   <td className="px-3 py-2 text-center text-slate-300">{LANG_LABEL[c.languageBucket]}</td>
                   <td className="px-3 py-2 text-center"><SideCell side={c.dc} /></td>
                   <td className="px-3 py-2 text-center"><SideCell side={c.aa} /></td>
+                  <td className="px-3 py-2 text-center text-slate-300 tabular-nums" title="тренировок с ботом">
+                    {c.botRoleplayCount || <span className="text-slate-600">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-center text-slate-300 tabular-nums">
+                    {c.consultations || <span className="text-slate-600">—</span>}
+                  </td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
                     {c.daysSinceLastTouch === null
                       ? "—"
@@ -215,7 +244,7 @@ function ClientTable({
                         : `${c.daysSinceLastTouch}д`}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <span className="inline-flex items-center gap-2">
+                    <span className="inline-flex items-center gap-2 cursor-help" title={breakdownTitle(c)}>
                       <span className="font-semibold text-slate-100 tabular-nums">{c.score}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
                     </span>
@@ -246,11 +275,325 @@ function ClientTable({
   );
 }
 
+// Распределение клиентов по числу тренировок С БОТОМ. Считается из загруженных
+// клиентов (актуальных по фильтру даты термина).
+const RP_BUCKETS: { key: string; label: string; min: number; max: number; color: string }[] = [
+  { key: "0", label: "0 ролевок", min: 0, max: 0, color: "#64748b" },
+  { key: "1-2", label: "1–2", min: 1, max: 2, color: "#f0b63d" },
+  { key: "3-4", label: "3–4", min: 3, max: 4, color: "#8fbe91" },
+  { key: "5+", label: "5+", min: 5, max: Number.POSITIVE_INFINITY, color: "#18a98b" },
+];
+
+// Строка drill-таблицы: имя (ссылка на Kommo) + основная метрика (про ролевки) +
+// опционально готовность (вторичный контекст, с разбивкой в тултипе).
+interface DrillRow {
+  key: string | number;
+  name: string;
+  kommoUrl: string;
+  primary: string;
+  readiness?: { score: number; category: ClientRow["category"]; title: string };
+}
+type DrillFn = (title: string, rows: DrillRow[]) => void;
+
+// ClientRow → DrillRow с метрикой «N ролевок с ботом» + готовность.
+function clientToDrillRow(c: ClientRow): DrillRow {
+  return {
+    key: c.leadId,
+    name: c.name,
+    kommoUrl: c.kommoUrl,
+    primary: `${c.botRoleplayCount} рол. с ботом`,
+    readiness: { score: c.score, category: c.category, title: breakdownTitle(c) },
+  };
+}
+
+function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
+  const all = clients;
+  const dist = useMemo(
+    () =>
+      RP_BUCKETS.map((b) => ({
+        label: b.label,
+        color: b.color,
+        min: b.min,
+        max: b.max,
+        value: all.filter((c) => c.botRoleplayCount >= b.min && c.botRoleplayCount <= b.max).length,
+      })),
+    [all],
+  );
+  const total = dist.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2">
+        <ChartPie className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Тренировки с ботом: распределение клиентов</span>
+        <span className="text-xs text-slate-500 tabular-nums">{total} клиентов</span>
+      </div>
+      <div className="text-[11px] text-slate-500 mb-1">
+        сколько клиентов сделали столько тренировок · клик по сектору — список
+      </div>
+      <div className="h-52">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={dist}
+              dataKey="value"
+              nameKey="label"
+              innerRadius={48}
+              outerRadius={78}
+              paddingAngle={2}
+              className="cursor-pointer"
+              onClick={(d) => {
+                const e = (d?.payload?.payload ?? d?.payload ?? d) as { label?: string; min?: number; max?: number };
+                const min = e.min ?? 0;
+                const max = e.max ?? Number.POSITIVE_INFINITY;
+                const rows = all
+                  .filter((c) => c.botRoleplayCount >= min && c.botRoleplayCount <= max)
+                  .sort((a, b) => b.botRoleplayCount - a.botRoleplayCount)
+                  .map(clientToDrillRow);
+                onDrill(`Тренировок с ботом: ${e.label ?? ""}`, rows);
+              }}
+            >
+              {dist.map((d) => (
+                <Cell key={d.label} fill={d.color} stroke="transparent" />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              itemStyle={{ color: "#e2e8f0" }}
+              labelStyle={{ color: "#94a3b8" }}
+              formatter={(v) => {
+                const n = typeof v === "number" ? v : 0;
+                return [`${n} (${total ? Math.round((n / total) * 100) : 0}%)`, "клиентов"];
+              }}
+            />
+            <Legend
+              wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }}
+              formatter={(value, entry) => `${value}: ${(entry?.payload as { value?: number })?.value ?? 0}`}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1", "unknown"];
+
+function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
+  const all = clients;
+  const dist = useMemo(
+    () => LANG_ORDER.map((b) => ({ label: LANG_LABEL[b], bucket: b, value: all.filter((c) => c.languageBucket === b).length })),
+    [all],
+  );
+  const total = dist.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Languages className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Уровни языка</span>
+      </div>
+      <div className="h-52">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={dist} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+            <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <Tooltip
+              cursor={{ fill: "rgba(255,255,255,0.04)" }}
+              contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              itemStyle={{ color: "#e2e8f0" }}
+              labelStyle={{ color: "#94a3b8" }}
+              formatter={(v) => [typeof v === "number" ? v : 0, "клиентов"]}
+            />
+            <Bar
+              dataKey="value"
+              fill="#60a5fa"
+              radius={[4, 4, 0, 0]}
+              className="cursor-pointer"
+              onClick={(d) => {
+                const e = (d?.payload ?? d) as { label?: string; bucket?: ClientRow["languageBucket"] };
+                if (!e.bucket) return;
+                const rows = all
+                  .filter((c) => c.languageBucket === e.bucket)
+                  .sort((a, b) => b.score - a.score)
+                  .map(clientToDrillRow);
+                onDrill(`Язык: ${e.label ?? ""}`, rows);
+              }}
+            />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// Всплывающая табличка дня: всего ролевок (+ разбивка по уровням) и уникальных.
+function TrainingTooltip({ active, payload, label }: {
+  active?: boolean;
+  payload?: Array<{ payload: BotDailyPoint }>;
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "6px 10px" }}>
+      <div style={{ color: "#94a3b8", marginBottom: 2 }}>{label}</div>
+      <div style={{ color: "#e2e8f0" }}>
+        Ролевок: <b>{p.total}</b> <span style={{ color: "#64748b" }}>(Ур.1 {p.lvl1} · Ур.2 {p.lvl2})</span>
+      </div>
+      <div style={{ color: "#e2e8f0" }}>
+        Уникальных: <b>{p.users}</b>
+      </div>
+    </div>
+  );
+}
+
+// Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
+// это активность практики, а не сделки). Сам грузит свой endpoint. Клик по дню →
+// список «кто сколько прошёл» в этот день.
+function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
+  const [points, setPoints] = useState<BotDailyPoint[] | null>(null);
+
+  const onDayClick = (s: { activeLabel?: string | number }) => {
+    const day = s?.activeLabel != null ? String(s.activeLabel) : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+    fetch(`/api/funnel/bot-roleplay-day?day=${day}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { clients: Array<{ leadId: number; name: string; kommoUrl: string; count: number }> }) => {
+        const rows: DrillRow[] = (j.clients ?? []).map((c) => ({
+          key: c.leadId,
+          name: c.name,
+          kommoUrl: c.kommoUrl,
+          primary: `${c.count} рол.`,
+        }));
+        onDrill(`Тренировки ${day} — кто сколько прошёл`, rows);
+      })
+      .catch(() => {});
+  };
+  useEffect(() => {
+    let cancelled = false;
+    const to = todayBerlinDate();
+    const from = new Date(to);
+    from.setDate(from.getDate() - 56);
+    const params = new URLSearchParams({ from: fmtLocalDate(from), to: fmtLocalDate(to) });
+    fetch(`/api/funnel/bot-roleplay-stats?${params}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { points: BotDailyPoint[] }) => {
+        if (!cancelled) setPoints(j.points ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setPoints([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (points !== null && points.length === 0) return null; // нет данных бота / env off
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Users className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
+        <span className="text-xs text-slate-500">8 недель · клик по дню — кто тренировался</span>
+      </div>
+      <div className="h-56">
+        {points === null ? (
+          <div className="flex items-center justify-center h-full text-sm text-slate-500">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> загрузка…
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }} onClick={onDayClick} className="cursor-pointer">
+              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(5)} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={24} />
+              <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+              <Tooltip content={<TrainingTooltip />} />
+              <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
+              {/* Область = всего ролевок за день; линия = уникальные пользователи.
+                  Разбивка по уровням — в тултипе, чтобы не перегружать визуал. */}
+              <Area type="monotone" dataKey="total" stroke="#60a5fa" fill="rgba(96,165,250,0.28)" name="Ролевок" />
+              <Line type="monotone" dataKey="users" stroke="#f0b63d" strokeWidth={2} dot={false} name="Уникальных" />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Drill-down: клик по сегменту/столбцу чарта → список клиентов; клик по строке
+// открывает карточку клиента (как открывались таблички в berater-dashboard).
+function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[]; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden="true" />
+      <div className="relative w-full max-w-lg max-h-[80vh] bg-slate-900 border border-white/10 rounded-2xl shadow-2xl flex flex-col">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
+          <span className="text-sm font-medium text-slate-200">{title}</span>
+          <span className="text-xs text-slate-500 tabular-nums">{rows.length}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/5"
+            aria-label="Закрыть"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="overflow-auto">
+          {rows.length === 0 ? (
+            <div className="px-4 py-6 text-center text-sm text-slate-500">нет клиентов</div>
+          ) : (
+            rows.map((r) => (
+              <div
+                key={r.key}
+                className="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
+              >
+                <a
+                  href={r.kommoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Открыть сделку в Kommo"
+                  className="truncate text-blue-300 hover:text-blue-200"
+                >
+                  {r.name}
+                </a>
+                <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                  <span className="text-slate-300">{r.primary}</span>
+                  {r.readiness && (
+                    <span className="flex items-center gap-2 cursor-help" title={r.readiness.title}>
+                      <span className="font-semibold text-slate-100">{r.readiness.score}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${CATEGORY[r.readiness.category].cls}`}>
+                        {CATEGORY[r.readiness.category].label}
+                      </span>
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ClientsView({ filters: _filters }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
+  const [drill, setDrill] = useState<{ title: string; rows: DrillRow[] } | null>(null);
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -260,6 +603,18 @@ export default function ClientsView({ filters: _filters }: Props) {
     }
   );
   const abortRef = useRef<AbortController | null>(null);
+
+  // Набор для графиков/метрик: клиенты, чей термин попал в выбранный диапазон дат
+  // (актуальность задаётся самим фильтром даты). Won-бэклог без термина в диапазоне
+  // в графики не идёт — он остаётся в таблице «Гутшайн одобрен».
+  const chartClients = useMemo(() => {
+    if (!data) return [];
+    return [...data.active.clients, ...data.won.clients].filter((c) => c.terminInRange);
+  }, [data]);
+  const uniqueBotUsers = useMemo(
+    () => chartClients.filter((c) => c.botRoleplayCount > 0).length,
+    [chartClients],
+  );
 
   const start = termin.start ?? todayBerlinDate();
   // Одна дата (нет end или end == start) = «с этого числа и дальше» (>=);
@@ -355,6 +710,19 @@ export default function ClientsView({ filters: _filters }: Props) {
 
       {data && (
         <>
+          <div className="glass-panel rounded-2xl border border-white/5 px-4 py-2.5 flex items-center gap-5 text-xs text-slate-400 flex-wrap">
+            <span>
+              В выборке: <b className="text-slate-200 tabular-nums">{chartClients.length}</b>
+            </span>
+            <span>
+              Прошли ролевки с ботом: <b className="text-slate-200 tabular-nums">{uniqueBotUsers}</b> уник.
+            </span>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
+            <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
+          </div>
+          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
           <ClientTable
             group={data.active}
             title="Клиенты в работе"
@@ -370,6 +738,7 @@ export default function ClientsView({ filters: _filters }: Props) {
         </>
       )}
 
+      {drill && <DrillModal title={drill.title} rows={drill.rows} onClose={() => setDrill(null)} />}
       {selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
     </div>
   );
