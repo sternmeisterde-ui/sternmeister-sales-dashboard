@@ -238,6 +238,7 @@ export async function computeClients(
       languageBucket: bucket,
       activeSide,
       activeAvg,
+      hasManagerRoleplay: dc.avg !== null || aa.avg !== null,
       daysSinceLastTouch: days,
       botRoleplayCount: botConfigured ? botCount : null,
       botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
