@@ -42,6 +42,15 @@ const LANG_LABEL: Record<ClientRow["languageBucket"], string> = {
   c1: "C1",
   unknown: "—",
 };
+
+// Текст-подсказка «откуда статус»: показывает разбивку готовности по факторам
+// (вес + вклад каждого), чтобы Hot/Warm/Cold был объяснимым (ТЗ §8).
+function breakdownTitle(c: ClientRow): string {
+  const lines = c.factors.map(
+    (f) => `  • ${f.label} (${Math.round(f.weight * 100)}%): ${f.present ? f.value : "нет данных"}`,
+  );
+  return `Готовность ${c.score} → ${CATEGORY[c.category].label}\nИз чего складывается:\n${lines.join("\n")}`;
+}
 const LANG_RANK: Record<ClientRow["languageBucket"], number> = {
   unknown: 0,
   a2: 1,
@@ -235,7 +244,7 @@ function ClientTable({
                         : `${c.daysSinceLastTouch}д`}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    <span className="inline-flex items-center gap-2">
+                    <span className="inline-flex items-center gap-2 cursor-help" title={breakdownTitle(c)}>
                       <span className="font-semibold text-slate-100 tabular-nums">{c.score}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
                     </span>
@@ -450,10 +459,9 @@ function TrainingChart() {
               <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
               <Tooltip content={<TrainingTooltip />} />
               <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
-              {/* Области = ролевки по уровням (сумма ≈ всего за день). */}
-              <Area type="monotone" dataKey="lvl1" stackId="rp" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Ролевки · Ур.1" />
-              <Area type="monotone" dataKey="lvl2" stackId="rp" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Ролевки · Ур.2" />
-              {/* Линия = уникальные пользователи за день. */}
+              {/* Область = всего ролевок за день; линия = уникальные пользователи.
+                  Разбивка по уровням — в тултипе, чтобы не перегружать визуал. */}
+              <Area type="monotone" dataKey="total" stroke="#60a5fa" fill="rgba(96,165,250,0.28)" name="Ролевок" />
               <Line type="monotone" dataKey="users" stroke="#f0b63d" strokeWidth={2} dot={false} name="Уникальных" />
             </ComposedChart>
           </ResponsiveContainer>
@@ -521,7 +529,7 @@ function DrillModal({
                     >
                       {c.name}
                     </a>
-                    <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                    <span className="flex items-center gap-3 shrink-0 tabular-nums cursor-help" title={breakdownTitle(c)}>
                       <span className="font-semibold text-slate-100">{c.score}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
                     </span>
