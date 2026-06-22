@@ -244,7 +244,7 @@ export async function computeClients(
   const activeTop = activeScored.slice(0, limit);
   const wonTop = wonScored.slice(0, limit);
 
-  const names = await hydrateNames([
+  const names = await getLeadNames([
     ...activeTop.map((s) => s.leadId),
     ...wonTop.map((s) => s.leadId),
   ]);
@@ -407,7 +407,7 @@ async function fetchLastTouchMap(leadIds: number[]): Promise<Map<number, string>
   return out;
 }
 
-async function hydrateNames(leadIds: number[]): Promise<Map<number, string>> {
+export async function getLeadNames(leadIds: number[]): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   if (leadIds.length === 0) return out;
   const idsIn = leadIds.join(",");

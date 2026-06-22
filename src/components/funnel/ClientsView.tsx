@@ -275,8 +275,8 @@ function ClientTable({
   );
 }
 
-// Распределение клиентов по числу проведённых ролевок (бот + звонки). Считается
-// из уже загруженных клиентов, поэтому уважает фильтр по дате термина.
+// Распределение клиентов по числу тренировок С БОТОМ. Считается из загруженных
+// клиентов (актуальных по фильтру даты термина).
 const RP_BUCKETS: { key: string; label: string; min: number; max: number; color: string }[] = [
   { key: "0", label: "0 ролевок", min: 0, max: 0, color: "#64748b" },
   { key: "1-2", label: "1–2", min: 1, max: 2, color: "#f0b63d" },
@@ -284,7 +284,27 @@ const RP_BUCKETS: { key: string; label: string; min: number; max: number; color:
   { key: "5+", label: "5+", min: 5, max: Number.POSITIVE_INFINITY, color: "#18a98b" },
 ];
 
-type DrillFn = (title: string, clients: ClientRow[]) => void;
+// Строка drill-таблицы: имя (ссылка на Kommo) + основная метрика (про ролевки) +
+// опционально готовность (вторичный контекст, с разбивкой в тултипе).
+interface DrillRow {
+  key: string | number;
+  name: string;
+  kommoUrl: string;
+  primary: string;
+  readiness?: { score: number; category: ClientRow["category"]; title: string };
+}
+type DrillFn = (title: string, rows: DrillRow[]) => void;
+
+// ClientRow → DrillRow с метрикой «N ролевок с ботом» + готовность.
+function clientToDrillRow(c: ClientRow): DrillRow {
+  return {
+    key: c.leadId,
+    name: c.name,
+    kommoUrl: c.kommoUrl,
+    primary: `${c.botRoleplayCount} рол. с ботом`,
+    readiness: { score: c.score, category: c.category, title: breakdownTitle(c) },
+  };
+}
 
 function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
   const all = clients;
@@ -304,10 +324,13 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
-      <div className="flex items-center gap-2 mb-1">
+      <div className="flex items-center gap-2">
         <ChartPie className="w-4 h-4 text-blue-400" />
-        <span className="text-sm font-medium text-slate-200">Распределение по тренировкам с ботом</span>
+        <span className="text-sm font-medium text-slate-200">Тренировки с ботом: распределение клиентов</span>
         <span className="text-xs text-slate-500 tabular-nums">{total} клиентов</span>
+      </div>
+      <div className="text-[11px] text-slate-500 mb-1">
+        сколько клиентов сделали столько тренировок · клик по сектору — список
       </div>
       <div className="h-52">
         <ResponsiveContainer width="100%" height="100%">
@@ -324,7 +347,11 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
                 const e = (d?.payload?.payload ?? d?.payload ?? d) as { label?: string; min?: number; max?: number };
                 const min = e.min ?? 0;
                 const max = e.max ?? Number.POSITIVE_INFINITY;
-                onDrill(`С ботом: ${e.label ?? ""}`, all.filter((c) => c.botRoleplayCount >= min && c.botRoleplayCount <= max));
+                const rows = all
+                  .filter((c) => c.botRoleplayCount >= min && c.botRoleplayCount <= max)
+                  .sort((a, b) => b.botRoleplayCount - a.botRoleplayCount)
+                  .map(clientToDrillRow);
+                onDrill(`Тренировок с ботом: ${e.label ?? ""}`, rows);
               }}
             >
               {dist.map((d) => (
@@ -340,7 +367,10 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
                 return [`${n} (${total ? Math.round((n / total) * 100) : 0}%)`, "клиентов"];
               }}
             />
-            <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
+            <Legend
+              wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }}
+              formatter={(value, entry) => `${value}: ${(entry?.payload as { value?: number })?.value ?? 0}`}
+            />
           </PieChart>
         </ResponsiveContainer>
       </div>
@@ -385,7 +415,11 @@ function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: D
               onClick={(d) => {
                 const e = (d?.payload ?? d) as { label?: string; bucket?: ClientRow["languageBucket"] };
                 if (!e.bucket) return;
-                onDrill(`Язык: ${e.label ?? ""}`, all.filter((c) => c.languageBucket === e.bucket));
+                const rows = all
+                  .filter((c) => c.languageBucket === e.bucket)
+                  .sort((a, b) => b.score - a.score)
+                  .map(clientToDrillRow);
+                onDrill(`Язык: ${e.label ?? ""}`, rows);
               }}
             />
           </BarChart>
@@ -417,9 +451,27 @@ function TrainingTooltip({ active, payload, label }: {
 }
 
 // Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
-// это активность практики, а не сделки). Сам грузит свой endpoint.
-function TrainingChart() {
+// это активность практики, а не сделки). Сам грузит свой endpoint. Клик по дню →
+// список «кто сколько прошёл» в этот день.
+function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
   const [points, setPoints] = useState<BotDailyPoint[] | null>(null);
+
+  const onDayClick = (s: { activeLabel?: string | number }) => {
+    const day = s?.activeLabel != null ? String(s.activeLabel) : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+    fetch(`/api/funnel/bot-roleplay-day?day=${day}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { clients: Array<{ leadId: number; name: string; kommoUrl: string; count: number }> }) => {
+        const rows: DrillRow[] = (j.clients ?? []).map((c) => ({
+          key: c.leadId,
+          name: c.name,
+          kommoUrl: c.kommoUrl,
+          primary: `${c.count} рол.`,
+        }));
+        onDrill(`Тренировки ${day} — кто сколько прошёл`, rows);
+      })
+      .catch(() => {});
+  };
   useEffect(() => {
     let cancelled = false;
     const to = todayBerlinDate();
@@ -445,7 +497,7 @@ function TrainingChart() {
       <div className="flex items-center gap-2 mb-1">
         <Users className="w-4 h-4 text-blue-400" />
         <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
-        <span className="text-xs text-slate-500">8 недель</span>
+        <span className="text-xs text-slate-500">8 недель · клик по дню — кто тренировался</span>
       </div>
       <div className="h-56">
         {points === null ? (
@@ -454,7 +506,7 @@ function TrainingChart() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+            <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }} onClick={onDayClick} className="cursor-pointer">
               <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(5)} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={24} />
               <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
               <Tooltip content={<TrainingTooltip />} />
@@ -473,15 +525,7 @@ function TrainingChart() {
 
 // Drill-down: клик по сегменту/столбцу чарта → список клиентов; клик по строке
 // открывает карточку клиента (как открывались таблички в berater-dashboard).
-function DrillModal({
-  title,
-  clients,
-  onClose,
-}: {
-  title: string;
-  clients: ClientRow[];
-  onClose: () => void;
-}) {
+function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[]; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -496,7 +540,7 @@ function DrillModal({
       <div className="relative w-full max-w-lg max-h-[80vh] bg-slate-900 border border-white/10 rounded-2xl shadow-2xl flex flex-col">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
           <span className="text-sm font-medium text-slate-200">{title}</span>
-          <span className="text-xs text-slate-500 tabular-nums">{clients.length}</span>
+          <span className="text-xs text-slate-500 tabular-nums">{rows.length}</span>
           <button
             type="button"
             onClick={onClose}
@@ -507,35 +551,36 @@ function DrillModal({
           </button>
         </div>
         <div className="overflow-auto">
-          {clients.length === 0 ? (
+          {rows.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-slate-500">нет клиентов</div>
           ) : (
-            clients
-              .slice()
-              .sort((a, b) => b.score - a.score)
-              .map((c) => {
-                const cat = CATEGORY[c.category];
-                return (
-                  <div
-                    key={c.leadId}
-                    className="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
-                  >
-                    <a
-                      href={c.kommoUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title="Открыть сделку в Kommo"
-                      className="truncate text-blue-300 hover:text-blue-200"
-                    >
-                      {c.name}
-                    </a>
-                    <span className="flex items-center gap-3 shrink-0 tabular-nums cursor-help" title={breakdownTitle(c)}>
-                      <span className="font-semibold text-slate-100">{c.score}</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
+            rows.map((r) => (
+              <div
+                key={r.key}
+                className="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
+              >
+                <a
+                  href={r.kommoUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Открыть сделку в Kommo"
+                  className="truncate text-blue-300 hover:text-blue-200"
+                >
+                  {r.name}
+                </a>
+                <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                  <span className="text-slate-300">{r.primary}</span>
+                  {r.readiness && (
+                    <span className="flex items-center gap-2 cursor-help" title={r.readiness.title}>
+                      <span className="font-semibold text-slate-100">{r.readiness.score}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${CATEGORY[r.readiness.category].cls}`}>
+                        {CATEGORY[r.readiness.category].label}
+                      </span>
                     </span>
-                  </div>
-                );
-              })
+                  )}
+                </span>
+              </div>
+            ))
           )}
         </div>
       </div>
@@ -548,7 +593,7 @@ export default function ClientsView({ filters: _filters }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
-  const [drill, setDrill] = useState<{ title: string; clients: ClientRow[] } | null>(null);
+  const [drill, setDrill] = useState<{ title: string; rows: DrillRow[] } | null>(null);
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -674,10 +719,10 @@ export default function ClientsView({ filters: _filters }: Props) {
             </span>
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <RoleplayDistribution clients={chartClients} onDrill={(title, clients) => setDrill({ title, clients })} />
-            <LanguageLevels clients={chartClients} onDrill={(title, clients) => setDrill({ title, clients })} />
+            <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
+            <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
-          <TrainingChart />
+          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
           <ClientTable
             group={data.active}
             title="Клиенты в работе"
@@ -693,7 +738,7 @@ export default function ClientsView({ filters: _filters }: Props) {
         </>
       )}
 
-      {drill && <DrillModal title={drill.title} clients={drill.clients} onClose={() => setDrill(null)} />}
+      {drill && <DrillModal title={drill.title} rows={drill.rows} onClose={() => setDrill(null)} />}
       {selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
     </div>
   );

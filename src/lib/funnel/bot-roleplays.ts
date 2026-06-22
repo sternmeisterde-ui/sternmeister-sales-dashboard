@@ -33,6 +33,41 @@ export interface BotDailyPoint {
   lvl2: number; // level_2 / mittel / schwer
 }
 
+export interface BotDayClient {
+  leadId: number;
+  count: number; // тренировок за этот день
+}
+
+/**
+ * Кто и сколько тренировался с ботом в КОНКРЕТНЫЙ день (для drill по точке графика).
+ * Возвращает [{leadId, count}] по убыванию. Имена резолвит вызывающий код
+ * (analytics), т.к. бот-БД имён сделок не хранит. Graceful no-op без env.
+ */
+export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient[]> {
+  const db = getBeraterBotDb();
+  if (!db) return [];
+  try {
+    const rows = unwrapRows<{ lead_id: string | number | null; cnt: string | number }>(
+      await db.execute(sql`
+        SELECT u.kommo_lead_id AS lead_id, count(*) AS cnt
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.finished_at IS NOT NULL
+          AND substring(s.finished_at from 1 for 10) = ${dayIso}
+          AND u.kommo_lead_id IS NOT NULL
+        GROUP BY u.kommo_lead_id
+        ORDER BY cnt DESC
+      `),
+    );
+    return rows
+      .map((r) => ({ leadId: Number(r.lead_id), count: Number(r.cnt) || 0 }))
+      .filter((x) => Number.isInteger(x.leadId) && x.leadId > 0);
+  } catch (e) {
+    console.error("[funnel] getBotRoleplaysOnDay failed (non-fatal):", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
+
 /**
  * Дневная статистика завершённых сессий бота за окно [fromIso, toIso] (ISO-даты).
  * Для графика «тренировки по дням». Graceful no-op без BERATER_BOT_DATABASE_URL.
