@@ -240,6 +240,7 @@ export async function computeClients(
       activeAvg,
       daysSinceLastTouch: days,
       botRoleplayCount: botConfigured ? botCount : null,
+      botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
       consultationDone: consultations > 0,
       consultOkk: okk?.consultOkk ?? null,
       dealOkk: okk?.dealOkk ?? null,

@@ -18,12 +18,14 @@
  * количество подготовки, звонковые — качество. Больше тренировок → выше готовность
  * (как roleplay-коэффициент в berater-dashboard).
  *
- * Полный набор факторов (ТЗ §7): язык 20 + готовность ролевок (актуальная
- * сторона, +10 за факт консультации) 35 + ролевки-с-ботом 10 + ОКК консультаций
- * 10 + ОКК по сделке 5 + стадия CRM 5 + активность 5. Знаменатель — сумма ВЕСОВ
- * ПРИСУТСТВУЮЩИХ факторов (нет ОКК/ролевки → фактор исключается, score нормируется
- * по остатку). ОКК — средний балл звонков из D2 (0..100), стадия CRM — близость к
- * Гутшайну.
+ * Факторы (сумма весов = 1.00): язык 20 + ролевки с менеджером (актуальная
+ * сторона, +10 за факт консультации) 35 + ролевки с ботом: количество 10 +
+ * качество 10 + ОКК консультаций 10 + ОКК по сделке 5 + стадия CRM 5 + активность 5.
+ * Ролевки с менеджером (качество) и с ботом (количество+качество) — РАЗНЫЕ сущности,
+ * оба в скоринге. Знаменатель — сумма ВЕСОВ ПРИСУТСТВУЮЩИХ факторов (нет данных →
+ * фактор исключается, score нормируется по остатку; ролевка с менеджером —
+ * обязательная: её отсутствие штрафует). ОКК — средний балл звонков из D2 (0..100),
+ * качество бота — из overall_readiness, стадия CRM — близость к Гутшайну.
  *
  * Score всегда с breakdown — правило §8 «должен быть объяснимым».
  */
@@ -59,6 +61,8 @@ export interface ReadinessInput {
   daysSinceLastTouch: number | null;
   /** Тренировок с ботом ролевок, или null если неизвестно. */
   botRoleplayCount: number | null;
+  /** Последняя самооценка готовности ботом (overall_readiness) или null. */
+  botReadiness: string | null;
   /** Проведена ли консультация (для бонуса +10 к готовности ролевок, §4.2). */
   consultationDone: boolean;
   /** Средний ОКК консультационных звонков (0..100) или null. */
@@ -97,6 +101,17 @@ function botCountScore(count: number | null): number | null {
   return 100;
 }
 
+// Самооценка готовности ботом (overall_readiness) → 0..100.
+// «недостаточно данных»/неизвестно → null (фактор исключается).
+function botQualityScore(readiness: string | null): number | null {
+  if (!readiness) return null;
+  const r = readiness.toLowerCase();
+  if (r.includes("почти")) return 66; // «почти готов»
+  if (r.includes("нужна") || r.includes("подготов")) return 33; // «нужна подготовка»
+  if (r.includes("готов")) return 100; // «готов»
+  return null; // «недостаточно данных» и пр.
+}
+
 function categorize(score: number): ReadinessCategory {
   if (score >= 75) return "hot";
   if (score >= 50) return "warm";
@@ -111,12 +126,14 @@ export function computeReadiness(input: ReadinessInput): ReadinessScore {
       : Math.min(100, Math.max(0, input.activeAvg * 20) + (input.consultationDone ? 10 : 0));
   const activity = activityScore(input.daysSinceLastTouch);
   const botCount = botCountScore(input.botRoleplayCount);
+  const botQuality = botQualityScore(input.botReadiness);
   const sideLabel = input.activeSide === "dc" ? "ДЦ" : "АА";
 
   const factors: ScoreFactor[] = [
     { key: "language", label: "Язык", weight: 0.2, value: LANGUAGE_SCORE[input.languageBucket], present: true },
     { key: "roleplay", label: `Ролевки с менеджером (${sideLabel})`, weight: 0.35, value: roleplay, present: input.activeAvg !== null, mandatory: true },
-    { key: "bot_roleplays", label: "Ролевки с ботом", weight: 0.1, value: botCount ?? 0, present: botCount !== null },
+    { key: "bot_count", label: "Кол-во ролевок с ботом", weight: 0.1, value: botCount ?? 0, present: botCount !== null },
+    { key: "bot_quality", label: "Качество ролевок с ботом", weight: 0.1, value: botQuality ?? 0, present: botQuality !== null },
     { key: "consult_okk", label: "ОКК консультаций", weight: 0.1, value: input.consultOkk ?? 0, present: input.consultOkk !== null },
     { key: "deal_okk", label: "ОКК по сделке", weight: 0.05, value: input.dealOkk ?? 0, present: input.dealOkk !== null },
     { key: "crm_stage", label: "Стадия CRM", weight: 0.05, value: input.crmStageScore ?? 0, present: input.crmStageScore !== null },
