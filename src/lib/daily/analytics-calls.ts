@@ -36,6 +36,7 @@ interface AnalyticsRow {
   incoming_total: string | number;
   missed_incoming: string | number;
   total_duration_s: string | number;
+  avg_wait_seconds: string | number | null;
 }
 
 /**
@@ -97,7 +98,7 @@ async function fetchCallMetricsByMaster(
   }).execute<AnalyticsRow>(sql`
     WITH deduped AS (
       SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, manager, duration, call_status
+        communication_id, communication_type, manager, duration, call_status, wait_seconds
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
@@ -118,7 +119,8 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                     AS outgoing_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s
+      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s,
+      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)            AS avg_wait_seconds
     FROM deduped
     GROUP BY manager
   `);
@@ -140,6 +142,7 @@ async function fetchCallMetricsByMaster(
       incomingTotal: Number(row.incoming_total),
       outgoingTotal: Number(row.outgoing_total),
       outgoingConnected: Number(row.outgoing_connected),
+      avgWaitSeconds: row.avg_wait_seconds == null ? 0 : Math.round(Number(row.avg_wait_seconds)),
     });
   }
 
@@ -675,6 +678,71 @@ async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, t
 
   const v = result.rows[0]?.avg_min;
   return v == null ? 0 : Math.round(Number(v));
+}
+
+/**
+ * Per-manager "time-to-first-call" SLA in MINUTES — same metric as
+ * getAnalyticsSlaFirstCallMinutes but grouped by manager and resolved to
+ * master_managers.id (via NAME_ALIASES). Drives the B2B per-manager «SLA»
+ * column. Managers with no qualifying leads in the window are absent (→ 0).
+ */
+export async function getAnalyticsSlaFirstCallMinutesByManager(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, number>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return new Map();
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `sla-first-call-min-mgr:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs));
+}
+
+async function fetchSlaFirstCallMinutesByManager(
+  managers: Array<{ id: string; name: string }>,
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<Map<string, number>> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ manager: string | null; avg_min: string | number | null }>(sql`
+    SELECT
+      manager,
+      AVG(COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds))::float / 60.0 AS avg_min
+    FROM analytics.sla
+    WHERE lead_created_at >= ${fromDate}
+      AND lead_created_at <= ${toDate}
+      AND pipeline_id IN (${pipelineList})
+      AND COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds) IS NOT NULL
+      AND manager IS NOT NULL AND manager <> ''
+    GROUP BY manager
+  `);
+
+  const byName = new Map<string, number>();
+  for (const row of result.rows) {
+    if (row.manager == null || row.avg_min == null) continue;
+    byName.set(row.manager, Math.round(Number(row.avg_min)));
+  }
+
+  const byMaster = new Map<string, number>();
+  for (const m of managers) {
+    let v = byName.get(m.name);
+    if (v == null) {
+      for (const alias of NAME_ALIASES[m.name] ?? []) {
+        const hit = byName.get(alias);
+        if (hit != null) { v = hit; break; }
+      }
+    }
+    if (v != null) byMaster.set(m.id, v);
+  }
+  return byMaster;
 }
 
 /**
