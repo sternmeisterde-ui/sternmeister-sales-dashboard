@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
-import { getDbForDepartment } from "@/lib/db";
+import { getDbForDepartment, db } from "@/lib/db";
 import {
   okkCalls,
   okkEvaluations,
   okkManagers,
 } from "@/lib/db/schema-okk";
-import { d1Users, d1Calls, r1Users, r1Calls } from "@/lib/db/schema-existing";
+import { d1Users, d1Calls, r1Users, r1Calls, analyticsExcludedCalls } from "@/lib/db/schema-existing";
 import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -474,6 +474,7 @@ async function fetchOkkData(
   groupBy: string,
   managerIds: string[],
   wantTree: boolean,
+  excludedCallIds: Set<string>,
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
   const promptTypes = getOkkPromptTypes(department, line);
@@ -549,6 +550,9 @@ async function fetchOkkData(
 
   const seenCallIds = new Set<string>();
   const rows = rawRows.filter((r) => {
+    // Moderator-excluded calls are dropped entirely — out of the tree AND
+    // every aggregate (manager/day/week/period/criteria).
+    if (excludedCallIds.has(r.callId)) return false;
     if (seenCallIds.has(r.callId)) return false;
     seenCallIds.add(r.callId);
     return true;
@@ -722,6 +726,7 @@ async function fetchRoleplayData(
   groupBy: string,
   managerIds: string[],
   wantTree: boolean,
+  excludedCallIds: Set<string>,
 ): Promise<AnalyticsResponse> {
   const db = getDbForDepartment(department);
   const callsTable = department === "b2b" ? r1Calls : d1Calls;
@@ -792,6 +797,8 @@ async function fetchRoleplayData(
   let processedCount = 0;
   for (const row of rows) {
     if (!row.startedAt) continue;
+    // Moderator-excluded roleplays are dropped entirely (see fetchOkkData).
+    if (excludedCallIds.has(row.callId)) continue;
     const evalJson = row.evaluationJson as Record<string, unknown> | null;
     const blocks = evalJson && Array.isArray(evalJson.blocks) ? evalJson.blocks : null;
     if (!blocks || blocks.length === 0) continue;
@@ -1104,6 +1111,29 @@ function buildResponse(
   return { periods: trimmedPeriods, blocks, overallScores, managers, managerBreakdown, timeTree, totalCalls, source, department };
 }
 
+// ─── Excluded calls ─────────────────────────────────────────
+//
+// Calls a moderator removed from the stats (analytics_excluded_calls in D1).
+// Loaded once per request and threaded into both fetchers; matching rows are
+// dropped before any accumulation, so they neither show in the tree nor count
+// toward any average. Signature is folded into the cache key so toggling an
+// exclusion reflects on the next load (not after the 2-min TTL).
+async function loadExcludedCallIds(department: string, source: string): Promise<Set<string>> {
+  try {
+    const rows = await db
+      .select({ callId: analyticsExcludedCalls.callId })
+      .from(analyticsExcludedCalls)
+      .where(and(
+        eq(analyticsExcludedCalls.department, department),
+        eq(analyticsExcludedCalls.source, source),
+      ));
+    return new Set(rows.map((r) => r.callId));
+  } catch (e) {
+    console.warn("[Analytics] loadExcludedCallIds failed:", e instanceof Error ? e.message : e);
+    return new Set();
+  }
+}
+
 // ─── Route handler ──────────────────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -1138,12 +1168,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ success: false, error: "from must be before to" }, { status: 400 });
     }
 
-    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}`;
+    // Excluded calls (moderation): drop before aggregation. Signature in the
+    // cache key so a freshly toggled exclusion isn't masked by the 2-min TTL.
+    const excludedCallIds = await loadExcludedCallIds(department, source);
+    const excludedSig = [...excludedCallIds].sort().join(",");
+
+    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}:excl=${excludedSig}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
-        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree)
-        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree),
+        ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds)
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds),
     );
 
     return NextResponse.json({ success: true, data });

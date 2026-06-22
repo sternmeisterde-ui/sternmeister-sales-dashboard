@@ -1021,7 +1021,14 @@ export default function Dashboard() {
 
         {/* --------------------- ANALYTICS VIEW --------------------- */}
         {activeTab === "analytics" && (
-          <AnalyticsTab department={activeDepartment} />
+          <AnalyticsTab
+            department={activeDepartment}
+            canModerate={
+              session?.masterRole === "admin" ||
+              session?.masterRole === "rop" ||
+              session?.masterRole === "teamlead"
+            }
+          />
         )}
 
         {activeTab === "tracking" && (
