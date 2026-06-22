@@ -29,6 +29,7 @@ import { syncStatusChanges } from "./sync-status-changes";
 import { syncCloseReasonChanges } from "./sync-close-reason-changes";
 import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncClientRoleplays } from "./sync-client-roleplays";
+import { syncBotRoleplays } from "./sync-bot-roleplays";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { detectWonExports } from "./detect-won-exports";
@@ -74,7 +75,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays" | "detect-exports")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -275,6 +276,13 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
       0,
       stepErrors,
     );
+  }
+
+  // Bot roleplays — зеркалит тренировки клиентов с ботом (berater_bot Neon, ЗАСЫПАЕТ
+  // при простое) в analytics.bot_roleplays. Full sync (таблица мала), авто-skip без
+  // BERATER_BOT_DATABASE_URL. Убирает живую зависимость «Клиентов» от спящей бот-БД.
+  if (!skip.has("bot_roleplays")) {
+    await runStep("sync-bot-roleplays", () => syncBotRoleplays(), 0, stepErrors);
   }
 
   // Update contact_date on leads after communications are populated.
