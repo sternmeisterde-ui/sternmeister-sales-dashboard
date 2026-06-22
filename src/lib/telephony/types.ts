@@ -44,6 +44,12 @@ export type TelephonyCall = {
   startedAt: Date;
   durationSec: number;    // total leg duration (rings + talk + wrap, provider-defined)
   talkDurationSec: number; // pure conversation seconds (0 for not-connected)
+  // Seconds the caller waited before someone picked up (ring/queue time).
+  //   • CloudTalk — exact `waiting_time` field.
+  //   • CallGear  — approximated as max(0, durationSec - talkDurationSec),
+  //                 since there's no dedicated wait field (includes wrap-up).
+  // Drives the "Ожидание (сек)" KPI tile on the B2B dashboard.
+  waitSec: number;
 
   status: TelephonyStatus;
   finishReason: string;   // raw provider reason (debug)

@@ -86,6 +86,7 @@ interface UnenrichedRow {
   firstCallAt: string | null;
   businessHoursSla: number | null;
   businessHoursSinceCommunication: number | null;
+  waitSeconds: number | null;
 }
 
 interface LeadMeta {
@@ -134,6 +135,7 @@ interface InsertRecord {
   business_hours_sla: number | null;
   business_hours_since_communication: number | null;
   phone: string;
+  wait_seconds: number | null;
 }
 
 /** Batch size for bulk SQL — keep JSON payload under ~1MB to stay well below Neon's HTTP body cap. */
@@ -226,6 +228,7 @@ export async function enrichTelephonyLeads(
     first_call_at: string | null;
     business_hours_sla: string | number | null;
     business_hours_since_communication: number | null;
+    wait_seconds: number | null;
   }>(sql`
     SELECT
       c.ctid::text                                     AS ctid,
@@ -242,7 +245,8 @@ export async function enrichTelephonyLeads(
       c.last_contact_flg,
       c.first_call_at::text                            AS first_call_at,
       c.business_hours_sla,
-      c.business_hours_since_communication
+      c.business_hours_since_communication,
+      c.wait_seconds
     FROM analytics.communications c
     LEFT JOIN analytics.enrich_skip_phones s ON s.phone = c.phone
     WHERE c.lead_id IS NULL
@@ -291,6 +295,7 @@ export async function enrichTelephonyLeads(
     firstCallAt: r.first_call_at,
     businessHoursSla: r.business_hours_sla != null ? Number(r.business_hours_sla) : null,
     businessHoursSinceCommunication: r.business_hours_since_communication,
+    waitSeconds: r.wait_seconds != null ? Number(r.wait_seconds) : null,
   }));
   result.scannedRows = unenriched.length;
   if (unenriched.length === 0) {
@@ -454,6 +459,7 @@ export async function enrichTelephonyLeads(
           business_hours_sla: row.businessHoursSla,
           business_hours_since_communication: row.businessHoursSinceCommunication,
           phone: row.phone,
+          wait_seconds: row.waitSeconds,
         });
       }
     }
@@ -562,7 +568,8 @@ async function bulkInsertFanouts(batch: InsertRecord[]): Promise<void> {
       lead_day_start, call_status, duration, manager,
       status_id, status_name, utm_source,
       first_contact_flg, last_contact_flg, first_call_at,
-      business_hours_sla, business_hours_since_communication, phone
+      business_hours_sla, business_hours_since_communication, phone,
+      wait_seconds
     )
     SELECT
       i.communication_id, i.communication_type, i.entity_id, i.created_at::timestamp,
@@ -570,7 +577,8 @@ async function bulkInsertFanouts(batch: InsertRecord[]): Promise<void> {
       i.lead_day_start::timestamp, i.call_status, i.duration, i.manager,
       i.status_id, i.status_name, i.utm_source,
       i.first_contact_flg, i.last_contact_flg, i.first_call_at::timestamp,
-      i.business_hours_sla, i.business_hours_since_communication, i.phone
+      i.business_hours_sla, i.business_hours_since_communication, i.phone,
+      i.wait_seconds
     FROM jsonb_to_recordset(${json}::jsonb) AS i(
       communication_id                 text,
       communication_type               text,
@@ -593,7 +601,8 @@ async function bulkInsertFanouts(batch: InsertRecord[]): Promise<void> {
       first_call_at                    text,
       business_hours_sla               bigint,
       business_hours_since_communication double precision,
-      phone                            text
+      phone                            text,
+      wait_seconds                     integer
     )
     ON CONFLICT (communication_id, COALESCE(lead_id, 0))
       WHERE communication_id IS NOT NULL

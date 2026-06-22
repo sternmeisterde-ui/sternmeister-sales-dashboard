@@ -317,6 +317,12 @@ export async function getCallsByDate(
     const recordings = session?.call_records ?? [];
     const recordingUrl = recordings.length > 0 ? recordings[0] : null;
 
+    const total = leg.total_duration ?? 0;
+    const talk = leg.duration ?? 0;
+    // CallGear has no dedicated wait field; approximate ring/queue time as
+    // total minus talk (includes wrap-up, so this slightly overestimates).
+    const wait = Math.max(0, total - talk);
+
     calls.push({
       source: "callgear",
       externalId: `cg-leg:${leg.id}`,
@@ -327,8 +333,9 @@ export async function getCallsByDate(
       phone,
       virtualPhone,
       startedAt: parseStartedAt(leg.start_time),
-      durationSec: leg.total_duration ?? 0,
-      talkDurationSec: leg.duration ?? 0,
+      durationSec: total,
+      talkDurationSec: talk,
+      waitSec: wait,
       status: classifyStatus(leg, sessionDir),
       finishReason: leg.finish_reason ?? "",
       recordingUrl,
