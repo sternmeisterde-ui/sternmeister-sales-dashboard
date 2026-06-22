@@ -89,6 +89,10 @@ export interface ClientRow {
   daysOnStage: number | null;
   /** Проведённых консультаций (статусы ДЦ/АА «проведена»). */
   consultations: number;
+  /** Средний ОКК консультационных звонков (0..100) или null. */
+  okkConsult: number | null;
+  /** Средний ОКК всех звонков сделки (0..100) или null. */
+  okkDeal: number | null;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -134,6 +138,8 @@ interface ScoredLead {
   managerName: string | null;
   daysOnStage: number | null;
   consultations: number;
+  okkConsult: number | null;
+  okkDeal: number | null;
   score: number;
   category: ReadinessCategory;
   factors: ScoreFactor[];
@@ -263,6 +269,8 @@ export async function computeClients(
       managerName,
       daysOnStage,
       consultations,
+      okkConsult: okk?.consultOkk ?? null,
+      okkDeal: okk?.dealOkk ?? null,
       score: readiness.score,
       category: readiness.category,
       factors: readiness.factors,
@@ -333,6 +341,8 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     managerName: s.managerName,
     daysOnStage: s.daysOnStage,
     consultations: s.consultations,
+    okkConsult: s.okkConsult,
+    okkDeal: s.okkDeal,
     score: s.score,
     category: s.category,
     factors: s.factors,
