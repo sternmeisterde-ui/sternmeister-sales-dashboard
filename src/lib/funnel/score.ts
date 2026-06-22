@@ -115,7 +115,7 @@ export function computeReadiness(input: ReadinessInput): ReadinessScore {
 
   const factors: ScoreFactor[] = [
     { key: "language", label: "Язык", weight: 0.2, value: LANGUAGE_SCORE[input.languageBucket], present: true },
-    { key: "roleplay", label: `Готовность ролевок ${sideLabel}`, weight: 0.35, value: roleplay, present: input.activeAvg !== null, mandatory: true },
+    { key: "roleplay", label: `Ролевки с менеджером (${sideLabel})`, weight: 0.35, value: roleplay, present: input.activeAvg !== null, mandatory: true },
     { key: "bot_roleplays", label: "Ролевки с ботом", weight: 0.1, value: botCount ?? 0, present: botCount !== null },
     { key: "consult_okk", label: "ОКК консультаций", weight: 0.1, value: input.consultOkk ?? 0, present: input.consultOkk !== null },
     { key: "deal_okk", label: "ОКК по сделке", weight: 0.05, value: input.dealOkk ?? 0, present: input.dealOkk !== null },
