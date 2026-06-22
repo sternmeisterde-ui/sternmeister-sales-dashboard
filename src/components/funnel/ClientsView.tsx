@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages } from "lucide-react";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, AreaChart, Area } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -12,6 +12,7 @@ import type {
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
+import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
 import ClientDrawer from "@/components/funnel/ClientDrawer";
 
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
@@ -71,11 +72,14 @@ function SideCell({ side }: { side: ClientSideReadiness }) {
 type SortKey =
   | "name"
   | "status"
+  | "manager"
+  | "stage_days"
   | "termin"
   | "language"
   | "dc"
   | "aa"
   | "roleplays"
+  | "consultations"
   | "activity"
   | "score";
 type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
@@ -99,11 +103,14 @@ const COLUMNS: {
 }[] = [
   { key: "name", label: "Клиент", align: "left", value: (c) => c.name.toLowerCase() },
   { key: "status", label: "Этап", align: "left", value: (c) => (c.status ?? "").toLowerCase() },
+  { key: "manager", label: "Менеджер", align: "left", value: (c) => (c.managerName ?? "").toLowerCase() },
+  { key: "stage_days", label: "Дней на стадии", align: "right", value: (c) => c.daysOnStage ?? Number.POSITIVE_INFINITY },
   { key: "termin", label: "Термин", align: "center", value: (c) => (c.terminAtIso ? Date.parse(c.terminAtIso) : Number.POSITIVE_INFINITY) },
   { key: "language", label: "Язык", align: "center", value: (c) => LANG_RANK[c.languageBucket] },
   { key: "dc", label: "ДЦ", align: "center", value: (c) => c.dc.latest ?? -1 },
   { key: "aa", label: "АА", align: "center", value: (c) => c.aa.latest ?? -1 },
   { key: "roleplays", label: "Ролевки", align: "center", value: (c) => c.roleplayCount },
+  { key: "consultations", label: "Конс.", align: "center", value: (c) => c.consultations },
   { key: "activity", label: "Активность", align: "right", value: (c) => c.daysSinceLastTouch ?? Number.POSITIVE_INFINITY },
   { key: "score", label: "Готовность", align: "right", value: (c) => c.score },
 ];
@@ -206,6 +213,10 @@ function ClientTable({
                 >
                   <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate">{c.name}</td>
                   <td className="px-3 py-2 text-slate-400 max-w-[190px] truncate">{c.status ?? "—"}</td>
+                  <td className="px-3 py-2 text-slate-400 max-w-[150px] truncate">{c.managerName ?? "—"}</td>
+                  <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
+                    {c.daysOnStage === null ? "—" : `${c.daysOnStage}д`}
+                  </td>
                   <td className="px-3 py-2 text-center text-slate-300 tabular-nums">{fmtTermin(c.terminAtIso)}</td>
                   <td className="px-3 py-2 text-center text-slate-300">{LANG_LABEL[c.languageBucket]}</td>
                   <td className="px-3 py-2 text-center"><SideCell side={c.dc} /></td>
@@ -215,6 +226,9 @@ function ClientTable({
                     title={`бот: ${c.botRoleplayCount} · со звонков: ${c.roleplayCount - c.botRoleplayCount}`}
                   >
                     {c.roleplayCount || <span className="text-slate-600">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-center text-slate-300 tabular-nums">
+                    {c.consultations || <span className="text-slate-600">—</span>}
                   </td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
                     {c.daysSinceLastTouch === null
@@ -301,6 +315,95 @@ function RoleplayDistribution({ data }: { data: ClientsResult }) {
             <Legend wrapperStyle={{ fontSize: 12 }} />
           </PieChart>
         </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1", "unknown"];
+
+function LanguageLevels({ data }: { data: ClientsResult }) {
+  const dist = useMemo(() => {
+    const all = [...data.active.clients, ...data.won.clients];
+    return LANG_ORDER.map((b) => ({ label: LANG_LABEL[b], value: all.filter((c) => c.languageBucket === b).length }));
+  }, [data]);
+  const total = dist.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Languages className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Уровни языка</span>
+      </div>
+      <div className="h-52">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={dist} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+            <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <Tooltip
+              cursor={{ fill: "rgba(255,255,255,0.04)" }}
+              contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              formatter={(v) => [typeof v === "number" ? v : 0, "клиентов"]}
+            />
+            <Bar dataKey="value" fill="#60a5fa" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
+// это активность практики, а не сделки). Сам грузит свой endpoint.
+function TrainingChart() {
+  const [points, setPoints] = useState<BotDailyPoint[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const to = todayBerlinDate();
+    const from = new Date(to);
+    from.setDate(from.getDate() - 56);
+    const params = new URLSearchParams({ from: fmtLocalDate(from), to: fmtLocalDate(to) });
+    fetch(`/api/funnel/bot-roleplay-stats?${params}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { points: BotDailyPoint[] }) => {
+        if (!cancelled) setPoints(j.points ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setPoints([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (points !== null && points.length === 0) return null; // нет данных бота / env off
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Users className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
+        <span className="text-xs text-slate-500">8 недель</span>
+      </div>
+      <div className="h-56">
+        {points === null ? (
+          <div className="flex items-center justify-center h-full text-sm text-slate-500">
+            <Loader2 className="w-4 h-4 animate-spin mr-2" /> загрузка…
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(5)} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={24} />
+              <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+              <Tooltip
+                contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Area type="monotone" dataKey="lvl1" stackId="1" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Лёгкие" />
+              <Area type="monotone" dataKey="lvl2" stackId="1" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Сложные" />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
       </div>
     </div>
   );
@@ -415,7 +518,11 @@ export default function ClientsView({ filters: _filters }: Props) {
 
       {data && (
         <>
-          <RoleplayDistribution data={data} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <RoleplayDistribution data={data} />
+            <LanguageLevels data={data} />
+          </div>
+          <TrainingChart />
           <ClientTable
             group={data.active}
             title="Клиенты в работе"

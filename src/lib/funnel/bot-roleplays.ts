@@ -23,6 +23,47 @@ export interface BotRoleplaySummary {
 }
 
 const LEVEL2 = "('level_2','mittel','schwer','medium','hard')";
+const LEVEL1 = "('level_1','leicht','easy')";
+
+export interface BotDailyPoint {
+  day: string; // YYYY-MM-DD
+  total: number;
+  lvl1: number; // level_1 / leicht
+  lvl2: number; // level_2 / mittel / schwer
+}
+
+/**
+ * Дневная статистика завершённых сессий бота за окно [fromIso, toIso] (ISO-даты).
+ * Для графика «тренировки по дням». Graceful no-op без BERATER_BOT_DATABASE_URL.
+ */
+export async function getBotDailyStats(fromIso: string, toIso: string): Promise<BotDailyPoint[]> {
+  const db = getBeraterBotDb();
+  if (!db) return [];
+  try {
+    const rows = unwrapRows<{ day: string; total: string | number; lvl1: string | number; lvl2: string | number }>(
+      await db.execute(sql`
+        SELECT substring(s.finished_at from 1 for 10) AS day,
+               count(*) AS total,
+               count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
+               count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
+        FROM sessions s
+        WHERE s.finished_at IS NOT NULL
+          AND s.finished_at >= ${fromIso}
+          AND s.finished_at <= ${toIso + "T23:59:59"}
+        GROUP BY 1 ORDER BY 1
+      `),
+    );
+    return rows.map((r) => ({
+      day: String(r.day),
+      total: Number(r.total) || 0,
+      lvl1: Number(r.lvl1) || 0,
+      lvl2: Number(r.lvl2) || 0,
+    }));
+  } catch (e) {
+    console.error("[funnel] getBotDailyStats failed (non-fatal):", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
 
 export async function getBotRoleplaysForLeads(
   leadIds: number[],
