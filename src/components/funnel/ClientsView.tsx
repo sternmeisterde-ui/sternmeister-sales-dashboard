@@ -532,9 +532,6 @@ export default function ClientsView({ filters: _filters }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
   const [drill, setDrill] = useState<{ title: string; clients: ClientRow[] } | null>(null);
-  // «Только актуальные» — для графиков/метрик считаем лишь клиентов с термином в
-  // диапазоне (исключает won-бэклог, попавший только по статусу WON). По умолчанию ON.
-  const [actualOnly, setActualOnly] = useState(true);
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -545,12 +542,13 @@ export default function ClientsView({ filters: _filters }: Props) {
   );
   const abortRef = useRef<AbortController | null>(null);
 
-  // Набор для графиков/метрик: actualOnly → только клиенты с термином в диапазоне.
+  // Набор для графиков/метрик: клиенты, чей термин попал в выбранный диапазон дат
+  // (актуальность задаётся самим фильтром даты). Won-бэклог без термина в диапазоне
+  // в графики не идёт — он остаётся в таблице «Гутшайн одобрен».
   const chartClients = useMemo(() => {
     if (!data) return [];
-    const all = [...data.active.clients, ...data.won.clients];
-    return actualOnly ? all.filter((c) => c.terminInRange) : all;
-  }, [data, actualOnly]);
+    return [...data.active.clients, ...data.won.clients].filter((c) => c.terminInRange);
+  }, [data]);
   const uniqueBotUsers = useMemo(
     () => chartClients.filter((c) => c.botRoleplayCount > 0).length,
     [chartClients],
@@ -624,15 +622,6 @@ export default function ClientsView({ filters: _filters }: Props) {
           }}
         />
         {loading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
-        <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={actualOnly}
-            onChange={(e) => setActualOnly(e.target.checked)}
-            className="accent-blue-500"
-          />
-          только актуальные (термин в диапазоне) — для графиков
-        </label>
         <span className="text-[11px] text-slate-500 ml-auto">
           одна дата — термины с этого числа и дальше; период — диапазон
         </span>
@@ -661,7 +650,7 @@ export default function ClientsView({ filters: _filters }: Props) {
         <>
           <div className="glass-panel rounded-2xl border border-white/5 px-4 py-2.5 flex items-center gap-5 text-xs text-slate-400 flex-wrap">
             <span>
-              В выборке{actualOnly ? " (актуальные)" : ""}: <b className="text-slate-200 tabular-nums">{chartClients.length}</b>
+              В выборке: <b className="text-slate-200 tabular-nums">{chartClients.length}</b>
             </span>
             <span>
               Прошли ролевки с ботом: <b className="text-slate-200 tabular-nums">{uniqueBotUsers}</b> уник.
