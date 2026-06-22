@@ -27,7 +27,8 @@ const LEVEL1 = "('level_1','leicht','easy')";
 
 export interface BotDailyPoint {
   day: string; // YYYY-MM-DD
-  total: number;
+  total: number; // всего завершённых сессий за день
+  users: number; // уникальных пользователей за день
   lvl1: number; // level_1 / leicht
   lvl2: number; // level_2 / mittel / schwer
 }
@@ -40,10 +41,11 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
   const db = getBeraterBotDb();
   if (!db) return [];
   try {
-    const rows = unwrapRows<{ day: string; total: string | number; lvl1: string | number; lvl2: string | number }>(
+    const rows = unwrapRows<{ day: string; total: string | number; users: string | number; lvl1: string | number; lvl2: string | number }>(
       await db.execute(sql`
         SELECT substring(s.finished_at from 1 for 10) AS day,
                count(*) AS total,
+               count(DISTINCT s.user_id) AS users,
                count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
                count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
         FROM sessions s
@@ -56,6 +58,7 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
     return rows.map((r) => ({
       day: String(r.day),
       total: Number(r.total) || 0,
+      users: Number(r.users) || 0,
       lvl1: Number(r.lvl1) || 0,
       lvl2: Number(r.lvl2) || 0,
     }));

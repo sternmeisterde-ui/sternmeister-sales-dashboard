@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, ExternalLink } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, AreaChart, Area } from "recharts";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X } from "lucide-react";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -386,6 +386,27 @@ function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: D
   );
 }
 
+// Всплывающая табличка дня: всего ролевок (+ разбивка по уровням) и уникальных.
+function TrainingTooltip({ active, payload, label }: {
+  active?: boolean;
+  payload?: Array<{ payload: BotDailyPoint }>;
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "6px 10px" }}>
+      <div style={{ color: "#94a3b8", marginBottom: 2 }}>{label}</div>
+      <div style={{ color: "#e2e8f0" }}>
+        Ролевок: <b>{p.total}</b> <span style={{ color: "#64748b" }}>(Ур.1 {p.lvl1} · Ур.2 {p.lvl2})</span>
+      </div>
+      <div style={{ color: "#e2e8f0" }}>
+        Уникальных: <b>{p.users}</b>
+      </div>
+    </div>
+  );
+}
+
 // Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
 // это активность практики, а не сделки). Сам грузит свой endpoint.
 function TrainingChart() {
@@ -424,18 +445,17 @@ function TrainingChart() {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+            <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
               <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(5)} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={24} />
               <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
-              <Tooltip
-                contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
-              itemStyle={{ color: "#e2e8f0" }}
-              labelStyle={{ color: "#94a3b8" }}
-              />
+              <Tooltip content={<TrainingTooltip />} />
               <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
-              <Area type="monotone" dataKey="lvl1" stackId="1" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Уровень 1" />
-              <Area type="monotone" dataKey="lvl2" stackId="1" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Уровень 2" />
-            </AreaChart>
+              {/* Области = ролевки по уровням (сумма ≈ всего за день). */}
+              <Area type="monotone" dataKey="lvl1" stackId="rp" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Ролевки · Ур.1" />
+              <Area type="monotone" dataKey="lvl2" stackId="rp" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Ролевки · Ур.2" />
+              {/* Линия = уникальные пользователи за день. */}
+              <Line type="monotone" dataKey="users" stroke="#f0b63d" strokeWidth={2} dot={false} name="Уникальных" />
+            </ComposedChart>
           </ResponsiveContainer>
         )}
       </div>
@@ -449,12 +469,10 @@ function DrillModal({
   title,
   clients,
   onClose,
-  onPick,
 }: {
   title: string;
   clients: ClientRow[];
   onClose: () => void;
-  onPick: (c: ClientRow) => void;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -492,30 +510,21 @@ function DrillModal({
                 return (
                   <div
                     key={c.leadId}
-                    className="flex items-center gap-2 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
+                    className="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
                   >
-                    <button
-                      type="button"
-                      onClick={() => onPick(c)}
-                      className="flex-1 min-w-0 flex items-center justify-between gap-3 text-left"
-                    >
-                      <span className="truncate text-slate-200">{c.name}</span>
-                      <span className="flex items-center gap-3 shrink-0 tabular-nums">
-                        <span className="text-slate-500">с ботом: {c.botRoleplayCount}</span>
-                        <span className="font-semibold text-slate-100">{c.score}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
-                      </span>
-                    </button>
                     <a
                       href={c.kommoUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      title="Открыть в Kommo"
-                      className="shrink-0 p-1 text-blue-300 hover:text-blue-200"
+                      title="Открыть сделку в Kommo"
+                      className="truncate text-blue-300 hover:text-blue-200"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
+                      {c.name}
                     </a>
+                    <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                      <span className="font-semibold text-slate-100">{c.score}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
+                    </span>
                   </div>
                 );
               })
@@ -676,17 +685,7 @@ export default function ClientsView({ filters: _filters }: Props) {
         </>
       )}
 
-      {drill && (
-        <DrillModal
-          title={drill.title}
-          clients={drill.clients}
-          onClose={() => setDrill(null)}
-          onPick={(c) => {
-            setDrill(null);
-            setSelected(c);
-          }}
-        />
-      )}
+      {drill && <DrillModal title={drill.title} clients={drill.clients} onClose={() => setDrill(null)} />}
       {selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
     </div>
   );
