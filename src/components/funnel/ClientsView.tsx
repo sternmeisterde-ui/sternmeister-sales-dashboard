@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages } from "lucide-react";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X } from "lucide-react";
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, AreaChart, Area } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
@@ -278,15 +278,21 @@ const RP_BUCKETS: { key: string; label: string; min: number; max: number; color:
   { key: "5+", label: "5+", min: 5, max: Number.POSITIVE_INFINITY, color: "#18a98b" },
 ];
 
-function RoleplayDistribution({ data }: { data: ClientsResult }) {
-  const dist = useMemo(() => {
-    const all = [...data.active.clients, ...data.won.clients];
-    return RP_BUCKETS.map((b) => ({
-      label: b.label,
-      color: b.color,
-      value: all.filter((c) => c.roleplayCount >= b.min && c.roleplayCount <= b.max).length,
-    }));
-  }, [data]);
+type DrillFn = (title: string, clients: ClientRow[]) => void;
+
+function RoleplayDistribution({ data, onDrill }: { data: ClientsResult; onDrill: DrillFn }) {
+  const all = useMemo(() => [...data.active.clients, ...data.won.clients], [data]);
+  const dist = useMemo(
+    () =>
+      RP_BUCKETS.map((b) => ({
+        label: b.label,
+        color: b.color,
+        min: b.min,
+        max: b.max,
+        value: all.filter((c) => c.roleplayCount >= b.min && c.roleplayCount <= b.max).length,
+      })),
+    [all],
+  );
   const total = dist.reduce((s, d) => s + d.value, 0);
   if (total === 0) return null;
 
@@ -300,19 +306,35 @@ function RoleplayDistribution({ data }: { data: ClientsResult }) {
       <div className="h-52">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
-            <Pie data={dist} dataKey="value" nameKey="label" innerRadius={48} outerRadius={78} paddingAngle={2}>
+            <Pie
+              data={dist}
+              dataKey="value"
+              nameKey="label"
+              innerRadius={48}
+              outerRadius={78}
+              paddingAngle={2}
+              className="cursor-pointer"
+              onClick={(d) => {
+                const e = (d?.payload?.payload ?? d?.payload ?? d) as { label?: string; min?: number; max?: number };
+                const min = e.min ?? 0;
+                const max = e.max ?? Number.POSITIVE_INFINITY;
+                onDrill(`Ролевок: ${e.label ?? ""}`, all.filter((c) => c.roleplayCount >= min && c.roleplayCount <= max));
+              }}
+            >
               {dist.map((d) => (
                 <Cell key={d.label} fill={d.color} stroke="transparent" />
               ))}
             </Pie>
             <Tooltip
               contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              itemStyle={{ color: "#e2e8f0" }}
+              labelStyle={{ color: "#94a3b8" }}
               formatter={(v) => {
                 const n = typeof v === "number" ? v : 0;
                 return [`${n} (${total ? Math.round((n / total) * 100) : 0}%)`, "клиентов"];
               }}
             />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
           </PieChart>
         </ResponsiveContainer>
       </div>
@@ -322,11 +344,12 @@ function RoleplayDistribution({ data }: { data: ClientsResult }) {
 
 const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1", "unknown"];
 
-function LanguageLevels({ data }: { data: ClientsResult }) {
-  const dist = useMemo(() => {
-    const all = [...data.active.clients, ...data.won.clients];
-    return LANG_ORDER.map((b) => ({ label: LANG_LABEL[b], value: all.filter((c) => c.languageBucket === b).length }));
-  }, [data]);
+function LanguageLevels({ data, onDrill }: { data: ClientsResult; onDrill: DrillFn }) {
+  const all = useMemo(() => [...data.active.clients, ...data.won.clients], [data]);
+  const dist = useMemo(
+    () => LANG_ORDER.map((b) => ({ label: LANG_LABEL[b], bucket: b, value: all.filter((c) => c.languageBucket === b).length })),
+    [all],
+  );
   const total = dist.reduce((s, d) => s + d.value, 0);
   if (total === 0) return null;
 
@@ -344,9 +367,21 @@ function LanguageLevels({ data }: { data: ClientsResult }) {
             <Tooltip
               cursor={{ fill: "rgba(255,255,255,0.04)" }}
               contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              itemStyle={{ color: "#e2e8f0" }}
+              labelStyle={{ color: "#94a3b8" }}
               formatter={(v) => [typeof v === "number" ? v : 0, "клиентов"]}
             />
-            <Bar dataKey="value" fill="#60a5fa" radius={[4, 4, 0, 0]} />
+            <Bar
+              dataKey="value"
+              fill="#60a5fa"
+              radius={[4, 4, 0, 0]}
+              className="cursor-pointer"
+              onClick={(d) => {
+                const e = (d?.payload ?? d) as { label?: string; bucket?: ClientRow["languageBucket"] };
+                if (!e.bucket) return;
+                onDrill(`Язык: ${e.label ?? ""}`, all.filter((c) => c.languageBucket === e.bucket));
+              }}
+            />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -397,8 +432,10 @@ function TrainingChart() {
               <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
               <Tooltip
                 contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+              itemStyle={{ color: "#e2e8f0" }}
+              labelStyle={{ color: "#94a3b8" }}
               />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
               <Area type="monotone" dataKey="lvl1" stackId="1" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Лёгкие" />
               <Area type="monotone" dataKey="lvl2" stackId="1" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Сложные" />
             </AreaChart>
@@ -409,11 +446,81 @@ function TrainingChart() {
   );
 }
 
+// Drill-down: клик по сегменту/столбцу чарта → список клиентов; клик по строке
+// открывает карточку клиента (как открывались таблички в berater-dashboard).
+function DrillModal({
+  title,
+  clients,
+  onClose,
+  onPick,
+}: {
+  title: string;
+  clients: ClientRow[];
+  onClose: () => void;
+  onPick: (c: ClientRow) => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden="true" />
+      <div className="relative w-full max-w-lg max-h-[80vh] bg-slate-900 border border-white/10 rounded-2xl shadow-2xl flex flex-col">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
+          <span className="text-sm font-medium text-slate-200">{title}</span>
+          <span className="text-xs text-slate-500 tabular-nums">{clients.length}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/5"
+            aria-label="Закрыть"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="overflow-auto">
+          {clients.length === 0 ? (
+            <div className="px-4 py-6 text-center text-sm text-slate-500">нет клиентов</div>
+          ) : (
+            clients
+              .slice()
+              .sort((a, b) => b.score - a.score)
+              .map((c) => {
+                const cat = CATEGORY[c.category];
+                return (
+                  <button
+                    key={c.leadId}
+                    type="button"
+                    onClick={() => onPick(c)}
+                    className="w-full flex items-center justify-between gap-3 px-4 py-2 text-sm text-left border-t border-white/5 hover:bg-blue-500/5"
+                  >
+                    <span className="truncate text-slate-200">{c.name}</span>
+                    <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                      <span className="text-slate-500">ролевок: {c.roleplayCount}</span>
+                      <span className="font-semibold text-slate-100">{c.score}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
+                    </span>
+                  </button>
+                );
+              })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ClientsView({ filters: _filters }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
+  const [drill, setDrill] = useState<{ title: string; clients: ClientRow[] } | null>(null);
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -519,8 +626,8 @@ export default function ClientsView({ filters: _filters }: Props) {
       {data && (
         <>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <RoleplayDistribution data={data} />
-            <LanguageLevels data={data} />
+            <RoleplayDistribution data={data} onDrill={(title, clients) => setDrill({ title, clients })} />
+            <LanguageLevels data={data} onDrill={(title, clients) => setDrill({ title, clients })} />
           </div>
           <TrainingChart />
           <ClientTable
@@ -538,6 +645,17 @@ export default function ClientsView({ filters: _filters }: Props) {
         </>
       )}
 
+      {drill && (
+        <DrillModal
+          title={drill.title}
+          clients={drill.clients}
+          onClose={() => setDrill(null)}
+          onPick={(c) => {
+            setDrill(null);
+            setSelected(c);
+          }}
+        />
+      )}
       {selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
     </div>
   );
