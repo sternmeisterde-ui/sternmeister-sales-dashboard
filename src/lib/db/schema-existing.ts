@@ -1,4 +1,4 @@
-import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb, date, numeric } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, uuid, integer, timestamp, boolean, jsonb, date, numeric, uniqueIndex } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 // ==================== D1 TABLES (Госники - B2G) ====================
@@ -334,3 +334,26 @@ export const r1CallsRelations = relations(r1Calls, ({ one }) => ({
     references: [r1Avatars.id],
   }),
 }));
+
+// ==================== Excluded calls (Оценка критериев) ====================
+//
+// Calls an admin/ROP/teamlead manually removed from the criteria stats. The
+// /api/analytics aggregation skips any (department, source, call_id) listed
+// here — the call disappears from the tree AND stops counting toward manager /
+// day / week / period / criteria averages. Denormalised manager/date/score are
+// stored so the «Исключённые» management panel can list them without querying
+// D2/R2/D1/R1. Restoring = deleting the row.
+export const analyticsExcludedCalls = pgTable("analytics_excluded_calls", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  department: text("department").notNull(),     // 'b2g' | 'b2b'
+  source: text("source").notNull(),             // 'okk' | 'roleplay'
+  callId: text("call_id").notNull(),            // okk_calls.id / r1_calls.id
+  managerName: text("manager_name"),            // denormalised for the panel
+  callDate: text("call_date"),                  // YYYY-MM-DD (Berlin civil)
+  score: integer("score"),                      // total_score at exclusion time
+  excludedById: text("excluded_by_id"),         // session user id
+  excludedByName: text("excluded_by_name"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+}, (t) => [
+  uniqueIndex("analytics_excluded_calls_unique").on(t.department, t.source, t.callId),
+]);
