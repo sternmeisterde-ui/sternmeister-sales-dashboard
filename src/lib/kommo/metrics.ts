@@ -94,6 +94,10 @@ export interface UserCallMetrics {
   // B2B «Принятых» tile and the «% дозвона» = outgoingConnected / outgoingTotal.
   // Optional: only the analytics-sourced paths populate it. Defaults to 0.
   outgoingConnected?: number;
+  // Mean answer-wait (ring/queue seconds) over this manager's answered calls.
+  // Optional: analytics-sourced per-manager path only. Drives the B2B
+  // per-manager «Ожидание» column. Not summed (it's an average).
+  avgWaitSeconds?: number;
 }
 
 export interface UserLeadMetrics {

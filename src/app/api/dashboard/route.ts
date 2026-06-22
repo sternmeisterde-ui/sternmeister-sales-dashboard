@@ -36,6 +36,7 @@ import {
   getAnalyticsDailyTrendByPipeline,
   getAnalyticsAvgWaitSeconds,
   getAnalyticsSlaFirstCallMinutes,
+  getAnalyticsSlaFirstCallMinutesByManager,
   getAnalyticsLostCalls,
   type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
@@ -496,7 +497,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -568,6 +569,13 @@ async function buildDashboardResponse(
             return 0;
           })
         : Promise.resolve(0),
+      // Per-manager first-call SLA (min) for the B2B per-manager «SLA» column.
+      department === "b2b"
+        ? getAnalyticsSlaFirstCallMinutesByManager(allManagers, department, from, to).catch((e) => {
+            console.error("[Dashboard] per-manager sla failed:", e);
+            return new Map<string, number>();
+          })
+        : Promise.resolve(new Map<string, number>()),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -639,6 +647,10 @@ async function buildDashboardResponse(
           missedIncoming: cm?.missedIncoming ?? 0,
           incomingTotal: cm?.incomingTotal ?? 0,
           outgoingTotal: cm?.outgoingTotal ?? 0,
+          // B2B per-manager columns.
+          outgoingConnected: cm?.outgoingConnected ?? 0,
+          avgWaitSeconds: cm?.avgWaitSeconds ?? 0,
+          slaFirstCallMin: slaByManager.get(mgr.id) ?? 0,
           overdueTasks: tm?.overdueTasks ?? 0,
         };
       })

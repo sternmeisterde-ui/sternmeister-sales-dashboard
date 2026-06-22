@@ -66,6 +66,10 @@ interface PerManagerRow {
   missedIncoming: number;
   incomingTotal: number;
   outgoingTotal: number;
+  // B2B per-manager columns.
+  outgoingConnected: number;
+  avgWaitSeconds: number;
+  slaFirstCallMin: number;
   overdueTasks: number;
 }
 
@@ -481,40 +485,78 @@ export default function DashboardTab({ department }: { department: string }) {
                 <thead>
                   <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
                     <th className="text-left py-2 px-2 font-medium">Менеджер</th>
-                    <th className="text-right py-2 px-2 font-medium">Звонки</th>
-                    <th className="text-right py-2 px-2 font-medium">Дозвон</th>
-                    <th className="text-right py-2 px-2 font-medium">% дозв.</th>
-                    <th className="text-right py-2 px-2 font-medium">На линии</th>
-                    <th className="text-right py-2 px-2 font-medium">Ср. диалог</th>
-                    <th className="text-right py-2 px-2 font-medium">Вх. всего</th>
-                    <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
-                    <th className="text-right py-2 px-2 font-medium">Задачи</th>
+                    {isB2G ? (
+                      <>
+                        <th className="text-right py-2 px-2 font-medium">Звонки</th>
+                        <th className="text-right py-2 px-2 font-medium">Дозвон</th>
+                        <th className="text-right py-2 px-2 font-medium">% дозв.</th>
+                        <th className="text-right py-2 px-2 font-medium">На линии</th>
+                        <th className="text-right py-2 px-2 font-medium">Ср. диалог</th>
+                        <th className="text-right py-2 px-2 font-medium">Вх. всего</th>
+                        <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
+                        <th className="text-right py-2 px-2 font-medium">Задачи</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="text-right py-2 px-2 font-medium">Исходящие</th>
+                        <th className="text-right py-2 px-2 font-medium">Принятых</th>
+                        <th className="text-right py-2 px-2 font-medium">% дозв.</th>
+                        <th className="text-right py-2 px-2 font-medium">Длительность</th>
+                        <th className="text-right py-2 px-2 font-medium">Ожидание</th>
+                        <th className="text-right py-2 px-2 font-medium">SLA</th>
+                        <th className="text-right py-2 px-2 font-medium">Всего</th>
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
-                  {lineManagers.map((mgr) => (
+                  {lineManagers.map((mgr) => {
+                    // B2B % дозвона = принятые исходящие / все исходящие (≤100%).
+                    const b2bDialPct = mgr.outgoingTotal > 0
+                      ? Math.round((mgr.outgoingConnected / mgr.outgoingTotal) * 100)
+                      : 0;
+                    return (
                     <tr key={mgr.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
                       <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">{mgr.name}</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsConnected}</td>
-                      <td className="py-2 px-2 text-right">
-                        <span className={mgr.dialPercent >= 50 ? "text-emerald-400" : mgr.dialPercent >= 30 ? "text-amber-400" : "text-rose-400"}>
-                          {mgr.dialPercent}%
-                        </span>
-                      </td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.avgDialogMinutes} мин</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.incomingTotal}</td>
-                      <td className="py-2 px-2 text-right">
-                        <span className={mgr.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{mgr.missedIncoming}</span>
-                      </td>
-                      <td className="py-2 px-2 text-right">
-                        <span className={mgr.overdueTasks > 0 ? "text-rose-400" : "text-slate-400"}>
-                          {mgr.overdueTasks > 0 ? `⚠ ${mgr.overdueTasks}` : "0"}
-                        </span>
-                      </td>
+                      {isB2G ? (
+                        <>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsConnected}</td>
+                          <td className="py-2 px-2 text-right">
+                            <span className={mgr.dialPercent >= 50 ? "text-emerald-400" : mgr.dialPercent >= 30 ? "text-amber-400" : "text-rose-400"}>
+                              {mgr.dialPercent}%
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.avgDialogMinutes} мин</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.incomingTotal}</td>
+                          <td className="py-2 px-2 text-right">
+                            <span className={mgr.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{mgr.missedIncoming}</span>
+                          </td>
+                          <td className="py-2 px-2 text-right">
+                            <span className={mgr.overdueTasks > 0 ? "text-rose-400" : "text-slate-400"}>
+                              {mgr.overdueTasks > 0 ? `⚠ ${mgr.overdueTasks}` : "0"}
+                            </span>
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingTotal}</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingConnected}</td>
+                          <td className="py-2 px-2 text-right">
+                            <span className={b2bDialPct >= 50 ? "text-emerald-400" : b2bDialPct >= 30 ? "text-amber-400" : "text-rose-400"}>
+                              {b2bDialPct}%
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.avgWaitSeconds} с</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
+                        </>
+                      )}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
