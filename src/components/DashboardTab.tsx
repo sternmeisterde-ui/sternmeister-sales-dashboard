@@ -5,6 +5,7 @@ import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
   ChevronLeft, ChevronRight,
+  PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -32,6 +33,11 @@ interface TodayMetrics {
   missedIncoming: number;
   incomingTotal: number;
   outgoingTotal: number;
+  // B2B tile additions (0 / absent on B2G).
+  outgoingConnected?: number;
+  avgWaitSeconds?: number;
+  slaFirstCallMin?: number;
+  lostCalls?: number;
   overdueTasks: number;
   revenue: number;
   managersCount: number;
@@ -346,41 +352,104 @@ export default function DashboardTab({ department }: { department: string }) {
         </div>
       )}
 
-      {/* ============ KPI: 4 tiles in one row, compact, responsive width ============ */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <CallMetricTile
-          icon={Phone}
-          label="Звонки"
-          color="blue"
-          totalValue={m.callsTotal}
-          totalCaption={`${m.outgoingTotal}↑ ${m.incomingTotal}↓`}
-          rows={tileRows("calls")}
-        />
-        <CallMetricTile
-          icon={Target}
-          label="Дозвон"
-          color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
-          totalValue={`${m.dialPercent}%`}
-          totalCaption={`${m.callsConnected}/${m.callsTotal}`}
-          rows={tileRows("dial")}
-        />
-        <CallMetricTile
-          icon={Clock}
-          label="На линии"
-          color="blue"
-          totalValue={`${m.totalMinutes}м`}
-          totalCaption={`ср. ${m.avgDialogMinutes}м`}
-          rows={tileRows("minutes")}
-        />
-        <CallMetricTile
-          icon={PhoneMissed}
-          label="Пропущенные"
-          color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
-          totalValue={m.missedIncoming}
-          totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal}`}
-          rows={tileRows("missed")}
-        />
-      </div>
+      {/* ============ KPI tiles ============ */}
+      {isB2G ? (
+        // B2G — 4 tiles with per-line breakdown (unchanged).
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <CallMetricTile
+            icon={Phone}
+            label="Звонки"
+            color="blue"
+            totalValue={m.callsTotal}
+            totalCaption={`${m.outgoingTotal}↑ ${m.incomingTotal}↓`}
+            rows={tileRows("calls")}
+          />
+          <CallMetricTile
+            icon={Target}
+            label="Дозвон"
+            color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
+            totalValue={`${m.dialPercent}%`}
+            totalCaption={`${m.callsConnected}/${m.callsTotal}`}
+            rows={tileRows("dial")}
+          />
+          <CallMetricTile
+            icon={Clock}
+            label="На линии"
+            color="blue"
+            totalValue={`${m.totalMinutes}м`}
+            totalCaption={`ср. ${m.avgDialogMinutes}м`}
+            rows={tileRows("minutes")}
+          />
+          <CallMetricTile
+            icon={PhoneMissed}
+            label="Пропущенные"
+            color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
+            totalValue={m.missedIncoming}
+            totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal}`}
+            rows={tileRows("missed")}
+          />
+        </div>
+      ) : (
+        // B2B — 7 single-number tiles, no captions. % дозвона = принятые
+        // исходящие / все исходящие (≤100%). Ожидание = средний answer-wait
+        // (сек). SLA = среднее время до 1-го звонка (мин).
+        (() => {
+          const outgoing = m.outgoingTotal;
+          const answeredOut = m.outgoingConnected ?? 0;
+          const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
+          const waitSec = m.avgWaitSeconds ?? 0;
+          const slaMin = m.slaFirstCallMin ?? 0;
+          const lost = m.lostCalls ?? 0;
+          return (
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+              <CallMetricTile
+                icon={PhoneOutgoing} label="Исходящие" color="blue" totalValue={outgoing} rows={null}
+                tip="Количество исходящих звонков (наборов). Сумма CloudTalk и CallGear."
+              />
+              <CallMetricTile
+                icon={Phone} label="Всего" color="blue" totalValue={m.callsTotal} rows={null}
+                tip="Все звонки: исходящие + входящие. Сумма CloudTalk и CallGear."
+              />
+              <CallMetricTile
+                icon={PhoneCall} label="Принятых" color="emerald" totalValue={answeredOut} rows={null}
+                tip="Исходящие, на которые ответили (длительность ≥ 1 сек)."
+              />
+              <CallMetricTile
+                icon={Target}
+                label="% дозвона"
+                color={dialPct >= 50 ? "emerald" : dialPct >= 30 ? "amber" : "rose"}
+                totalValue={`${dialPct}%`}
+                rows={null}
+                tip="Доля исходящих, на которые ответили: принятые ÷ исходящие."
+              />
+              <CallMetricTile
+                icon={Clock} label="Длительность" color="blue" totalValue={`${m.totalMinutes}м`} rows={null}
+                tip="Суммарное время разговора по всем звонкам, в минутах."
+              />
+              <CallMetricTile
+                icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
+                tip="Среднее время ожидания ответа абонентом (гудки/очередь до поднятия трубки), в секундах."
+              />
+              <CallMetricTile
+                icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
+                tipAlign="right"
+                tip="Среднее время от создания лида до первого звонка по нему, в минутах (рабочее время)."
+              />
+              <CallMetricTile
+                icon={PhoneOff}
+                label="Потерянные"
+                color={lost === 0 ? "emerald" : "rose"}
+                totalValue={lost}
+                rows={null}
+                tipAlign="right"
+                tip="Исходящие недозвоны в 09:00–19:00 (Берлин), на которые не перезвонили на тот же номер в течение 15 минут."
+              />
+              {/* tipAlign right on the last two so the popover opens leftward
+                  and doesn't clip past the viewport edge. */}
+            </div>
+          );
+        })()
+      )}
 
       {/* ============ PER-MANAGER TABLES — moved up: detail bound to top filter ============ */}
       {(isB2G
@@ -498,6 +567,8 @@ function CallMetricTile({
   totalCaption,
   color,
   rows,
+  tip,
+  tipAlign = "left",
 }: {
   icon: LucideIcon;
   label: string;
@@ -505,6 +576,11 @@ function CallMetricTile({
   totalCaption?: string;
   color: "blue" | "emerald" | "amber" | "rose";
   rows: TileRow[] | null;
+  // Optional hover explanation, glass-panel styled. Shown below the tile.
+  tip?: string;
+  // Which edge the tooltip anchors to — "right" opens leftward so the
+  // rightmost tiles don't clip past the viewport. Default "left".
+  tipAlign?: "left" | "right";
 }) {
   const colorMap = {
     blue: { bg: "bg-blue-500/10", text: "text-blue-400" },
@@ -517,15 +593,23 @@ function CallMetricTile({
   // ── B2B — single big number (no line concept) ──────────────────────
   if (!rows) {
     return (
-      <div className="glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-slate-400 font-semibold tracking-wider text-[10px] uppercase truncate">{label}</span>
+      <div className="group relative glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0">
+        <div className="flex items-start justify-between mb-1.5 gap-1">
+          <span className="text-slate-400 font-semibold tracking-tight text-[10px] uppercase leading-tight break-words min-w-0">{label}</span>
           <div className={`p-1 ${c.bg} rounded ${c.text} shrink-0`}>
             <Icon className="w-3 h-3" />
           </div>
         </div>
         <div className={`text-2xl font-bold ${c.text} tracking-tight`}>{totalValue}</div>
         {totalCaption && <div className="text-[10px] text-slate-500 mt-0.5 truncate">{totalCaption}</div>}
+        {tip && (
+          <div
+            role="tooltip"
+            className={`pointer-events-none absolute ${tipAlign === "right" ? "right-0" : "left-0"} top-full mt-2 z-30 w-52 max-w-[80vw] rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur px-2.5 py-2 text-[11px] leading-snug text-slate-300 shadow-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+          >
+            {tip}
+          </div>
+        )}
       </div>
     );
   }
