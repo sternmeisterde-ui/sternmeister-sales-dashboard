@@ -3,14 +3,16 @@
  * клиент прошёл с ботом, какого уровня, какая последняя самооценка готовности.
  * Связь — `users.kommo_lead_id` = наш lead_id (сделка Бератера).
  *
- * ОПЦИОНАЛЬНО: без BERATER_BOT_DATABASE_URL читатель — graceful no-op (пустая
- * Map), скоринг/UI просто не получают бот-данных. См. src/lib/db/berater-bot.ts.
+ * ЧТЕНИЕ — из ЗЕРКАЛА `analytics.bot_roleplays` (наполняет ETL `sync-bot-roleplays`
+ * из бот-Neon, см. src/lib/etl/sync-bot-roleplays.ts). НЕ ходим в бот-БД на лету:
+ * она засыпает (scale-to-zero) и таймаутила запрос «Клиентов» → колонка пустела у
+ * всех. Нет зеркала/данных → пустой результат (graceful).
  *
  * NB: difficulty в данных разнородный — и `level_1/level_2`, и немецкие
  * `leicht/mittel/schwer`, и NULL. Нормализуем: leicht→1, mittel/schwer→2.
  */
 import { sql } from "drizzle-orm";
-import { getBeraterBotDb } from "@/lib/db/berater-bot";
+import { analyticsDb } from "@/lib/db/analytics";
 import { unwrapRows } from "./compute";
 
 export interface BotRoleplaySummary {
@@ -44,18 +46,14 @@ export interface BotDayClient {
  * (analytics), т.к. бот-БД имён сделок не хранит. Graceful no-op без env.
  */
 export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient[]> {
-  const db = getBeraterBotDb();
-  if (!db) return [];
   try {
     const rows = unwrapRows<{ lead_id: string | number | null; cnt: string | number }>(
-      await db.execute(sql`
-        SELECT u.kommo_lead_id AS lead_id, count(*) AS cnt
-        FROM sessions s
-        JOIN users u ON u.id = s.user_id
-        WHERE s.finished_at IS NOT NULL
-          AND substring(s.finished_at from 1 for 10) = ${dayIso}
-          AND u.kommo_lead_id IS NOT NULL
-        GROUP BY u.kommo_lead_id
+      await analyticsDb.execute(sql`
+        SELECT lead_id, count(*) AS cnt
+        FROM analytics.bot_roleplays
+        WHERE substring(finished_at from 1 for 10) = ${dayIso}
+          AND lead_id IS NOT NULL
+        GROUP BY lead_id
         ORDER BY cnt DESC
       `),
     );
@@ -73,20 +71,17 @@ export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient
  * Для графика «тренировки по дням». Graceful no-op без BERATER_BOT_DATABASE_URL.
  */
 export async function getBotDailyStats(fromIso: string, toIso: string): Promise<BotDailyPoint[]> {
-  const db = getBeraterBotDb();
-  if (!db) return [];
   try {
     const rows = unwrapRows<{ day: string; total: string | number; users: string | number; lvl1: string | number; lvl2: string | number }>(
-      await db.execute(sql`
-        SELECT substring(s.finished_at from 1 for 10) AS day,
+      await analyticsDb.execute(sql`
+        SELECT substring(finished_at from 1 for 10) AS day,
                count(*) AS total,
-               count(DISTINCT s.user_id) AS users,
-               count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
-               count(*) FILTER (WHERE lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
-        FROM sessions s
-        WHERE s.finished_at IS NOT NULL
-          AND s.finished_at >= ${fromIso}
-          AND s.finished_at <= ${toIso + "T23:59:59"}
+               count(DISTINCT user_id) AS users,
+               count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
+               count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
+        FROM analytics.bot_roleplays
+        WHERE finished_at >= ${fromIso}
+          AND finished_at <= ${toIso + "T23:59:59"}
         GROUP BY 1 ORDER BY 1
       `),
     );
@@ -107,8 +102,6 @@ export async function getBotRoleplaysForLeads(
   leadIds: number[],
 ): Promise<Map<number, BotRoleplaySummary>> {
   const out = new Map<number, BotRoleplaySummary>();
-  const db = getBeraterBotDb();
-  if (!db) return out; // BERATER_BOT_DATABASE_URL не задан — обогащение выключено
   const ids = Array.from(
     new Set(leadIds.map(Number).filter((n) => Number.isInteger(n) && n > 0)),
   );
@@ -116,17 +109,15 @@ export async function getBotRoleplaysForLeads(
 
   try {
     const rows = unwrapRows<Record<string, unknown>>(
-      await db.execute(sql`
-        SELECT u.kommo_lead_id AS lead_id,
+      await analyticsDb.execute(sql`
+        SELECT lead_id,
                count(*) AS cnt,
-               sum(CASE WHEN lower(coalesce(s.difficulty,'')) IN ${sql.raw(LEVEL2)} THEN 2 ELSE 1 END) AS weighted,
-               (array_agg(s.overall_readiness ORDER BY s.finished_at DESC))[1] AS latest_readiness,
-               max(s.finished_at) AS latest_at
-        FROM sessions s
-        JOIN users u ON u.id = s.user_id
-        WHERE s.finished_at IS NOT NULL
-          AND u.kommo_lead_id IN (${sql.raw(ids.join(","))})
-        GROUP BY u.kommo_lead_id
+               sum(CASE WHEN lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL2)} THEN 2 ELSE 1 END) AS weighted,
+               (array_agg(overall_readiness ORDER BY finished_at DESC))[1] AS latest_readiness,
+               max(finished_at) AS latest_at
+        FROM analytics.bot_roleplays
+        WHERE lead_id IN (${sql.raw(ids.join(","))})
+        GROUP BY lead_id
       `),
     );
     for (const r of rows) {
