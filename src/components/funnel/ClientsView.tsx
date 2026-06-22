@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X } from "lucide-react";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, ExternalLink } from "lucide-react";
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, AreaChart, Area } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
@@ -277,8 +277,8 @@ const RP_BUCKETS: { key: string; label: string; min: number; max: number; color:
 
 type DrillFn = (title: string, clients: ClientRow[]) => void;
 
-function RoleplayDistribution({ data, onDrill }: { data: ClientsResult; onDrill: DrillFn }) {
-  const all = useMemo(() => [...data.active.clients, ...data.won.clients], [data]);
+function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
+  const all = clients;
   const dist = useMemo(
     () =>
       RP_BUCKETS.map((b) => ({
@@ -341,8 +341,8 @@ function RoleplayDistribution({ data, onDrill }: { data: ClientsResult; onDrill:
 
 const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1", "unknown"];
 
-function LanguageLevels({ data, onDrill }: { data: ClientsResult; onDrill: DrillFn }) {
-  const all = useMemo(() => [...data.active.clients, ...data.won.clients], [data]);
+function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
+  const all = clients;
   const dist = useMemo(
     () => LANG_ORDER.map((b) => ({ label: LANG_LABEL[b], bucket: b, value: all.filter((c) => c.languageBucket === b).length })),
     [all],
@@ -433,8 +433,8 @@ function TrainingChart() {
               labelStyle={{ color: "#94a3b8" }}
               />
               <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
-              <Area type="monotone" dataKey="lvl1" stackId="1" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Лёгкие" />
-              <Area type="monotone" dataKey="lvl2" stackId="1" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Сложные" />
+              <Area type="monotone" dataKey="lvl1" stackId="1" stroke="#60a5fa" fill="rgba(96,165,250,0.35)" name="Уровень 1" />
+              <Area type="monotone" dataKey="lvl2" stackId="1" stroke="#18a98b" fill="rgba(24,169,139,0.35)" name="Уровень 2" />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -490,19 +490,33 @@ function DrillModal({
               .map((c) => {
                 const cat = CATEGORY[c.category];
                 return (
-                  <button
+                  <div
                     key={c.leadId}
-                    type="button"
-                    onClick={() => onPick(c)}
-                    className="w-full flex items-center justify-between gap-3 px-4 py-2 text-sm text-left border-t border-white/5 hover:bg-blue-500/5"
+                    className="flex items-center gap-2 px-4 py-2 text-sm border-t border-white/5 hover:bg-blue-500/5"
                   >
-                    <span className="truncate text-slate-200">{c.name}</span>
-                    <span className="flex items-center gap-3 shrink-0 tabular-nums">
-                      <span className="text-slate-500">с ботом: {c.botRoleplayCount}</span>
-                      <span className="font-semibold text-slate-100">{c.score}</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onPick(c)}
+                      className="flex-1 min-w-0 flex items-center justify-between gap-3 text-left"
+                    >
+                      <span className="truncate text-slate-200">{c.name}</span>
+                      <span className="flex items-center gap-3 shrink-0 tabular-nums">
+                        <span className="text-slate-500">с ботом: {c.botRoleplayCount}</span>
+                        <span className="font-semibold text-slate-100">{c.score}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-md border ${cat.cls}`}>{cat.label}</span>
+                      </span>
+                    </button>
+                    <a
+                      href={c.kommoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      title="Открыть в Kommo"
+                      className="shrink-0 p-1 text-blue-300 hover:text-blue-200"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
                 );
               })
           )}
@@ -518,6 +532,9 @@ export default function ClientsView({ filters: _filters }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
   const [drill, setDrill] = useState<{ title: string; clients: ClientRow[] } | null>(null);
+  // «Только актуальные» — для графиков/метрик считаем лишь клиентов с термином в
+  // диапазоне (исключает won-бэклог, попавший только по статусу WON). По умолчанию ON.
+  const [actualOnly, setActualOnly] = useState(true);
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -527,6 +544,17 @@ export default function ClientsView({ filters: _filters }: Props) {
     }
   );
   const abortRef = useRef<AbortController | null>(null);
+
+  // Набор для графиков/метрик: actualOnly → только клиенты с термином в диапазоне.
+  const chartClients = useMemo(() => {
+    if (!data) return [];
+    const all = [...data.active.clients, ...data.won.clients];
+    return actualOnly ? all.filter((c) => c.terminInRange) : all;
+  }, [data, actualOnly]);
+  const uniqueBotUsers = useMemo(
+    () => chartClients.filter((c) => c.botRoleplayCount > 0).length,
+    [chartClients],
+  );
 
   const start = termin.start ?? todayBerlinDate();
   // Одна дата (нет end или end == start) = «с этого числа и дальше» (>=);
@@ -596,6 +624,15 @@ export default function ClientsView({ filters: _filters }: Props) {
           }}
         />
         {loading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
+        <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={actualOnly}
+            onChange={(e) => setActualOnly(e.target.checked)}
+            className="accent-blue-500"
+          />
+          только актуальные (термин в диапазоне) — для графиков
+        </label>
         <span className="text-[11px] text-slate-500 ml-auto">
           одна дата — термины с этого числа и дальше; период — диапазон
         </span>
@@ -622,9 +659,17 @@ export default function ClientsView({ filters: _filters }: Props) {
 
       {data && (
         <>
+          <div className="glass-panel rounded-2xl border border-white/5 px-4 py-2.5 flex items-center gap-5 text-xs text-slate-400 flex-wrap">
+            <span>
+              В выборке{actualOnly ? " (актуальные)" : ""}: <b className="text-slate-200 tabular-nums">{chartClients.length}</b>
+            </span>
+            <span>
+              Прошли ролевки с ботом: <b className="text-slate-200 tabular-nums">{uniqueBotUsers}</b> уник.
+            </span>
+          </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <RoleplayDistribution data={data} onDrill={(title, clients) => setDrill({ title, clients })} />
-            <LanguageLevels data={data} onDrill={(title, clients) => setDrill({ title, clients })} />
+            <RoleplayDistribution clients={chartClients} onDrill={(title, clients) => setDrill({ title, clients })} />
+            <LanguageLevels clients={chartClients} onDrill={(title, clients) => setDrill({ title, clients })} />
           </div>
           <TrainingChart />
           <ClientTable

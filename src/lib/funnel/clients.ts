@@ -54,6 +54,9 @@ export interface ClientRow {
   aa: ClientSideReadiness;
   /** Дата термина (попавшего в диапазон). */
   terminAtIso: string | null;
+  /** Есть ли термин (ДЦ/АА) в выбранном диапазоне = «актуальный» клиент.
+   *  false у won-бэклога, попавшего только по статусу WON. */
+  terminInRange: boolean;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
   /** Тренировок с ботом ролевок (репо berater_bot). */
@@ -103,6 +106,7 @@ interface ScoredLead {
   dc: ClientSideReadiness;
   aa: ClientSideReadiness;
   terminAtIso: string | null;
+  terminInRange: boolean;
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
   botRoleplayCount: number;
@@ -220,6 +224,7 @@ export async function computeClients(
       dc,
       aa,
       terminAtIso,
+      terminInRange: dcInRange || r.aaInRange === true,
       lastTouchAtIso: lastTouchIso,
       daysSinceLastTouch: days,
       botRoleplayCount: botCount,
@@ -289,6 +294,7 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     dc: s.dc,
     aa: s.aa,
     terminAtIso: s.terminAtIso,
+    terminInRange: s.terminInRange,
     lastTouchAtIso: s.lastTouchAtIso,
     daysSinceLastTouch: s.daysSinceLastTouch,
     botRoleplayCount: s.botRoleplayCount,
