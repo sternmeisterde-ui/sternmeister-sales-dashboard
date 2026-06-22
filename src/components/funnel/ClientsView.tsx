@@ -14,6 +14,7 @@ import type {
 } from "@/lib/funnel/clients";
 import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
 import ClientDrawer from "@/components/funnel/ClientDrawer";
+import FilterSelect from "@/components/funnel/FilterSelect";
 
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
 const cache = new Map<string, ClientsResult>();
@@ -136,6 +137,20 @@ const COLUMNS: {
 function compare(a: number | string, b: number | string): number {
   if (typeof a === "number" && typeof b === "number") return a - b;
   return String(a).localeCompare(String(b), "ru");
+}
+
+function countCats(clients: ClientRow[]): { hot: number; warm: number; cold: number } {
+  const c = { hot: 0, warm: 0, cold: 0 };
+  for (const x of clients) c[x.category] += 1;
+  return c;
+}
+
+// Клиентский фильтр группы по менеджеру (данные уже загружены целиком, ~250 строк).
+// manager === "" → без фильтра. Пересчитываем total/shown/categories под отфильтрованных.
+function filterGroupByManager(group: ClientGroup, manager: string): ClientGroup {
+  if (!manager) return group;
+  const clients = group.clients.filter((c) => c.managerName === manager);
+  return { clients, total: clients.length, shown: clients.length, categories: countCats(clients) };
 }
 
 function ClientTable({
@@ -610,6 +625,8 @@ export default function ClientsView({ filters: _filters }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ClientRow | null>(null);
   const [drill, setDrill] = useState<{ title: string; rows: DrillRow[] } | null>(null);
+  // Клиентский фильтр по ответственному менеджеру ("" = все). Влияет и на чарты, и на таблицы.
+  const [manager, setManager] = useState("");
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -623,14 +640,33 @@ export default function ClientsView({ filters: _filters }: Props) {
   // Набор для графиков/метрик: клиенты, чей термин попал в выбранный диапазон дат
   // (актуальность задаётся самим фильтром даты). Won-бэклог без термина в диапазоне
   // в графики не идёт — он остаётся в таблице «Гутшайн одобрен».
+  // Менеджеры для дропдауна — distinct из загруженных клиентов (active+won), отсортированы.
+  const managerOptions = useMemo(() => {
+    if (!data) return [];
+    const names = new Set<string>();
+    for (const c of [...data.active.clients, ...data.won.clients]) {
+      if (c.managerName) names.add(c.managerName);
+    }
+    return Array.from(names)
+      .sort((a, b) => a.localeCompare(b, "ru"))
+      .map((n) => ({ value: n, label: n }));
+  }, [data]);
+
   const chartClients = useMemo(() => {
     if (!data) return [];
-    return [...data.active.clients, ...data.won.clients].filter((c) => c.terminInRange);
-  }, [data]);
+    return [...data.active.clients, ...data.won.clients].filter(
+      (c) => c.terminInRange && (manager === "" || c.managerName === manager),
+    );
+  }, [data, manager]);
   const uniqueBotUsers = useMemo(
     () => chartClients.filter((c) => c.botRoleplayCount > 0).length,
     [chartClients],
   );
+  // Выбранный менеджер пропал из новых данных (смена периода) → сброс на «Все», чтобы
+  // дропдаун и фильтр не рассинхронились (render-time паттерн, без setState-в-эффекте).
+  if (manager !== "" && data !== null && !managerOptions.some((o) => o.value === manager)) {
+    setManager("");
+  }
 
   const start = termin.start ?? todayBerlinDate();
   // Одна дата (нет end или end == start) = «с этого числа и дальше» (>=);
@@ -699,6 +735,17 @@ export default function ClientsView({ filters: _filters }: Props) {
             setTermin({ start: t, end: t });
           }}
         />
+        <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+          Менеджер
+        </span>
+        <FilterSelect
+          value={manager}
+          options={managerOptions}
+          onChange={setManager}
+          emptyLabel="Все"
+          ariaLabel="Фильтр по менеджеру"
+          minWidthClass="min-w-[160px]"
+        />
         {loading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
         <span className="text-[11px] text-slate-500 ml-auto">
           одна дата — термины с этого числа и дальше; период — диапазон
@@ -740,13 +787,13 @@ export default function ClientsView({ filters: _filters }: Props) {
           </div>
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
           <ClientTable
-            group={data.active}
+            group={filterGroupByManager(data.active, manager)}
             title="Клиенты в работе"
             icon={<Users className="w-4 h-4 text-blue-400" />}
             onRowClick={setSelected}
           />
           <ClientTable
-            group={data.won}
+            group={filterGroupByManager(data.won, manager)}
             title="Гутшайн одобрен"
             icon={<Trophy className="w-4 h-4 text-emerald-400" />}
             onRowClick={setSelected}
