@@ -60,8 +60,6 @@ export interface ClientRow {
   botRoleplayCount: number;
   /** Последняя самооценка готовности ботом (overall_readiness). */
   botLatestReadiness: string | null;
-  /** Суммарно ролевок (бот + звонковые) — фактор скоринга. */
-  roleplayCount: number;
   /** Ответственный менеджер (имя из master_managers) или null. */
   managerName: string | null;
   /** Дней на текущей стадии Бератера (по последней смене статуса). */
@@ -109,7 +107,6 @@ interface ScoredLead {
   daysSinceLastTouch: number | null;
   botRoleplayCount: number;
   botLatestReadiness: string | null;
-  roleplayCount: number;
   managerName: string | null;
   daysOnStage: number | null;
   consultations: number;
@@ -195,10 +192,9 @@ export async function computeClients(
         ? null
         : Math.max(0, Math.floor((nowMs - Date.parse(lastTouchIso)) / 86_400_000));
 
-    // Суммарная практика: тренировки с ботом + звонковые ролевки (обе стороны).
+    // Бот-ролевки — отдельная сущность от звонковых (их качество в dc/aa). Не склеиваем.
     const bot = botRoleplays.get(leadId);
     const botCount = bot?.count ?? 0;
-    const roleplayCount = botCount + dc.attempts.length + aa.attempts.length;
 
     const uid = r.responsibleUserId === null ? null : Number(r.responsibleUserId);
     const managerName = uid !== null ? roster.get(uid) ?? null : null;
@@ -214,7 +210,7 @@ export async function computeClients(
       activeSide,
       activeAvg,
       daysSinceLastTouch: days,
-      roleplayCount,
+      botRoleplayCount: botCount,
     });
 
     const lead: ScoredLead = {
@@ -228,7 +224,6 @@ export async function computeClients(
       daysSinceLastTouch: days,
       botRoleplayCount: botCount,
       botLatestReadiness: bot?.latestReadiness ?? null,
-      roleplayCount,
       managerName,
       daysOnStage,
       consultations,
@@ -298,7 +293,6 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     daysSinceLastTouch: s.daysSinceLastTouch,
     botRoleplayCount: s.botRoleplayCount,
     botLatestReadiness: s.botLatestReadiness,
-    roleplayCount: s.roleplayCount,
     managerName: s.managerName,
     daysOnStage: s.daysOnStage,
     consultations: s.consultations,
