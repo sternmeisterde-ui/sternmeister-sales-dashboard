@@ -18,9 +18,12 @@
  * количество подготовки, звонковые — качество. Больше тренировок → выше готовность
  * (как roleplay-коэффициент в berater-dashboard).
  *
- * Отложены вне-MVP факторы (исключены из знаменателя): ОКК-агрегаты (§8 даёт 15%)
- * и «Стадия CRM» (5%). Знаменатель = язык 20 + ролевки 35 + активность 5 +
- * ролевки-с-ботом 10 = 0.70.
+ * Полный набор факторов (ТЗ §7): язык 20 + готовность ролевок (актуальная
+ * сторона, +10 за факт консультации) 35 + ролевки-с-ботом 10 + ОКК консультаций
+ * 10 + ОКК по сделке 5 + стадия CRM 5 + активность 5. Знаменатель — сумма ВЕСОВ
+ * ПРИСУТСТВУЮЩИХ факторов (нет ОКК/ролевки → фактор исключается, score нормируется
+ * по остатку). ОКК — средний балл звонков из D2 (0..100), стадия CRM — близость к
+ * Гутшайну.
  *
  * Score всегда с breakdown — правило §8 «должен быть объяснимым».
  */
@@ -35,6 +38,9 @@ export interface ScoreFactor {
   /** 0..100 — вклад фактора. Нет данных на актуальной стадии → 0. */
   value: number;
   present: boolean;
+  /** true = вес учитывается в знаменателе ДАЖE при отсутствии данных (реальный
+   *  пробол штрафует, а не исключается). Для готовности ролевок (§8). */
+  mandatory?: boolean;
 }
 
 export interface ReadinessScore {
@@ -53,6 +59,14 @@ export interface ReadinessInput {
   daysSinceLastTouch: number | null;
   /** Тренировок с ботом ролевок, или null если неизвестно. */
   botRoleplayCount: number | null;
+  /** Проведена ли консультация (для бонуса +10 к готовности ролевок, §4.2). */
+  consultationDone: boolean;
+  /** Средний ОКК консультационных звонков (0..100) или null. */
+  consultOkk: number | null;
+  /** Средний ОКК по всем звонкам сделки (0..100) или null. */
+  dealOkk: number | null;
+  /** Стадия в CRM → 0..100 (ближе к Гутшайну = выше) или null. */
+  crmStageScore: number | null;
 }
 
 // §8: B2/C1/C2 = 100, B1 = 80, A2 = 50, A1 = 10, unknown = 30 (a1→a2, c2→c1).
@@ -90,21 +104,31 @@ function categorize(score: number): ReadinessCategory {
 }
 
 export function computeReadiness(input: ReadinessInput): ReadinessScore {
+  // Готовность ролевок актуальной стороны + бонус +10 за факт консультации (§4.2, cap 100).
   const roleplay =
-    input.activeAvg === null ? 0 : Math.min(100, Math.max(0, input.activeAvg * 20));
+    input.activeAvg === null
+      ? 0
+      : Math.min(100, Math.max(0, input.activeAvg * 20) + (input.consultationDone ? 10 : 0));
   const activity = activityScore(input.daysSinceLastTouch);
   const botCount = botCountScore(input.botRoleplayCount);
   const sideLabel = input.activeSide === "dc" ? "ДЦ" : "АА";
 
   const factors: ScoreFactor[] = [
     { key: "language", label: "Язык", weight: 0.2, value: LANGUAGE_SCORE[input.languageBucket], present: true },
-    { key: "roleplay", label: `Готовность ролевок ${sideLabel}`, weight: 0.35, value: roleplay, present: input.activeAvg !== null },
+    { key: "roleplay", label: `Готовность ролевок ${sideLabel}`, weight: 0.35, value: roleplay, present: input.activeAvg !== null, mandatory: true },
     { key: "bot_roleplays", label: "Ролевки с ботом", weight: 0.1, value: botCount ?? 0, present: botCount !== null },
+    { key: "consult_okk", label: "ОКК консультаций", weight: 0.1, value: input.consultOkk ?? 0, present: input.consultOkk !== null },
+    { key: "deal_okk", label: "ОКК по сделке", weight: 0.05, value: input.dealOkk ?? 0, present: input.dealOkk !== null },
+    { key: "crm_stage", label: "Стадия CRM", weight: 0.05, value: input.crmStageScore ?? 0, present: input.crmStageScore !== null },
     { key: "activity", label: "Активность 7 дней", weight: 0.05, value: activity ?? 0, present: activity !== null },
   ];
 
-  const denom = factors.reduce((s, f) => s + f.weight, 0);
-  const acc = factors.reduce((s, f) => s + f.weight * f.value, 0);
-  const score = Math.round(acc / denom);
+  // Знаменатель — присутствующие факторы + обязательные (пробел в которых штрафует).
+  // Отсутствующие данные (нет ОКК/бота/касаний) НЕ тянут score вниз — фактор просто
+  // исключается из нормировки.
+  const counted = factors.filter((f) => f.present || f.mandatory);
+  const denom = counted.reduce((s, f) => s + f.weight, 0);
+  const acc = counted.reduce((s, f) => s + f.weight * f.value, 0);
+  const score = denom > 0 ? Math.round(acc / denom) : 0;
   return { score, category: categorize(score), factors };
 }

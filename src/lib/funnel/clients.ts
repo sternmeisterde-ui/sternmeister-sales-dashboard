@@ -18,6 +18,7 @@ import { unwrapRows } from "./compute";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
 import { getBotRoleplaysForLeads } from "./bot-roleplays";
+import { getOkkByLead } from "./okk-by-lead";
 import {
   computeReadiness,
   type LanguageBucket,
@@ -27,6 +28,25 @@ import {
 
 const BERATER = B2G_PIPELINES.BERATER;
 const KOMMO_BASE = "https://sternmeister.kommo.com/leads/detail";
+
+// «Стадия CRM» (ТЗ §7): позиция статуса Бератера по пути к Гутшайну → 0..100.
+// Немапленные статусы (LOST и пр.) → фактор исключается из скоринга.
+const STAGE_SCORE: Record<number, number> = {
+  [BERATER_STATUSES.RECEIVED_FROM_FIRST]: 15,
+  [BERATER_STATUSES.DELAYED_START]: 18,
+  [BERATER_STATUSES.DOVEDENIE]: 22,
+  [BERATER_STATUSES.CONSULT_BEFORE_DC]: 35,
+  [BERATER_STATUSES.TERM_DC_CANCELLED]: 40,
+  [BERATER_STATUSES.CONSULT_BEFORE_DC_DONE]: 50,
+  [BERATER_STATUSES.TERM_DC_DONE]: 60,
+  [BERATER_STATUSES.CONSULT_BEFORE_AA]: 70,
+  [BERATER_STATUSES.TERM_AA]: 75,
+  [BERATER_STATUSES.TERM_AA_CANCELLED]: 65,
+  [BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]: 85,
+  [BERATER_STATUSES.BERATER_REVIEW]: 90,
+  [BERATER_STATUSES.APPEAL]: 55,
+  [BERATER_STATUSES.WON]: 100,
+};
 
 /**
  * Фильтр по дате термина (YYYY-MM-DD, Berlin).
@@ -160,7 +180,7 @@ export async function computeClients(
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
-  const [roleplays, lastTouch, botRoleplays, roster, stageEntered, consults] =
+  const [roleplays, lastTouch, botRoleplays, roster, stageEntered, consults, okkByLead] =
     await Promise.all([
       getRoleplaysForLeads(ids),
       fetchLastTouchMap(ids),
@@ -168,9 +188,12 @@ export async function computeClients(
       fetchManagerNames(),
       fetchCurrentStageEntered(ids),
       fetchConsultationCounts(ids),
+      getOkkByLead(ids), // ОКК-агрегаты из D2
     ]);
 
   const nowMs = Date.now();
+  // Без BERATER_BOT_DATABASE_URL бот-фактор не штрафует, а исключается (null).
+  const botConfigured = !!process.env.BERATER_BOT_DATABASE_URL;
   const activeScored: ScoredLead[] = [];
   const wonScored: ScoredLead[] = [];
 
@@ -208,13 +231,19 @@ export async function computeClients(
         ? null
         : Math.max(0, Math.floor((nowMs - Date.parse(stageIso)) / 86_400_000));
     const consultations = consults.get(leadId) ?? 0;
+    const okk = okkByLead.get(leadId);
+    const crmStageScore = STAGE_SCORE[Number(r.statusId)] ?? null;
 
     const readiness = computeReadiness({
       languageBucket: bucket,
       activeSide,
       activeAvg,
       daysSinceLastTouch: days,
-      botRoleplayCount: botCount,
+      botRoleplayCount: botConfigured ? botCount : null,
+      consultationDone: consultations > 0,
+      consultOkk: okk?.consultOkk ?? null,
+      dealOkk: okk?.dealOkk ?? null,
+      crmStageScore,
     });
 
     const lead: ScoredLead = {
