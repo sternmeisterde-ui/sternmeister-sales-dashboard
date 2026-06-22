@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -191,7 +191,17 @@ function extractKommoLeadId(input: string): string | null {
   return m2 ? m2[1] : null;
 }
 
-export default function AnalyticsTab({ department }: { department: "b2g" | "b2b" }) {
+interface ExcludedCall {
+  id: string;
+  callId: string;
+  managerName: string | null;
+  callDate: string | null;
+  score: number | null;
+  excludedByName: string | null;
+  createdAt: string | null;
+}
+
+export default function AnalyticsTab({ department, canModerate = false }: { department: "b2g" | "b2b"; canModerate?: boolean }) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
   // Коммерсы: вид по вкладкам линий без «Все» → стартуем на первой линии.
   // Госники: кросс-воронка «Все» + опциональный per-line drill-down.
@@ -219,6 +229,12 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
   // Скрытые направления в сводке (мультивыбор). Храним id скрытых линий; читаем
   // из localStorage в эффекте (а не в инициализаторе) — гидрация цела.
   const [hiddenDirections, setHiddenDirections] = useState<Set<string>>(new Set());
+
+  // Moderation: calls excluded from the stats (admin/rop/teamlead only).
+  // excludedList drives the «Исключённые» panel; excludeBusy guards double-clicks.
+  const [excludedList, setExcludedList] = useState<ExcludedCall[]>([]);
+  const [excludedOpen, setExcludedOpen] = useState(false);
+  const [excludeBusy, setExcludeBusy] = useState(false);
 
   // Comparison mode
   const [compareMode, setCompareMode] = useState(false);
@@ -470,11 +486,56 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
     }
   }, [department, source, compareMode, dateRange, managerIds]);
 
+  // Moderation: current exclusions for the panel (admin/rop/teamlead only).
+  const fetchExcluded = useCallback(async (signal?: AbortSignal) => {
+    if (!canModerate) { setExcludedList([]); return; }
+    try {
+      const res = await fetch(`/api/analytics/exclude?department=${department}&source=${source}`, { signal });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (Array.isArray(json.excluded)) setExcludedList(json.excluded as ExcludedCall[]);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+    }
+  }, [canModerate, department, source]);
+
+  // Exclude (true) / restore (false) a call, then recompute stats + refresh
+  // the panel. The /api/analytics cache key folds in the exclusion signature,
+  // so the refetch returns freshly-recomputed averages (no TTL lag).
+  const toggleExclude = useCallback(async (
+    callId: string,
+    excluded: boolean,
+    meta?: { managerName?: string; callDate?: string; score?: number | null },
+  ) => {
+    if (!canModerate || excludeBusy) return;
+    setExcludeBusy(true);
+    try {
+      const res = await fetch("/api/analytics/exclude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ department, source, callId, excluded, ...meta }),
+      });
+      if (!res.ok) throw new Error(`exclude failed ${res.status}`);
+      hasDataRef.current = true; // background refresh — keep tree mounted
+      await Promise.all([fetchData(), fetchOverview(), fetchExcluded()]);
+    } catch (e) {
+      console.error("[Analytics] toggleExclude:", e);
+    } finally {
+      setExcludeBusy(false);
+    }
+  }, [canModerate, excludeBusy, department, source, fetchData, fetchOverview, fetchExcluded]);
+
   useEffect(() => {
     const ac = new AbortController();
     fetchData(ac.signal);
     return () => ac.abort();
   }, [fetchData]);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchExcluded(ac.signal);
+    return () => ac.abort();
+  }, [fetchExcluded]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -727,6 +788,9 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                   overallScores={overview.overallScores}
                   collapsedBlocks={collapsedBlocks}
                   onToggle={(n) => toggle(setCollapsedBlocks, n)}
+                  // Один видимый направление = строка направления уже равна
+                  // среднему → прячем дублирующую строку «Средний балл».
+                  showAverage={visibleOverviewBlocks.length > 1}
                 />
               ) : (
                 <div className="glass-panel rounded-2xl p-6 border border-white/5 text-center">
@@ -784,6 +848,51 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                 </button>
               </div>
             )}
+            {/* Исключённые из статистики — панель модерации (admin/rop/teamlead). */}
+            {canModerate && excludedList.length > 0 && (
+              <div className="glass-panel rounded-2xl border border-rose-500/15 mb-2 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setExcludedOpen((v) => !v)}
+                  className="w-full flex items-center justify-between gap-2 px-4 py-2.5 hover:bg-white/[0.02]"
+                >
+                  <span className="flex items-center gap-2 text-[11px] uppercase tracking-widest font-bold text-rose-300">
+                    <Ban className="w-3.5 h-3.5" />
+                    Исключённые из статистики ({excludedList.length})
+                  </span>
+                  {excludedOpen ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
+                </button>
+                {excludedOpen && (
+                  <div className="px-3 pb-3 flex flex-col gap-1">
+                    {excludedList.map((ex) => (
+                      <div key={ex.id} className="flex items-center gap-2 text-[11px] text-slate-400 bg-slate-900/40 rounded-lg px-3 py-1.5">
+                        <span className="text-slate-200 font-medium truncate max-w-[160px]">{ex.managerName ?? "—"}</span>
+                        <span className="text-slate-600">·</span>
+                        <span className="tabular-nums">{ex.callDate ?? "—"}</span>
+                        {ex.score != null && (
+                          <>
+                            <span className="text-slate-600">·</span>
+                            <span className="tabular-nums">{ex.score}%</span>
+                          </>
+                        )}
+                        {ex.excludedByName && (
+                          <span className="text-slate-600 truncate hidden sm:inline">· исключил: {ex.excludedByName}</span>
+                        )}
+                        <button
+                          type="button"
+                          disabled={excludeBusy}
+                          onClick={() => toggleExclude(ex.callId, false)}
+                          className="ml-auto shrink-0 flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 font-semibold disabled:opacity-40"
+                          title="Вернуть звонок в статистику"
+                        >
+                          <RotateCcw className="w-3 h-3" /> Вернуть
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {source === "okk" && data && (
               <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
             )}
@@ -802,6 +911,8 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
                 onToggleMgr={(k) => toggle(setExpandedMgrs, k)}
                 expandedDates={expandedDates}
                 onToggleDate={(k) => toggle(setExpandedDates, k)}
+                canModerate={canModerate}
+                onExclude={(info) => toggleExclude(info.callId, true, { managerName: info.managerName, callDate: info.callDate, score: info.score })}
               />
             ) : (
               data && !loading ? (
@@ -860,11 +971,14 @@ export default function AnalyticsTab({ department }: { department: "b2g" | "b2b"
 // ==================== Criteria x Time Table ====================
 
 function CriteriaTimeTable({
-  blocks, periods, groupBy, overallScores, collapsedBlocks, onToggle,
+  blocks, periods, groupBy, overallScores, collapsedBlocks, onToggle, showAverage = true,
 }: {
   blocks: BlockData[]; periods: string[]; groupBy: string;
   overallScores: Record<string, number>;
   collapsedBlocks: Set<string>; onToggle: (n: string) => void;
+  // «Средний балл» row. Hidden by the B2B overview when only one direction is
+  // visible (the single direction row already equals the average).
+  showAverage?: boolean;
 }) {
   return (
     <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
@@ -889,13 +1003,15 @@ function CriteriaTimeTable({
                 <BlockTimeRows key={block.name} block={block} periods={periods} isCollapsed={collapsed} onToggle={() => onToggle(block.name)} />
               );
             })}
-            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
-              <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
-              {periods.map((p) => {
-                const v = overallScores[p];
-                return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
-              })}
-            </tr>
+            {showAverage && (
+              <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+                <td className="px-4 py-2.5 font-bold text-white text-[12px] sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10">Средний балл</td>
+                {periods.map((p) => {
+                  const v = overallScores[p];
+                  return <td key={p} className={`px-2 py-2.5 text-right font-mono text-[12px] font-bold ${getCriteriaColor(v)} ${getCriteriaBg(v)}`}>{fmtScore(v)}</td>;
+                })}
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -1129,7 +1245,7 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, department, source, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate,
+  tree, blocks, department, source, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate, canModerate, onExclude,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
   department: "b2g" | "b2b";
@@ -1139,6 +1255,9 @@ function CriteriaTimeTree({
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
   expandedMgrs: Set<string>; onToggleMgr: (k: string) => void;
   expandedDates: Set<string>; onToggleDate: (k: string) => void;
+  // Moderation: exclude a call from the stats (admin/rop/teamlead only).
+  canModerate: boolean;
+  onExclude: (info: { callId: string; managerName: string; callDate: string; score: number | null }) => void;
 }) {
   // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
   // нужном режиме; внутри можно переключаться.
@@ -1147,7 +1266,7 @@ function CriteriaTimeTree({
   // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
   // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
   // absolute-дропдаун обрезался бы контейнером.
-  const [menu, setMenu] = useState<{ callId: string; kommoLeadUrl: string | null; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ callId: string; kommoLeadUrl: string | null; managerName: string; callDate: string; score: number | null; x: number; y: number } | null>(null);
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
@@ -1337,7 +1456,7 @@ function CriteriaTimeTree({
                                           // Не вылезать за правый край.
                                           let x = r.left;
                                           if (x + MENU_W > window.innerWidth - 8) x = Math.max(8, window.innerWidth - MENU_W - 8);
-                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, x, y });
+                                          setMenu({ callId: c.callId, kommoLeadUrl: c.kommoLeadUrl, managerName: mgr.name, callDate: d.date, score: c.overall, x, y });
                                         }}
                                         className="text-slate-500 hover:text-white shrink-0"
                                         title="Действия"
@@ -1449,6 +1568,19 @@ function CriteriaTimeTree({
           >
             <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
           </button>
+          {canModerate && (
+            <button
+              type="button"
+              onClick={() => {
+                onExclude({ callId: menu.callId, managerName: menu.managerName, callDate: menu.callDate, score: menu.score });
+                setMenu(null);
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-rose-300 hover:bg-rose-500/10 border-t border-white/5"
+              title="Убрать этот звонок из всех средних оценок"
+            >
+              <Ban className="w-3.5 h-3.5 text-rose-400 shrink-0" /> Исключить из статистики
+            </button>
+          )}
         </div>
       </>
     )}
