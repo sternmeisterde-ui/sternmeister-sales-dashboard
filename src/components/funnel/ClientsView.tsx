@@ -65,6 +65,13 @@ function scoreColor(s5: number): string {
   return "text-rose-300";
 }
 
+// ОКК 0..100 → цвет (как scoreColor, но по 100-балльной шкале).
+function okkColor(okk: number): string {
+  if (okk >= 80) return "text-emerald-300";
+  if (okk >= 60) return "text-amber-300";
+  return "text-rose-300";
+}
+
 function SideCell({ side }: { side: ClientSideReadiness }) {
   if (side.attempts.length === 0) return <span className="text-slate-600">—</span>;
   const last = side.attempts[side.attempts.length - 1];
@@ -89,6 +96,7 @@ type SortKey =
   | "aa"
   | "roleplays"
   | "consultations"
+  | "okk"
   | "activity"
   | "score";
 type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
@@ -120,6 +128,7 @@ const COLUMNS: {
   { key: "aa", label: "АА", align: "center", value: (c) => c.aa.latest ?? -1 },
   { key: "roleplays", label: "С ботом", align: "center", value: (c) => c.botRoleplayCount },
   { key: "consultations", label: "Конс.", align: "center", value: (c) => c.consultations },
+  { key: "okk", label: "ОКК", align: "center", value: (c) => c.okkDeal ?? -1 },
   { key: "activity", label: "Активность", align: "right", value: (c) => c.daysSinceLastTouch ?? Number.POSITIVE_INFINITY },
   { key: "score", label: "Готовность", align: "right", value: (c) => c.score },
 ];
@@ -235,6 +244,13 @@ function ClientTable({
                   </td>
                   <td className="px-3 py-2 text-center text-slate-300 tabular-nums">
                     {c.consultations || <span className="text-slate-600">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-center tabular-nums" title="средний ОКК звонков по сделке (из ОКК-системы)">
+                    {c.okkDeal === null ? (
+                      <span className="text-slate-600">—</span>
+                    ) : (
+                      <span className={okkColor(c.okkDeal)}>{Math.round(c.okkDeal)}</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
                     {c.daysSinceLastTouch === null
