@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
@@ -69,15 +69,6 @@ interface PerManagerRow {
   overdueTasks: number;
 }
 
-interface StatusBreakdownRow {
-  pipelineId: number;
-  pipelineName: string;
-  line: string | null;
-  statusId: number;
-  statusName: string;
-  count: number;
-}
-
 interface DashboardData {
   date: string;
   department: string;
@@ -98,7 +89,6 @@ interface DashboardData {
     incomingTotal: number; outgoingTotal: number;
   }> | null;
   trendByPipeline?: Record<string, DailyBucket[]> | null;
-  statusBreakdown: StatusBreakdownRow[];
 }
 
 type LineFilter = "all" | "1" | "2" | "3";
@@ -541,9 +531,6 @@ export default function DashboardTab({ department }: { department: string }) {
         onFilterChange={setTrendLine}
         mode={isB2G ? "b2g" : "b2b"}
       />
-
-      {/* ============ STATUS COHORT TABLE with filters ============ */}
-      <StatusCohortTable rows={data.statusBreakdown} isB2G={isB2G} />
     </div>
   );
 }
@@ -743,303 +730,6 @@ function TrendChart({
           <Line type="monotone" dataKey="Пропущ." stroke="#f43f5e" strokeWidth={2} dot={{ fill: "#f43f5e", r: 3 }} />
         </LineChart>
       </ResponsiveContainer>
-    </div>
-  );
-}
-
-// ==================== Status cohort table with filters ====================
-//
-// Filters:
-//   • Линия (B2G only): all / 1 / 2 / 3 — same dropdown style as the trend chart.
-//     Pipeline filter dropped — Line 2 and Line 3 share the BERATER pipeline,
-//     so a separate "воронка" filter would just duplicate the line filter.
-//   • Статусы: multi-select dropdown with checkboxes, "select all" / "clear"
-//     toggles. Default = all checked. Newly-appearing statuses (e.g. after a
-//     date-range expansion) are auto-selected so the user doesn't lose visibility.
-//
-// Percent base: each row's count / sum(currently shown rows). When the user
-// narrows by line or unchecks statuses, percentages re-base to that subset.
-//
-// B2B variant: no line filter (no line concept); pipeline filter shows up
-// because Бух Комм vs Мед Admin are real distinct funnels worth slicing.
-
-// Display names for B2G pipelines in the cohort filter. The "Бератер" funnel
-// covers both Line 2 and Line 3 in Kommo (single pipeline split by status_id);
-// "Квалификатор" is the FIRST_LINE pipeline. Falls back to whatever
-// pipelineName the server emits.
-const B2G_FUNNEL_LABEL: Record<number, string> = {
-  10935879: "Квалификатор",  // B2G_PIPELINES.FIRST_LINE
-  12154099: "Бератер",        // B2G_PIPELINES.BERATER (L2 + L3)
-};
-
-/**
- * Dedup key for cohort statuses. Two pipelines (e.g. Бух Комм vs Мед Комм)
- * have the SAME logical status under different status_ids — "Контакт
- * установлен" sits at 81523515 in Бух Комм and 101858259 in Мед Комм.
- * Filtering by status_id forces the user to tick both boxes; keying by
- * normalized name lets one tick include all matching rows.
- *
- * Server already trims and fixes the Latin-C / "Счёт" anomaly, so this
- * helper just lowercases for case-insensitive equality (e.g. "НЕДОЗВОН"
- * vs "Недозвон" if Kommo names ever drift on the same word).
- */
-function statusKey(name: string): string {
-  return name.toLowerCase().trim();
-}
-
-function StatusCohortTable({ rows, isB2G }: { rows: StatusBreakdownRow[]; isB2G: boolean }) {
-  // Funnel multi-select. null sentinel = "all selected" (keeps newly-arriving
-  // pipelines auto-included when the date range expands).
-  const [funnelSelection, setFunnelSelection] = useState<Set<number> | null>(null);
-  // Status selection keyed by normalized status name (see statusKey above) so
-  // duplicates across pipelines collapse into one filter checkbox.
-  const [statusSelection, setStatusSelection] = useState<Set<string> | null>(null);
-  const [statusOpen, setStatusOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Available funnels = distinct pipelineIds in the current rows. For B2G
-  // remap labels to the user's preferred names (Квалификатор / Бератер).
-  // Bератер still surfaces every L2 + L3 lead — the row filter is by
-  // pipelineId, not by line, so nothing is dropped at this stage.
-  const funnels = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const r of rows) {
-      const name = isB2G
-        ? (B2G_FUNNEL_LABEL[r.pipelineId] ?? r.pipelineName)
-        : r.pipelineName;
-      map.set(r.pipelineId, name);
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [rows, isB2G]);
-
-  // Resolve funnel selection from the sentinel.
-  const selectedFunnels = useMemo(() => {
-    if (funnelSelection === null) return new Set(funnels.map((f) => f.id));
-    return new Set(Array.from(funnelSelection).filter((id) => funnels.some((f) => f.id === id)));
-  }, [funnelSelection, funnels]);
-
-  const scopedRows = useMemo(() => {
-    return rows.filter((r) => selectedFunnels.has(r.pipelineId));
-  }, [rows, selectedFunnels]);
-
-  const toggleFunnel = (id: number) => {
-    setFunnelSelection((prev) => {
-      const base = prev ?? new Set(funnels.map((f) => f.id));
-      const next = new Set(base);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  // Alias for the rest of the component.
-  const lineFilteredRows = scopedRows;
-
-  const availableStatuses = useMemo(() => {
-    // Dedupe by normalized name — collapses Бух Комм + Мед Комм same-name
-    // statuses into a single dropdown row. First-seen display name wins
-    // (server already canonicalises spellings, so this is mostly cosmetic).
-    const map = new Map<string, string>();
-    for (const r of lineFilteredRows) {
-      const key = statusKey(r.statusName);
-      if (!map.has(key)) map.set(key, r.statusName);
-    }
-    return Array.from(map.entries())
-      .map(([key, name]) => ({ key, name }))
-      .sort((a, b) => a.name.localeCompare(b.name, "ru"));
-  }, [lineFilteredRows]);
-
-  // Resolve "selected statuses" from the sentinel: null = everything available.
-  const selectedSet = useMemo(() => {
-    if (statusSelection === null) {
-      return new Set(availableStatuses.map((s) => s.key));
-    }
-    // Filter selection to only statuses still available in current line scope.
-    return new Set(
-      Array.from(statusSelection).filter((key) =>
-        availableStatuses.some((s) => s.key === key),
-      ),
-    );
-  }, [statusSelection, availableStatuses]);
-
-  const filtered = useMemo(() => {
-    return lineFilteredRows.filter((r) => selectedSet.has(statusKey(r.statusName)));
-  }, [lineFilteredRows, selectedSet]);
-
-  const total = filtered.reduce((s, r) => s + r.count, 0);
-  const sorted = useMemo(() => [...filtered].sort((a, b) => b.count - a.count), [filtered]);
-
-  // Close dropdown on outside click.
-  useEffect(() => {
-    if (!statusOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setStatusOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [statusOpen]);
-
-  if (rows.length === 0) return null;
-
-  const toggleStatus = (key: string) => {
-    setStatusSelection((prev) => {
-      const base = prev ?? new Set(availableStatuses.map((s) => s.key));
-      const next = new Set(base);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-  const selectAllStatuses = () => setStatusSelection(null);
-  const clearAllStatuses = () => setStatusSelection(new Set());
-
-  const allChecked = selectedSet.size === availableStatuses.length && availableStatuses.length > 0;
-  const noneChecked = selectedSet.size === 0;
-  const buttonLabel = allChecked
-    ? `Все статусы (${availableStatuses.length})`
-    : noneChecked
-      ? "Не выбрано"
-      : `Выбрано: ${selectedSet.size} из ${availableStatuses.length}`;
-
-  return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5">
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-        <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-          Статусы сделок — когортный срез
-          <span className="text-slate-500 ml-2 font-normal normal-case">
-            (всего {total.toLocaleString("ru-RU")} {total === 1 ? "сделка" : total % 10 >= 2 && total % 10 <= 4 && (total % 100 < 10 || total % 100 >= 20) ? "сделки" : "сделок"})
-          </span>
-        </h3>
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Funnel multi-select as inline checkbox pills. Both B2G and B2B
-              have exactly 2 funnels in scope — checkbox pills read better than
-              a dropdown for that count. Default both checked; user clicks to
-              toggle. Бератер covers L2 + L3 in one funnel. */}
-          {funnels.map((f) => {
-            const checked = selectedFunnels.has(f.id);
-            return (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => toggleFunnel(f.id)}
-                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors ${
-                  checked
-                    ? "bg-blue-500/15 border-blue-500/40 text-blue-200"
-                    : "bg-slate-900/40 border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200"
-                }`}
-              >
-                <span className={`inline-block w-3.5 h-3.5 rounded border ${
-                  checked ? "bg-blue-500 border-blue-500" : "border-slate-500"
-                } flex items-center justify-center text-[10px] text-white`}>
-                  {checked ? "✓" : ""}
-                </span>
-                <span>{f.name}</span>
-              </button>
-            );
-          })}
-
-          {/* Status multi-select dropdown */}
-          <div ref={dropdownRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setStatusOpen((s) => !s)}
-              className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors flex items-center gap-2 min-w-[200px] justify-between"
-            >
-              <span>{buttonLabel}</span>
-              <span className="text-slate-500 text-[10px]">{statusOpen ? "▲" : "▼"}</span>
-            </button>
-            {statusOpen && (
-              <div className="absolute right-0 top-full mt-1 z-30 w-72 max-h-80 overflow-auto rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur-md shadow-xl">
-                <div className="sticky top-0 bg-slate-900/95 backdrop-blur-md border-b border-white/5 px-3 py-2 flex items-center justify-between">
-                  <button
-                    onClick={selectAllStatuses}
-                    className="text-[10px] uppercase tracking-wider text-blue-400 hover:text-blue-300"
-                  >
-                    Выбрать все
-                  </button>
-                  <button
-                    onClick={clearAllStatuses}
-                    className="text-[10px] uppercase tracking-wider text-slate-500 hover:text-slate-300"
-                  >
-                    Снять все
-                  </button>
-                </div>
-                {availableStatuses.length === 0 ? (
-                  <div className="p-4 text-center text-xs text-slate-500">Нет статусов</div>
-                ) : (
-                  <ul className="py-1">
-                    {availableStatuses.map((s) => {
-                      const checked = selectedSet.has(s.key);
-                      return (
-                        <li key={s.key}>
-                          <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 cursor-pointer text-xs text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleStatus(s.key)}
-                              className="w-3.5 h-3.5 rounded border-white/20 bg-slate-900 text-blue-500 focus:ring-blue-500/40 focus:ring-1"
-                            />
-                            <span className="truncate">{s.name}</span>
-                          </label>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {sorted.length === 0 ? (
-        <div className="text-center py-8 text-slate-500 text-sm">Нет сделок по выбранным фильтрам</div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
-                <th className="text-left py-2 px-2 font-medium">Статус</th>
-                {selectedFunnels.size > 1 && (
-                  <th className="text-left py-2 px-2 font-medium">Воронка</th>
-                )}
-                <th className="text-right py-2 px-2 font-medium">Сделок</th>
-                <th className="text-right py-2 px-2 font-medium w-1/3">Доля</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((r) => {
-                const pct = total > 0 ? (r.count / total) * 100 : 0;
-                const funnelName =
-                  funnels.find((f) => f.id === r.pipelineId)?.name ?? r.pipelineName;
-                return (
-                  <tr key={`${r.pipelineId}-${r.statusId}`} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                    <td className="py-2 px-2 text-slate-200 truncate max-w-[320px]">{r.statusName}</td>
-                    {selectedFunnels.size > 1 && (
-                      <td className="py-2 px-2 text-xs text-slate-400 truncate max-w-[160px]">
-                        {funnelName}
-                      </td>
-                    )}
-                    <td className="py-2 px-2 text-right text-slate-200 tabular-nums font-medium">{r.count.toLocaleString("ru-RU")}</td>
-                    <td className="py-2 px-2 w-1/3">
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-1.5 bg-slate-800/60 rounded-full overflow-hidden">
-                          <div className="h-full bg-blue-500/70" style={{ width: `${pct}%` }} />
-                        </div>
-                        <span className="text-[11px] text-slate-500 min-w-[44px] text-right tabular-nums">
-                          {pct.toFixed(1)}%
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }

@@ -11,8 +11,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTasks } from "@/lib/kommo/client";
 import {
   getAnalyticsLeads,
-  getAnalyticsCohortStatusBreakdown,
-  type AnalyticsCohortStatusRow,
 } from "@/lib/daily/analytics-leads";
 import {
   aggregateLeadFunnelMetrics,
@@ -411,91 +409,6 @@ function buildPipelineBreakdown(
   return result;
 }
 
-// ==================== Cohort status breakdown ====================
-//
-// Same idea as buildPipelineBreakdown but: (a) keeps closed leads (won/lost)
-// since the cohort is "leads created in this period" and we want the full
-// lifecycle, not just current active state; (b) emits a flat row-per-status
-// shape with a derived `line` column for B2G; (c) labels match what the new
-// dashboard cohort table renders.
-
-interface CohortStatusRow {
-  pipelineId: number;
-  pipelineName: string;
-  line: string | null;
-  statusId: number;
-  statusName: string;
-  count: number;
-}
-
-function buildCohortStatusBreakdown(
-  rows: AnalyticsCohortStatusRow[],
-  department: string,
-): CohortStatusRow[] {
-  // Pipeline labels for the cohort table — neutral names without line suffix
-  // since the line column carries that info. BERATER stays "Бух Бератер" for
-  // both Line 2 and Line 3 rows; the line column distinguishes them.
-  const pipelineLabels: Record<number, string> =
-    department === "b2b"
-      ? {
-          [B2B_PIPELINES.COMMERCIAL]: "Бух Комм",
-          [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
-        }
-      : {
-          [B2G_PIPELINES.FIRST_LINE]: "Бух Гос",
-          [B2G_PIPELINES.BERATER]: "Бух Бератер",
-        };
-
-  return rows
-    .map((r) => {
-      let line: string | null = null;
-      if (department === "b2g") {
-        if (r.pipelineId === B2G_PIPELINES.FIRST_LINE) line = "1";
-        else if (r.pipelineId === B2G_PIPELINES.BERATER) {
-          line = BERATER_LINE_3_STATUS_IDS.has(r.statusId) ? "3" : "2";
-        }
-      }
-      return {
-        pipelineId: r.pipelineId,
-        pipelineName: pipelineLabels[r.pipelineId] ?? r.pipelineName,
-        line,
-        statusId: r.statusId,
-        statusName: normalizeStatusName(r.statusName),
-        count: r.count,
-      };
-    })
-    .sort((a, b) => b.count - a.count);
-}
-
-/**
- * Clean up status names emitted by Kommo before showing them in the UI.
- *
- * Real anomalies observed live (B2B/Коммерция, 2026-04-28):
- *  • "Cчет выставлен" — first character is Latin "C" U+0043 (looks identical
- *    to Cyrillic "С" U+0421, but breaks string compare). Both Бух Комм
- *    (status 82661919) and Мед Комм (status 101858271) are affected.
- *    We restore Cyrillic "С" and add the "ё" so the canonical spelling
- *    "Счёт выставлен" is shown.
- *  • "ИНТЕРЕС ПОДТВЕРЖДЕН " — trailing space on Бух Комм (status 82661915)
- *    while Мед Комм has the trimmed form. Causes filter dedupe to treat
- *    the two as different keys.
- * The data lives in Kommo and ops can't easily fix it there — this is the
- * presentation-layer scrub.
- */
-function normalizeStatusName(raw: string): string {
-  let name = raw.trim();
-  // Replace Latin "C" at the start of the word "Cчет" / "Cчёт".
-  if (/^C(?=ч[её]?т)/i.test(name)) {
-    name = `С${name.slice(1)}`;
-  }
-  // Canonicalise "Счет выставлен" → "Счёт выставлен" (same status, two
-  // spellings in Kommo across pipelines — pick the one with ё).
-  if (/^Счет(?=\b| )/i.test(name)) {
-    name = name.replace(/^Счет/, "Счёт");
-  }
-  return name;
-}
-
 // ==================== MAIN HANDLER ====================
 
 const RESPONSE_CACHE_TTL = 5 * 60 * 1000;
@@ -579,31 +492,14 @@ async function buildDashboardResponse(
       line3: allManagers.filter((m) => m.line === "3").map((m) => m.name),
     };
 
-    // Cohort table allowlist — for B2G we restrict to FIRST_LINE + BERATER
-    // (Medical Gov has its own funnel ops doesn't manage in this view). For
-    // B2B all department pipelines participate.
-    const cohortPipelineIdsArr =
-      department === "b2g"
-        ? [B2G_PIPELINES.FIRST_LINE, B2G_PIPELINES.BERATER]
-        : pipelineIds;
-
     // All external calls in parallel. Calls (and trend) come from the analytics
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, cohortStatusRows, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
-      // Cohort status breakdown: pre-aggregated GROUP BY in Postgres returning
-      // rows with the human-readable `pipeline` / `status` text columns the
-      // ETL already mirrors. Avoids the Kommo /pipelines fallback path that
-      // was leaving the dashboard table showing literal "Status 12345" when
-      // getPipelines() failed or didn't include a status_id.
-      getAnalyticsCohortStatusBreakdown(cohortPipelineIdsArr, from, to).catch((e) => {
-        console.error("[Dashboard] cohort status breakdown failed:", e);
-        return [] as AnalyticsCohortStatusRow[];
-      }),
       // Tasks are filtered server-side by responsible_user_id so we pull only
       // our 16-or-so managers' open tasks instead of every task in the
       // account. Big win on department switch latency — the prior account-
@@ -777,15 +673,6 @@ async function buildDashboardResponse(
       allowedPipelineIds.has(c.pipelineId),
     );
 
-    // Flat status rows for the cohort table — leads created in [from, to]
-    // regardless of status (active OR closed = won/lost). Lifecycle view
-    // of the cohort. For B2G, tagged with derived line.
-    //
-    // Pipeline allowlist (cohortPipelineIdsArr) was applied in the SQL upstream
-    // — for B2G it's tighter than the rest of the dashboard (only FIRST_LINE
-    // + BERATER participate), for B2B all department pipelines.
-    const statusBreakdown = buildCohortStatusBreakdown(cohortStatusRows, department);
-
     // Empty per-line trends for B2B (or when query failed) — keeps the
     // response shape uniform so the client doesn't need null guards.
     const emptyTrend: DailyCallBucket[] = [];
@@ -843,6 +730,5 @@ async function buildDashboardResponse(
       todayMetricsByPipeline,
       trendByPipeline,
       pipelineBreakdown,
-      statusBreakdown,
     };
 }
