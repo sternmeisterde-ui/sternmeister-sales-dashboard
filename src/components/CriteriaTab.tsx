@@ -93,12 +93,15 @@ function getScoreInfo(type: string, scoring: boolean): {
 }
 
 // Criticality-weight tier display. Only meaningful for scoring binary criteria
-// (analytical/filter criteria don't enter the weighted sum).
-function getWeightInfo(weight: number): { label: string; color: string; bg: string; border: string } | null {
+// (analytical/filter criteria don't enter the weighted sum). Known tiers get a
+// named label + colour; any other value falls back to a literal «×N» so the UI
+// stays correct if the rubric changes the weights upstream.
+function getWeightInfo(weight: number): { label: string; color: string; bg: string; border: string } {
   if (weight === 3) return { label: "Фундамент ×3", color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/25" };
   if (weight === 1.5) return { label: "Важное ×1.5", color: "text-sky-300", bg: "bg-sky-500/10", border: "border-sky-500/25" };
+  if (weight === 1) return { label: "Базовое ×1", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
   if (weight === 0.5) return { label: "Бонус ×0.5", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
-  return { label: "Базовое ×1", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
+  return { label: `×${weight}`, color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
 }
 
 // ─── Criterion Card (read-only) ─────────────────────────────────
@@ -221,16 +224,20 @@ function StageSection({ stage }: { stage: StageRaw }) {
 
 // ─── Weight legend ──────────────────────────────────────────────
 
-function WeightLegend() {
-  const tiers = [3, 1.5, 0.5].map((w) => getWeightInfo(w)!);
+// `weights` — distinct weight values actually present in the open config,
+// sorted descending. Rendered only when the config genuinely uses weights.
+function WeightLegend({ weights }: { weights: number[] }) {
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <span className="text-[10px] text-slate-500 uppercase tracking-wider">Вес критерия:</span>
-      {tiers.map((t) => (
-        <span key={t.label} className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${t.bg} border ${t.border} ${t.color}`}>
-          {t.label}
-        </span>
-      ))}
+      {weights.map((w) => {
+        const t = getWeightInfo(w);
+        return (
+          <span key={w} className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${t.bg} border ${t.border} ${t.color}`}>
+            {t.label}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -275,6 +282,17 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
   const stages = config?.stages ?? [];
   const totalCriteria = stages.reduce((sum, s) => sum + s.criteria.length, 0);
   const scoredCriteria = stages.reduce((sum, s) => sum + s.criteria.filter(isScoringBinary).length, 0);
+
+  // Weights actually used in THIS config (scoring binary criteria only). The
+  // legend renders only when the rubric genuinely weights criteria — flat
+  // configs (all weight 1 / unset, e.g. berater / все r2_*) get no legend.
+  const usedWeights = stages
+    .flatMap((s) => s.criteria)
+    .filter((c) => isScoringBinary(c) && c.type === "binary")
+    .map((c) => c.weight)
+    .filter((w): w is number => typeof w === "number");
+  const hasWeights = usedWeights.some((w) => w !== 1);
+  const legendWeights = Array.from(new Set(usedWeights)).sort((a, b) => b - a);
 
   return (
     <div className="flex flex-col gap-5 fade-in">
@@ -329,7 +347,7 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
                 <span className="text-xs text-slate-500 ml-1.5">этапов</span>
               </div>
             </div>
-            <WeightLegend />
+            {hasWeights && <WeightLegend weights={legendWeights} />}
           </div>
         )}
       </div>
