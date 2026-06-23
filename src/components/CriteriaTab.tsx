@@ -334,15 +334,6 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
         )}
       </div>
 
-      {/* Read-only note */}
-      <div className="flex items-start gap-2 px-5 py-3 bg-slate-800/30 border border-white/[0.06] rounded-xl text-xs text-slate-400 leading-relaxed">
-        <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-500" />
-        <span>
-          Критерии редактируются в репозитории OKK (<code className="text-slate-300">src/criteria/*.json</code>) и
-          синхронизируются в базу при деплое. Здесь — актуальная версия с весами критичности, целями и датами ввода.
-        </span>
-      </div>
-
       {/* Error */}
       {error && (
         <div className="flex items-center gap-2 px-5 py-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-300 text-sm">
