@@ -58,6 +58,11 @@ const cleanText = (text: string) => {
     .trim();
 };
 
+// Взвешенные баллы (D2 v5.1: вес критерия ×3/×1.5/×0.5) дают дробные
+// block_score / max_block_score / total_max_score. Показываем целое как целое,
+// а дробное — с одним знаком, без хвостов «.0».
+const fmtPts = (n: number) => (Number.isInteger(n) ? String(n) : Number(n.toFixed(1)).toString());
+
 // Calendar helpers — Berlin-civil-day correct.
 //
 // Every Date that flows through the inline filter calendar is a UTC instant
@@ -1952,7 +1957,8 @@ export default function Dashboard() {
                     <h4 className="text-sm font-black text-white uppercase tracking-wider">Итоговая Оценка</h4>
                     {selectedCall.totalMaxScore ? (
                       <p className="text-xs text-slate-400 mt-0.5">
-                        {Math.round(selectedCall.score / 100 * selectedCall.totalMaxScore)}/{selectedCall.totalMaxScore} баллов
+                        {fmtPts(selectedCall.score / 100 * selectedCall.totalMaxScore)}/{fmtPts(selectedCall.totalMaxScore)} баллов
+                        <span className="text-slate-500"> · с учётом веса критериев</span>
                       </p>
                     ) : (
                       <p className="text-xs text-slate-400 mt-0.5">На базе критериев оценки звонка</p>
@@ -2017,7 +2023,7 @@ export default function Dashboard() {
                                   <div className={`h-full rounded-full ${blockAccent.bar}`} style={{ width: `${Math.min(blockPct, 100)}%` }} />
                                 </div>
                                 <span className={`text-sm font-bold tabular-nums ${blockAccent.text}`}>{Math.round(blockPct)}%</span>
-                                <span className="text-[10px] text-slate-500">{block.score}/{block.maxScore}</span>
+                                <span className="text-[10px] text-slate-500" title="Взвешенные баллы блока (вес критериев ×3 / ×1.5 / ×0.5)">{fmtPts(block.score)}/{fmtPts(block.maxScore)}</span>
                               </div>
                             )}
                           </button>
