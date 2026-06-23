@@ -655,25 +655,33 @@ export async function getAnalyticsSlaFirstCallMinutes(
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return 0;
   const cacheKey = `sla-first-call-min:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs));
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs, dept === "b2b"));
 }
 
-async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+// useOwn=true (B2B) reads our own Бух-Комм SLA (sla_own_seconds, спека Рузанны);
+// B2G keeps the integrator-COALESCE value (Looker parity). The SQL expression
+// is chosen here so both the value and the IS NOT NULL filter stay consistent.
+function slaSourceSql(useOwn: boolean) {
+  return useOwn
+    ? sql`sla_own_seconds`
+    : sql`COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds)`;
+}
+
+async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number, useOwn: boolean): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const src = slaSourceSql(useOwn);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ avg_min: string | number | null }>(sql`
-    SELECT AVG(
-      COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds)
-    )::float / 60.0 AS avg_min
+    SELECT AVG(${src})::float / 60.0 AS avg_min
     FROM analytics.sla
     WHERE lead_created_at >= ${fromDate}
       AND lead_created_at <= ${toDate}
       AND pipeline_id IN (${pipelineList})
-      AND COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds) IS NOT NULL
+      AND ${src} IS NOT NULL
   `);
 
   const v = result.rows[0]?.avg_min;
@@ -697,7 +705,7 @@ export async function getAnalyticsSlaFirstCallMinutesByManager(
   if (pipelineIds.length === 0) return new Map();
   const managerIds = managers.map((m) => m.id).sort().join(",");
   const cacheKey = `sla-first-call-min-mgr:${dept}:${fromTs}:${toTs}:${managerIds}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs));
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs, dept === "b2b"));
 }
 
 async function fetchSlaFirstCallMinutesByManager(
@@ -705,22 +713,24 @@ async function fetchSlaFirstCallMinutesByManager(
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
+  useOwn: boolean,
 ): Promise<Map<string, number>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const src = slaSourceSql(useOwn);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ manager: string | null; avg_min: string | number | null }>(sql`
     SELECT
       manager,
-      AVG(COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds))::float / 60.0 AS avg_min
+      AVG(${src})::float / 60.0 AS avg_min
     FROM analytics.sla
     WHERE lead_created_at >= ${fromDate}
       AND lead_created_at <= ${toDate}
       AND pipeline_id IN (${pipelineList})
-      AND COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds) IS NOT NULL
+      AND ${src} IS NOT NULL
       AND manager IS NOT NULL AND manager <> ''
     GROUP BY manager
   `);

@@ -283,6 +283,14 @@ export const sla = analyticsSchema.table(
     slaFirstCallCalendarSecondsIntegrator: bigint("sla_first_call_calendar_seconds_integrator", { mode: "number" }),
     tltIntegrator: bigint("tlt_integrator", { mode: "number" }),
     slaStatus: text("sla_status"),
+    // «Свой» SLA для Бух Комм (B2B) — независимый от интегратора/Looker расчёт
+    // по спеке Рузанны: рабочие часы от входа в статус «Новый лид» (Бух Комм)
+    // до первого звонка. NULL для не-Бух-Комм лидов и по корнер-кейсам (нет
+    // якоря / закрыт без звонка / исключён). slaOwnStatus — отладочная метка
+    // (measured / instant / pending / no_anchor / closed_no_call / excluded).
+    // compute-sla.ts заполняет; карточка «SLA» (Звонки, B2B) читает. Added 0027.
+    slaOwnSeconds: bigint("sla_own_seconds", { mode: "number" }),
+    slaOwnStatus: text("sla_own_status"),
   },
   (t) => [
     index().on(t.leadId),

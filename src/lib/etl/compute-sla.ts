@@ -21,6 +21,26 @@ import { and, gte, lte, sql, inArray } from "drizzle-orm";
 import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
 import { withDbRetry } from "@/lib/db/with-retry";
 
+// ─── «Свой» SLA (Бух Комм / B2B) — спека Рузанны ─────────────
+//
+// Старт = первый вход в статус «Новый лид» в воронке «Бух Комм»; конец =
+// первый звонок по лиду; значение = рабочие часы между ними. См. 0027_sla_own.
+//
+// INCLUDE_NEW_LEAD_23: считать ли «Новый лид 2/3» как старт. Сейчас FALSE
+// (буквально по формуле — только основной «Новый лид»). Если у лида нет входа
+// в основной статус, но есть в 2/3, его SLA не посчитается — поднять флаг,
+// когда Рузанна подтвердит, что 2/3 = тот же этап старта.
+const INCLUDE_NEW_LEAD_23 = false;
+const NEW_LEAD_STATUSES = INCLUDE_NEW_LEAD_23
+  ? ["Новый лид", "Новый лид 2", "Новый лид 3"]
+  : ["Новый лид"];
+const OWN_SLA_PIPELINE = "Бух Комм";
+// Причины отказа, по которым лид выпадает из своего SLA (плюс флаг
+// exclude_from_analytics). Точные строки сверены с прод-данными.
+const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set(["Спам", "Неквал лид"]);
+// Kommo «успешно/закрыт» статусы — для корнер-кейса «звонка нет + лид закрыт».
+const CLOSED_STATUS_IDS = new Set([142, 143]);
+
 // Parse "HH:MM" → hour as number (0–23). Returns null on unparsable.
 function parseHour(s: string | null | undefined): number | null {
   if (!s) return null;
@@ -47,6 +67,7 @@ export async function computeSla(
       category: leadsCohort.category,
       manager: leadsCohort.manager,
       lossReason: leadsCohort.lossReason,
+      excludeFromAnalytics: leadsCohort.excludeFromAnalytics,
     })
     .from(leadsCohort)
     .where(
@@ -140,6 +161,26 @@ export async function computeSla(
     if (row.sla_start_at) {
       slaStartByLead.set(Number(row.lead_id), new Date(row.sla_start_at));
     }
+  }
+
+  // «Свой» SLA anchor: первый вход в статус «Новый лид» в воронке «Бух Комм».
+  // Отдельно от slaStart (тот мимикрирует под интегратор и кросс-воронковый).
+  const newLeadStatusList = NEW_LEAD_STATUSES.map((s) => `'${s.replace(/'/g, "''")}'`).join(", ");
+  const ownAnchorRes = await analyticsDb.execute<{
+    lead_id: number;
+    anchor_at: Date | null;
+  }>(sql`
+    SELECT lead_id,
+           MIN(event_at) AT TIME ZONE 'UTC' AS anchor_at
+    FROM analytics.lead_status_changes
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+      AND pipeline = ${OWN_SLA_PIPELINE}
+      AND status IN (${sql.raw(newLeadStatusList)})
+    GROUP BY lead_id
+  `);
+  const ownAnchorByLead = new Map<number, Date>();
+  for (const row of ownAnchorRes.rows) {
+    if (row.anchor_at) ownAnchorByLead.set(Number(row.lead_id), new Date(row.anchor_at));
   }
 
   // TLT (Time between Latest Touches): per-lead BH-difference between
@@ -308,6 +349,38 @@ export async function computeSla(
         : 0
       : null;
 
+    // ── «Свой» SLA (Бух Комм / B2B) ──────────────────────────
+    // Считается ТОЛЬКО для лидов, у которых есть вход в «Новый лид» в Бух Комм
+    // (ownAnchor) — для остальных остаётся NULL. Корнер-кейсы и исключения —
+    // ровно по спеке Рузанны.
+    let slaOwnSeconds: number | null = null;
+    let slaOwnStatus: string | null = null;
+    const ownAnchor = ownAnchorByLead.get(lead.leadId);
+    if (ownAnchor) {
+      const excludedByReason = lead.excludeFromAnalytics === true
+        || (lead.lossReason != null && OWN_SLA_EXCLUDED_LOSS_REASONS.has(lead.lossReason));
+      if (excludedByReason) {
+        slaOwnStatus = "excluded";                 // значение остаётся NULL
+      } else if (comms.firstCallOutAt) {
+        if (comms.firstCallOutAt <= ownAnchor) {
+          slaOwnSeconds = 0;                        // звонок раньше/в момент входа
+          slaOwnStatus = "instant";
+        } else {
+          slaOwnSeconds = businessHoursSeconds(ownAnchor, comms.firstCallOutAt);
+          slaOwnStatus = "measured";
+        }
+      } else {
+        // Звонка нет: закрыт → не считаем; открыт → рабочие часы до «сейчас».
+        const isClosed = lead.statusId != null && CLOSED_STATUS_IDS.has(lead.statusId);
+        if (isClosed) {
+          slaOwnStatus = "closed_no_call";         // значение остаётся NULL
+        } else {
+          slaOwnSeconds = businessHoursSeconds(ownAnchor, nowUtc);
+          slaOwnStatus = "pending";
+        }
+      }
+    }
+
     let slaStatus: string;
     if (isWaiting) {
       slaStatus = "waiting";
@@ -342,6 +415,8 @@ export async function computeSla(
       businessHoursSinceLastContact: bhSinceLastContact,
       tltSeconds,
       slaStatus,
+      slaOwnSeconds,
+      slaOwnStatus,
     });
   }
 
