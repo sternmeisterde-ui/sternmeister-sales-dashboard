@@ -1,10 +1,18 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Loader2, Save, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, Hash, FileText, BarChart3, Filter } from "lucide-react";
+import {
+  Loader2, ChevronDown, ChevronRight, AlertTriangle, Hash, FileText,
+  BarChart3, Filter, Target, CalendarClock, Lock,
+} from "lucide-react";
 import { getLines, isValidLineId } from "@/lib/config/tenant";
 
 // ─── Types ──────────────────────────────────────────────────────
+// Read-only view of the OKK evaluation config. The criteria are edited in the
+// OKK repo (src/criteria/*.json) and synced to the D2 `criteria_configs` table
+// on deploy — the Dashboard API is GET-only (POST → 405). We therefore render
+// the config verbatim, including the v5.1 scoring fields the engine actually
+// uses: `weight` (criticality tier), `objective` (goal rubric), `effective_from`.
 
 interface CriterionRaw {
   id: number;
@@ -14,22 +22,17 @@ interface CriterionRaw {
   condition?: string | null;
   scoring: boolean | Record<string, string>;
   description: string;
+  /** Criticality weight applied in scoreEvaluation (D2 v5.1): 3 фундамент,
+   *  1.5 важное, 0.5 бонус, 1/undefined нейтральное. */
+  weight?: number;
+  /** Goal-rubric objective — what the criterion is really checking. */
+  objective?: string;
+  /** ISO date (YYYY-MM-DD): criterion only scores calls on/after this date. */
+  effective_from?: string;
 }
 
 interface StageRaw { name: string; criteria: CriterionRaw[]; }
 interface CriteriaConfig { prompt_type: string; version: string; stages: StageRaw[]; }
-
-interface CriterionLocal {
-  id: number;
-  name: string;
-  type: string;
-  conditional: boolean;
-  condition: string;
-  scoring: boolean;
-  description: string;
-}
-
-interface StageLocal { name: string; criteria: CriterionLocal[]; }
 
 // ─── Props ──────────────────────────────────────────────────────
 
@@ -62,25 +65,18 @@ function getDefaultConfig(dept: "b2g" | "b2b", line: string): string {
 
 // ─── Helpers ────────────────────────────────────────────────────
 
-function rawToLocal(raw: CriterionRaw): CriterionLocal {
-  return {
-    id: raw.id, name: raw.name, type: raw.type,
-    conditional: raw.conditional, condition: raw.condition ?? "",
-    scoring: typeof raw.scoring === "boolean" ? raw.scoring : true,
-    description: raw.description,
-  };
+function isScoringBinary(c: CriterionRaw): boolean {
+  const scores = typeof c.scoring === "boolean" ? c.scoring : true;
+  return scores && (c.type === "binary" || c.type === "scale_0_10");
 }
 
-function localToRaw(local: CriterionLocal, raw: CriterionRaw): CriterionRaw {
-  return {
-    ...raw, name: local.name, type: local.type,
-    conditional: local.conditional, condition: local.condition || null,
-    scoring: typeof raw.scoring === "boolean" ? local.scoring : raw.scoring,
-    description: local.description,
-  };
+function formatDateRu(iso: string): string {
+  // iso = "2026-06-23" → "23.06.2026" (no TZ math — it's a plain calendar date).
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : iso;
 }
 
-// Score type display with colors
+// Score-type display (analytical / filter / binary / scale).
 function getScoreInfo(type: string, scoring: boolean): {
   icon: typeof Hash; label: string; color: string; bg: string; border: string;
 } {
@@ -96,24 +92,32 @@ function getScoreInfo(type: string, scoring: boolean): {
   return { icon: Hash, label: "1 балл — да/нет", color: "text-emerald-300", bg: "bg-emerald-500/10", border: "border-emerald-500/20" };
 }
 
-// ─── Criterion Card ─────────────────────────────────────────────
+// Criticality-weight tier display. Only meaningful for scoring binary criteria
+// (analytical/filter criteria don't enter the weighted sum).
+function getWeightInfo(weight: number): { label: string; color: string; bg: string; border: string } | null {
+  if (weight === 3) return { label: "Фундамент ×3", color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/25" };
+  if (weight === 1.5) return { label: "Важное ×1.5", color: "text-sky-300", bg: "bg-sky-500/10", border: "border-sky-500/25" };
+  if (weight === 0.5) return { label: "Бонус ×0.5", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
+  return { label: "Базовое ×1", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
+}
 
-function CriterionCard({
-  c, stageIndex, ci, onChange,
-}: {
-  c: CriterionLocal;
-  stageIndex: number;
-  ci: number;
-  onChange: (si: number, ci: number, field: keyof CriterionLocal, value: unknown) => void;
-}) {
-  const info = getScoreInfo(c.type, c.scoring);
+// ─── Criterion Card (read-only) ─────────────────────────────────
+
+function CriterionCard({ c }: { c: CriterionRaw }) {
+  const scores = typeof c.scoring === "boolean" ? c.scoring : true;
+  const info = getScoreInfo(c.type, scores);
   const Icon = info.icon;
+  // Weight badge only for scoring binary criteria (others don't enter the sum).
+  const weightInfo =
+    isScoringBinary(c) && c.type === "binary" && typeof c.weight === "number"
+      ? getWeightInfo(c.weight)
+      : null;
 
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-slate-900/40 hover:bg-slate-900/60 transition-colors overflow-hidden">
-      {/* Header bar with number + type */}
-      <div className="flex items-center justify-between px-5 py-3 bg-slate-800/40 border-b border-white/[0.04]">
-        <div className="flex items-center gap-3">
+    <div className="rounded-xl border border-white/[0.06] bg-slate-900/40 overflow-hidden">
+      {/* Header bar with number + badges */}
+      <div className="flex items-center justify-between gap-2 px-5 py-3 bg-slate-800/40 border-b border-white/[0.04] flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 text-sm font-bold font-mono">
             {c.id}
           </span>
@@ -121,11 +125,21 @@ function CriterionCard({
             <Icon className={`w-3.5 h-3.5 ${info.color}`} />
             <span className={`text-[11px] font-semibold ${info.color}`}>{info.label}</span>
           </div>
+          {weightInfo && (
+            <span className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg ${weightInfo.bg} border ${weightInfo.border} ${weightInfo.color}`}>
+              {weightInfo.label}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
           {c.conditional && (
             <span className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md">
               Если ситуация возникла
+            </span>
+          )}
+          {c.effective_from && (
+            <span className="flex items-center gap-1 text-[10px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-md">
+              <CalendarClock className="w-3 h-3" /> с {formatDateRu(c.effective_from)}
             </span>
           )}
         </div>
@@ -133,35 +147,30 @@ function CriterionCard({
 
       {/* Body */}
       <div className="px-5 py-4 space-y-3">
-        {/* Name — large editable */}
-        <input
-          type="text"
-          value={c.name}
-          onChange={(e) => onChange(stageIndex, ci, "name", e.target.value)}
-          className="w-full bg-slate-800/60 border border-white/[0.08] rounded-xl px-4 py-3 text-sm text-white font-medium focus:border-blue-500/40 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all placeholder-slate-600"
-          placeholder="Название критерия"
-        />
+        {/* Name */}
+        <h4 className="text-sm font-semibold text-white leading-snug">{c.name}</h4>
 
-        {/* Description — large textarea */}
-        <textarea
-          value={c.description}
-          onChange={(e) => onChange(stageIndex, ci, "description", e.target.value)}
-          rows={3}
-          className="w-full bg-slate-800/40 border border-white/[0.06] rounded-xl px-4 py-3 text-xs text-slate-300 leading-relaxed focus:border-blue-500/30 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all resize-y placeholder-slate-600"
-          placeholder="Описание: что проверяется, как оценивается..."
-        />
+        {/* Objective (goal rubric) — what the criterion is really checking */}
+        {c.objective && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-500/[0.06] border border-blue-500/15">
+            <Target className="w-3.5 h-3.5 text-blue-400 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <span className="block text-[10px] font-bold text-blue-300/80 uppercase tracking-wider mb-1">Цель критерия</span>
+              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{c.objective}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Description */}
+        {c.description && (
+          <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">{c.description}</p>
+        )}
 
         {/* Condition if conditional */}
-        {c.conditional && (
+        {c.conditional && c.condition && (
           <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/10">
             <span className="text-[10px] text-amber-400 mt-0.5 shrink-0">⚡</span>
-            <input
-              type="text"
-              value={c.condition}
-              onChange={(e) => onChange(stageIndex, ci, "condition", e.target.value)}
-              className="flex-1 bg-transparent text-xs text-amber-200 focus:outline-none placeholder-amber-600/40"
-              placeholder="Когда критерий применяется (например: если клиент спросил о цене)"
-            />
+            <p className="text-xs text-amber-200/90 leading-relaxed">{c.condition}</p>
           </div>
         )}
       </div>
@@ -171,20 +180,13 @@ function CriterionCard({
 
 // ─── Stage Section ──────────────────────────────────────────────
 
-function StageSection({
-  stage, stageIndex, onChange,
-}: {
-  stage: StageLocal;
-  stageIndex: number;
-  onChange: (si: number, ci: number, field: keyof CriterionLocal, value: unknown) => void;
-}) {
+function StageSection({ stage }: { stage: StageRaw }) {
   const [open, setOpen] = useState(true);
-  const scored = stage.criteria.filter((c) => c.scoring && (c.type === "binary" || c.type === "scale_0_10")).length;
+  const scored = stage.criteria.filter(isScoringBinary).length;
   const total = stage.criteria.length;
 
   return (
     <div>
-      {/* Stage header */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -206,14 +208,29 @@ function StageSection({
         </div>
       </button>
 
-      {/* Criteria cards */}
       {open && (
         <div className="grid gap-3 pb-6 pl-8">
-          {stage.criteria.map((c, ci) => (
-            <CriterionCard key={c.id} c={c} stageIndex={stageIndex} ci={ci} onChange={onChange} />
+          {stage.criteria.map((c) => (
+            <CriterionCard key={c.id} c={c} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Weight legend ──────────────────────────────────────────────
+
+function WeightLegend() {
+  const tiers = [3, 1.5, 0.5].map((w) => getWeightInfo(w)!);
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-[10px] text-slate-500 uppercase tracking-wider">Вес критерия:</span>
+      {tiers.map((t) => (
+        <span key={t.label} className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${t.bg} border ${t.border} ${t.color}`}>
+          {t.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -224,13 +241,10 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
   const options = getConfigOptions(department);
   const [activeConfig, setActiveConfig] = useState<string>(getDefaultConfig(department, lineFilter));
 
-  const [rawConfig, setRawConfig] = useState<CriteriaConfig | null>(null);
-  const [stages, setStages] = useState<StageLocal[]>([]);
+  const [config, setConfig] = useState<CriteriaConfig | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Reset config when department changes
   useEffect(() => {
@@ -240,17 +254,15 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
   const loadCriteria = useCallback(async (promptType: string) => {
     setLoading(true);
     setError(null);
-    setDirty(false);
-    setSaveSuccess(false);
     try {
       const res = await fetch(`/api/criteria?prompt_type=${promptType}`);
       const json = await res.json();
       if (!json.success) throw new Error(json.error ?? "Unknown error");
-      const config: CriteriaConfig = json.data;
-      setRawConfig(config);
-      setStages(config.stages.map((s) => ({ name: s.name, criteria: s.criteria.map(rawToLocal) })));
+      setConfig(json.data as CriteriaConfig);
+      setVersion(json.version ?? (json.data as CriteriaConfig).version ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setConfig(null);
     } finally {
       setLoading(false);
     }
@@ -260,56 +272,9 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
     loadCriteria(activeConfig);
   }, [activeConfig, loadCriteria]);
 
-  const handleChange = useCallback(
-    (si: number, ci: number, field: keyof CriterionLocal, value: unknown) => {
-      setStages((prev) =>
-        prev.map((s, i) =>
-          i !== si ? s : { ...s, criteria: s.criteria.map((c, j) => (j !== ci ? c : { ...c, [field]: value })) }
-        )
-      );
-      setDirty(true);
-      setSaveSuccess(false);
-    },
-    []
-  );
-
-  const handleSave = async () => {
-    if (!rawConfig) return;
-    setSaving(true);
-    setError(null);
-    setSaveSuccess(false);
-    try {
-      const updatedConfig: CriteriaConfig = {
-        ...rawConfig,
-        stages: rawConfig.stages.map((rawStage, si) => ({
-          ...rawStage,
-          criteria: rawStage.criteria.map((rawC, ci) => {
-            const local = stages[si]?.criteria[ci];
-            return local ? localToRaw(local, rawC) : rawC;
-          }),
-        })),
-      };
-      const res = await fetch("/api/criteria", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt_type: activeConfig, config: updatedConfig }),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error ?? "Save failed");
-      setRawConfig(updatedConfig);
-      setDirty(false);
-      setSaveSuccess(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
+  const stages = config?.stages ?? [];
   const totalCriteria = stages.reduce((sum, s) => sum + s.criteria.length, 0);
-  const scoredCriteria = stages.reduce(
-    (sum, s) => sum + s.criteria.filter((c) => c.scoring && (c.type === "binary" || c.type === "scale_0_10")).length, 0
-  );
+  const scoredCriteria = stages.reduce((sum, s) => sum + s.criteria.filter(isScoringBinary).length, 0);
 
   return (
     <div className="flex flex-col gap-5 fade-in">
@@ -320,20 +285,12 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
             <h2 className="text-xl font-bold text-white">Критерии оценки</h2>
             <p className="text-sm text-slate-400 mt-1">
               {department === "b2b" ? "Коммерсы" : "Госники"} — {options.find((o) => o.promptType === activeConfig)?.label}
+              {version && <span className="text-slate-500"> · v{version}</span>}
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            {dirty && (
-              <span className="text-xs text-amber-400 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20 font-medium">
-                Есть несохранённые изменения
-              </span>
-            )}
-            {saveSuccess && (
-              <span className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-lg border border-emerald-500/20">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Сохранено
-              </span>
-            )}
-          </div>
+          <span className="flex items-center gap-1.5 text-xs text-slate-400 bg-slate-700/40 px-3 py-1.5 rounded-lg border border-white/[0.06]">
+            <Lock className="w-3.5 h-3.5 text-slate-500" /> Только просмотр
+          </span>
         </div>
 
         {/* Config selector — only for Госники (multiple configs) */}
@@ -355,23 +312,35 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
           </div>
         )}
 
-        {/* Stats */}
+        {/* Stats + legend */}
         {!loading && stages.length > 0 && (
-          <div className="flex items-center gap-6 mt-4 pt-4 border-t border-white/[0.06]">
-            <div>
-              <span className="text-2xl font-bold text-white">{totalCriteria}</span>
-              <span className="text-xs text-slate-500 ml-1.5">критериев</span>
+          <div className="mt-4 pt-4 border-t border-white/[0.06] flex flex-col gap-4">
+            <div className="flex items-center gap-6">
+              <div>
+                <span className="text-2xl font-bold text-white">{totalCriteria}</span>
+                <span className="text-xs text-slate-500 ml-1.5">критериев</span>
+              </div>
+              <div>
+                <span className="text-2xl font-bold text-emerald-400">{scoredCriteria}</span>
+                <span className="text-xs text-slate-500 ml-1.5">оцениваемых</span>
+              </div>
+              <div>
+                <span className="text-2xl font-bold text-blue-400">{stages.length}</span>
+                <span className="text-xs text-slate-500 ml-1.5">этапов</span>
+              </div>
             </div>
-            <div>
-              <span className="text-2xl font-bold text-emerald-400">{scoredCriteria}</span>
-              <span className="text-xs text-slate-500 ml-1.5">оцениваемых</span>
-            </div>
-            <div>
-              <span className="text-2xl font-bold text-blue-400">{stages.length}</span>
-              <span className="text-xs text-slate-500 ml-1.5">этапов</span>
-            </div>
+            <WeightLegend />
           </div>
         )}
+      </div>
+
+      {/* Read-only note */}
+      <div className="flex items-start gap-2 px-5 py-3 bg-slate-800/30 border border-white/[0.06] rounded-xl text-xs text-slate-400 leading-relaxed">
+        <Lock className="w-4 h-4 shrink-0 mt-0.5 text-slate-500" />
+        <span>
+          Критерии редактируются в репозитории OKK (<code className="text-slate-300">src/criteria/*.json</code>) и
+          синхронизируются в базу при деплое. Здесь — актуальная версия с весами критичности, целями и датами ввода.
+        </span>
       </div>
 
       {/* Error */}
@@ -393,26 +362,8 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
       {!loading && (
         <div className="flex flex-col gap-2">
           {stages.map((stage, si) => (
-            <StageSection key={`${activeConfig}-${si}`} stage={stage} stageIndex={si} onChange={handleChange} />
+            <StageSection key={`${activeConfig}-${si}`} stage={stage} />
           ))}
-        </div>
-      )}
-
-      {/* Save */}
-      {!loading && stages.length > 0 && (
-        <div className="flex justify-end pt-2 pb-6">
-          <button
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            className={`flex items-center gap-2 px-8 py-3 rounded-xl text-sm font-semibold transition-all ${
-              dirty
-                ? "bg-blue-500 hover:bg-blue-600 text-white shadow-lg shadow-blue-500/25"
-                : "bg-slate-800 text-slate-500 cursor-not-allowed"
-            }`}
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            Сохранить изменения
-          </button>
         </div>
       )}
     </div>
