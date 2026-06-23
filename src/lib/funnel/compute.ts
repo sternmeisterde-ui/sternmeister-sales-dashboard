@@ -42,9 +42,36 @@ import {
   maturityTargetAt,
   todayBerlinUTC,
 } from "./cohort-math";
+import type { LanguageBucket } from "./score";
 
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const BERATER = B2G_PIPELINES.BERATER; // 12154099
+
+/**
+ * SQL-фрагмент WHERE для фильтра по уровню языка. Бакеты совпадают с
+ * normalizeLanguageLevel: a2/b1/b2/c1 = начинается с уровня; unknown = NULL,
+ * A1 или нераспознанное. Колонка `language_level` (Kommo CFV 869928).
+ * Пусто, если bucket не задан. Применяется к `analytics.leads_cohort`.
+ */
+export function languageBucketSql(bucket: LanguageBucket | null | undefined) {
+  switch (bucket) {
+    case "a2":
+      return sql` AND TRIM(language_level) ILIKE 'A2%'`;
+    case "b1":
+      return sql` AND TRIM(language_level) ILIKE 'B1%'`;
+    case "b2":
+      return sql` AND TRIM(language_level) ILIKE 'B2%'`;
+    case "c1":
+      return sql` AND (TRIM(language_level) ILIKE 'C1%' OR TRIM(language_level) ILIKE 'C2%')`;
+    case "unknown":
+      return sql` AND (language_level IS NULL OR NOT (
+        TRIM(language_level) ILIKE 'A2%' OR TRIM(language_level) ILIKE 'B1%' OR
+        TRIM(language_level) ILIKE 'B2%' OR TRIM(language_level) ILIKE 'C1%' OR
+        TRIM(language_level) ILIKE 'C2%'))`;
+    default:
+      return sql``;
+  }
+}
 
 // ── Целевые статусы C1/C2 (на Бух Гос) ──
 const C1_TARGET_STATUSES = [
@@ -113,6 +140,8 @@ export interface ComputeOpts {
   maturity: MaturityFilter;
   source: string | null;
   responsibleUserId: number | null;
+  /** Фильтр по уровню языка (бакет). null/undefined = без фильтра. */
+  lang?: LanguageBucket | null;
 }
 
 export interface BaseLead {
@@ -696,6 +725,7 @@ export async function fetchQualifiedBaseLeads(
           ? sql`AND responsible_user_id = ${opts.responsibleUserId}`
           : sql``
       }
+      ${languageBucketSql(opts.lang)}
   `);
 
   const data = unwrapRows<{

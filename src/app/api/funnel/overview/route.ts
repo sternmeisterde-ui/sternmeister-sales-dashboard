@@ -35,6 +35,13 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Уровень языка (бакет). Невалидное значение игнорируем (= без фильтра).
+  const langRaw = params.get("lang");
+  const LANG_BUCKETS = ["a2", "b1", "b2", "c1", "unknown"] as const;
+  const lang = (LANG_BUCKETS as readonly string[]).includes(langRaw ?? "")
+    ? (langRaw as (typeof LANG_BUCKETS)[number])
+    : null;
+
   try {
     const payload = await computeOverview({
       from,
@@ -42,6 +49,7 @@ export async function GET(req: NextRequest) {
       maturity: "all", // зрелость к обзору не применяется
       source,
       responsibleUserId,
+      lang,
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

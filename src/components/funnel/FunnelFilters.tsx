@@ -14,6 +14,7 @@ interface Props {
   defaultState: FunnelFiltersState;
   sourceOptions: FilterOption[];
   managerOptions: FilterOption[];
+  langOptions: FilterOption[];
   activeFilterCount: number;
   /** Когда в проде появится бэкенд, придёт сюда из last_sync. */
   lastUpdatedAt: Date | null;
@@ -39,6 +40,7 @@ export default function FunnelFilters({
   defaultState,
   sourceOptions,
   managerOptions,
+  langOptions,
   activeFilterCount,
   lastUpdatedAt,
   mode = "cohorts",
@@ -119,6 +121,27 @@ export default function FunnelFilters({
           emptyLabel="Все менеджеры"
           ariaLabel="Менеджер"
           minWidthClass="min-w-[170px]"
+        />
+      </div>
+
+      {/* Уровень языка — применяется только к Объединённой воронке (вид «Когорты»). */}
+      <div
+        className={isClients || isManagers ? "opacity-40 pointer-events-none" : ""}
+        title={
+          isClients
+            ? "Не применяется к виду «Клиенты»"
+            : isManagers
+              ? "Не применяется к виду «Менеджеры»"
+              : "Применяется к Объединённой воронке"
+        }
+      >
+        <FilterSelect
+          value={state.lang}
+          options={langOptions}
+          onChange={(lang) => onChange({ lang })}
+          emptyLabel="Любой язык"
+          ariaLabel="Уровень языка"
+          minWidthClass="min-w-[130px]"
         />
       </div>
 

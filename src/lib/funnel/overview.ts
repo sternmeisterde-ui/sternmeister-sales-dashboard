@@ -27,6 +27,7 @@ import {
   fetchCloseReasonHistory,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
+  languageBucketSql,
   processLeadForConversion,
   unwrapRows,
   type BaseLead,
@@ -41,7 +42,9 @@ import type {
 
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const CONSULT_DC_DONE = BERATER_STATUSES.CONSULT_BEFORE_DC_DONE; // 102183939
+const TERM_DC_DONE = BERATER_STATUSES.TERM_DC_DONE; // 93886075 «Термин ДЦ состоялся»
 const CONSULT_AA_DONE = BERATER_STATUSES.CONSULT_BEFORE_AA_DONE; // 102183947
+const TERM_AA = BERATER_STATUSES.TERM_AA; // 93860879 «Термин АА (на этапе)»
 const FRESH_CALL_DAYS = 7;
 const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
 
@@ -56,7 +59,9 @@ const STAGE_DEFS = [
   { key: "docs", label: "Документы в ДЦ" },
   { key: "term_dc", label: "Термин ДЦ" },
   { key: "consult_dc", label: "Конс. перед ДЦ" },
+  { key: "term_dc_done", label: "Термин ДЦ состоялся" },
   { key: "consult_aa", label: "Конс. перед АА" },
+  { key: "term_aa", label: "Термин АА" },
   { key: "gutschein", label: "Гутшайн" },
 ] as const;
 
@@ -202,26 +207,40 @@ function computeLeadStages(
   const term_dc = targetCounts(c2);
   const gutschein = targetCounts(c5);
 
-  // Берётер-консультации (сырые даты «проведена») — вспомогательные этапы МЕЖДУ
-  // C2 и C5: Термин ДЦ (Гос-142, «назначен») по времени идёт ДО них. Зажимаем
-  // между соседями (`&& term_dc`, `&& consult_dc`) + гутшайн-инференс →
-  // монотонность docs ⊇ term_dc ⊇ consult_dc ⊇ consult_aa ⊇ gutschein.
+  // Бератер-вехи (сырые даты события) — вспомогательные этапы МЕЖДУ C2 и C5.
+  // Термин ДЦ (Гос-142, «назначен») по времени идёт ДО них. Считаем «достиг
+  // глубже ⇒ достиг и раньше» (backward-инференс), затем зажимаем к предшест-
+  // веннику (`&& <prev>`) → монотонность:
+  //   docs ⊇ term_dc ⊇ consult_dc ⊇ term_dc_done ⊇ consult_aa ⊇ term_aa ⊇ gutschein.
+  // term_dc_done = «Термин ДЦ состоялся» (база C3/C3.1), term_aa = «дошёл до АА» (C3.1).
   const consultDcAt = earliestBeraterEvent(berater, CONSULT_DC_DONE);
+  const termDcDoneAt = earliestBeraterEvent(berater, TERM_DC_DONE);
   const consultAaAt = earliestBeraterEvent(berater, CONSULT_AA_DONE);
-  const consultAa0 = consultAaAt !== null || gutschein;
-  const consultDc0 = consultDcAt !== null || consultAa0;
+  const termAaAt = earliestBeraterEvent(berater, TERM_AA);
+
+  const termAa0 = termAaAt !== null || gutschein;
+  const consultAa0 = consultAaAt !== null || termAa0;
+  const termDcDone0 = termDcDoneAt !== null || consultAa0;
+  const consultDc0 = consultDcAt !== null || termDcDone0;
   const consult_dc = consultDc0 && term_dc;
-  const consult_aa = consultAa0 && consult_dc;
+  const term_dc_done = termDcDone0 && consult_dc;
+  const consult_aa = consultAa0 && term_dc_done;
+  const term_aa = termAa0 && consult_aa;
 
   return {
-    reached: { new: true, qual: true, docs, term_dc, consult_dc, consult_aa, gutschein },
+    reached: {
+      new: true, qual: true, docs, term_dc, consult_dc,
+      term_dc_done, consult_aa, term_aa, gutschein,
+    },
     at: {
       new: lead.anchorAt,
       qual: lead.anchorAt, // anchor = created_at (упрощение, как у когорт)
       docs: docsAt,
       term_dc: termDcAt,
       consult_dc: consultDcAt,
+      term_dc_done: termDcDoneAt,
       consult_aa: consultAaAt,
+      term_aa: termAaAt,
       gutschein: gutscheinAt,
     },
   };
@@ -251,16 +270,20 @@ function buildFunnel(
     new: newLeadCount,
     qual: qualCount,
     docs: 0,
-    consult_dc: 0,
     term_dc: 0,
+    consult_dc: 0,
+    term_dc_done: 0,
     consult_aa: 0,
+    term_aa: 0,
     gutschein: 0,
   };
   for (const s of stages) {
     if (s.reached.docs) counts.docs += 1;
-    if (s.reached.consult_dc) counts.consult_dc += 1;
     if (s.reached.term_dc) counts.term_dc += 1;
+    if (s.reached.consult_dc) counts.consult_dc += 1;
+    if (s.reached.term_dc_done) counts.term_dc_done += 1;
     if (s.reached.consult_aa) counts.consult_aa += 1;
+    if (s.reached.term_aa) counts.term_aa += 1;
     if (s.reached.gutschein) counts.gutschein += 1;
   }
 
@@ -317,6 +340,7 @@ async function fetchNewLeadCount(opts: ComputeOpts): Promise<number> {
           ? sql`AND responsible_user_id = ${opts.responsibleUserId}`
           : sql``
       }
+      ${languageBucketSql(opts.lang)}
   `);
   const data = unwrapRows<{ n: string | number }>(rows);
   return data.length ? Number(data[0].n) : 0;
