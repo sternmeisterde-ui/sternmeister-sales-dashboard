@@ -44,7 +44,14 @@ const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const CONSULT_DC_DONE = BERATER_STATUSES.CONSULT_BEFORE_DC_DONE; // 102183939
 const TERM_DC_DONE = BERATER_STATUSES.TERM_DC_DONE; // 93886075 «Термин ДЦ состоялся»
 const CONSULT_AA_DONE = BERATER_STATUSES.CONSULT_BEFORE_AA_DONE; // 102183947
-const TERM_AA = BERATER_STATUSES.TERM_AA; // 93860879 «Термин АА (на этапе)»
+// «Термин АА» — встреча в АА. Сам статус TERM_AA (на этапе) транзитный и в
+// истории логируется реже, чем даже Гутшайн, поэтому веху считаем по кластеру
+// «встреча АА была»: состоялась / отменена-перенесена / ушла на рассмотрение.
+const TERM_AA_STATUSES = [
+  BERATER_STATUSES.TERM_AA, // 93860879 на этапе
+  BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 отменён/перенесён (встреча всё равно была назначена)
+  BERATER_STATUSES.BERATER_REVIEW, // 93860887 на рассмотрении бератера (пост-АА)
+];
 const FRESH_CALL_DAYS = 7;
 const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
 
@@ -209,30 +216,31 @@ function computeLeadStages(
   const term_dc = targetCounts(c2);
   const gutschein = targetCounts(c5);
 
-  // Бератер-вехи (сырые даты события) — вспомогательные этапы МЕЖДУ C2 и C5.
-  // Термин ДЦ (Гос-142, «назначен») по времени идёт ДО них. Считаем «достиг
-  // глубже ⇒ достиг и раньше» (backward-инференс), затем зажимаем к предшест-
-  // веннику (`&& <prev>`) → монотонность:
-  //   docs ⊇ term_dc ⊇ consult_dc ⊇ term_dc_done ⊇ consult_aa ⊇ term_aa ⊇ gutschein.
-  // term_dc_done = «Термин ДЦ состоялся» (база C3/C3.1), term_aa = «дошёл до АА» (C3.1).
+  // Бератер-вехи между C2 (Термин ДЦ назначен) и C5 (Гутшайн). Воронка
+  // кумулятивная — «дошёл до этапа», поэтому считаем ГЛУБИНУ по цепочке и
+  // помечаем достигнутыми ВСЕ этапы до неё (инференс вверх). Это надёжнее
+  // пер-этапных клэмпов: статусы логируются неравномерно (напр. TERM_AA реже
+  // Гутшайна), а от глубины монотонность гарантирована по построению.
+  //   1 consult_dc → 2 term_dc_done → 3 consult_aa → 4 term_aa → 5 gutschein.
   const consultDcAt = earliestBeraterEvent(berater, CONSULT_DC_DONE);
   const termDcDoneAt = earliestBeraterEvent(berater, TERM_DC_DONE);
   const consultAaAt = earliestBeraterEvent(berater, CONSULT_AA_DONE);
-  const termAaAt = earliestBeraterEvent(berater, TERM_AA);
+  const termAaAt = earliestBeraterEventAny(berater, TERM_AA_STATUSES);
 
-  const termAa0 = termAaAt !== null || gutschein;
-  const consultAa0 = consultAaAt !== null || termAa0;
-  const termDcDone0 = termDcDoneAt !== null || consultAa0;
-  const consultDc0 = consultDcAt !== null || termDcDone0;
-  // Зажим к предшественнику (term_dc), НО с полом по gutschein: Гутшайн —
-  // конец воронки, поэтому лид с Гутшайном по определению прошёл все
-  // промежуточные бератер-этапы, даже если у него нет Гос-события «Термин ДЦ
-  // назначен» (кросс-пайплайн: Гутшайн с стороны Бератера). Без пола это давало
-  // term_aa < gutschein (переход >100%).
-  const consult_dc = (consultDc0 && term_dc) || gutschein;
-  const term_dc_done = (termDcDone0 && consult_dc) || gutschein;
-  const consult_aa = (consultAa0 && term_dc_done) || gutschein;
-  const term_aa = (termAa0 && consult_aa) || gutschein;
+  let depth = 0;
+  if (consultDcAt !== null) depth = 1;
+  if (termDcDoneAt !== null) depth = Math.max(depth, 2);
+  if (consultAaAt !== null) depth = Math.max(depth, 3);
+  if (termAaAt !== null) depth = Math.max(depth, 4);
+  if (gutschein) depth = 5;
+
+  // Знаменатель берётер-цепочки — Гос «Термин ДЦ назначен» (term_dc, C2). Кросс-
+  // пайплайн Гутшайн без Гос-события всё равно прошёл этапы → пол по gutschein.
+  const reachedBerater = term_dc || gutschein;
+  const consult_dc = reachedBerater && depth >= 1;
+  const term_dc_done = reachedBerater && depth >= 2;
+  const consult_aa = reachedBerater && depth >= 3;
+  const term_aa = reachedBerater && depth >= 4;
 
   return {
     reached: {
@@ -261,6 +269,19 @@ function earliestBeraterEvent(
   for (const bl of beraterLeads) {
     const ev = bl.events.get(statusId);
     if (ev !== undefined && (min === null || ev < min)) min = ev;
+  }
+  return min;
+}
+
+/** Самое раннее событие среди НЕСКОЛЬКИХ статусов (кластер вехи). */
+function earliestBeraterEventAny(
+  beraterLeads: BeraterLead[],
+  statusIds: readonly number[]
+): Date | null {
+  let min: Date | null = null;
+  for (const sid of statusIds) {
+    const ev = earliestBeraterEvent(beraterLeads, sid);
+    if (ev !== null && (min === null || ev < min)) min = ev;
   }
   return min;
 }
