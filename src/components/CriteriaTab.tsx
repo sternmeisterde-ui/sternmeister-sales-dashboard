@@ -96,12 +96,29 @@ function getScoreInfo(type: string, scoring: boolean): {
 // (analytical/filter criteria don't enter the weighted sum). Known tiers get a
 // named label + colour; any other value falls back to a literal «×N» so the UI
 // stays correct if the rubric changes the weights upstream.
+// Вес критерия = его балл. Показываем «3 балла» / «1,5 балла» / «1 балл» —
+// без «×» и названий тиров (цвет тира остаётся для наглядности).
+function weightLabel(w: number): string {
+  const num = Number.isInteger(w) ? String(w) : String(w).replace(".", ",");
+  let unit: string;
+  if (!Number.isInteger(w)) {
+    unit = "балла"; // дробные (0,5 / 1,5 / 2,5) → «балла»
+  } else {
+    const n = Math.abs(w) % 100;
+    const n1 = n % 10;
+    if (n >= 11 && n <= 14) unit = "баллов";
+    else if (n1 === 1) unit = "балл";
+    else if (n1 >= 2 && n1 <= 4) unit = "балла";
+    else unit = "баллов";
+  }
+  return `${num} ${unit}`;
+}
+
 function getWeightInfo(weight: number): { label: string; color: string; bg: string; border: string } {
-  if (weight === 3) return { label: "Фундамент ×3", color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/25" };
-  if (weight === 1.5) return { label: "Важное ×1.5", color: "text-sky-300", bg: "bg-sky-500/10", border: "border-sky-500/25" };
-  if (weight === 1) return { label: "Базовое ×1", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
-  if (weight === 0.5) return { label: "Бонус ×0.5", color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
-  return { label: `×${weight}`, color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
+  const label = weightLabel(weight);
+  if (weight === 3) return { label, color: "text-rose-300", bg: "bg-rose-500/10", border: "border-rose-500/25" };
+  if (weight === 1.5) return { label, color: "text-sky-300", bg: "bg-sky-500/10", border: "border-sky-500/25" };
+  return { label, color: "text-slate-400", bg: "bg-slate-500/10", border: "border-slate-500/20" };
 }
 
 // ─── Criterion Card (read-only) ─────────────────────────────────
