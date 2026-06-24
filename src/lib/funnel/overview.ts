@@ -180,11 +180,11 @@ async function computeUpcomingReadiness(
   warm: number;
   cold: number;
 }> {
+  // Все активные клиенты с ПРЕДСТОЯЩИМ термином (termin_date/aa_termin_date ≥
+  // сегодня), без верхней границы. terminTo=null → «с сегодня и дальше».
   const today = todayBerlinUTC();
-  const end = new Date(today);
-  end.setUTCDate(today.getUTCDate() + 90);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
-  const res = await computeClients({ terminFrom: fmt(today), terminTo: fmt(end), lang });
+  const res = await computeClients({ terminFrom: fmt(today), terminTo: null, lang });
   // Активные клиенты, которых ещё «готовим» (выигравшие гутшайн — не здесь).
   return res.active.categories;
 }

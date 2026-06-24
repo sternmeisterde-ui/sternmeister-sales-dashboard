@@ -6,7 +6,7 @@ import { fmtPercent, fmtCount } from "@/lib/funnel/format";
 
 /**
  * KPI-полоска (ТЗ §9.1): 5 плиток-обзора за выбранный период.
- * Hot/Warm/Cold — заглушка до скоринга §8.
+ * Hot/Warm/Cold — готовность активных клиентов с предстоящим термином (скоринг §8).
  */
 export default function KpiBar({
   kpi,
@@ -56,7 +56,8 @@ export default function KpiBar({
             "—"
           )
         }
-        sub={kpi?.hotWarmCold ? "предстоящие термины ≤90д" : "скоро · нужен скоринг"}
+        sub={kpi?.hotWarmCold ? "клиенты с предстоящим термином" : "скоро · нужен скоринг"}
+        tooltip="Активные клиенты с уже назначенным термином (встречей ДЦ/АА), который ещё впереди — и насколько они к нему готовы. Hot ≥75 / Warm 50–74 / Cold <50 баллов готовности (ролевки с ботом и менеджером, уровень языка, ОКК и др.). Поимённо и с расшифровкой — во вкладке «Клиенты»."
         loading={loading}
         muted={!kpi?.hotWarmCold}
       />
@@ -96,6 +97,7 @@ function KpiTile({
   sub,
   loading,
   muted = false,
+  tooltip,
 }: {
   icon: React.ReactNode;
   tone: keyof typeof TONE | string;
@@ -104,12 +106,14 @@ function KpiTile({
   sub: string;
   loading: boolean;
   muted?: boolean;
+  tooltip?: string;
 }) {
   return (
     <div
+      title={tooltip}
       className={`glass-panel rounded-xl border border-white/5 px-3 py-2.5 flex flex-col gap-1 min-w-0 ${
-        muted ? "opacity-60" : ""
-      }`}
+        tooltip ? "cursor-help" : ""
+      } ${muted ? "opacity-60" : ""}`}
     >
       <div className="flex items-center gap-1.5 text-slate-400">
         <span className={TONE[tone] ?? "text-slate-300"}>{icon}</span>
