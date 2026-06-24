@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeOverview } from "@/lib/funnel/overview";
+import { parseLangBucket } from "@/lib/funnel/compute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +36,8 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const lang = parseLangBucket(params.get("lang"));
+
   try {
     const payload = await computeOverview({
       from,
@@ -42,6 +45,7 @@ export async function GET(req: NextRequest) {
       maturity: "all", // зрелость к обзору не применяется
       source,
       responsibleUserId,
+      lang,
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

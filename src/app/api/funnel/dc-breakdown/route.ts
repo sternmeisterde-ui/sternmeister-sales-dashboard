@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeDcBreakdown } from "@/lib/funnel/dc-breakdown";
+import { parseLangBucket } from "@/lib/funnel/compute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,6 +48,7 @@ export async function GET(req: NextRequest) {
       maturity: "all", // разбор за период как есть
       source,
       responsibleUserId,
+      lang: parseLangBucket(sp.get("lang")),
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeClients } from "@/lib/funnel/clients";
+import { parseLangBucket } from "@/lib/funnel/compute";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 
 export const runtime = "nodejs";
@@ -34,7 +35,10 @@ export async function GET(req: NextRequest) {
     Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 1000 ? limitRaw : 300;
 
   try {
-    const result = await computeClients({ terminFrom: from, terminTo: to }, limit);
+    const result = await computeClients(
+      { terminFrom: from, terminTo: to, lang: parseLangBucket(sp.get("lang")) },
+      limit,
+    );
     return NextResponse.json(result, {
       headers: { "Cache-Control": "no-store" },
     });

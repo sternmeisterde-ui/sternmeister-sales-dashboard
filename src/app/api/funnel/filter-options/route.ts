@@ -76,8 +76,18 @@ export async function GET(req: NextRequest) {
       a.label.localeCompare(b.label, "ru")
     );
 
+    // Уровни языка — фиксированные бакеты (как normalizeLanguageLevel:
+    // A1 → «Неизвестно», C2 → C1). value = бакет, который ждёт overview API.
+    const languageLevels = [
+      { value: "a2", label: "A2" },
+      { value: "b1", label: "B1" },
+      { value: "b2", label: "B2" },
+      { value: "c1", label: "C1" },
+      { value: "unknown", label: "Не указан" },
+    ];
+
     return NextResponse.json(
-      { sources, responsible_users: responsibleUsers },
+      { sources, responsible_users: responsibleUsers, language_levels: languageLevels },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e) {

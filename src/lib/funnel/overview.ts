@@ -27,6 +27,7 @@ import {
   fetchCloseReasonHistory,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
+  languageBucketSql,
   processLeadForConversion,
   unwrapRows,
   type BaseLead,
@@ -41,7 +42,16 @@ import type {
 
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const CONSULT_DC_DONE = BERATER_STATUSES.CONSULT_BEFORE_DC_DONE; // 102183939
+const TERM_DC_DONE = BERATER_STATUSES.TERM_DC_DONE; // 93886075 «Термин ДЦ состоялся»
 const CONSULT_AA_DONE = BERATER_STATUSES.CONSULT_BEFORE_AA_DONE; // 102183947
+// «Термин АА» — встреча в АА. Сам статус TERM_AA (на этапе) транзитный и в
+// истории логируется реже, чем даже Гутшайн, поэтому веху считаем по кластеру
+// «встреча АА была»: состоялась / отменена-перенесена / ушла на рассмотрение.
+const TERM_AA_STATUSES = [
+  BERATER_STATUSES.TERM_AA, // 93860879 на этапе
+  BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 отменён/перенесён (встреча всё равно была назначена)
+  BERATER_STATUSES.BERATER_REVIEW, // 93860887 на рассмотрении бератера (пост-АА)
+];
 const FRESH_CALL_DAYS = 7;
 const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
 
@@ -56,7 +66,9 @@ const STAGE_DEFS = [
   { key: "docs", label: "Документы в ДЦ" },
   { key: "term_dc", label: "Термин ДЦ" },
   { key: "consult_dc", label: "Конс. перед ДЦ" },
+  { key: "term_dc_done", label: "Термин ДЦ состоялся" },
   { key: "consult_aa", label: "Конс. перед АА" },
+  { key: "term_aa", label: "Термин АА" },
   { key: "gutschein", label: "Гутшайн" },
 ] as const;
 
@@ -78,7 +90,7 @@ export async function computeOverview(
   // Квал-база + Hot/Warm/Cold (по предстоящим терминам) — независимы, в параллель.
   const [baseLeadsRaw, hotWarmCold] = await Promise.all([
     fetchQualifiedBaseLeads(opts),
-    computeUpcomingReadiness(),
+    computeUpcomingReadiness(opts.lang ?? null),
   ]);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
 
@@ -160,7 +172,9 @@ export async function computeOverview(
 // ── Hot/Warm/Cold: клиенты с предстоящим термином (сегодня → +90 дн) ─────────
 // Готовность — про будущее, поэтому популяция НЕ зависит от фильтра периода
 // воронки (он про дату создания). Реиспользуем computeClients + score.ts.
-async function computeUpcomingReadiness(): Promise<{
+async function computeUpcomingReadiness(
+  lang: ComputeOpts["lang"]
+): Promise<{
   hot: number;
   warm: number;
   cold: number;
@@ -169,7 +183,7 @@ async function computeUpcomingReadiness(): Promise<{
   const end = new Date(today);
   end.setUTCDate(today.getUTCDate() + 90);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
-  const res = await computeClients({ terminFrom: fmt(today), terminTo: fmt(end) });
+  const res = await computeClients({ terminFrom: fmt(today), terminTo: fmt(end), lang });
   // Активные клиенты, которых ещё «готовим» (выигравшие гутшайн — не здесь).
   return res.active.categories;
 }
@@ -202,26 +216,46 @@ function computeLeadStages(
   const term_dc = targetCounts(c2);
   const gutschein = targetCounts(c5);
 
-  // Берётер-консультации (сырые даты «проведена») — вспомогательные этапы МЕЖДУ
-  // C2 и C5: Термин ДЦ (Гос-142, «назначен») по времени идёт ДО них. Зажимаем
-  // между соседями (`&& term_dc`, `&& consult_dc`) + гутшайн-инференс →
-  // монотонность docs ⊇ term_dc ⊇ consult_dc ⊇ consult_aa ⊇ gutschein.
+  // Бератер-вехи между C2 (Термин ДЦ назначен) и C5 (Гутшайн). Воронка
+  // кумулятивная — «дошёл до этапа», поэтому считаем ГЛУБИНУ по цепочке и
+  // помечаем достигнутыми ВСЕ этапы до неё (инференс вверх). Это надёжнее
+  // пер-этапных клэмпов: статусы логируются неравномерно (напр. TERM_AA реже
+  // Гутшайна), а от глубины монотонность гарантирована по построению.
+  //   1 consult_dc → 2 term_dc_done → 3 consult_aa → 4 term_aa → 5 gutschein.
   const consultDcAt = earliestBeraterEvent(berater, CONSULT_DC_DONE);
+  const termDcDoneAt = earliestBeraterEvent(berater, TERM_DC_DONE);
   const consultAaAt = earliestBeraterEvent(berater, CONSULT_AA_DONE);
-  const consultAa0 = consultAaAt !== null || gutschein;
-  const consultDc0 = consultDcAt !== null || consultAa0;
-  const consult_dc = consultDc0 && term_dc;
-  const consult_aa = consultAa0 && consult_dc;
+  const termAaAt = earliestBeraterEventAny(berater, TERM_AA_STATUSES);
+
+  let depth = 0;
+  if (consultDcAt !== null) depth = 1;
+  if (termDcDoneAt !== null) depth = Math.max(depth, 2);
+  if (consultAaAt !== null) depth = Math.max(depth, 3);
+  if (termAaAt !== null) depth = Math.max(depth, 4);
+  if (gutschein) depth = 5;
+
+  // Знаменатель берётер-цепочки — Гос «Термин ДЦ назначен» (term_dc, C2). Кросс-
+  // пайплайн Гутшайн без Гос-события всё равно прошёл этапы → пол по gutschein.
+  const reachedBerater = term_dc || gutschein;
+  const consult_dc = reachedBerater && depth >= 1;
+  const term_dc_done = reachedBerater && depth >= 2;
+  const consult_aa = reachedBerater && depth >= 3;
+  const term_aa = reachedBerater && depth >= 4;
 
   return {
-    reached: { new: true, qual: true, docs, term_dc, consult_dc, consult_aa, gutschein },
+    reached: {
+      new: true, qual: true, docs, term_dc, consult_dc,
+      term_dc_done, consult_aa, term_aa, gutschein,
+    },
     at: {
       new: lead.anchorAt,
       qual: lead.anchorAt, // anchor = created_at (упрощение, как у когорт)
       docs: docsAt,
       term_dc: termDcAt,
       consult_dc: consultDcAt,
+      term_dc_done: termDcDoneAt,
       consult_aa: consultAaAt,
+      term_aa: termAaAt,
       gutschein: gutscheinAt,
     },
   };
@@ -239,6 +273,19 @@ function earliestBeraterEvent(
   return min;
 }
 
+/** Самое раннее событие среди НЕСКОЛЬКИХ статусов (кластер вехи). */
+function earliestBeraterEventAny(
+  beraterLeads: BeraterLead[],
+  statusIds: readonly number[]
+): Date | null {
+  let min: Date | null = null;
+  for (const sid of statusIds) {
+    const ev = earliestBeraterEvent(beraterLeads, sid);
+    if (ev !== null && (min === null || ev < min)) min = ev;
+  }
+  return min;
+}
+
 // ── Сборка воронки ──────────────────────────────────────────────────────────
 
 function buildFunnel(
@@ -251,16 +298,20 @@ function buildFunnel(
     new: newLeadCount,
     qual: qualCount,
     docs: 0,
-    consult_dc: 0,
     term_dc: 0,
+    consult_dc: 0,
+    term_dc_done: 0,
     consult_aa: 0,
+    term_aa: 0,
     gutschein: 0,
   };
   for (const s of stages) {
     if (s.reached.docs) counts.docs += 1;
-    if (s.reached.consult_dc) counts.consult_dc += 1;
     if (s.reached.term_dc) counts.term_dc += 1;
+    if (s.reached.consult_dc) counts.consult_dc += 1;
+    if (s.reached.term_dc_done) counts.term_dc_done += 1;
     if (s.reached.consult_aa) counts.consult_aa += 1;
+    if (s.reached.term_aa) counts.term_aa += 1;
     if (s.reached.gutschein) counts.gutschein += 1;
   }
 
@@ -317,6 +368,7 @@ async function fetchNewLeadCount(opts: ComputeOpts): Promise<number> {
           ? sql`AND responsible_user_id = ${opts.responsibleUserId}`
           : sql``
       }
+      ${languageBucketSql(opts.lang)}
   `);
   const data = unwrapRows<{ n: string | number }>(rows);
   return data.length ? Number(data[0].n) : 0;

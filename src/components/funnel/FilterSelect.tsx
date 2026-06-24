@@ -80,11 +80,10 @@ export default function FilterSelect({
       {open && (
         <ul
           role="listbox"
-          className="absolute left-0 right-0 mt-1 min-w-full max-h-[260px] overflow-y-auto rounded-xl border border-white/10 shadow-2xl py-1"
-          style={{
-            background: "#0f172a",
-            zIndex: 50,
-          }}
+          // bg-slate-900 (а не инлайн #0f172a) — чтобы фон перекрашивался темой
+          // (.theme-light .bg-slate-900 → светлый); текст slate/blue тоже флипается
+          // темой, иначе в светлой теме было тёмное-на-тёмном.
+          className="absolute left-0 right-0 mt-1 min-w-full max-h-[260px] overflow-y-auto rounded-xl border border-white/10 shadow-2xl py-1 z-50 bg-slate-900"
         >
           <li>
             <button

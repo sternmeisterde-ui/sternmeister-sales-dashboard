@@ -29,6 +29,9 @@ export interface FunnelFiltersState {
   source: string;
   /** Kommo responsible_user_id. Пустая строка = «Все». */
   responsibleUserId: string;
+  /** Уровень языка (бакет a2/b1/b2/c1/unknown). Пустая строка = «Все».
+   *  Применяется только к Объединённой воронке + KPI (вид «Когорты»). */
+  lang: string;
 }
 
 export interface FilterOption {

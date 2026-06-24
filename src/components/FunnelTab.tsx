@@ -45,6 +45,7 @@ function buildDefaultFilters(): FunnelFiltersState {
     maturity: "all",
     source: "",
     responsibleUserId: "",
+    lang: "",
   };
 }
 
@@ -59,7 +60,8 @@ function countActiveFilters(
     (dateChanged ? 1 : 0) +
     (state.maturity !== defaults.maturity ? 1 : 0) +
     (state.source !== defaults.source ? 1 : 0) +
-    (state.responsibleUserId !== defaults.responsibleUserId ? 1 : 0)
+    (state.responsibleUserId !== defaults.responsibleUserId ? 1 : 0) +
+    (state.lang !== defaults.lang ? 1 : 0)
   );
 }
 
@@ -125,6 +127,7 @@ export default function FunnelTab({
   // ── Динамические фильтр-опции (источники/менеджеры) ──
   const [sourceOptions, setSourceOptions] = useState<FilterOption[]>([]);
   const [managerOptions, setManagerOptions] = useState<FilterOption[]>([]);
+  const [langOptions, setLangOptions] = useState<FilterOption[]>([]);
   const filterOptionsAbort = useRef<AbortController | null>(null);
 
   // ── Реальные данные C1/C2/C5 с бэка ──
@@ -158,6 +161,7 @@ export default function FunnelTab({
       if (state.source) params.set("source", state.source);
       if (state.responsibleUserId)
         params.set("responsible_user_id", state.responsibleUserId);
+      if (state.lang) params.set("lang", state.lang);
       const res = await fetch(`/api/funnel/cohorts?${params}`, {
         signal: ctrl.signal,
       });
@@ -221,6 +225,7 @@ export default function FunnelTab({
       if (state.source) params.set("source", state.source);
       if (state.responsibleUserId)
         params.set("responsible_user_id", state.responsibleUserId);
+      if (state.lang) params.set("lang", state.lang);
       const res = await fetch(`/api/funnel/overview?${params}`, {
         signal: ctrl.signal,
       });
@@ -267,10 +272,12 @@ export default function FunnelTab({
         const data: {
           sources: FilterOption[];
           responsible_users: FilterOption[];
+          language_levels?: FilterOption[];
         } = await res.json();
         if (filterOptionsAbort.current !== ctrl) return;
         setSourceOptions(data.sources);
         setManagerOptions(data.responsible_users);
+        setLangOptions(data.language_levels ?? []);
         // Авто-сброс выбранного значения, если оно больше не в списке.
         setFilters((prev) => {
           const next = { ...prev };
@@ -448,6 +455,7 @@ export default function FunnelTab({
     if (filters.source) p.set("source", filters.source);
     if (filters.responsibleUserId)
       p.set("responsible_user_id", filters.responsibleUserId);
+    if (filters.lang) p.set("lang", filters.lang);
     return p;
   }, [filters]);
 
@@ -471,6 +479,7 @@ export default function FunnelTab({
         defaultState={defaultFilters}
         sourceOptions={sourceOptions}
         managerOptions={managerOptions}
+        langOptions={langOptions}
         activeFilterCount={activeFilterCount}
         lastUpdatedAt={lastUpdatedAt}
         mode={viewMode}

@@ -677,9 +677,11 @@ export default function ClientsView({ filters: _filters }: Props) {
     termin.end.getTime() !== termin.start.getTime();
   const terminFrom = fmtLocalDate(start);
   const terminTo = hasRange ? fmtLocalDate(termin.end as Date) : null;
-  const key = `${terminFrom}|${terminTo ?? "open"}`;
+  const lang = _filters.lang;
+  const key = `${terminFrom}|${terminTo ?? "open"}|${lang}`;
 
-  const load = useCallback(async (k: string, tFrom: string, tTo: string | null) => {
+  const load = useCallback(
+    async (k: string, tFrom: string, tTo: string | null, langBucket: string) => {
     const cached = cache.get(k);
     if (cached) {
       setData(cached);
@@ -694,6 +696,7 @@ export default function ClientsView({ filters: _filters }: Props) {
     try {
       const params = new URLSearchParams({ termin_from: tFrom, limit: String(FETCH_LIMIT) });
       if (tTo) params.set("termin_to", tTo);
+      if (langBucket) params.set("lang", langBucket);
       const res = await fetch(`/api/funnel/clients?${params}`, { signal: ctrl.signal });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
@@ -713,9 +716,9 @@ export default function ClientsView({ filters: _filters }: Props) {
   }, []);
 
   useEffect(() => {
-    const id = setTimeout(() => load(key, terminFrom, terminTo), 250);
+    const id = setTimeout(() => load(key, terminFrom, terminTo, lang), 250);
     return () => clearTimeout(id);
-  }, [key, terminFrom, terminTo, load]);
+  }, [key, terminFrom, terminTo, lang, load]);
 
   const isEmpty =
     data && data.active.shown === 0 && data.won.shown === 0;
