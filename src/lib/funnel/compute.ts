@@ -53,6 +53,16 @@ const BERATER = B2G_PIPELINES.BERATER; // 12154099
  * A1 или нераспознанное. Колонка `language_level` (Kommo CFV 869928).
  * Пусто, если bucket не задан. Применяется к `analytics.leads_cohort`.
  */
+/** Парсит query-параметр `lang` в бакет (или null, если невалидно/пусто). */
+export function parseLangBucket(raw: string | null | undefined): LanguageBucket | null {
+  const v = (raw ?? "").toLowerCase();
+  return (["a2", "b1", "b2", "c1", "unknown"] as const).includes(
+    v as LanguageBucket,
+  )
+    ? (v as LanguageBucket)
+    : null;
+}
+
 export function languageBucketSql(bucket: LanguageBucket | null | undefined) {
   switch (bucket) {
     case "a2":

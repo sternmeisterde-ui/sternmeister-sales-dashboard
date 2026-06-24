@@ -86,8 +86,8 @@ export default function ManagersView({ filters }: Props) {
   const cacheKey = useMemo(() => {
     const from = filters.dateRange.start ? fmtLocalDate(filters.dateRange.start) : "";
     const to = filters.dateRange.end ? fmtLocalDate(filters.dateRange.end) : "";
-    return `${from}|${to}|${filters.source}`;
-  }, [filters.dateRange.start, filters.dateRange.end, filters.source]);
+    return `${from}|${to}|${filters.source}|${filters.lang}`;
+  }, [filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang]);
 
   const load = useCallback(async () => {
     if (!filters.dateRange.start || !filters.dateRange.end) return;
@@ -107,6 +107,7 @@ export default function ManagersView({ filters }: Props) {
         to: fmtLocalDate(filters.dateRange.end),
       });
       if (filters.source) params.set("source", filters.source);
+      if (filters.lang) params.set("lang", filters.lang);
       const res = await fetch(`/api/funnel/managers?${params}`, { signal: ctrl.signal });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
@@ -120,7 +121,7 @@ export default function ManagersView({ filters }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [cacheKey, filters.dateRange.start, filters.dateRange.end, filters.source]);
+  }, [cacheKey, filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang]);
 
   useEffect(() => {
     load();

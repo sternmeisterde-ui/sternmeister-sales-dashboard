@@ -14,7 +14,7 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db/index";
-import { unwrapRows } from "./compute";
+import { unwrapRows, languageBucketSql } from "./compute";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
 import { getBotRoleplaysForLeads } from "./bot-roleplays";
@@ -56,6 +56,8 @@ const STAGE_SCORE: Record<number, number> = {
 export interface ClientsParams {
   terminFrom: string;
   terminTo: string | null;
+  /** Фильтр по уровню языка (бакет). null/undefined = без фильтра. */
+  lang?: LanguageBucket | null;
 }
 
 export interface ClientSideReadiness {
@@ -149,7 +151,7 @@ export async function computeClients(
   params: ClientsParams,
   limit = 300
 ): Promise<ClientsResult> {
-  const { terminFrom, terminTo } = params;
+  const { terminFrom, terminTo, lang } = params;
   // Одна дата (terminTo == null) = «с этого числа и дальше» (>=); период = диапазон.
   const dcCond = terminTo
     ? sql`(termin_date::date >= ${terminFrom}::date AND termin_date::date <= ${terminTo}::date)`
@@ -179,6 +181,7 @@ export async function computeClients(
           OR ${dcCond}
           OR ${aaCond}
         )
+        ${languageBucketSql(lang)}
     `)
   );
   if (baseRows.length === 0) {

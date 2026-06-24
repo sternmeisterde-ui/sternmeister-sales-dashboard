@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { computeCohorts } from "@/lib/funnel/compute";
+import { computeCohorts, parseLangBucket } from "@/lib/funnel/compute";
 import type { MaturityFilter } from "@/lib/funnel/types";
 
 export const runtime = "nodejs";
@@ -49,6 +49,7 @@ export async function GET(req: NextRequest) {
       maturity,
       source,
       responsibleUserId,
+      lang: parseLangBucket(params.get("lang")),
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

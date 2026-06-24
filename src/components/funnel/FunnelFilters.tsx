@@ -124,17 +124,8 @@ export default function FunnelFilters({
         />
       </div>
 
-      {/* Уровень языка — применяется только к Объединённой воронке (вид «Когорты»). */}
-      <div
-        className={isClients || isManagers ? "opacity-40 pointer-events-none" : ""}
-        title={
-          isClients
-            ? "Не применяется к виду «Клиенты»"
-            : isManagers
-              ? "Не применяется к виду «Менеджеры»"
-              : "Применяется к Объединённой воронке"
-        }
-      >
+      {/* Уровень языка — применяется ко всем визуальным элементам вкладки. */}
+      <div title="Уровень языка — применяется ко всем видам вкладки">
         <FilterSelect
           value={state.lang}
           options={langOptions}

@@ -161,6 +161,7 @@ export default function FunnelTab({
       if (state.source) params.set("source", state.source);
       if (state.responsibleUserId)
         params.set("responsible_user_id", state.responsibleUserId);
+      if (state.lang) params.set("lang", state.lang);
       const res = await fetch(`/api/funnel/cohorts?${params}`, {
         signal: ctrl.signal,
       });
@@ -454,6 +455,7 @@ export default function FunnelTab({
     if (filters.source) p.set("source", filters.source);
     if (filters.responsibleUserId)
       p.set("responsible_user_id", filters.responsibleUserId);
+    if (filters.lang) p.set("lang", filters.lang);
     return p;
   }, [filters]);
 

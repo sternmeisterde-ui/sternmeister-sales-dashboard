@@ -83,7 +83,7 @@ export async function computeOverview(
   // Квал-база + Hot/Warm/Cold (по предстоящим терминам) — независимы, в параллель.
   const [baseLeadsRaw, hotWarmCold] = await Promise.all([
     fetchQualifiedBaseLeads(opts),
-    computeUpcomingReadiness(),
+    computeUpcomingReadiness(opts.lang ?? null),
   ]);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
 
@@ -165,7 +165,9 @@ export async function computeOverview(
 // ── Hot/Warm/Cold: клиенты с предстоящим термином (сегодня → +90 дн) ─────────
 // Готовность — про будущее, поэтому популяция НЕ зависит от фильтра периода
 // воронки (он про дату создания). Реиспользуем computeClients + score.ts.
-async function computeUpcomingReadiness(): Promise<{
+async function computeUpcomingReadiness(
+  lang: ComputeOpts["lang"]
+): Promise<{
   hot: number;
   warm: number;
   cold: number;
@@ -174,7 +176,7 @@ async function computeUpcomingReadiness(): Promise<{
   const end = new Date(today);
   end.setUTCDate(today.getUTCDate() + 90);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
-  const res = await computeClients({ terminFrom: fmt(today), terminTo: fmt(end) });
+  const res = await computeClients({ terminFrom: fmt(today), terminTo: fmt(end), lang });
   // Активные клиенты, которых ещё «готовим» (выигравшие гутшайн — не здесь).
   return res.active.categories;
 }
@@ -222,10 +224,15 @@ function computeLeadStages(
   const consultAa0 = consultAaAt !== null || termAa0;
   const termDcDone0 = termDcDoneAt !== null || consultAa0;
   const consultDc0 = consultDcAt !== null || termDcDone0;
-  const consult_dc = consultDc0 && term_dc;
-  const term_dc_done = termDcDone0 && consult_dc;
-  const consult_aa = consultAa0 && term_dc_done;
-  const term_aa = termAa0 && consult_aa;
+  // Зажим к предшественнику (term_dc), НО с полом по gutschein: Гутшайн —
+  // конец воронки, поэтому лид с Гутшайном по определению прошёл все
+  // промежуточные бератер-этапы, даже если у него нет Гос-события «Термин ДЦ
+  // назначен» (кросс-пайплайн: Гутшайн с стороны Бератера). Без пола это давало
+  // term_aa < gutschein (переход >100%).
+  const consult_dc = (consultDc0 && term_dc) || gutschein;
+  const term_dc_done = (termDcDone0 && consult_dc) || gutschein;
+  const consult_aa = (consultAa0 && term_dc_done) || gutschein;
+  const term_aa = (termAa0 && consult_aa) || gutschein;
 
   return {
     reached: {

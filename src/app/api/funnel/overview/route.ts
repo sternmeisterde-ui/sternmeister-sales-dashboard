@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeOverview } from "@/lib/funnel/overview";
+import { parseLangBucket } from "@/lib/funnel/compute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,12 +36,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Уровень языка (бакет). Невалидное значение игнорируем (= без фильтра).
-  const langRaw = params.get("lang");
-  const LANG_BUCKETS = ["a2", "b1", "b2", "c1", "unknown"] as const;
-  const lang = (LANG_BUCKETS as readonly string[]).includes(langRaw ?? "")
-    ? (langRaw as (typeof LANG_BUCKETS)[number])
-    : null;
+  const lang = parseLangBucket(params.get("lang"));
 
   try {
     const payload = await computeOverview({
