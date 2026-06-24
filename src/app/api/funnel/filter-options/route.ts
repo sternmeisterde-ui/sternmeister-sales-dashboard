@@ -9,6 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE;
+const BERATER = B2G_PIPELINES.BERATER;
 
 export async function GET(req: NextRequest) {
   const session = await getSession();
@@ -46,13 +47,16 @@ export async function GET(req: NextRequest) {
       label: r.value,
     }));
 
-    // Ответственные (manager + responsible_user_id).
+    // Ответственные (manager + responsible_user_id). Берём ОБЕ линии — Бух Гос
+    // (1-я линия, квалификаторы) и Бератер (2-я линия, финишёры), иначе чистого
+    // финишёра без Гос-лидов нельзя выбрать в фильтре. Атрибуция воронки по
+    // менеджеру тоже учитывает обе стороны (managerAttributionSql).
     const managersRows = await analyticsDb.execute(sql`
       SELECT
         responsible_user_id AS "responsibleUserId",
         manager             AS "manager"
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${BUH_GOS}
+      WHERE pipeline_id IN (${BUH_GOS}, ${BERATER})
         AND created_at >= ${from.toISOString()}
         AND created_at <  ${to.toISOString()}
         AND responsible_user_id IS NOT NULL

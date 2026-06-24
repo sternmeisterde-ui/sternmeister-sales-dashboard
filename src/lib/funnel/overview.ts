@@ -28,6 +28,7 @@ import {
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
   languageBucketSql,
+  managerAttributionSql,
   processLeadForConversion,
   unwrapRows,
   type BaseLead,
@@ -363,11 +364,7 @@ async function fetchNewLeadCount(opts: ComputeOpts): Promise<number> {
       AND created_at >= ${opts.from.toISOString()}
       AND created_at <  ${opts.to.toISOString()}
       ${opts.source ? sql`AND utm_source = ${opts.source}` : sql``}
-      ${
-        opts.responsibleUserId !== null
-          ? sql`AND responsible_user_id = ${opts.responsibleUserId}`
-          : sql``
-      }
+      ${managerAttributionSql(opts.responsibleUserId)}
       ${languageBucketSql(opts.lang)}
   `);
   const data = unwrapRows<{ n: string | number }>(rows);
