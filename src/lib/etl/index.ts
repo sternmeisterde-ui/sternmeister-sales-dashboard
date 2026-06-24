@@ -29,7 +29,7 @@ import { syncStatusChanges } from "./sync-status-changes";
 import { syncCloseReasonChanges } from "./sync-close-reason-changes";
 import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncClientRoleplays } from "./sync-client-roleplays";
-import { syncBotRoleplays } from "./sync-bot-roleplays";
+import { syncBotRoleplays, syncBotUsers } from "./sync-bot-roleplays";
 import { syncTasks } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { detectWonExports } from "./detect-won-exports";
@@ -283,6 +283,9 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   // BERATER_BOT_DATABASE_URL. Убирает живую зависимость «Клиентов» от спящей бот-БД.
   if (!skip.has("bot_roleplays")) {
     await runStep("sync-bot-roleplays", () => syncBotRoleplays(), 0, stepErrors);
+    // Регистрации пользователей бота → analytics.bot_users (отличать «в боте, 0
+    // тренировок» от «не в боте»). Тот же триггер/skip, что и сессии.
+    await runStep("sync-bot-users", () => syncBotUsers(), 0, stepErrors);
   }
 
   // Update contact_date on leads after communications are populated.

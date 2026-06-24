@@ -17,7 +17,7 @@ import { db } from "@/lib/db/index";
 import { unwrapRows, languageBucketSql } from "./compute";
 import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
-import { getBotRoleplaysForLeads } from "./bot-roleplays";
+import { getBotRoleplaysForLeads, getRegisteredBotLeads } from "./bot-roleplays";
 import { getOkkByLead } from "./okk-by-lead";
 import {
   computeReadiness,
@@ -83,6 +83,8 @@ export interface ClientRow {
   daysSinceLastTouch: number | null;
   /** Тренировок с ботом ролевок (репо berater_bot). */
   botRoleplayCount: number;
+  /** Зарегистрирован ли клиент в боте (есть запись в analytics.bot_users). */
+  botRegistered: boolean;
   /** Последняя самооценка готовности ботом (overall_readiness). */
   botLatestReadiness: string | null;
   /** Ответственный менеджер (имя из master_managers) или null. */
@@ -136,6 +138,7 @@ interface ScoredLead {
   lastTouchAtIso: string | null;
   daysSinceLastTouch: number | null;
   botRoleplayCount: number;
+  botRegistered: boolean;
   botLatestReadiness: string | null;
   managerName: string | null;
   daysOnStage: number | null;
@@ -189,11 +192,12 @@ export async function computeClients(
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
-  const [roleplays, lastTouch, botRoleplays, roster, stageEntered, consults, okkByLead] =
+  const [roleplays, lastTouch, botRoleplays, botRegisteredSet, roster, stageEntered, consults, okkByLead] =
     await Promise.all([
       getRoleplaysForLeads(ids),
       fetchLastTouchMap(ids),
       getBotRoleplaysForLeads(ids), // graceful no-op без BERATER_BOT_DATABASE_URL
+      getRegisteredBotLeads(ids), // кто зарегистрирован в боте (analytics.bot_users)
       fetchManagerNames(),
       fetchCurrentStageEntered(ids),
       fetchConsultationCounts(ids),
@@ -268,6 +272,7 @@ export async function computeClients(
       lastTouchAtIso: lastTouchIso,
       daysSinceLastTouch: days,
       botRoleplayCount: botCount,
+      botRegistered: botRegisteredSet.has(leadId),
       botLatestReadiness: bot?.latestReadiness ?? null,
       managerName,
       daysOnStage,
@@ -340,6 +345,7 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     lastTouchAtIso: s.lastTouchAtIso,
     daysSinceLastTouch: s.daysSinceLastTouch,
     botRoleplayCount: s.botRoleplayCount,
+    botRegistered: s.botRegistered,
     botLatestReadiness: s.botLatestReadiness,
     managerName: s.managerName,
     daysOnStage: s.daysOnStage,
