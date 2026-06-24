@@ -63,6 +63,35 @@ export function parseLangBucket(raw: string | null | undefined): LanguageBucket 
     : null;
 }
 
+/**
+ * SQL-фрагмент WHERE для фильтра «воронка этого менеджера». Лид относится к
+ * менеджеру, если он ОТВЕТСТВЕННЫЙ на Гос-лиде ИЛИ на линкованном (по общему
+ * контакту) Бератер-лиде. Без этого финишёры 2-й линии (бератеры) видели бы
+ * только свои редкие Гос-лиды, а их реальные Гутшайны (на берётер-стороне)
+ * терялись. Линковка — как в fetchBeraterContext (lead_contact_links по contact_id).
+ * Применяется к строкам `analytics.leads_cohort` пайплайна Бух Гос. Пусто, если
+ * менеджер не задан.
+ */
+export function managerAttributionSql(responsibleUserId: number | null | undefined) {
+  if (responsibleUserId === null || responsibleUserId === undefined) return sql``;
+  return sql` AND (
+    responsible_user_id = ${responsibleUserId}
+    OR lead_id IN (
+      SELECT base_lcl.lead_id
+      FROM analytics.lead_contact_links AS base_lcl
+      INNER JOIN analytics.lead_contact_links AS berater_lcl
+        ON berater_lcl.contact_id = base_lcl.contact_id
+       AND berater_lcl.is_active = TRUE
+       AND berater_lcl.lead_id <> base_lcl.lead_id
+      INNER JOIN analytics.leads_cohort AS berater
+        ON berater.lead_id = berater_lcl.lead_id
+       AND berater.pipeline_id = ${BERATER}
+       AND berater.responsible_user_id = ${responsibleUserId}
+      WHERE base_lcl.is_active = TRUE
+    )
+  )`;
+}
+
 export function languageBucketSql(bucket: LanguageBucket | null | undefined) {
   switch (bucket) {
     case "a2":
@@ -730,11 +759,7 @@ export async function fetchQualifiedBaseLeads(
       AND created_at >= ${opts.from.toISOString()}
       AND created_at <  ${opts.to.toISOString()}
       ${opts.source ? sql`AND utm_source = ${opts.source}` : sql``}
-      ${
-        opts.responsibleUserId !== null
-          ? sql`AND responsible_user_id = ${opts.responsibleUserId}`
-          : sql``
-      }
+      ${managerAttributionSql(opts.responsibleUserId)}
       ${languageBucketSql(opts.lang)}
   `);
 
