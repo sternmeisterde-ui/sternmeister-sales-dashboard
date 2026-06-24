@@ -98,6 +98,35 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
   }
 }
 
+/**
+ * Какие из переданных лидов ЗАРЕГИСТРИРОВАНЫ в боте (есть запись в зеркале
+ * `analytics.bot_users` с этим kommo_lead_id). Нужно, чтобы отличать «в боте, но
+ * 0 тренировок» от «вообще не в боте». Graceful: нет таблицы/данных → пустой set.
+ */
+export async function getRegisteredBotLeads(leadIds: number[]): Promise<Set<number>> {
+  const out = new Set<number>();
+  const ids = Array.from(
+    new Set(leadIds.map(Number).filter((n) => Number.isInteger(n) && n > 0)),
+  );
+  if (ids.length === 0) return out;
+  try {
+    const rows = unwrapRows<{ lead_id: string | number }>(
+      await analyticsDb.execute(sql`
+        SELECT DISTINCT kommo_lead_id AS lead_id
+        FROM analytics.bot_users
+        WHERE kommo_lead_id IN (${sql.raw(ids.join(","))})
+      `),
+    );
+    for (const r of rows) {
+      const n = Number(r.lead_id);
+      if (Number.isInteger(n) && n > 0) out.add(n);
+    }
+  } catch (e) {
+    console.error("[funnel] getRegisteredBotLeads failed (non-fatal):", e instanceof Error ? e.message : e);
+  }
+  return out;
+}
+
 export async function getBotRoleplaysForLeads(
   leadIds: number[],
 ): Promise<Map<number, BotRoleplaySummary>> {

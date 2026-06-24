@@ -308,11 +308,15 @@ function ClientTable({
 
 // Распределение клиентов по числу тренировок С БОТОМ. Считается из загруженных
 // клиентов (актуальных по фильтру даты термина).
-const RP_BUCKETS: { key: string; label: string; min: number; max: number; color: string }[] = [
-  { key: "0", label: "0 ролевок", min: 0, max: 0, color: "#64748b" },
-  { key: "1-2", label: "1–2", min: 1, max: 2, color: "#f0b63d" },
-  { key: "3-4", label: "3–4", min: 3, max: 4, color: "#8fbe91" },
-  { key: "5+", label: "5+", min: 5, max: Number.POSITIVE_INFINITY, color: "#18a98b" },
+// Сегмент «0 ролевок» разбит на два: зарегистрирован в боте, но не тренировался,
+// и вообще не в боте — это разные сигналы (первых надо «толкнуть» тренироваться,
+// вторых — сначала завести в бот). match — предикат вместо min/max диапазона.
+const RP_BUCKETS: { key: string; label: string; color: string; match: (c: ClientRow) => boolean }[] = [
+  { key: "in0", label: "В боте, 0", color: "#64748b", match: (c) => c.botRoleplayCount === 0 && c.botRegistered },
+  { key: "out", label: "Не в боте", color: "#334155", match: (c) => c.botRoleplayCount === 0 && !c.botRegistered },
+  { key: "1-2", label: "1–2", color: "#f0b63d", match: (c) => c.botRoleplayCount >= 1 && c.botRoleplayCount <= 2 },
+  { key: "3-4", label: "3–4", color: "#8fbe91", match: (c) => c.botRoleplayCount >= 3 && c.botRoleplayCount <= 4 },
+  { key: "5+", label: "5+", color: "#18a98b", match: (c) => c.botRoleplayCount >= 5 },
 ];
 
 // Строка drill-таблицы: имя (ссылка на Kommo) + основная метрика (про ролевки) +
@@ -339,16 +343,26 @@ function clientToDrillRow(c: ClientRow): DrillRow {
 
 function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
   const all = clients;
+  // Graceful: пока данных о регистрациях нет (таблица bot_users пуста/не
+  // наполнена), не делим «0» — показываем единый сегмент «0 ролевок». Как только
+  // регистрации появятся (есть хоть один botRegistered) — авто-разбивка на два.
+  const buckets = useMemo(() => {
+    const hasReg = all.some((c) => c.botRegistered);
+    if (hasReg) return RP_BUCKETS;
+    return [
+      { key: "0", label: "0 ролевок", color: "#64748b", match: (c: ClientRow) => c.botRoleplayCount === 0 },
+      ...RP_BUCKETS.filter((b) => b.key !== "in0" && b.key !== "out"),
+    ];
+  }, [all]);
   const dist = useMemo(
     () =>
-      RP_BUCKETS.map((b) => ({
+      buckets.map((b) => ({
+        key: b.key,
         label: b.label,
         color: b.color,
-        min: b.min,
-        max: b.max,
-        value: all.filter((c) => c.botRoleplayCount >= b.min && c.botRoleplayCount <= b.max).length,
+        value: all.filter(b.match).length,
       })),
-    [all],
+    [all, buckets],
   );
   const total = dist.reduce((s, d) => s + d.value, 0);
   if (total === 0) return null;
@@ -375,14 +389,14 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
               paddingAngle={2}
               className="cursor-pointer"
               onClick={(d) => {
-                const e = (d?.payload?.payload ?? d?.payload ?? d) as { label?: string; min?: number; max?: number };
-                const min = e.min ?? 0;
-                const max = e.max ?? Number.POSITIVE_INFINITY;
+                const e = (d?.payload?.payload ?? d?.payload ?? d) as { key?: string };
+                const b = buckets.find((x) => x.key === e.key);
+                if (!b) return;
                 const rows = all
-                  .filter((c) => c.botRoleplayCount >= min && c.botRoleplayCount <= max)
-                  .sort((a, b) => b.botRoleplayCount - a.botRoleplayCount)
+                  .filter(b.match)
+                  .sort((a, z) => z.botRoleplayCount - a.botRoleplayCount)
                   .map(clientToDrillRow);
-                onDrill(`Тренировок с ботом: ${e.label ?? ""}`, rows);
+                onDrill(`Тренировок с ботом: ${b.label}`, rows);
               }}
             >
               {dist.map((d) => (

@@ -64,6 +64,77 @@ export async function syncBotRoleplays(): Promise<number> {
   return upserted;
 }
 
+type BotUserRow = {
+  id: string | number;
+  kommo_lead_id: string | number | null;
+  kommo_contact_id: string | number | null;
+  phone_normalized: string | null;
+  access_status: string | null;
+  access_authorized: boolean | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+};
+
+/**
+ * Зеркалит РЕГИСТРАЦИИ пользователей бота (таблица `users`) в
+ * `analytics.bot_users`. Нужно, чтобы отличать «в боте, но 0 тренировок» от
+ * «вообще не в боте» (сессии этого не дают — у не-тренировавшегося их просто нет).
+ * Full sync, идемпотентно по user_id. Авто-skip без BERATER_BOT_DATABASE_URL.
+ */
+export async function syncBotUsers(): Promise<number> {
+  const bot = getBeraterBotDb();
+  if (!bot) {
+    console.log("[ETL] sync-bot-users: skipped (BERATER_BOT_DATABASE_URL not set)");
+    return 0;
+  }
+
+  const rows = unwrapRows<BotUserRow>(
+    await bot.execute(sql`
+      SELECT id, kommo_lead_id, kommo_contact_id, phone_normalized,
+             access_status, access_authorized, created_at, last_seen_at
+      FROM users
+    `),
+  );
+  if (rows.length === 0) {
+    console.log("[ETL] sync-bot-users: 0 users");
+    return 0;
+  }
+
+  let upserted = 0;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    upserted += await upsertUserChunk(rows.slice(i, i + CHUNK));
+  }
+  console.log(`[ETL] sync-bot-users: upserted ${upserted} users`);
+  return upserted;
+}
+
+async function upsertUserChunk(rows: BotUserRow[]): Promise<number> {
+  const posInt = (v: string | number | null): number | null => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+  const values = rows.map(
+    (r) =>
+      sql`(${String(r.id)}, ${posInt(r.kommo_lead_id)}, ${posInt(r.kommo_contact_id)}, ${r.phone_normalized}, ${r.access_status}, ${r.access_authorized}, ${r.created_at == null ? null : String(r.created_at)}, ${r.last_seen_at == null ? null : String(r.last_seen_at)})`,
+  );
+  await analyticsDb.execute(sql`
+    INSERT INTO analytics.bot_users
+      (user_id, kommo_lead_id, kommo_contact_id, phone_normalized, access_status, access_authorized, created_at, last_seen_at)
+    VALUES ${sql.join(values, sql`, `)}
+    ON CONFLICT (user_id) DO UPDATE SET
+      kommo_lead_id     = EXCLUDED.kommo_lead_id,
+      kommo_contact_id  = EXCLUDED.kommo_contact_id,
+      phone_normalized  = EXCLUDED.phone_normalized,
+      access_status     = EXCLUDED.access_status,
+      access_authorized = EXCLUDED.access_authorized,
+      created_at        = EXCLUDED.created_at,
+      last_seen_at      = EXCLUDED.last_seen_at,
+      synced_at         = NOW()
+  `);
+  return rows.length;
+}
+
 /** Пачечный upsert (одним INSERT … VALUES … ON CONFLICT) — быстрее, чем строка-за-строкой. */
 async function upsertChunk(rows: BotSessionRow[]): Promise<number> {
   const values = rows.map((r) => {
