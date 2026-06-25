@@ -652,6 +652,7 @@ interface CorrPayload {
 const CORR_FACTORS: { key: string; label: string }[] = [
   { key: "bot", label: "Ролевки с ботом" },
   { key: "language", label: "Уровень языка" },
+  { key: "okk", label: "Балл ОКК" },
 ];
 
 function CorrelationPanel() {

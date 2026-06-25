@@ -3,6 +3,7 @@ import { getSession } from "@/lib/auth";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { unwrapRows } from "@/lib/funnel/compute";
+import { getOkkByLead } from "@/lib/funnel/okk-by-lead";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -147,6 +148,40 @@ async function languageFactor(): Promise<CorrelationPayload> {
   };
 }
 
+async function okkFactor(): Promise<CorrelationPayload> {
+  // Решённые берётер-сделки → их средний балл ОКК сделки (dealOkk из D2).
+  const rows = unwrapRows<{ won: number | string; lead: number | string }>(
+    await analyticsDb.execute(sql`
+      SELECT (status_id = ${WON})::int AS won, lead_id AS lead
+      FROM analytics.leads_cohort
+      WHERE pipeline_id = ${BERATER} AND is_deleted = FALSE
+        AND status_id IN (${WON}, ${LOST})`),
+  );
+  const leads = rows
+    .map((r) => ({ won: Number(r.won), id: Number(r.lead) }))
+    .filter((l) => Number.isInteger(l.id) && l.id > 0);
+  const okk = await getOkkByLead(leads.map((l) => l.id)); // Map<lead, {dealOkk}>
+  const data = leads
+    .map((l) => ({ won: l.won, score: okk.get(l.id)?.dealOkk ?? null }))
+    .filter((d): d is { won: number; score: number } => typeof d.score === "number");
+  const segments = [
+    seg("<60", "< 60", data.filter((d) => d.score < 60)),
+    seg("60-74", "60–74", data.filter((d) => d.score >= 60 && d.score < 75)),
+    seg("75-89", "75–89", data.filter((d) => d.score >= 75 && d.score < 90)),
+    seg("90+", "90+", data.filter((d) => d.score >= 90)),
+  ];
+  return {
+    factor: "okk",
+    label: "Балл ОКК",
+    population: "решённые сделки с оценкой ОКК (всё время)",
+    segments,
+    topline: null, // связь почти нулевая и немонотонная — «крайние группы» вводили бы в заблуждение
+    corr: pearson(data.map((d) => d.score), data.map((d) => d.won)),
+    caveat:
+      "Балл ОКК по чек-листу практически НЕ связан с Гутшайном — качество звонка не предсказывает закрытие. Низкие бакеты малы.",
+  };
+}
+
 export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -154,7 +189,10 @@ export async function GET(req: NextRequest) {
 
   const factor = req.nextUrl.searchParams.get("factor") ?? "bot";
   try {
-    const payload = factor === "language" ? await languageFactor() : await botFactor();
+    const payload =
+      factor === "language" ? await languageFactor()
+      : factor === "okk" ? await okkFactor()
+      : await botFactor();
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[/api/funnel/correlation] failed:", e);
