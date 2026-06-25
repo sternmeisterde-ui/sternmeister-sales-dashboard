@@ -45,7 +45,6 @@ const LANGUAGE_KEYS: Array<{ key: keyof LanguageBreakdown; label: string }> = [
   { key: "b1", label: "B1" },
   { key: "b2", label: "B2" },
   { key: "c1", label: "C1" },
-  { key: "unknown", label: "Без оценки" },
 ];
 
 export default function CohortTable({

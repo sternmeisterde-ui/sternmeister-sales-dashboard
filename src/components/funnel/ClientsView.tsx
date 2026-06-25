@@ -37,11 +37,11 @@ const CATEGORY = {
 } as const;
 
 const LANG_LABEL: Record<ClientRow["languageBucket"], string> = {
+  a1: "A1",
   a2: "A2",
   b1: "B1",
   b2: "B2",
   c1: "C1",
-  unknown: "—",
 };
 
 // Текст-подсказка «откуда статус»: показывает разбивку готовности по факторам
@@ -53,7 +53,7 @@ function breakdownTitle(c: ClientRow): string {
   return `Готовность ${c.score} → ${CATEGORY[c.category].label}\nИз чего складывается:\n${lines.join("\n")}`;
 }
 const LANG_RANK: Record<ClientRow["languageBucket"], number> = {
-  unknown: 0,
+  a1: 0,
   a2: 1,
   b1: 2,
   b2: 3,
@@ -423,7 +423,8 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
   );
 }
 
-const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1", "unknown"];
+// A1 («не квал») исключён из аналитики — в распределении не показываем.
+const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1"];
 
 function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
   const all = clients;

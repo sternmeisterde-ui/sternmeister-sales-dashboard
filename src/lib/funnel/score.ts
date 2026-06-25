@@ -30,7 +30,7 @@
  * Категории Hot≥75/Warm≥50/Cold<50. Score объясним (breakdown), §8.
  */
 
-export type LanguageBucket = "a2" | "b1" | "b2" | "c1" | "unknown";
+export type LanguageBucket = "a1" | "a2" | "b1" | "b2" | "c1";
 export type ReadinessCategory = "hot" | "warm" | "cold";
 
 export interface ScoreFactor {
@@ -71,13 +71,14 @@ export interface ReadinessInput {
   crmStageScore: number | null;
 }
 
-// §8: B2/C1/C2 = 100, B1 = 80, A2 = 50, A1 = 10, unknown = 30 (a1→a2, c2→c1).
+// B2/C1/C2 = 100, B1 = 80, A2 = 50. Минимум уровня — A2: «не указан» → A2 (50).
+// A1 = «не квал по языку» (отдельно, ниже A2) = 0.
 const LANGUAGE_SCORE: Record<LanguageBucket, number> = {
-  b2: 100,
   c1: 100,
+  b2: 100,
   b1: 80,
   a2: 50,
-  unknown: 30,
+  a1: 0,
 };
 
 function activityScore(days: number | null): number | null {

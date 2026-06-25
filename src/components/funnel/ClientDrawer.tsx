@@ -37,11 +37,11 @@ const FACTOR_HELP: Record<string, string> = {
 };
 
 const LANG_LABEL: Record<ClientRow["languageBucket"], string> = {
+  a1: "A1",
   a2: "A2",
   b1: "B1",
   b2: "B2",
   c1: "C1",
-  unknown: "не указан",
 };
 
 function scoreColor(s5: number): string {

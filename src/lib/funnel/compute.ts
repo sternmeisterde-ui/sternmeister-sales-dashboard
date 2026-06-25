@@ -47,16 +47,11 @@ import type { LanguageBucket } from "./score";
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const BERATER = B2G_PIPELINES.BERATER; // 12154099
 
-/**
- * SQL-фрагмент WHERE для фильтра по уровню языка. Бакеты совпадают с
- * normalizeLanguageLevel: a2/b1/b2/c1 = начинается с уровня; unknown = NULL,
- * A1 или нераспознанное. Колонка `language_level` (Kommo CFV 869928).
- * Пусто, если bucket не задан. Применяется к `analytics.leads_cohort`.
- */
 /** Парсит query-параметр `lang` (CSV «a2,b1») в массив бакетов. Пусто/невалид → []. */
 export function parseLangBuckets(raw: string | null | undefined): LanguageBucket[] {
   if (!raw) return [];
-  const valid = new Set<LanguageBucket>(["a2", "b1", "b2", "c1", "unknown"]);
+  // A1 («не квал») в аналитику не идёт — как фильтр не принимаем.
+  const valid = new Set<LanguageBucket>(["a2", "b1", "b2", "c1"]);
   const out: LanguageBucket[] = [];
   for (const part of raw.split(",")) {
     const v = part.trim().toLowerCase() as LanguageBucket;
@@ -97,19 +92,20 @@ export function managerAttributionSql(responsibleUserId: number | null | undefin
 /** Условие одного бакета (без AND) — для OR-объединения при мультивыборе. */
 function langBucketCond(bucket: LanguageBucket) {
   switch (bucket) {
+    case "a1":
+      return sql`TRIM(language_level) ILIKE 'A1%'`;
     case "a2":
-      return sql`TRIM(language_level) ILIKE 'A2%'`;
+      // A2 (минимум) ИЛИ не указан/нераспознанное — всё, что НЕ A1/B1/B2/C1.
+      return sql`(language_level IS NULL OR NOT (
+        TRIM(language_level) ILIKE 'A1%' OR TRIM(language_level) ILIKE 'B1%' OR
+        TRIM(language_level) ILIKE 'B2%' OR TRIM(language_level) ILIKE 'C1%' OR
+        TRIM(language_level) ILIKE 'C2%'))`;
     case "b1":
       return sql`TRIM(language_level) ILIKE 'B1%'`;
     case "b2":
       return sql`TRIM(language_level) ILIKE 'B2%'`;
     case "c1":
       return sql`(TRIM(language_level) ILIKE 'C1%' OR TRIM(language_level) ILIKE 'C2%')`;
-    case "unknown":
-      return sql`(language_level IS NULL OR NOT (
-        TRIM(language_level) ILIKE 'A2%' OR TRIM(language_level) ILIKE 'B1%' OR
-        TRIM(language_level) ILIKE 'B2%' OR TRIM(language_level) ILIKE 'C1%' OR
-        TRIM(language_level) ILIKE 'C2%'))`;
   }
 }
 
@@ -204,7 +200,7 @@ export interface BaseLead {
   /** Дата дисквалификации: точная (из истории CFV 879824) или приближение через updated_at. */
   disqualifiedAt: Date | null;
   /** Нормализованный уровень языка: a2/b1/b2/c1/unknown. */
-  languageBucket: "a2" | "b1" | "b2" | "c1" | "unknown";
+  languageBucket: "a1" | "a2" | "b1" | "b2" | "c1";
 }
 
 /** Дисквалифицирующие enum_id (из src/lib/kommo/metrics.ts NEQVAL_ENUM_IDS). */
@@ -228,16 +224,16 @@ export function excludesIgnor(id: ConversionId): boolean {
 
 function normalizeLanguageLevel(
   raw: string | null
-): "a2" | "b1" | "b2" | "c1" | "unknown" {
-  if (!raw) return "unknown";
-  const m = raw.trim().match(/^[A-C][12]/i);
-  if (!m) return "unknown";
-  const lvl = m[0].toUpperCase();
-  if (lvl === "A2") return "a2";
+): "a1" | "a2" | "b1" | "b2" | "c1" {
+  // Не указан / нераспознанное → A2 (минимум уровня).
+  // A1 — отдельно: «не квал по языку» (ниже A2).
+  if (!raw) return "a2";
+  const lvl = (raw.trim().match(/^[A-C][12]/i)?.[0] ?? "").toUpperCase();
+  if (lvl === "A1") return "a1";
   if (lvl === "B1") return "b1";
   if (lvl === "B2") return "b2";
   if (lvl === "C1" || lvl === "C2") return "c1"; // C2 кладём в C1 bucket
-  return "unknown"; // A1 → unknown
+  return "a2"; // A2 и всё прочее → A2
 }
 
 export interface BeraterLead {
@@ -259,7 +255,6 @@ interface AggBucket {
   langB1: number;
   langB2: number;
   langC1: number;
-  langUnknown: number;
 }
 
 async function fetchBenchmarks(): Promise<
@@ -395,7 +390,6 @@ export async function computeCohorts(
           langB1: 0,
           langB2: 0,
           langC1: 0,
-          langUnknown: 0,
         };
         cohortMap.set(weekKey, bucket);
       }
@@ -412,7 +406,6 @@ export async function computeCohorts(
         else if (lead.languageBucket === "b1") bucket.langB1 += 1;
         else if (lead.languageBucket === "b2") bucket.langB2 += 1;
         else if (lead.languageBucket === "c1") bucket.langC1 += 1;
-        else bucket.langUnknown += 1;
         if (state === "success") bucket.target += 1;
         continue;
       }
@@ -443,7 +436,6 @@ export async function computeCohorts(
       else if (lead.languageBucket === "b1") bucket.langB1 += 1;
       else if (lead.languageBucket === "b2") bucket.langB2 += 1;
       else if (lead.languageBucket === "c1") bucket.langC1 += 1;
-      else bucket.langUnknown += 1;
     }
   }
 
@@ -783,10 +775,17 @@ export async function fetchQualifiedBaseLeads(
   return data.map((r) => {
     const nonQualEnumId =
       r.nonQualEnumId === null ? null : Number(r.nonQualEnumId);
-    const isDisqualified =
+    const languageBucket = normalizeLanguageLevel(r.languageLevel);
+    // A1 = «не квал по языку» → дисквал (минимальный уровень — A2). Исключается
+    // из аналитики тем же механизмом, что и причинный неквал (NEQVAL).
+    const isLangNonQual = languageBucket === "a1";
+    const isNeqval =
       nonQualEnumId !== null && NEQVAL_ENUM_IDS.has(nonQualEnumId);
+    const isDisqualified = isNeqval || isLangNonQual;
     const isIgnor =
       nonQualEnumId !== null && IGNOR_ENUM_IDS.has(nonQualEnumId);
+    const anchorAt =
+      r.anchorAt instanceof Date ? r.anchorAt : new Date(r.anchorAt);
     const updatedAt =
       r.updatedAt === null
         ? null
@@ -795,19 +794,18 @@ export async function fetchQualifiedBaseLeads(
           : new Date(r.updatedAt);
     return {
       leadId: Number(r.leadId),
-      anchorAt:
-        r.anchorAt instanceof Date ? r.anchorAt : new Date(r.anchorAt),
+      anchorAt,
       responsibleUserId:
         r.responsibleUserId === null ? null : Number(r.responsibleUserId),
       utmSource: r.utmSource,
       currentStatusId: Number(r.statusId),
       isDisqualified,
       isIgnor,
-      // Приближение: если currently disqualified — берём updated_at как
-      // приблизительную дату. enrichDisqualifiedAt() заменит на точную из
-      // истории CFV 879824 если она есть.
-      disqualifiedAt: isDisqualified ? updatedAt : null,
-      languageBucket: normalizeLanguageLevel(r.languageLevel),
+      // A1 «не квал по языку» — дисквал с момента создания (ни один этап не
+      // зачтётся, лид не попадёт в «Квал»). Причинный NEQVAL — приближение
+      // updated_at (enrichDisqualifiedAt уточнит по истории CFV 879824).
+      disqualifiedAt: isLangNonQual ? anchorAt : isNeqval ? updatedAt : null,
+      languageBucket,
     };
   });
 }
@@ -964,7 +962,6 @@ export function buildLanguageBreakdown(bucket: AggBucket): {
   b1: { count: number; pct: number | null };
   b2: { count: number; pct: number | null };
   c1: { count: number; pct: number | null };
-  unknown: { count: number; pct: number | null };
 } {
   const total = bucket.base;
   const cell = (count: number) => ({
@@ -976,7 +973,6 @@ export function buildLanguageBreakdown(bucket: AggBucket): {
     b1: cell(bucket.langB1),
     b2: cell(bucket.langB2),
     c1: cell(bucket.langC1),
-    unknown: cell(bucket.langUnknown),
   };
 }
 

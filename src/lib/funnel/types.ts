@@ -58,7 +58,6 @@ export interface LanguageBreakdown {
   b1: { count: number; pct: number | null };
   b2: { count: number; pct: number | null };
   c1: { count: number; pct: number | null };
-  unknown: { count: number; pct: number | null };
 }
 
 /** Одна когорта (неделя) внутри конверсии. */
