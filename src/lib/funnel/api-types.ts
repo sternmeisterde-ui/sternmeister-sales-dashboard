@@ -27,7 +27,6 @@ export interface CohortsApiCohort {
   disqualificationPct: number | null;
   /** Раскладка лидов когорты по уровню языка. */
   languageLevels: {
-    a1: { count: number; pct: number | null };
     a2: { count: number; pct: number | null };
     b1: { count: number; pct: number | null };
     b2: { count: number; pct: number | null };

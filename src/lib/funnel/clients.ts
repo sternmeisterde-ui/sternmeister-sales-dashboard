@@ -213,6 +213,8 @@ export async function computeClients(
     const dcInRange = r.dcInRange === true;
 
     const bucket = normalizeBucket(r.languageLevel);
+    // A1 = «не квал по языку» — в аналитику не идёт (как и в когортах).
+    if (bucket === "a1") continue;
     const rp = roleplays.get(leadId);
     const dc = sideReadiness(rp?.dc);
     const aa = sideReadiness(rp?.aa);

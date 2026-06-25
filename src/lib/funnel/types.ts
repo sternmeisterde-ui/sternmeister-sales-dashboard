@@ -54,7 +54,6 @@ export interface ConversionMeta {
 
 /** Раскладка по уровню языка для одной когорты. */
 export interface LanguageBreakdown {
-  a1: { count: number; pct: number | null };
   a2: { count: number; pct: number | null };
   b1: { count: number; pct: number | null };
   b2: { count: number; pct: number | null };

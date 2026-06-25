@@ -77,7 +77,6 @@ interface RealCohortRow {
   disqualifiedCount: number;
   disqualificationPct: number | null;
   languageLevels: {
-    a1: { count: number; pct: number | null };
     a2: { count: number; pct: number | null };
     b1: { count: number; pct: number | null };
     b2: { count: number; pct: number | null };

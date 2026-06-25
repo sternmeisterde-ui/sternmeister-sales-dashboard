@@ -41,7 +41,6 @@ interface DrillState {
 }
 
 const LANGUAGE_KEYS: Array<{ key: keyof LanguageBreakdown; label: string }> = [
-  { key: "a1", label: "A1" },
   { key: "a2", label: "A2" },
   { key: "b1", label: "B1" },
   { key: "b2", label: "B2" },

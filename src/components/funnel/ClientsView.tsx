@@ -423,7 +423,8 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
   );
 }
 
-const LANG_ORDER: ClientRow["languageBucket"][] = ["a1", "a2", "b1", "b2", "c1"];
+// A1 («не квал») исключён из аналитики — в распределении не показываем.
+const LANG_ORDER: ClientRow["languageBucket"][] = ["a2", "b1", "b2", "c1"];
 
 function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
   const all = clients;

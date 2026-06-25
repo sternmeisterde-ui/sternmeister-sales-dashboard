@@ -50,7 +50,8 @@ const BERATER = B2G_PIPELINES.BERATER; // 12154099
 /** Парсит query-параметр `lang` (CSV «a2,b1») в массив бакетов. Пусто/невалид → []. */
 export function parseLangBuckets(raw: string | null | undefined): LanguageBucket[] {
   if (!raw) return [];
-  const valid = new Set<LanguageBucket>(["a1", "a2", "b1", "b2", "c1"]);
+  // A1 («не квал») в аналитику не идёт — как фильтр не принимаем.
+  const valid = new Set<LanguageBucket>(["a2", "b1", "b2", "c1"]);
   const out: LanguageBucket[] = [];
   for (const part of raw.split(",")) {
     const v = part.trim().toLowerCase() as LanguageBucket;
@@ -254,7 +255,6 @@ interface AggBucket {
   langB1: number;
   langB2: number;
   langC1: number;
-  langA1: number;
 }
 
 async function fetchBenchmarks(): Promise<
@@ -390,7 +390,6 @@ export async function computeCohorts(
           langB1: 0,
           langB2: 0,
           langC1: 0,
-          langA1: 0,
         };
         cohortMap.set(weekKey, bucket);
       }
@@ -407,7 +406,6 @@ export async function computeCohorts(
         else if (lead.languageBucket === "b1") bucket.langB1 += 1;
         else if (lead.languageBucket === "b2") bucket.langB2 += 1;
         else if (lead.languageBucket === "c1") bucket.langC1 += 1;
-        else bucket.langA1 += 1;
         if (state === "success") bucket.target += 1;
         continue;
       }
@@ -438,7 +436,6 @@ export async function computeCohorts(
       else if (lead.languageBucket === "b1") bucket.langB1 += 1;
       else if (lead.languageBucket === "b2") bucket.langB2 += 1;
       else if (lead.languageBucket === "c1") bucket.langC1 += 1;
-      else bucket.langA1 += 1;
     }
   }
 
@@ -778,10 +775,17 @@ export async function fetchQualifiedBaseLeads(
   return data.map((r) => {
     const nonQualEnumId =
       r.nonQualEnumId === null ? null : Number(r.nonQualEnumId);
-    const isDisqualified =
+    const languageBucket = normalizeLanguageLevel(r.languageLevel);
+    // A1 = «не квал по языку» → дисквал (минимальный уровень — A2). Исключается
+    // из аналитики тем же механизмом, что и причинный неквал (NEQVAL).
+    const isLangNonQual = languageBucket === "a1";
+    const isNeqval =
       nonQualEnumId !== null && NEQVAL_ENUM_IDS.has(nonQualEnumId);
+    const isDisqualified = isNeqval || isLangNonQual;
     const isIgnor =
       nonQualEnumId !== null && IGNOR_ENUM_IDS.has(nonQualEnumId);
+    const anchorAt =
+      r.anchorAt instanceof Date ? r.anchorAt : new Date(r.anchorAt);
     const updatedAt =
       r.updatedAt === null
         ? null
@@ -790,19 +794,18 @@ export async function fetchQualifiedBaseLeads(
           : new Date(r.updatedAt);
     return {
       leadId: Number(r.leadId),
-      anchorAt:
-        r.anchorAt instanceof Date ? r.anchorAt : new Date(r.anchorAt),
+      anchorAt,
       responsibleUserId:
         r.responsibleUserId === null ? null : Number(r.responsibleUserId),
       utmSource: r.utmSource,
       currentStatusId: Number(r.statusId),
       isDisqualified,
       isIgnor,
-      // Приближение: если currently disqualified — берём updated_at как
-      // приблизительную дату. enrichDisqualifiedAt() заменит на точную из
-      // истории CFV 879824 если она есть.
-      disqualifiedAt: isDisqualified ? updatedAt : null,
-      languageBucket: normalizeLanguageLevel(r.languageLevel),
+      // A1 «не квал по языку» — дисквал с момента создания (ни один этап не
+      // зачтётся, лид не попадёт в «Квал»). Причинный NEQVAL — приближение
+      // updated_at (enrichDisqualifiedAt уточнит по истории CFV 879824).
+      disqualifiedAt: isLangNonQual ? anchorAt : isNeqval ? updatedAt : null,
+      languageBucket,
     };
   });
 }
@@ -955,7 +958,6 @@ export async function fetchBeraterContext(
 // ──────────────────────────────────────────────────────────────────────────
 
 export function buildLanguageBreakdown(bucket: AggBucket): {
-  a1: { count: number; pct: number | null };
   a2: { count: number; pct: number | null };
   b1: { count: number; pct: number | null };
   b2: { count: number; pct: number | null };
@@ -967,7 +969,6 @@ export function buildLanguageBreakdown(bucket: AggBucket): {
     pct: total > 0 ? (count / total) * 100 : null,
   });
   return {
-    a1: cell(bucket.langA1),
     a2: cell(bucket.langA2),
     b1: cell(bucket.langB1),
     b2: cell(bucket.langB2),
