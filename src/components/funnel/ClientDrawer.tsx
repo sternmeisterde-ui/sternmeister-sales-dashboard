@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, ExternalLink, Loader2, Phone, Mail, MessageSquare, StickyNote, Activity } from "lucide-react";
+import { X, ExternalLink, Loader2, Phone, Mail, MessageSquare, StickyNote, Activity, HelpCircle } from "lucide-react";
 import type { ClientRow, ClientSideReadiness } from "@/lib/funnel/clients";
 import type { ClientDetail, ClientTouch } from "@/lib/funnel/client-detail";
 
@@ -15,6 +15,28 @@ const CATEGORY = {
   warm: { label: "Warm", cls: "text-amber-300 bg-amber-500/10 border-amber-500/30" },
   cold: { label: "Cold", cls: "text-slate-400 bg-slate-500/10 border-slate-500/20" },
 } as const;
+
+// Пояснение к каждому фактору готовности (ключи — из score.ts computeReadiness).
+const FACTOR_HELP: Record<string, string> = {
+  bot_count:
+    "Сколько раз клиент тренировался с ботом-симулятором ролевок. Шкала: 0 / 1–2 / 3–4 / 5+ → 0 / 40 / 60 / 80 / 100 баллов. Это бонус: учитывается только если тренировки были; их отсутствие не штрафует (штраф за невовлечённость несёт «Ролевка с менеджером»).",
+  mgr_done:
+    "Была ли проведена хотя бы одна живая ролевка с менеджером (любая сторона — ДЦ или АА). Бинарно: да = 100, нет = 0.",
+  language:
+    "Уровень немецкого. B2/C1 = 100, B1 = 80, A2 = 50, не указан = 30, A1 = 10.",
+  roleplay:
+    "Средняя оценка ролевок с менеджером на актуальной для клиента стороне (этап ДЦ → берём ДЦ-ролевки, этап АА → АА-ролевки). +10 за проведённую консультацию.",
+  consult_okk:
+    "ОКК (контроль качества звонков) ТОЛЬКО по консультационным звонкам сделки — линии «бератер» и «бератер 2». Оценивает качество именно консультаций.",
+  bot_quality:
+    "Последняя самооценка готовности, которую бот выставил после тренировки: «готов» = 100, «почти готов» = 66, «нужна подготовка» = 33.",
+  deal_okk:
+    "ОКК по ВСЕМ оценённым звонкам сделки (любого типа, не только консультации) — общий показатель качества общения с клиентом.",
+  crm_stage:
+    "Насколько далеко клиент продвинулся по воронке бератера: чем ближе к Гутшайну, тем выше балл.",
+  activity:
+    "Давность последнего касания клиента: ≤7 дней = 100, ≤14 = 60, ≤30 = 30, дольше = 0.",
+};
 
 const LANG_LABEL: Record<ClientRow["languageBucket"], string> = {
   a2: "A2",
@@ -208,6 +230,14 @@ export default function ClientDrawer({ client, onClose }: Props) {
                   <div className="flex items-center justify-between text-xs mb-1">
                     <span className="text-slate-300">
                       {f.label}
+                      {FACTOR_HELP[f.key] && (
+                        <span
+                          title={FACTOR_HELP[f.key]}
+                          className="inline-flex align-middle ml-1 text-slate-500 hover:text-slate-300 cursor-help"
+                        >
+                          <HelpCircle className="w-3 h-3" />
+                        </span>
+                      )}
                       <span className="text-slate-600 ml-1">
                         · вес {Math.round(f.weight * 100)}%
                       </span>
