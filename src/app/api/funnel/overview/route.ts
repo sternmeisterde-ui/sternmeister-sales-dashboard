@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeOverview } from "@/lib/funnel/overview";
-import { parseLangBucket } from "@/lib/funnel/compute";
+import { parseLangBuckets } from "@/lib/funnel/compute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const lang = parseLangBucket(params.get("lang"));
+  const lang = parseLangBuckets(params.get("lang"));
 
   try {
     const payload = await computeOverview({
