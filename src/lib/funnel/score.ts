@@ -20,7 +20,8 @@
  * (ДЦ-фаза→ДЦ, АА-фаза→АА); неактуальная не штрафует. Но «ролевка проведена» —
  * по ЛЮБОЙ стороне (факт практики важнее, чем на какой стадии).
  *
- * Прочее: язык 15 + ОКК консультаций 10 + ОКК сделки 5 + стадия CRM 5 + активность 5.
+ * Прочее: язык 15 + ОКК сделки 5 + стадия CRM 5 + активность 5.
+ * (ОКК консультаций убран 2026-06-25 — слабый предиктор, дублировал ОКК сделки.)
  * Σ весов = 1.00. Знаменатель = сумма весов ПРИСУТСТВУЮЩИХ факторов (нет данных →
  * фактор исключается; «менеджер проведена» и «язык» есть всегда; «кол-во бота» —
  * БОНУС: только при наличии тренировок, отсутствие не штрафует, штраф несёт mgr_done).
@@ -64,8 +65,6 @@ export interface ReadinessInput {
   botReadiness: string | null;
   /** Проведена ли консультация (для бонуса +10 к готовности ролевок, §4.2). */
   consultationDone: boolean;
-  /** Средний ОКК консультационных звонков (0..100) или null. */
-  consultOkk: number | null;
   /** Средний ОКК по всем звонкам сделки (0..100) или null. */
   dealOkk: number | null;
   /** Стадия в CRM → 0..100 (ближе к Гутшайну = выше) или null. */
@@ -139,7 +138,6 @@ export function computeReadiness(input: ReadinessInput): ReadinessScore {
     { key: "mgr_done", label: "Ролевка с менеджером проведена", weight: 0.2, value: input.hasManagerRoleplay ? 100 : 0, present: true },
     { key: "language", label: "Язык", weight: 0.15, value: LANGUAGE_SCORE[input.languageBucket], present: true },
     { key: "roleplay", label: `Качество ролевок с менеджером (${sideLabel})`, weight: 0.1, value: roleplay, present: input.activeAvg !== null },
-    { key: "consult_okk", label: "ОКК консультаций", weight: 0.1, value: input.consultOkk ?? 0, present: input.consultOkk !== null },
     { key: "bot_quality", label: "Качество ролевок с ботом", weight: 0.05, value: botQuality ?? 0, present: botQuality !== null },
     { key: "deal_okk", label: "ОКК по сделке", weight: 0.05, value: input.dealOkk ?? 0, present: input.dealOkk !== null },
     { key: "crm_stage", label: "Стадия CRM", weight: 0.05, value: input.crmStageScore ?? 0, present: input.crmStageScore !== null },

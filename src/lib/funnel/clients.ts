@@ -93,8 +93,6 @@ export interface ClientRow {
   daysOnStage: number | null;
   /** Проведённых консультаций (статусы ДЦ/АА «проведена»). */
   consultations: number;
-  /** Средний ОКК консультационных звонков (0..100) или null. */
-  okkConsult: number | null;
   /** Средний ОКК всех звонков сделки (0..100) или null. */
   okkDeal: number | null;
   score: number;
@@ -143,7 +141,6 @@ interface ScoredLead {
   managerName: string | null;
   daysOnStage: number | null;
   consultations: number;
-  okkConsult: number | null;
   okkDeal: number | null;
   score: number;
   category: ReadinessCategory;
@@ -256,7 +253,6 @@ export async function computeClients(
       botRoleplayCount: botConfigured ? botCount : null,
       botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
       consultationDone: consultations > 0,
-      consultOkk: okk?.consultOkk ?? null,
       dealOkk: okk?.dealOkk ?? null,
       crmStageScore,
     });
@@ -277,7 +273,6 @@ export async function computeClients(
       managerName,
       daysOnStage,
       consultations,
-      okkConsult: okk?.consultOkk ?? null,
       okkDeal: okk?.dealOkk ?? null,
       score: readiness.score,
       category: readiness.category,
@@ -350,7 +345,6 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
     managerName: s.managerName,
     daysOnStage: s.daysOnStage,
     consultations: s.consultations,
-    okkConsult: s.okkConsult,
     okkDeal: s.okkDeal,
     score: s.score,
     category: s.category,
