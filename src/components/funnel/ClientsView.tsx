@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X } from "lucide-react";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
@@ -634,6 +634,144 @@ function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[];
   );
 }
 
+// ── Корреляция факторов с Гутшайном ────────────────────────────────────────
+// Win-rate (доля Гутшайна среди РЕШЁННЫХ сделок) по сегментам выбранного фактора.
+// Самостоятельная панель: свой фетч /api/funnel/correlation, не зависит от
+// фильтра термина (как «Тренировки по дням»).
+
+interface CorrSegment {
+  key: string; label: string; decided: number; won: number; winPct: number; small: boolean;
+}
+interface CorrPayload {
+  factor: string; label: string; population: string;
+  segments: CorrSegment[];
+  topline: { leftLabel: string; leftPct: number; leftN: number; rightLabel: string; rightPct: number; rightN: number; ratio: number | null } | null;
+  corr: number | null; caveat: string;
+}
+
+const CORR_FACTORS: { key: string; label: string }[] = [
+  { key: "bot", label: "Ролевки с ботом" },
+  { key: "language", label: "Уровень языка" },
+  { key: "okk", label: "Балл ОКК" },
+];
+
+function CorrelationPanel() {
+  const [factor, setFactor] = useState<string>("bot");
+  const [data, setData] = useState<CorrPayload | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const errPayload = (caveat: string): CorrPayload => ({
+      factor, label: "", population: "", segments: [], topline: null, corr: null, caveat,
+    });
+    fetch(`/api/funnel/correlation?factor=${factor}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => { if (alive) setData(d?.segments?.length ? (d as CorrPayload) : errPayload("Нет данных")); })
+      .catch(() => { if (alive) setData(errPayload("Не удалось загрузить")); });
+    return () => { alive = false; };
+  }, [factor]);
+
+  // «Грузится» = данных ещё нет или они под прошлый фактор (без синхронного setState в эффекте).
+  const loading = !data || data.factor !== factor;
+  // Масштаб полос — относительно макс. win-rate (значения 17–50% иначе выглядят пусто).
+  const maxPct = data ? Math.max(1, ...data.segments.map((s) => s.winPct)) : 1;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <TrendingUp className="w-4 h-4 text-blue-400" />
+        <span className="text-sm font-medium text-slate-200">Корреляция с Гутшайном</span>
+        {data && <span className="text-xs text-slate-500">{data.population}</span>}
+      </div>
+      <div className="text-[11px] text-slate-500 mb-2">
+        доля Гутшайна среди решённых сделок (Гутшайн или закрыто), по сегментам
+      </div>
+
+      {/* Переключатель факторов */}
+      <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
+        {CORR_FACTORS.map((f) => (
+          <button
+            key={f.key}
+            type="button"
+            onClick={() => setFactor(f.key)}
+            className={`text-[11px] px-3 py-1 rounded-md transition-colors ${
+              factor === f.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {loading && (
+        <div className="py-8 flex justify-center">
+          <Loader2 className="w-5 h-5 animate-spin text-slate-500" />
+        </div>
+      )}
+
+      {!loading && data && data.segments.length > 0 && (
+        <div className="mt-3 flex flex-col gap-3">
+          {/* Главная цифра — крайние группы */}
+          {data.topline && (
+            <div className="rounded-xl bg-slate-800/40 border border-white/5 px-3 py-2.5">
+              <div className="text-[11px] text-slate-400 mb-2">
+                {data.topline.ratio
+                  ? <>«{data.topline.leftLabel}» получают Гутшайн в <b className="text-emerald-300">{data.topline.ratio}×</b> чаще, чем «{data.topline.rightLabel}»</>
+                  : "Сравнение крайних групп"}
+              </div>
+              {[
+                { l: data.topline.leftLabel, p: data.topline.leftPct, n: data.topline.leftN, hi: true },
+                { l: data.topline.rightLabel, p: data.topline.rightPct, n: data.topline.rightN, hi: false },
+              ].map((x) => (
+                <div key={x.l} className="flex items-center gap-2 text-xs mb-1">
+                  <span className="w-32 shrink-0 text-slate-300 truncate">{x.l}</span>
+                  <div className="flex-1 h-2 rounded-full bg-slate-700/50 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${x.hi ? "bg-emerald-400/80" : "bg-slate-500/70"}`}
+                      style={{ width: `${Math.min(100, (x.p / maxPct) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="w-20 shrink-0 text-right tabular-nums text-slate-200">
+                    {x.p}% <span className="text-slate-500">({x.n})</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Сегменты */}
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Win-rate по сегментам</div>
+            <div className="flex flex-col gap-1.5">
+              {data.segments.map((s) => (
+                <div key={s.key} className="flex items-center gap-2 text-xs">
+                  <span className="w-16 shrink-0 text-slate-300">{s.label}</span>
+                  <div className="flex-1 h-2.5 rounded-full bg-slate-700/50 overflow-hidden">
+                    <div className="h-full rounded-full bg-blue-400/70" style={{ width: `${Math.min(100, (s.winPct / maxPct) * 100)}%` }} />
+                  </div>
+                  <span className="w-28 shrink-0 text-right tabular-nums text-slate-300">
+                    {s.winPct}% <span className="text-slate-500">n={s.decided}{s.small ? " ⚠" : ""}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Корреляция + оговорки */}
+          <div className="text-[11px] text-slate-500 leading-relaxed">
+            {data.corr !== null && <>Связь ≈ <b className="text-slate-300">{data.corr}</b> (−1…1). </>}
+            {data.caveat}
+          </div>
+        </div>
+      )}
+
+      {!loading && data && data.segments.length === 0 && (
+        <div className="py-6 text-center text-xs text-slate-500">{data.caveat || "Нет данных"}</div>
+      )}
+    </div>
+  );
+}
+
 export default function ClientsView({ filters: _filters }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -804,6 +942,7 @@ export default function ClientsView({ filters: _filters }: Props) {
             <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
+          <CorrelationPanel />
           <ClientTable
             group={filterGroupByManager(data.active, manager)}
             title="Клиенты в работе"
