@@ -128,13 +128,13 @@ function mockLanguageBreakdown(
   seed: number,
   idx: number
 ): LanguageBreakdown {
-  // Псевдо-распределение: A2 ~25%, B1 ~35%, B2 ~20%, C1 ~7%, unknown ~13%.
+  // Псевдо-распределение: A2 ~25%, B1 ~35%, B2 ~20%, C1 ~7%, A1 ~13%.
   const buckets: Array<[keyof LanguageBreakdown, number]> = [
     ["a2", 0.25],
     ["b1", 0.35],
     ["b2", 0.2],
     ["c1", 0.07],
-    ["unknown", 0.13],
+    ["a1", 0.13],
   ];
   // Лёгкий шум на seed.
   const result = {} as LanguageBreakdown;

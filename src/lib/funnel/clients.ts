@@ -353,13 +353,14 @@ function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
 }
 
 function normalizeBucket(raw: string | null): LanguageBucket {
-  if (!raw) return "unknown";
+  // Не указан / нераспознанное → A2 (минимум). A1 — отдельно (не квал по языку).
+  if (!raw) return "a2";
   const s = raw.trim().toUpperCase();
-  if (s.startsWith("A1") || s.startsWith("A2")) return "a2";
+  if (s.startsWith("A1")) return "a1";
   if (s.startsWith("B1")) return "b1";
   if (s.startsWith("B2")) return "b2";
   if (s.startsWith("C1") || s.startsWith("C2")) return "c1";
-  return "unknown";
+  return "a2";
 }
 
 function sideReadiness(
