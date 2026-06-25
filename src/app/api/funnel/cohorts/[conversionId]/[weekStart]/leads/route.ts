@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeCohortLeads } from "@/lib/funnel/lead-list";
-import { parseLangBucket } from "@/lib/funnel/compute";
+import { parseLangBuckets } from "@/lib/funnel/compute";
 import type { ConversionId } from "@/lib/funnel/types";
 import { CONVERSION_ORDER } from "@/lib/funnel/conversions";
 
@@ -78,7 +78,7 @@ export async function GET(
       maturity: "all", // зрелость на drill не влияет
       source,
       responsibleUserId,
-      lang: parseLangBucket(sp.get("lang")),
+      lang: parseLangBuckets(sp.get("lang")),
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

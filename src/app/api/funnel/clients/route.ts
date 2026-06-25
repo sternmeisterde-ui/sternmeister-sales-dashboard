@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeClients } from "@/lib/funnel/clients";
-import { parseLangBucket } from "@/lib/funnel/compute";
+import { parseLangBuckets } from "@/lib/funnel/compute";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 
 export const runtime = "nodejs";
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const result = await computeClients(
-      { terminFrom: from, terminTo: to, lang: parseLangBucket(sp.get("lang")) },
+      { terminFrom: from, terminTo: to, lang: parseLangBuckets(sp.get("lang")) },
       limit,
     );
     return NextResponse.json(result, {

@@ -53,14 +53,16 @@ const BERATER = B2G_PIPELINES.BERATER; // 12154099
  * A1 или нераспознанное. Колонка `language_level` (Kommo CFV 869928).
  * Пусто, если bucket не задан. Применяется к `analytics.leads_cohort`.
  */
-/** Парсит query-параметр `lang` в бакет (или null, если невалидно/пусто). */
-export function parseLangBucket(raw: string | null | undefined): LanguageBucket | null {
-  const v = (raw ?? "").toLowerCase();
-  return (["a2", "b1", "b2", "c1", "unknown"] as const).includes(
-    v as LanguageBucket,
-  )
-    ? (v as LanguageBucket)
-    : null;
+/** Парсит query-параметр `lang` (CSV «a2,b1») в массив бакетов. Пусто/невалид → []. */
+export function parseLangBuckets(raw: string | null | undefined): LanguageBucket[] {
+  if (!raw) return [];
+  const valid = new Set<LanguageBucket>(["a2", "b1", "b2", "c1", "unknown"]);
+  const out: LanguageBucket[] = [];
+  for (const part of raw.split(",")) {
+    const v = part.trim().toLowerCase() as LanguageBucket;
+    if (valid.has(v) && !out.includes(v)) out.push(v);
+  }
+  return out;
 }
 
 /**
@@ -92,24 +94,29 @@ export function managerAttributionSql(responsibleUserId: number | null | undefin
   )`;
 }
 
-export function languageBucketSql(bucket: LanguageBucket | null | undefined) {
+/** Условие одного бакета (без AND) — для OR-объединения при мультивыборе. */
+function langBucketCond(bucket: LanguageBucket) {
   switch (bucket) {
     case "a2":
-      return sql` AND TRIM(language_level) ILIKE 'A2%'`;
+      return sql`TRIM(language_level) ILIKE 'A2%'`;
     case "b1":
-      return sql` AND TRIM(language_level) ILIKE 'B1%'`;
+      return sql`TRIM(language_level) ILIKE 'B1%'`;
     case "b2":
-      return sql` AND TRIM(language_level) ILIKE 'B2%'`;
+      return sql`TRIM(language_level) ILIKE 'B2%'`;
     case "c1":
-      return sql` AND (TRIM(language_level) ILIKE 'C1%' OR TRIM(language_level) ILIKE 'C2%')`;
+      return sql`(TRIM(language_level) ILIKE 'C1%' OR TRIM(language_level) ILIKE 'C2%')`;
     case "unknown":
-      return sql` AND (language_level IS NULL OR NOT (
+      return sql`(language_level IS NULL OR NOT (
         TRIM(language_level) ILIKE 'A2%' OR TRIM(language_level) ILIKE 'B1%' OR
         TRIM(language_level) ILIKE 'B2%' OR TRIM(language_level) ILIKE 'C1%' OR
         TRIM(language_level) ILIKE 'C2%'))`;
-    default:
-      return sql``;
   }
+}
+
+/** WHERE-фрагмент фильтра по уровню(ям) языка. Несколько бакетов → OR. Пусто → без фильтра. */
+export function languageBucketSql(buckets: LanguageBucket[] | null | undefined) {
+  if (!buckets || buckets.length === 0) return sql``;
+  return sql` AND (${sql.join(buckets.map(langBucketCond), sql` OR `)})`;
 }
 
 // ── Целевые статусы C1/C2 (на Бух Гос) ──
@@ -179,8 +186,8 @@ export interface ComputeOpts {
   maturity: MaturityFilter;
   source: string | null;
   responsibleUserId: number | null;
-  /** Фильтр по уровню языка (бакет). null/undefined = без фильтра. */
-  lang?: LanguageBucket | null;
+  /** Фильтр по уровням языка (мультивыбор). Пусто/undefined = без фильтра. */
+  lang?: LanguageBucket[] | null;
 }
 
 export interface BaseLead {

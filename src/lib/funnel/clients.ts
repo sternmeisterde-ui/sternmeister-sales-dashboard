@@ -56,8 +56,8 @@ const STAGE_SCORE: Record<number, number> = {
 export interface ClientsParams {
   terminFrom: string;
   terminTo: string | null;
-  /** Фильтр по уровню языка (бакет). null/undefined = без фильтра. */
-  lang?: LanguageBucket | null;
+  /** Фильтр по уровням языка (мультивыбор). Пусто/undefined = без фильтра. */
+  lang?: LanguageBucket[] | null;
 }
 
 export interface ClientSideReadiness {

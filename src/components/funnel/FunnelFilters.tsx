@@ -3,6 +3,7 @@
 import { RotateCcw } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
 import FilterSelect from "@/components/funnel/FilterSelect";
+import MultiFilterSelect from "@/components/funnel/MultiFilterSelect";
 import type {
   FunnelFiltersState,
   MaturityFilter,
@@ -124,12 +125,13 @@ export default function FunnelFilters({
         />
       </div>
 
-      {/* Уровень языка — применяется ко всем визуальным элементам вкладки. */}
-      <div title="Уровень языка — применяется ко всем видам вкладки">
-        <FilterSelect
-          value={state.lang}
+      {/* Уровень языка — мультивыбор; применяется ко всем визуальным элементам вкладки.
+          state.lang — CSV бакетов («a2,b1»); пустая строка = любой. */}
+      <div title="Уровень языка (можно несколько) — применяется ко всем видам вкладки">
+        <MultiFilterSelect
+          values={state.lang ? state.lang.split(",") : []}
           options={langOptions}
-          onChange={(lang) => onChange({ lang })}
+          onChange={(vals) => onChange({ lang: vals.join(",") })}
           emptyLabel="Любой язык"
           ariaLabel="Уровень языка"
           minWidthClass="min-w-[130px]"
