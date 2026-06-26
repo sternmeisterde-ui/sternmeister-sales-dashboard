@@ -9,26 +9,27 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/funnel/correlation?factor=bot|language|okk&view=segments|time
- * Связь фактора с Гутшайном на РЕШЁННЫХ берётер-сделках (статус WON 142 / LOST 143).
- *  • view=segments — win-rate по упорядоченным сегментам фактора + средняя + corr.
- *  • view=time     — win-rate по месяцам когорты для 2 макро-сегментов (скользящее
- *                    за 3 мес), с пометкой незрелых последних месяцев.
- * Только analytics-БД (+ D2 для фактора «balls ОКК» через getOkkByLead).
+ * GET /api/funnel/correlation?factor=bot|language|okk
+ * Связь фактора с Гутшайном на РЕШЁННЫХ берётер-сделках (WON 142 / LOST 143).
+ * Возвращает ОБА вида:
+ *  • segments — win-rate по упорядоченным сегментам + средняя + corr (для столбиков справа).
+ *  • points   — дневное скользящее win-rate (за TIME_WINDOW дней) по ДАТЕ закрытия
+ *               сделки, для 2 макро-сегментов (для линии по времени слева).
+ * Только analytics-БД (+ D2 для «balls ОКК» через getOkkByLead).
  */
 
 const BERATER = 12154099;
 const WON = 142;
 const LOST = 143;
 const BOT_ERA = "2026-04-01";
-const MIN_WINDOW_N = 10; // меньше — точку «по времени» не рисуем (разрыв линии)
+const TIME_WINDOW = 45; // дней — окно скользящего win-rate
+const TIME_MIN_N = 15; // меньше в окне → точку не рисуем
 
-// Один наблюдаемый лид: исход + к какому fine-сегменту и макро-группе относится.
 interface LeadRow {
   won: number; // 0/1
-  month: string; // YYYY-MM (когорта по created_at)
-  seg: string; // ключ fine-сегмента (для вида «сегменты»)
-  macro: "a" | "b"; // 2 макро-группы (для вида «время»)
+  resDate: string | null; // YYYY-MM-DD дата закрытия (для линии по времени)
+  seg: string; // ключ fine-сегмента
+  macro: "a" | "b"; // 2 макро-группы (для линии по времени)
   metric: number; // числовое значение для коэффициента корреляции
 }
 
@@ -37,8 +38,8 @@ interface FactorData {
   label: string;
   population: string;
   caveat: string;
-  segOrder: { key: string; label: string }[]; // fine-сегменты по порядку
-  macro: { aLabel: string; bLabel: string }; // a = выше/больше, b = базовая
+  segOrder: { key: string; label: string }[];
+  macro: { aLabel: string; bLabel: string };
   rows: LeadRow[];
 }
 
@@ -58,6 +59,15 @@ function pearson(xs: number[], ys: number[]): number | null {
   return Math.round((sxy / Math.sqrt(sxx * syy)) * 100) / 100;
 }
 
+// ── Подзапрос даты закрытия (последнее событие WON/LOST) ─────────────────────
+const RES_AT_JOIN = sql`
+  LEFT JOIN (
+    SELECT lead_id, max(event_at) AS res_at
+    FROM analytics.lead_status_changes
+    WHERE pipeline_id = ${BERATER} AND status_id IN (${WON}, ${LOST})
+    GROUP BY lead_id
+  ) res ON res.lead_id = lc.lead_id`;
+
 // ── Сборщики данных по фактору ───────────────────────────────────────────────
 
 function botBucket(rp: number): string {
@@ -68,16 +78,17 @@ function botBucket(rp: number): string {
 }
 
 async function botData(): Promise<FactorData> {
-  const raw = unwrapRows<{ won: number | string; month: string; rp: number | string }>(
+  const raw = unwrapRows<{ won: number | string; res_date: string | null; rp: number | string }>(
     await analyticsDb.execute(sql`
       WITH bot AS (
         SELECT lead_id, count(*) AS cnt FROM analytics.bot_roleplays
         WHERE lead_id IS NOT NULL GROUP BY lead_id)
       SELECT (lc.status_id = ${WON})::int AS won,
-             to_char(lc.created_at, 'YYYY-MM') AS month,
+             to_char(res.res_at, 'YYYY-MM-DD') AS res_date,
              COALESCE(bot.cnt, 0) AS rp
       FROM analytics.leads_cohort lc
       LEFT JOIN bot ON bot.lead_id = lc.lead_id
+      ${RES_AT_JOIN}
       WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
         AND lc.status_id IN (${WON}, ${LOST})
         AND lc.created_at >= ${BOT_ERA}`),
@@ -86,8 +97,7 @@ async function botData(): Promise<FactorData> {
     factor: "bot",
     label: "Ролевки с ботом",
     population: "решённые сделки с апреля 2026 (старт бота)",
-    caveat:
-      "Тренируются мотивированные клиенты — это корреляция, не причина. Верхние бакеты и свежие месяцы малы.",
+    caveat: "Тренируются мотивированные клиенты — это корреляция, не причина. Верхние бакеты малы.",
     segOrder: [
       { key: "0", label: "0 ролевок" }, { key: "1-2", label: "1–2" },
       { key: "3-4", label: "3–4" }, { key: "5+", label: "5+" },
@@ -95,25 +105,26 @@ async function botData(): Promise<FactorData> {
     macro: { aLabel: "Тренировался", bLabel: "Не тренировался" },
     rows: raw.map((r) => {
       const rp = Number(r.rp);
-      return { won: Number(r.won), month: String(r.month), seg: botBucket(rp), macro: rp > 0 ? "a" : "b", metric: rp };
+      return { won: Number(r.won), resDate: r.res_date ?? null, seg: botBucket(rp), macro: rp > 0 ? "a" : "b", metric: rp };
     }),
   };
 }
 
 async function languageData(): Promise<FactorData> {
-  const raw = unwrapRows<{ won: number | string; month: string; lang: string }>(
+  const raw = unwrapRows<{ won: number | string; res_date: string | null; lang: string }>(
     await analyticsDb.execute(sql`
-      SELECT (status_id = ${WON})::int AS won,
-             to_char(created_at, 'YYYY-MM') AS month,
+      SELECT (lc.status_id = ${WON})::int AS won,
+             to_char(res.res_at, 'YYYY-MM-DD') AS res_date,
              CASE
-               WHEN TRIM(language_level) ILIKE 'A1%' THEN 'a1'
-               WHEN TRIM(language_level) ILIKE 'B1%' THEN 'b1'
-               WHEN TRIM(language_level) ILIKE 'B2%' THEN 'b2'
-               WHEN TRIM(language_level) ILIKE 'C1%' OR TRIM(language_level) ILIKE 'C2%' THEN 'c1'
+               WHEN TRIM(lc.language_level) ILIKE 'A1%' THEN 'a1'
+               WHEN TRIM(lc.language_level) ILIKE 'B1%' THEN 'b1'
+               WHEN TRIM(lc.language_level) ILIKE 'B2%' THEN 'b2'
+               WHEN TRIM(lc.language_level) ILIKE 'C1%' OR TRIM(lc.language_level) ILIKE 'C2%' THEN 'c1'
                ELSE 'a2' END AS lang
-      FROM analytics.leads_cohort
-      WHERE pipeline_id = ${BERATER} AND is_deleted = FALSE
-        AND status_id IN (${WON}, ${LOST})`),
+      FROM analytics.leads_cohort lc
+      ${RES_AT_JOIN}
+      WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
+        AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const rank: Record<string, number> = { a2: 0, b1: 1, b2: 2, c1: 3 };
   return {
@@ -127,9 +138,9 @@ async function languageData(): Promise<FactorData> {
     ],
     macro: { aLabel: "B2–C1 (выше)", bLabel: "A2–B1" },
     rows: raw
-      .map((r) => ({ won: Number(r.won), month: String(r.month), lang: String(r.lang) }))
-      .filter((d) => d.lang !== "a1") // A1 не идёт в аналитику
-      .map((d) => ({ won: d.won, month: d.month, seg: d.lang, macro: (d.lang === "b2" || d.lang === "c1" ? "a" : "b"), metric: rank[d.lang] })),
+      .map((r) => ({ won: Number(r.won), resDate: r.res_date ?? null, lang: String(r.lang) }))
+      .filter((d) => d.lang !== "a1")
+      .map((d) => ({ won: d.won, resDate: d.resDate, seg: d.lang, macro: (d.lang === "b2" || d.lang === "c1" ? "a" : "b") as "a" | "b", metric: rank[d.lang] })),
   };
 }
 
@@ -141,24 +152,24 @@ function okkBucket(s: number): string {
 }
 
 async function okkData(): Promise<FactorData> {
-  const raw = unwrapRows<{ won: number | string; month: string; lead: number | string }>(
+  const raw = unwrapRows<{ won: number | string; res_date: string | null; lead: number | string }>(
     await analyticsDb.execute(sql`
-      SELECT (status_id = ${WON})::int AS won,
-             to_char(created_at, 'YYYY-MM') AS month, lead_id AS lead
-      FROM analytics.leads_cohort
-      WHERE pipeline_id = ${BERATER} AND is_deleted = FALSE
-        AND status_id IN (${WON}, ${LOST})`),
+      SELECT (lc.status_id = ${WON})::int AS won,
+             to_char(res.res_at, 'YYYY-MM-DD') AS res_date, lc.lead_id AS lead
+      FROM analytics.leads_cohort lc
+      ${RES_AT_JOIN}
+      WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
+        AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const leads = raw
-    .map((r) => ({ won: Number(r.won), month: String(r.month), id: Number(r.lead) }))
+    .map((r) => ({ won: Number(r.won), resDate: r.res_date ?? null, id: Number(r.lead) }))
     .filter((l) => Number.isInteger(l.id) && l.id > 0);
   const okk = await getOkkByLead(leads.map((l) => l.id));
   return {
     factor: "okk",
     label: "Балл ОКК",
     population: "решённые сделки с оценкой ОКК (всё время)",
-    caveat:
-      "Балл ОКК по чек-листу почти НЕ связан с Гутшайном — качество звонка не предсказывает закрытие. Низкие бакеты малы.",
+    caveat: "Балл ОКК по чек-листу почти НЕ связан с Гутшайном — качество звонка не предсказывает закрытие. Низкие бакеты малы.",
     segOrder: [
       { key: "<60", label: "< 60" }, { key: "60-74", label: "60–74" },
       { key: "75-89", label: "75–89" }, { key: "90+", label: "90+" },
@@ -167,7 +178,7 @@ async function okkData(): Promise<FactorData> {
     rows: leads
       .map((l) => ({ ...l, score: okk.get(l.id)?.dealOkk ?? null }))
       .filter((l): l is typeof l & { score: number } => typeof l.score === "number")
-      .map((l) => ({ won: l.won, month: l.month, seg: okkBucket(l.score), macro: l.score >= 90 ? "a" : "b", metric: l.score })),
+      .map((l) => ({ won: l.won, resDate: l.resDate, seg: okkBucket(l.score), macro: (l.score >= 90 ? "a" : "b") as "a" | "b", metric: l.score })),
   };
 }
 
@@ -177,7 +188,7 @@ async function loadFactor(factor: string): Promise<FactorData> {
   return botData();
 }
 
-// ── Вид «По сегментам» ───────────────────────────────────────────────────────
+// ── Вид «По сегментам» (столбики) ────────────────────────────────────────────
 
 function buildSegments(fd: FactorData) {
   const segments = fd.segOrder.map((s) => {
@@ -188,59 +199,55 @@ function buildSegments(fd: FactorData) {
   const totalWon = fd.rows.reduce((a, r) => a + r.won, 0);
   const overallPct = pct(totalWon, fd.rows.length);
   const corr = pearson(fd.rows.map((r) => r.metric), fd.rows.map((r) => r.won));
-  // topline — только для монотонных факторов (язык, бот); у ОКК связи нет.
   const lo = segments[0], hi = segments[segments.length - 1];
   const topline =
-    fd.factor === "okk"
-      ? null
-      : {
-          leftLabel: hi.label, leftPct: hi.winPct, leftN: hi.decided,
-          rightLabel: lo.label, rightPct: lo.winPct, rightN: lo.decided,
-          ratio: lo.winPct > 0 ? Math.round((10 * hi.winPct) / lo.winPct) / 10 : null,
-        };
+    fd.factor === "okk" ? null
+    : {
+        leftLabel: hi.label, leftPct: hi.winPct, leftN: hi.decided,
+        rightLabel: lo.label, rightPct: lo.winPct, rightN: lo.decided,
+        ratio: lo.winPct > 0 ? Math.round((10 * hi.winPct) / lo.winPct) / 10 : null,
+      };
   return { segments, overallPct, corr, topline };
 }
 
-// ── Вид «По времени» ─────────────────────────────────────────────────────────
+// ── Вид «По времени» (дневное скользящее по дате закрытия) ────────────────────
 
-function nowMonthMinus(months: number): string {
-  // Текущий месяц минус N (для пометки незрелых). Date в route доступен.
-  const d = new Date();
-  d.setMonth(d.getMonth() - months);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+function addDays(s: string, n: number): string {
+  const d = new Date(s + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
 }
 
 function buildTime(fd: FactorData) {
-  // месяц → макро → {decided, won}
-  const byMonth = new Map<string, { a: { d: number; w: number }; b: { d: number; w: number } }>();
-  for (const r of fd.rows) {
-    let m = byMonth.get(r.month);
-    if (!m) { m = { a: { d: 0, w: 0 }, b: { d: 0, w: 0 } }; byMonth.set(r.month, m); }
-    const cell = m[r.macro];
-    cell.d += 1; cell.w += r.won;
+  const rows = fd.rows.filter((r) => r.resDate) as (LeadRow & { resDate: string })[];
+  if (rows.length === 0) {
+    return { series: [{ key: "a", label: fd.macro.aLabel }, { key: "b", label: fd.macro.bLabel }], points: [] };
   }
-  const months = Array.from(byMonth.keys()).sort();
-  const immatureFrom = nowMonthMinus(2); // последние ~2 месяца ещё зреют
-  const points = months.map((mon, i) => {
-    // скользящее за 3 мес (текущий + 2 предыдущих ПРИСУТСТВУЮЩИХ месяца)
-    const window = months.slice(Math.max(0, i - 2), i + 1);
-    const agg = (k: "a" | "b") => window.reduce(
-      (acc, w) => { const c = byMonth.get(w)![k]; return { d: acc.d + c.d, w: acc.w + c.w }; },
-      { d: 0, w: 0 },
-    );
-    const a = agg("a"), b = agg("b");
-    return {
-      month: mon,
-      a: a.d >= MIN_WINDOW_N ? pct(a.w, a.d) : null, aN: a.d,
-      b: b.d >= MIN_WINDOW_N ? pct(b.w, b.d) : null, bN: b.d,
-      immature: mon >= immatureFrom,
-    };
-  });
+  rows.sort((x, y) => (x.resDate < y.resDate ? -1 : 1));
+  const minDate = rows[0].resDate;
+  const maxDate = rows[rows.length - 1].resDate;
+
+  // Перечисляем календарные дни и для каждого считаем окно [day-W+1, day].
+  // Двигаем два указателя по отсортированным rows (скользящее окно).
+  const points: { date: string; a: number | null; aN: number; b: number | null; bN: number }[] = [];
+  let lo = 0, hi = 0; // [lo, hi) — индексы строк в текущем окне
+  for (let day = minDate; day <= maxDate; day = addDays(day, 1)) {
+    const from = addDays(day, -(TIME_WINDOW - 1));
+    while (hi < rows.length && rows[hi].resDate <= day) hi++;
+    while (lo < hi && rows[lo].resDate < from) lo++;
+    let aD = 0, aW = 0, bD = 0, bW = 0;
+    for (let i = lo; i < hi; i++) {
+      const r = rows[i];
+      if (r.macro === "a") { aD++; aW += r.won; } else { bD++; bW += r.won; }
+    }
+    points.push({
+      date: day,
+      a: aD >= TIME_MIN_N ? pct(aW, aD) : null, aN: aD,
+      b: bD >= TIME_MIN_N ? pct(bW, bD) : null, bN: bD,
+    });
+  }
   return {
-    series: [
-      { key: "a", label: fd.macro.aLabel },
-      { key: "b", label: fd.macro.bLabel },
-    ],
+    series: [{ key: "a", label: fd.macro.aLabel }, { key: "b", label: fd.macro.bLabel }],
     points,
   };
 }
@@ -253,9 +260,9 @@ export async function GET(req: NextRequest) {
   const factor = req.nextUrl.searchParams.get("factor") ?? "bot";
   try {
     const fd = await loadFactor(factor);
-    // Оба вида в одном ответе: слева линия «по времени», справа столбики «по сегментам».
     const payload = {
       factor: fd.factor, label: fd.label, population: fd.population, caveat: fd.caveat,
+      windowDays: TIME_WINDOW,
       ...buildSegments(fd),
       ...buildTime(fd),
     };

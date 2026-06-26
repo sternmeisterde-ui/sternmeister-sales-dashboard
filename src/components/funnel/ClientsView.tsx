@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line, CartesianGrid, ReferenceLine, ReferenceArea, LabelList } from "recharts";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line, CartesianGrid, ReferenceLine, LabelList } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -641,9 +641,10 @@ function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[];
 // фильтра термина (как «Тренировки по дням»).
 
 interface CorrSeg { key: string; label: string; decided: number; won: number; winPct: number; small: boolean }
-interface CorrTimePoint { month: string; a: number | null; aN: number; b: number | null; bN: number; immature: boolean }
+interface CorrTimePoint { date: string; a: number | null; aN: number; b: number | null; bN: number }
 interface CorrPayload {
   factor: string; label: string; population: string; caveat: string;
+  windowDays?: number;
   segments: CorrSeg[];
   overallPct: number;
   corr: number | null;
@@ -679,9 +680,8 @@ function CorrelationPanel() {
   // «Грузится» — данных ещё нет или они под прошлый фактор (без sync setState в эффекте).
   const loading = !data || data.factor !== factor;
   const hasSeg = !loading && data!.segments.length > 0;
-  const hasTime = !loading && data!.points.length > 0;
-  const immFrom = data?.points.find((p) => p.immature)?.month;
-  const lastMonth = data?.points[data.points.length - 1]?.month;
+  // линия по времени осмысленна только если есть хоть одна непустая точка
+  const hasTime = !loading && data!.points.some((p) => p.a != null || p.b != null);
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -694,8 +694,8 @@ function CorrelationPanel() {
             "Показывает, связан ли выбранный фактор с получением Гутшайна.",
             "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
             "Win-rate = доля Гутшайна среди решённых сделок.",
-            "Слева «по месяцам»: 2 макро-линии (скользящее за 3 мес) — видно, крепнет ли разрыв. Затенённый хвост — месяцы ещё не дозрели.",
-            "Справа «по сегментам»: win-rate каждого сегмента, пунктир — средняя по всем; бледный столбик = малая выборка.",
+            "Слева — линия по дате закрытия сделки: win-rate за скользящее окно ~45 дней (по точке на день) для 2 макро-групп. Видно, крепнет ли разрыв со временем.",
+            "Справа — столбики по сегментам: win-rate каждого сегмента, пунктир — средняя по всем; бледный столбик = малая выборка.",
             "«Связь ≈ N» — корреляция от −1 до 1: около 0 — связи нет, ближе к 1 — сильная.",
             "Это корреляция, а не причина: напр. бот выбирают более мотивированные клиенты.",
           ]}
@@ -722,28 +722,28 @@ function CorrelationPanel() {
           <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Слева — линия по времени */}
             <div className="flex flex-col">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">По месяцам (скользящее за 3 мес)</div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+                По дате закрытия · скользящее за {data.windowDays ?? 45} дн
+              </div>
               {hasTime ? (
                 <div className="h-52">
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart data={data.points} margin={{ top: 8, right: 12, bottom: 0, left: -14 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                      <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94a3b8" }} minTickGap={36}
+                        tickFormatter={(d: string) => (typeof d === "string" ? d.slice(5) : d)} />
                       <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%"
-                        domain={[0, yMax(Math.max(...data.points.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
+                        domain={[0, yMax(Math.max(1, ...data.points.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
                       <Tooltip contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
                         formatter={(v, n) => [v == null ? "—" : `${v}%`, String(n)]} />
-                      {immFrom && lastMonth && (
-                        <ReferenceArea x1={immFrom} x2={lastMonth} fill="#f59e0b" fillOpacity={0.07} ifOverflow="extendDomain" />
-                      )}
-                      <Line type="monotone" dataKey="a" name={data.series[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={{ r: 3, fill: "#34d399" }} connectNulls={false} isAnimationActive={false} />
-                      <Line type="monotone" dataKey="b" name={data.series[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={{ r: 3, fill: "#94a3b8" }} connectNulls={false} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="a" name={data.series[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
+                      <Line type="monotone" dataKey="b" name={data.series[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
                       <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
               ) : (
-                <div className="h-52 flex items-center justify-center text-xs text-slate-500">мало данных по месяцам</div>
+                <div className="h-52 flex items-center justify-center text-xs text-slate-500">мало данных для линии по времени</div>
               )}
             </div>
 
