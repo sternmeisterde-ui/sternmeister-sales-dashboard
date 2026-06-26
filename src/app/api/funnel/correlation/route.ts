@@ -22,7 +22,7 @@ const BERATER = 12154099;
 const WON = 142;
 const LOST = 143;
 const BOT_ERA = "2026-04-01";
-const TIME_WINDOW = 45; // дней — окно скользящего win-rate
+const TIME_WINDOW = 30; // дней — окно скользящего win-rate
 const TIME_MIN_N = 15; // меньше в окне → точку не рисуем
 
 interface LeadRow {

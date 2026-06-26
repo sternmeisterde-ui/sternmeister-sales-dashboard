@@ -662,6 +662,19 @@ const CORR_FACTORS: { key: string; label: string }[] = [
 const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.25) / 5) * 5);
 const tipStyle = { background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 } as const;
 
+// Вывод простым языком: цвет + одна фраза, чтобы ответ читался без разбора графиков.
+function corrVerdict(d: CorrPayload): { dot: string; text: React.ReactNode } {
+  const abs = Math.abs(d.corr ?? 0);
+  if (d.factor === "okk" || abs < 0.1) {
+    return { dot: "bg-slate-500", text: <>Связи нет: {d.label.toLowerCase()} не предсказывает Гутшайн.</> };
+  }
+  const strength = abs < 0.25 ? "Слабая связь" : abs < 0.5 ? "Заметная связь" : "Сильная связь";
+  const dir = d.topline?.ratio
+    ? <>«{d.topline.leftLabel}» закрывают сделки в <b className="text-emerald-300">{d.topline.ratio}×</b> чаще</>
+    : <>выше {d.label.toLowerCase()} → чаще Гутшайн</>;
+  return { dot: abs < 0.25 ? "bg-amber-400" : "bg-emerald-400", text: <>{strength}: {dir}.</> };
+}
+
 function CorrelationPanel() {
   const [factor, setFactor] = useState<string>("bot");
   const [data, setData] = useState<CorrPayload | null>(null);
@@ -694,7 +707,8 @@ function CorrelationPanel() {
             "Показывает, связан ли выбранный фактор с получением Гутшайна.",
             "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
             "Win-rate = доля Гутшайна среди решённых сделок.",
-            "Слева — линия по дате закрытия сделки: win-rate за скользящее окно ~45 дней (по точке на день) для 2 макро-групп. Видно, крепнет ли разрыв со временем.",
+            "Сверху — вывод простым языком (цвет: серый = связи нет, жёлтый = слабая, зелёный = заметная/сильная).",
+            "Слева — линия по дате закрытия сделки: win-rate за скользящее окно ~30 дней (по точке на день) для 2 макро-групп. Видно, крепнет ли разрыв со временем.",
             "Справа — столбики по сегментам: win-rate каждого сегмента, пунктир — средняя по всем; бледный столбик = малая выборка.",
             "«Связь ≈ N» — корреляция от −1 до 1: около 0 — связи нет, ближе к 1 — сильная.",
             "Это корреляция, а не причина: напр. бот выбирают более мотивированные клиенты.",
@@ -719,6 +733,17 @@ function CorrelationPanel() {
 
       {!loading && data && (hasSeg || hasTime) && (
         <>
+          {/* Вывод простым языком */}
+          {(() => {
+            const v = corrVerdict(data);
+            return (
+              <div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-800/40 border border-white/5 px-3 py-2">
+                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${v.dot}`} />
+                <span className="text-[13px] text-slate-200">{v.text}</span>
+              </div>
+            );
+          })()}
+
           <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Слева — линия по времени */}
             <div className="flex flex-col">
