@@ -13,6 +13,7 @@ import type {
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
 import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
+import InfoPopover from "@/components/funnel/InfoPopover";
 import ClientDrawer from "@/components/funnel/ClientDrawer";
 import FilterSelect from "@/components/funnel/FilterSelect";
 
@@ -681,6 +682,18 @@ function CorrelationPanel() {
       <div className="flex items-center gap-2 flex-wrap">
         <TrendingUp className="w-4 h-4 text-blue-400" />
         <span className="text-sm font-medium text-slate-200">Корреляция с Гутшайном</span>
+        <InfoPopover
+          title="Корреляция с Гутшайном"
+          points={[
+            "Показывает, связан ли выбранный фактор с получением Гутшайна.",
+            "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
+            "Win-rate сегмента = доля Гутшайна среди решённых сделок этого сегмента.",
+            "«Связь ≈ N» — коэффициент корреляции от −1 до 1: около 0 — связи нет, ближе к 1 — сильная положительная.",
+            "⚠ у сегмента = выборка мала (< 15), по отдельности ему верить рано.",
+            "Это корреляция, а не причина: напр. с ботом тренируются более мотивированные клиенты — они и так доводят дело чаще.",
+            "Бот ролевок запущен в апреле 2026, поэтому для фактора «ролевки» берём сделки с апреля.",
+          ]}
+        />
         {data && <span className="text-xs text-slate-500">{data.population}</span>}
       </div>
       <div className="text-[11px] text-slate-500 mb-2">
