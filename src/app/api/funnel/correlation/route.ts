@@ -253,9 +253,13 @@ function buildTime(fd: FactorData) {
       b: bD >= TIME_MIN_N ? pct(bW, bD) : null, bN: bD,
     });
   }
+  // Общий период: обрезаем до диапазона, где есть ОБЕ линии (обе стартуют/кончаются
+  // вместе, без пустоты слева) — графики сравнимы напрямую.
+  const both = points.map((p, i) => (p.a != null && p.b != null ? i : -1)).filter((i) => i >= 0);
+  const trimmed = both.length ? points.slice(both[0], both[both.length - 1] + 1) : [];
   return {
     series: [{ key: "a", label: fd.macro.aLabel }, { key: "b", label: fd.macro.bLabel }],
-    points,
+    points: trimmed,
   };
 }
 
