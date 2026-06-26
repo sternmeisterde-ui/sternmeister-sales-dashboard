@@ -198,10 +198,7 @@ function buildSegments(fd: FactorData) {
           rightLabel: lo.label, rightPct: lo.winPct, rightN: lo.decided,
           ratio: lo.winPct > 0 ? Math.round((10 * hi.winPct) / lo.winPct) / 10 : null,
         };
-  return {
-    view: "segments" as const, factor: fd.factor, label: fd.label, population: fd.population,
-    segments, overallPct, corr, topline, caveat: fd.caveat,
-  };
+  return { segments, overallPct, corr, topline };
 }
 
 // ── Вид «По времени» ─────────────────────────────────────────────────────────
@@ -240,13 +237,11 @@ function buildTime(fd: FactorData) {
     };
   });
   return {
-    view: "time" as const, factor: fd.factor, label: fd.label, population: fd.population,
     series: [
       { key: "a", label: fd.macro.aLabel },
       { key: "b", label: fd.macro.bLabel },
     ],
     points,
-    caveat: fd.caveat + " По месяцам — скользящее за 3 мес; пунктир — месяцы ещё не дозрели.",
   };
 }
 
@@ -255,12 +250,15 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   if (session.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
-  const sp = req.nextUrl.searchParams;
-  const factor = sp.get("factor") ?? "bot";
-  const view = sp.get("view") === "time" ? "time" : "segments";
+  const factor = req.nextUrl.searchParams.get("factor") ?? "bot";
   try {
     const fd = await loadFactor(factor);
-    const payload = view === "time" ? buildTime(fd) : buildSegments(fd);
+    // Оба вида в одном ответе: слева линия «по времени», справа столбики «по сегментам».
+    const payload = {
+      factor: fd.factor, label: fd.label, population: fd.population, caveat: fd.caveat,
+      ...buildSegments(fd),
+      ...buildTime(fd),
+    };
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[/api/funnel/correlation] failed:", e);

@@ -643,16 +643,13 @@ function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[];
 interface CorrSeg { key: string; label: string; decided: number; won: number; winPct: number; small: boolean }
 interface CorrTimePoint { month: string; a: number | null; aN: number; b: number | null; bN: number; immature: boolean }
 interface CorrPayload {
-  view: "segments" | "time";
   factor: string; label: string; population: string; caveat: string;
-  // segments
-  segments?: CorrSeg[];
-  overallPct?: number;
-  corr?: number | null;
-  topline?: { leftLabel: string; leftPct: number; leftN: number; rightLabel: string; rightPct: number; rightN: number; ratio: number | null } | null;
-  // time
-  series?: { key: string; label: string }[];
-  points?: CorrTimePoint[];
+  segments: CorrSeg[];
+  overallPct: number;
+  corr: number | null;
+  topline: { leftLabel: string; leftPct: number; leftN: number; rightLabel: string; rightPct: number; rightN: number; ratio: number | null } | null;
+  series: { key: string; label: string }[];
+  points: CorrTimePoint[];
 }
 
 const CORR_FACTORS: { key: string; label: string }[] = [
@@ -662,35 +659,29 @@ const CORR_FACTORS: { key: string; label: string }[] = [
 ];
 
 const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.25) / 5) * 5);
-
-// Точка линии «по сегментам»: пустая (тёмная) при малой выборке.
-function SegDot(props: { cx?: number; cy?: number; payload?: CorrSeg }) {
-  const { cx, cy, payload } = props;
-  if (cx == null || cy == null) return <g />;
-  return <circle cx={cx} cy={cy} r={4} strokeWidth={2} stroke="#60a5fa" fill={payload?.small ? "#0f172a" : "#60a5fa"} />;
-}
+const tipStyle = { background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 } as const;
 
 function CorrelationPanel() {
   const [factor, setFactor] = useState<string>("bot");
-  const [view, setView] = useState<"segments" | "time">("segments");
   const [data, setData] = useState<CorrPayload | null>(null);
 
   useEffect(() => {
     let alive = true;
-    const err = (caveat: string): CorrPayload => ({ view, factor, label: "", population: "", caveat, segments: [], points: [] });
-    fetch(`/api/funnel/correlation?factor=${factor}&view=${view}`)
+    const err = (caveat: string): CorrPayload =>
+      ({ factor, label: "", population: "", caveat, segments: [], overallPct: 0, corr: null, topline: null, series: [], points: [] });
+    fetch(`/api/funnel/correlation?factor=${factor}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d) => { if (alive) setData(d?.view ? (d as CorrPayload) : err("Нет данных")); })
+      .then((d) => { if (alive) setData(d?.factor ? (d as CorrPayload) : err("Нет данных")); })
       .catch(() => { if (alive) setData(err("Не удалось загрузить")); });
     return () => { alive = false; };
-  }, [factor, view]);
+  }, [factor]);
 
-  // «Грузится» — данных ещё нет или они под прошлый фактор/вид (без sync setState в эффекте).
-  const loading = !data || data.factor !== factor || data.view !== view;
-  const hasSeg = !loading && data?.view === "segments" && (data.segments?.length ?? 0) > 0;
-  const hasTime = !loading && data?.view === "time" && (data.points?.length ?? 0) > 0;
-  const immFrom = data?.points?.find((p) => p.immature)?.month;
-  const lastMonth = data?.points?.[data.points.length - 1]?.month;
+  // «Грузится» — данных ещё нет или они под прошлый фактор (без sync setState в эффекте).
+  const loading = !data || data.factor !== factor;
+  const hasSeg = !loading && data!.segments.length > 0;
+  const hasTime = !loading && data!.points.length > 0;
+  const immFrom = data?.points.find((p) => p.immature)?.month;
+  const lastMonth = data?.points[data.points.length - 1]?.month;
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -703,105 +694,106 @@ function CorrelationPanel() {
             "Показывает, связан ли выбранный фактор с получением Гутшайна.",
             "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
             "Win-rate = доля Гутшайна среди решённых сделок.",
-            "«По сегментам»: наклон линии вверх = выше сегмент → чаще Гутшайн. Пунктир — средняя по всем.",
-            "«По времени»: 2 макро-линии по месяцам когорты (скользящее за 3 мес) — видно, крепнет ли разрыв. Затенённый хвост — месяцы ещё не дозрели.",
+            "Слева «по месяцам»: 2 макро-линии (скользящее за 3 мес) — видно, крепнет ли разрыв. Затенённый хвост — месяцы ещё не дозрели.",
+            "Справа «по сегментам»: win-rate каждого сегмента, пунктир — средняя по всем; бледный столбик = малая выборка.",
             "«Связь ≈ N» — корреляция от −1 до 1: около 0 — связи нет, ближе к 1 — сильная.",
-            "Пустая точка / ⚠ = выборка мала. Это корреляция, не причина (бот выбирают мотивированные).",
+            "Это корреляция, а не причина: напр. бот выбирают более мотивированные клиенты.",
           ]}
         />
         {data && !loading && <span className="text-xs text-slate-500">{data.population}</span>}
       </div>
 
-      {/* Переключатели: фактор + вид */}
-      <div className="flex items-center gap-2 flex-wrap mt-2">
-        <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
-          {CORR_FACTORS.map((f) => (
-            <button key={f.key} type="button" onClick={() => setFactor(f.key)}
-              className={`text-[11px] px-3 py-1 rounded-md transition-colors ${factor === f.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"}`}>
-              {f.label}
-            </button>
-          ))}
-        </div>
-        <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 ml-auto">
-          {(["segments", "time"] as const).map((v) => (
-            <button key={v} type="button" onClick={() => setView(v)}
-              className={`text-[11px] px-3 py-1 rounded-md transition-colors ${view === v ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"}`}>
-              {v === "segments" ? "По сегментам" : "По времени"}
-            </button>
-          ))}
-        </div>
+      {/* Переключатель факторов */}
+      <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 mt-2">
+        {CORR_FACTORS.map((f) => (
+          <button key={f.key} type="button" onClick={() => setFactor(f.key)}
+            className={`text-[11px] px-3 py-1 rounded-md transition-colors ${factor === f.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"}`}>
+            {f.label}
+          </button>
+        ))}
       </div>
 
       {loading && (
         <div className="py-10 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-slate-500" /></div>
       )}
 
-      {/* Вид «По сегментам» */}
-      {hasSeg && data && (
-        <div className="mt-3 flex flex-col gap-2">
-          {data.topline?.ratio && (
-            <div className="text-[12px] text-slate-300">
-              «{data.topline.leftLabel}» получают Гутшайн в <b className="text-emerald-300">{data.topline.ratio}×</b> чаще, чем «{data.topline.rightLabel}»
+      {!loading && data && (hasSeg || hasTime) && (
+        <>
+          <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Слева — линия по времени */}
+            <div className="flex flex-col">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">По месяцам (скользящее за 3 мес)</div>
+              {hasTime ? (
+                <div className="h-52">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={data.points} margin={{ top: 8, right: 12, bottom: 0, left: -14 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                      <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                      <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%"
+                        domain={[0, yMax(Math.max(...data.points.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
+                      <Tooltip contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
+                        formatter={(v, n) => [v == null ? "—" : `${v}%`, String(n)]} />
+                      {immFrom && lastMonth && (
+                        <ReferenceArea x1={immFrom} x2={lastMonth} fill="#f59e0b" fillOpacity={0.07} ifOverflow="extendDomain" />
+                      )}
+                      <Line type="monotone" dataKey="a" name={data.series[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={{ r: 3, fill: "#34d399" }} connectNulls={false} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="b" name={data.series[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={{ r: 3, fill: "#94a3b8" }} connectNulls={false} isAnimationActive={false} />
+                      <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-52 flex items-center justify-center text-xs text-slate-500">мало данных по месяцам</div>
+              )}
             </div>
-          )}
-          <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data.segments} margin={{ top: 18, right: 16, bottom: 4, left: -14 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} />
-                <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%" domain={[0, yMax]} />
-                <Tooltip
-                  contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
-                  itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
-                  formatter={(v, _n, p) => {
-                    const seg = p?.payload as CorrSeg;
-                    return [`${v}% · ${seg.won}/${seg.decided}${seg.small ? " ⚠ мало" : ""}`, "win-rate"];
-                  }}
-                />
-                {data.overallPct != null && (
-                  <ReferenceLine y={data.overallPct} stroke="#64748b" strokeDasharray="4 4"
-                    label={{ value: `ср. ${data.overallPct}%`, fill: "#94a3b8", fontSize: 10, position: "insideTopRight" }} />
-                )}
-                <Line type="monotone" dataKey="winPct" stroke="#60a5fa" strokeWidth={2.5} dot={<SegDot />} isAnimationActive={false}>
-                  <LabelList dataKey="winPct" position="top" formatter={(v) => `${v}%`} fontSize={11} fill="#cbd5e1" />
-                </Line>
-              </ComposedChart>
-            </ResponsiveContainer>
+
+            {/* Справа — столбики по сегментам */}
+            <div className="flex flex-col">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">По сегментам (win-rate)</div>
+              {hasSeg ? (
+                <div className="h-52">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={data.segments} margin={{ top: 18, right: 12, bottom: 0, left: -14 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+                      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} />
+                      <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%"
+                        domain={[0, yMax(Math.max(...data.segments.map((s) => s.winPct)))]} />
+                      <Tooltip cursor={{ fill: "rgba(255,255,255,0.04)" }} contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
+                        formatter={(v, _n, p) => {
+                          const seg = p?.payload as CorrSeg;
+                          return [`${v}% · ${seg.won}/${seg.decided}${seg.small ? " ⚠ мало" : ""}`, "win-rate"];
+                        }} />
+                      {data.overallPct != null && (
+                        <ReferenceLine y={data.overallPct} stroke="#64748b" strokeDasharray="4 4"
+                          label={{ value: `ср. ${data.overallPct}%`, fill: "#94a3b8", fontSize: 10, position: "insideTopRight" }} />
+                      )}
+                      <Bar dataKey="winPct" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                        {data.segments.map((s) => (
+                          <Cell key={s.key} fill={s.small ? "#334155" : "#60a5fa"} />
+                        ))}
+                        <LabelList dataKey="winPct" position="top" formatter={(v) => `${v}%`} fontSize={11} fill="#cbd5e1" />
+                      </Bar>
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-52 flex items-center justify-center text-xs text-slate-500">нет данных по сегментам</div>
+              )}
+              {data.topline?.ratio && (
+                <div className="text-[11px] text-slate-400 mt-1">
+                  «{data.topline.leftLabel}» — Гутшайн в <b className="text-emerald-300">{data.topline.ratio}×</b> чаще, чем «{data.topline.rightLabel}»
+                </div>
+              )}
+            </div>
           </div>
-          <div className="text-[11px] text-slate-500 leading-relaxed">
+
+          <div className="text-[11px] text-slate-500 leading-relaxed mt-2">
             {data.corr != null && <>Связь ≈ <b className="text-slate-300">{data.corr}</b> (−1…1). </>}{data.caveat}
           </div>
-        </div>
+        </>
       )}
 
-      {/* Вид «По времени» */}
-      {hasTime && data && (
-        <div className="mt-3 flex flex-col gap-2">
-          <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data.points} margin={{ top: 12, right: 16, bottom: 4, left: -14 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} />
-                <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%" domain={[0, yMax]} />
-                <Tooltip
-                  contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
-                  itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
-                  formatter={(v, n) => [v == null ? "—" : `${v}%`, String(n)]}
-                />
-                {immFrom && lastMonth && (
-                  <ReferenceArea x1={immFrom} x2={lastMonth} fill="#f59e0b" fillOpacity={0.07} ifOverflow="extendDomain" />
-                )}
-                <Line type="monotone" dataKey="a" name={data.series?.[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
-                <Line type="monotone" dataKey="b" name={data.series?.[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
-                <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="text-[11px] text-slate-500 leading-relaxed">{data.caveat}</div>
-        </div>
-      )}
-
-      {!loading && !hasSeg && !hasTime && data && (
+      {!loading && data && !hasSeg && !hasTime && (
         <div className="py-6 text-center text-xs text-slate-500">{data.caveat || "Нет данных"}</div>
       )}
     </div>
