@@ -21,7 +21,6 @@ export const dynamic = "force-dynamic";
 const BERATER = 12154099;
 const WON = 142;
 const LOST = 143;
-const BOT_ERA = "2026-04-01";
 const TIME_WINDOW = 30; // дней — окно скользящего win-rate
 const TIME_MIN_N = 15; // меньше в окне → точку не рисуем
 
@@ -78,6 +77,12 @@ function botBucket(rp: number): string {
 }
 
 async function botData(): Promise<FactorData> {
+  // Старт бот-эры = первая зафиксированная ролевка (раньше бота не было, и лиды
+  // тех дат нельзя считать «не тренировался» — у них не было возможности).
+  const startRow = unwrapRows<{ s: string | null }>(
+    await analyticsDb.execute(sql`SELECT min(substring(finished_at, 1, 10)) AS s FROM analytics.bot_roleplays WHERE finished_at IS NOT NULL`),
+  );
+  const botStart = startRow[0]?.s ?? "2026-05-01";
   const raw = unwrapRows<{ won: number | string; res_date: string | null; rp: number | string }>(
     await analyticsDb.execute(sql`
       WITH bot AS (
@@ -91,12 +96,14 @@ async function botData(): Promise<FactorData> {
       ${RES_AT_JOIN}
       WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
         AND lc.status_id IN (${WON}, ${LOST})
-        AND lc.created_at >= ${BOT_ERA}`),
+        -- тренировавшихся берём всех; «не тренировался» — только после старта бота
+        -- (у них была возможность). Иначе дотбот-лиды раздувают «не тренировался».
+        AND (COALESCE(bot.cnt, 0) > 0 OR lc.created_at >= ${botStart})`),
   );
   return {
     factor: "bot",
     label: "Ролевки с ботом",
-    population: "решённые сделки с апреля 2026 (старт бота)",
+    population: `решённые сделки с ${botStart} (старт бота)`,
     caveat: "Тренируются мотивированные клиенты — это корреляция, не причина. Верхние бакеты малы.",
     segOrder: [
       { key: "0", label: "0 ролевок" }, { key: "1-2", label: "1–2" },
