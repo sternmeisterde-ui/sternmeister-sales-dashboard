@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line } from "recharts";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line, CartesianGrid, ReferenceLine, ReferenceArea, LabelList } from "recharts";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -640,14 +640,19 @@ function DrillModal({ title, rows, onClose }: { title: string; rows: DrillRow[];
 // Самостоятельная панель: свой фетч /api/funnel/correlation, не зависит от
 // фильтра термина (как «Тренировки по дням»).
 
-interface CorrSegment {
-  key: string; label: string; decided: number; won: number; winPct: number; small: boolean;
-}
+interface CorrSeg { key: string; label: string; decided: number; won: number; winPct: number; small: boolean }
+interface CorrTimePoint { month: string; a: number | null; aN: number; b: number | null; bN: number; immature: boolean }
 interface CorrPayload {
-  factor: string; label: string; population: string;
-  segments: CorrSegment[];
-  topline: { leftLabel: string; leftPct: number; leftN: number; rightLabel: string; rightPct: number; rightN: number; ratio: number | null } | null;
-  corr: number | null; caveat: string;
+  view: "segments" | "time";
+  factor: string; label: string; population: string; caveat: string;
+  // segments
+  segments?: CorrSeg[];
+  overallPct?: number;
+  corr?: number | null;
+  topline?: { leftLabel: string; leftPct: number; leftN: number; rightLabel: string; rightPct: number; rightN: number; ratio: number | null } | null;
+  // time
+  series?: { key: string; label: string }[];
+  points?: CorrTimePoint[];
 }
 
 const CORR_FACTORS: { key: string; label: string }[] = [
@@ -656,26 +661,36 @@ const CORR_FACTORS: { key: string; label: string }[] = [
   { key: "okk", label: "Балл ОКК" },
 ];
 
+const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.25) / 5) * 5);
+
+// Точка линии «по сегментам»: пустая (тёмная) при малой выборке.
+function SegDot(props: { cx?: number; cy?: number; payload?: CorrSeg }) {
+  const { cx, cy, payload } = props;
+  if (cx == null || cy == null) return <g />;
+  return <circle cx={cx} cy={cy} r={4} strokeWidth={2} stroke="#60a5fa" fill={payload?.small ? "#0f172a" : "#60a5fa"} />;
+}
+
 function CorrelationPanel() {
   const [factor, setFactor] = useState<string>("bot");
+  const [view, setView] = useState<"segments" | "time">("segments");
   const [data, setData] = useState<CorrPayload | null>(null);
 
   useEffect(() => {
     let alive = true;
-    const errPayload = (caveat: string): CorrPayload => ({
-      factor, label: "", population: "", segments: [], topline: null, corr: null, caveat,
-    });
-    fetch(`/api/funnel/correlation?factor=${factor}`)
+    const err = (caveat: string): CorrPayload => ({ view, factor, label: "", population: "", caveat, segments: [], points: [] });
+    fetch(`/api/funnel/correlation?factor=${factor}&view=${view}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((d) => { if (alive) setData(d?.segments?.length ? (d as CorrPayload) : errPayload("Нет данных")); })
-      .catch(() => { if (alive) setData(errPayload("Не удалось загрузить")); });
+      .then((d) => { if (alive) setData(d?.view ? (d as CorrPayload) : err("Нет данных")); })
+      .catch(() => { if (alive) setData(err("Не удалось загрузить")); });
     return () => { alive = false; };
-  }, [factor]);
+  }, [factor, view]);
 
-  // «Грузится» = данных ещё нет или они под прошлый фактор (без синхронного setState в эффекте).
-  const loading = !data || data.factor !== factor;
-  // Масштаб полос — относительно макс. win-rate (значения 17–50% иначе выглядят пусто).
-  const maxPct = data ? Math.max(1, ...data.segments.map((s) => s.winPct)) : 1;
+  // «Грузится» — данных ещё нет или они под прошлый фактор/вид (без sync setState в эффекте).
+  const loading = !data || data.factor !== factor || data.view !== view;
+  const hasSeg = !loading && data?.view === "segments" && (data.segments?.length ?? 0) > 0;
+  const hasTime = !loading && data?.view === "time" && (data.points?.length ?? 0) > 0;
+  const immFrom = data?.points?.find((p) => p.immature)?.month;
+  const lastMonth = data?.points?.[data.points.length - 1]?.month;
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -687,98 +702,106 @@ function CorrelationPanel() {
           points={[
             "Показывает, связан ли выбранный фактор с получением Гутшайна.",
             "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
-            "Win-rate сегмента = доля Гутшайна среди решённых сделок этого сегмента.",
-            "«Связь ≈ N» — коэффициент корреляции от −1 до 1: около 0 — связи нет, ближе к 1 — сильная положительная.",
-            "⚠ у сегмента = выборка мала (< 15), по отдельности ему верить рано.",
-            "Это корреляция, а не причина: напр. с ботом тренируются более мотивированные клиенты — они и так доводят дело чаще.",
-            "Бот ролевок запущен в апреле 2026, поэтому для фактора «ролевки» берём сделки с апреля.",
+            "Win-rate = доля Гутшайна среди решённых сделок.",
+            "«По сегментам»: наклон линии вверх = выше сегмент → чаще Гутшайн. Пунктир — средняя по всем.",
+            "«По времени»: 2 макро-линии по месяцам когорты (скользящее за 3 мес) — видно, крепнет ли разрыв. Затенённый хвост — месяцы ещё не дозрели.",
+            "«Связь ≈ N» — корреляция от −1 до 1: около 0 — связи нет, ближе к 1 — сильная.",
+            "Пустая точка / ⚠ = выборка мала. Это корреляция, не причина (бот выбирают мотивированные).",
           ]}
         />
-        {data && <span className="text-xs text-slate-500">{data.population}</span>}
-      </div>
-      <div className="text-[11px] text-slate-500 mb-2">
-        доля Гутшайна среди решённых сделок (Гутшайн или закрыто), по сегментам
+        {data && !loading && <span className="text-xs text-slate-500">{data.population}</span>}
       </div>
 
-      {/* Переключатель факторов */}
-      <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
-        {CORR_FACTORS.map((f) => (
-          <button
-            key={f.key}
-            type="button"
-            onClick={() => setFactor(f.key)}
-            className={`text-[11px] px-3 py-1 rounded-md transition-colors ${
-              factor === f.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
+      {/* Переключатели: фактор + вид */}
+      <div className="flex items-center gap-2 flex-wrap mt-2">
+        <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5">
+          {CORR_FACTORS.map((f) => (
+            <button key={f.key} type="button" onClick={() => setFactor(f.key)}
+              className={`text-[11px] px-3 py-1 rounded-md transition-colors ${factor === f.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"}`}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div className="inline-flex p-0.5 rounded-lg bg-slate-800/60 border border-white/5 ml-auto">
+          {(["segments", "time"] as const).map((v) => (
+            <button key={v} type="button" onClick={() => setView(v)}
+              className={`text-[11px] px-3 py-1 rounded-md transition-colors ${view === v ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-white"}`}>
+              {v === "segments" ? "По сегментам" : "По времени"}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading && (
-        <div className="py-8 flex justify-center">
-          <Loader2 className="w-5 h-5 animate-spin text-slate-500" />
-        </div>
+        <div className="py-10 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-slate-500" /></div>
       )}
 
-      {!loading && data && data.segments.length > 0 && (
-        <div className="mt-3 flex flex-col gap-3">
-          {/* Главная цифра — крайние группы */}
-          {data.topline && (
-            <div className="rounded-xl bg-slate-800/40 border border-white/5 px-3 py-2.5">
-              <div className="text-[11px] text-slate-400 mb-2">
-                {data.topline.ratio
-                  ? <>«{data.topline.leftLabel}» получают Гутшайн в <b className="text-emerald-300">{data.topline.ratio}×</b> чаще, чем «{data.topline.rightLabel}»</>
-                  : "Сравнение крайних групп"}
-              </div>
-              {[
-                { l: data.topline.leftLabel, p: data.topline.leftPct, n: data.topline.leftN, hi: true },
-                { l: data.topline.rightLabel, p: data.topline.rightPct, n: data.topline.rightN, hi: false },
-              ].map((x) => (
-                <div key={x.l} className="flex items-center gap-2 text-xs mb-1">
-                  <span className="w-32 shrink-0 text-slate-300 truncate">{x.l}</span>
-                  <div className="flex-1 h-2 rounded-full bg-slate-700/50 overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${x.hi ? "bg-emerald-400/80" : "bg-slate-500/70"}`}
-                      style={{ width: `${Math.min(100, (x.p / maxPct) * 100)}%` }}
-                    />
-                  </div>
-                  <span className="w-20 shrink-0 text-right tabular-nums text-slate-200">
-                    {x.p}% <span className="text-slate-500">({x.n})</span>
-                  </span>
-                </div>
-              ))}
+      {/* Вид «По сегментам» */}
+      {hasSeg && data && (
+        <div className="mt-3 flex flex-col gap-2">
+          {data.topline?.ratio && (
+            <div className="text-[12px] text-slate-300">
+              «{data.topline.leftLabel}» получают Гутшайн в <b className="text-emerald-300">{data.topline.ratio}×</b> чаще, чем «{data.topline.rightLabel}»
             </div>
           )}
-
-          {/* Сегменты */}
-          <div>
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Win-rate по сегментам</div>
-            <div className="flex flex-col gap-1.5">
-              {data.segments.map((s) => (
-                <div key={s.key} className="flex items-center gap-2 text-xs">
-                  <span className="w-16 shrink-0 text-slate-300">{s.label}</span>
-                  <div className="flex-1 h-2.5 rounded-full bg-slate-700/50 overflow-hidden">
-                    <div className="h-full rounded-full bg-blue-400/70" style={{ width: `${Math.min(100, (s.winPct / maxPct) * 100)}%` }} />
-                  </div>
-                  <span className="w-28 shrink-0 text-right tabular-nums text-slate-300">
-                    {s.winPct}% <span className="text-slate-500">n={s.decided}{s.small ? " ⚠" : ""}</span>
-                  </span>
-                </div>
-              ))}
-            </div>
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={data.segments} margin={{ top: 18, right: 16, bottom: 4, left: -14 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%" domain={[0, yMax]} />
+                <Tooltip
+                  contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+                  itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
+                  formatter={(v, _n, p) => {
+                    const seg = p?.payload as CorrSeg;
+                    return [`${v}% · ${seg.won}/${seg.decided}${seg.small ? " ⚠ мало" : ""}`, "win-rate"];
+                  }}
+                />
+                {data.overallPct != null && (
+                  <ReferenceLine y={data.overallPct} stroke="#64748b" strokeDasharray="4 4"
+                    label={{ value: `ср. ${data.overallPct}%`, fill: "#94a3b8", fontSize: 10, position: "insideTopRight" }} />
+                )}
+                <Line type="monotone" dataKey="winPct" stroke="#60a5fa" strokeWidth={2.5} dot={<SegDot />} isAnimationActive={false}>
+                  <LabelList dataKey="winPct" position="top" formatter={(v) => `${v}%`} fontSize={11} fill="#cbd5e1" />
+                </Line>
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
-
-          {/* Корреляция + оговорки */}
           <div className="text-[11px] text-slate-500 leading-relaxed">
-            {data.corr !== null && <>Связь ≈ <b className="text-slate-300">{data.corr}</b> (−1…1). </>}
-            {data.caveat}
+            {data.corr != null && <>Связь ≈ <b className="text-slate-300">{data.corr}</b> (−1…1). </>}{data.caveat}
           </div>
         </div>
       )}
 
-      {!loading && data && data.segments.length === 0 && (
+      {/* Вид «По времени» */}
+      {hasTime && data && (
+        <div className="mt-3 flex flex-col gap-2">
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={data.points} margin={{ top: 12, right: 16, bottom: 4, left: -14 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%" domain={[0, yMax]} />
+                <Tooltip
+                  contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+                  itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
+                  formatter={(v, n) => [v == null ? "—" : `${v}%`, String(n)]}
+                />
+                {immFrom && lastMonth && (
+                  <ReferenceArea x1={immFrom} x2={lastMonth} fill="#f59e0b" fillOpacity={0.07} ifOverflow="extendDomain" />
+                )}
+                <Line type="monotone" dataKey="a" name={data.series?.[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="b" name={data.series?.[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={false} />
+                <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="text-[11px] text-slate-500 leading-relaxed">{data.caveat}</div>
+        </div>
+      )}
+
+      {!loading && !hasSeg && !hasTime && data && (
         <div className="py-6 text-center text-xs text-slate-500">{data.caveat || "Нет данных"}</div>
       )}
     </div>
