@@ -662,17 +662,37 @@ const CORR_FACTORS: { key: string; label: string }[] = [
 const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.25) / 5) * 5);
 const tipStyle = { background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 } as const;
 
-// Вывод простым языком: цвет + одна фраза, чтобы ответ читался без разбора графиков.
-function corrVerdict(d: CorrPayload): { dot: string; text: React.ReactNode } {
-  const abs = Math.abs(d.corr ?? 0);
-  if (d.factor === "okk" || abs < 0.1) {
-    return { dot: "bg-slate-500", text: <>Связи нет: {d.label.toLowerCase()} не предсказывает Гутшайн.</> };
-  }
-  const strength = abs < 0.25 ? "Слабая связь" : abs < 0.5 ? "Заметная связь" : "Сильная связь";
-  const dir = d.topline?.ratio
-    ? <>«{d.topline.leftLabel}» закрывают сделки в <b className="text-emerald-300">{d.topline.ratio}×</b> чаще</>
-    : <>выше {d.label.toLowerCase()} → чаще Гутшайн</>;
-  return { dot: abs < 0.25 ? "bg-amber-400" : "bg-emerald-400", text: <>{strength}: {dir}.</> };
+// Тултип линии по времени: группы отсортированы по убыванию (та, что выше на
+// графике в этой точке — выше и в карточке) + цвет совпадает с линией.
+function TimeTooltip({ active, payload, label, series }: {
+  active?: boolean;
+  label?: string;
+  payload?: { dataKey?: string | number; value?: number | null; color?: string; payload?: CorrTimePoint }[];
+  series: { key: string; label: string }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const items = payload
+    .filter((p) => p.value != null)
+    .map((p) => ({
+      key: String(p.dataKey),
+      value: p.value as number,
+      color: p.color ?? "#cbd5e1",
+      n: (p.payload as Record<string, number> | undefined)?.[`${p.dataKey}N`] ?? 0,
+      name: series.find((s) => s.key === p.dataKey)?.label ?? String(p.dataKey),
+    }))
+    .sort((x, y) => y.value - x.value); // выше значение → выше в карточке
+  if (items.length === 0) return null;
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "6px 10px" }}>
+      <div style={{ color: "#94a3b8", marginBottom: 4 }}>{label}</div>
+      {items.map((it) => (
+        <div key={it.key} style={{ color: it.color, display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 8, height: 8, borderRadius: 99, background: it.color, display: "inline-block" }} />
+          {it.name}: <b>{it.value}%</b> <span style={{ color: "#64748b" }}>(n={it.n})</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function CorrelationPanel() {
@@ -701,20 +721,19 @@ function CorrelationPanel() {
       <div className="flex items-center gap-2 flex-wrap">
         <TrendingUp className="w-4 h-4 text-blue-400" />
         <span className="text-sm font-medium text-slate-200">Корреляция с Гутшайном</span>
-        <InfoPopover
-          title="Корреляция с Гутшайном"
-          points={[
-            "Показывает, связан ли выбранный фактор с получением Гутшайна.",
-            "Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто-проиграно). Лиды «в работе» не берём — у них исхода ещё нет, иначе сигнал размывается.",
-            "Win-rate = доля Гутшайна среди решённых сделок.",
-            "Сверху — вывод простым языком (цвет: серый = связи нет, жёлтый = слабая, зелёный = заметная/сильная).",
-            "Слева — линия по дате закрытия сделки: win-rate за скользящее окно ~30 дней (по точке на день) для 2 макро-групп. Видно, крепнет ли разрыв со временем.",
-            "Справа — столбики по сегментам: win-rate каждого сегмента, пунктир — средняя по всем; бледный столбик = малая выборка.",
-            "«Связь ≈ N» — корреляция от −1 до 1: около 0 — связи нет, ближе к 1 — сильная.",
-            "Это корреляция, а не причина: напр. бот выбирают более мотивированные клиенты.",
-          ]}
-        />
         {data && !loading && <span className="text-xs text-slate-500">{data.population}</span>}
+        <div className="ml-auto">
+          <InfoPopover
+            title="Как читать"
+            points={[
+              "Связан ли фактор с Гутшайном. Считаем только по РЕШЁННЫМ сделкам (Гутшайн или закрыто) — у «в работе» исхода ещё нет.",
+              "Справа — столбики: win-rate каждого сегмента (доля Гутшайна среди решённых), пунктир = средняя. Выше столбик → чаще Гутшайн.",
+              "Слева — линия по дате закрытия: 2 группы; чья линия выше — тот чаще закрывает. Видно, крепнет ли разрыв со временем.",
+              "Зачем скользящее среднее: в день закрывается мало сделок, точечный % скакал бы 0↔100%. Поэтому точка дня = среднее за 30 дней.",
+              "«Связь ≈ N» (−1…1): около 0 — связи нет. Это корреляция, не причина (напр. бот выбирают мотивированные).",
+            ]}
+          />
+        </div>
       </div>
 
       {/* Переключатель факторов */}
@@ -733,17 +752,6 @@ function CorrelationPanel() {
 
       {!loading && data && (hasSeg || hasTime) && (
         <>
-          {/* Вывод простым языком */}
-          {(() => {
-            const v = corrVerdict(data);
-            return (
-              <div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-800/40 border border-white/5 px-3 py-2">
-                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${v.dot}`} />
-                <span className="text-[13px] text-slate-200">{v.text}</span>
-              </div>
-            );
-          })()}
-
           <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Слева — линия по времени */}
             <div className="flex flex-col">
@@ -759,8 +767,7 @@ function CorrelationPanel() {
                         tickFormatter={(d: string) => (typeof d === "string" ? d.slice(5) : d)} />
                       <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%"
                         domain={[0, yMax(Math.max(1, ...data.points.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
-                      <Tooltip contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }}
-                        formatter={(v, n) => [v == null ? "—" : `${v}%`, String(n)]} />
+                      <Tooltip content={<TimeTooltip series={data.series} />} />
                       <Line type="monotone" dataKey="a" name={data.series[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
                       <Line type="monotone" dataKey="b" name={data.series[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
                       <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />
