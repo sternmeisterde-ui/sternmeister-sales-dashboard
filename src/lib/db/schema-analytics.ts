@@ -425,3 +425,39 @@ export const contactCallExports = analyticsSchema.table(
   },
   (t) => [index("idx_cce_status").on(t.status)],
 );
+
+// ==================== CLOUDTALK CALL EVENTS (webhook) ====================
+// Per-call ground truth captured live from CloudTalk Workflow Automations
+// (Trigger: Call Ended → Action: API Request → POST here). The public REST
+// CDR does NOT carry campaign attribution, so this webhook is the only source
+// that can tell a Power-Dialer (campaign) call apart from a manual one:
+// `campaign_id` is populated for dialer calls and null for manual ones.
+//
+// `call_id` matches the numeric tail of analytics.communications.communication_id
+// (`ct:<call_id>`), so the dialer view can JOIN attribution onto CDR rows.
+// `raw` keeps the whole payload — defensive, so new/unexpected fields aren't lost.
+export const cloudtalkCallEvents = analyticsSchema.table(
+  "cloudtalk_call_events",
+  {
+    callId: text("call_id").primaryKey(),          // CloudTalk Cdr id (= ct:<id>)
+    callUuid: text("call_uuid"),
+    externalNumber: text("external_number"),       // remote party (dialed/caller)
+    internalNumber: text("internal_number"),       // our DID
+    direction: text("direction"),                  // incoming | outgoing
+    waitingTime: integer("waiting_time"),
+    talkingTime: integer("talking_time"),
+    wrapupTime: integer("wrapup_time"),
+    agentId: text("agent_id"),                     // CloudTalk agent id → master_managers.cloudtalk_agent_id
+    campaignId: text("campaign_id"),               // null = manual call (the discriminator)
+    campaignName: text("campaign_name"),
+    disposition: text("disposition"),              // call outcome set by agent (dialer only)
+    raw: jsonb("raw"),                             // full webhook body
+    receivedAt: timestamp("received_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_ctce_campaign").on(t.campaignId),
+    index("idx_ctce_received").on(t.receivedAt),
+  ],
+);
+

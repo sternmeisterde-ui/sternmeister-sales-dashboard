@@ -22,7 +22,10 @@ import { CALL_TYPES, normalizeEventType } from "./event-types";
 //   - Events outside the shift window are clipped to the window.
 //   - If a call overruns the shift end, we clip at shift end.
 
-export type SegmentType = "call" | "crm" | "idle";
+// "wait" is dialer-only (CloudTalk ring/queue time before talk); the general
+// timeline never emits it. Kept in the shared union so TimelineBar/Segment can
+// render both views from one component.
+export type SegmentType = "call" | "crm" | "idle" | "wait";
 
 export interface TimelineEvent {
   eventId: string;
@@ -55,8 +58,10 @@ export interface TimelineResult {
   shiftEnd?: string;               // "HH:MM"
   totalMinutes: number;            // 0 if off
   segments: TimelineSegment[];
-  pct: { call: number; crm: number; idle: number };
-  minutes: { call: number; crm: number; idle: number };
+  // `wait` is populated only by buildDialerTimeline; the general timeline
+  // leaves it undefined (treated as 0 by consumers).
+  pct: { call: number; crm: number; idle: number; wait?: number };
+  minutes: { call: number; crm: number; idle: number; wait?: number };
 }
 
 export interface ScheduleRow {
@@ -373,5 +378,122 @@ export function buildTimeline(params: {
     segments,
     pct,
     minutes: { call: callMin, crm: crmMin, idle: idleMin },
+  };
+}
+
+// ==================== Dialer timeline builder ====================
+// Same 09:00–20:00 Berlin grid + segment shape as buildTimeline, but for
+// CloudTalk dialer calls. Each call lays down two contiguous stripes from its
+// start: «ожидание/дозвон» (ring/queue = waiting_time) then «разговор» (talk =
+// talking_time). Everything else is «простой». Produces a TimelineResult so the
+// UI renders it with the same TimelineBar as the general view.
+
+export interface DialerCall {
+  startedAt: Date;   // CloudTalk Cdr.started_at (ring start)
+  talkSec: number;   // talking_time
+  waitSec: number;   // waiting_time (ring/queue before pickup)
+}
+
+function labelForDialerSeg(type: SegmentType, durationMin: number): string {
+  if (type === "call") return `Разговор · ${durationMin} мин`;
+  if (type === "wait") return `Ожидание/дозвон · ${durationMin} мин`;
+  return `Простой · ${durationMin} мин`;
+}
+
+export function buildDialerTimeline(params: {
+  scheduleRow: ScheduleRow | null;
+  dateISO: string;
+  tzOffsetMinutes: number;
+  calls: DialerCall[];
+}): TimelineResult {
+  const { scheduleRow, dateISO, tzOffsetMinutes, calls } = params;
+  const window = deriveShiftWindow(scheduleRow);
+
+  if (!window) {
+    return {
+      mode: "off",
+      offReason: offReasonFor(scheduleRow),
+      totalMinutes: 0,
+      segments: [],
+      pct: { call: 0, crm: 0, idle: 0, wait: 0 },
+      minutes: { call: 0, crm: 0, idle: 0, wait: 0 },
+    };
+  }
+
+  const total = window.totalMinutes;
+  const [y, mo, d] = dateISO.split("-").map(Number);
+  const shiftStartUtcMs =
+    Date.UTC(y, mo - 1, d, window.startLocal.h, window.startLocal.m) -
+    tzOffsetMinutes * 60_000;
+  const shiftEndUtcMs = shiftStartUtcMs + total * 60_000;
+
+  // grid cell: 0 idle, 1 wait, 2 talk. Talk wins over wait wins over idle when
+  // calls overlap (shouldn't normally — an agent is on one call at a time).
+  const grid = new Uint8Array(total);
+  // Exact seconds within the window (honest side-panel numbers); the grid below
+  // floors-to-minute for visibility, like buildTimeline.
+  let talkSecExact = 0;
+  let waitSecExact = 0;
+
+  const clipSec = (aMs: number, bMs: number): number => {
+    const s = Math.max(aMs, shiftStartUtcMs);
+    const e = Math.min(bMs, shiftEndUtcMs);
+    return e > s ? (e - s) / 1000 : 0;
+  };
+  const mark = (aMs: number, bMs: number, val: number) => {
+    if (bMs <= aMs) return;
+    const sMin = Math.max(0, Math.floor((aMs - shiftStartUtcMs) / 60_000));
+    const eMin = Math.min(total, Math.ceil((bMs - shiftStartUtcMs) / 60_000));
+    for (let i = sMin; i < eMin; i++) if (grid[i] < val) grid[i] = val;
+  };
+
+  for (const c of calls) {
+    const waitStart = c.startedAt.getTime();
+    const waitEnd = waitStart + Math.max(0, c.waitSec) * 1000;
+    const talkStart = waitEnd;
+    const talkEnd = talkStart + Math.max(0, c.talkSec) * 1000;
+    waitSecExact += clipSec(waitStart, waitEnd);
+    talkSecExact += clipSec(talkStart, talkEnd);
+    mark(waitStart, waitEnd, 1);
+    mark(talkStart, talkEnd, 2);
+  }
+
+  // Collapse grid into contiguous segments.
+  const segments: TimelineSegment[] = [];
+  let cursor = 0;
+  while (cursor < total) {
+    const v = grid[cursor];
+    let end = cursor + 1;
+    while (end < total && grid[end] === v) end++;
+    const type: SegmentType = v === 2 ? "call" : v === 1 ? "wait" : "idle";
+    const durationMin = end - cursor;
+    segments.push({
+      type,
+      startMin: cursor,
+      endMin: end,
+      durationMin,
+      label: labelForDialerSeg(type, durationMin),
+    });
+    cursor = end;
+  }
+
+  const callMin = Math.round(talkSecExact / 60);
+  const waitMin = Math.round(waitSecExact / 60);
+  const idleMin = Math.max(0, total - callMin - waitMin);
+  const pct = {
+    call: total > 0 ? Math.round((callMin / total) * 100) : 0,
+    wait: total > 0 ? Math.round((waitMin / total) * 100) : 0,
+    crm: 0,
+    idle: total > 0 ? Math.round((idleMin / total) * 100) : 0,
+  };
+
+  return {
+    mode: "working",
+    shiftStart: fmtHm(window.startLocal),
+    shiftEnd: fmtHm(window.endLocal),
+    totalMinutes: total,
+    segments,
+    pct,
+    minutes: { call: callMin, wait: waitMin, crm: 0, idle: idleMin },
   };
 }

@@ -16,7 +16,8 @@ import { trackingDb } from "@/lib/db/tracking-db";
 import { trackingEvents } from "@/lib/db/schema-tracking";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS, EVENT_TYPE_MAP, normalizeEventType } from "@/lib/tracking/event-types";
-import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
+import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
+import { getDialerCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
 
@@ -51,6 +52,7 @@ export async function GET(req: NextRequest) {
     const managerId = url.searchParams.get("managerId");
     const dateISO = url.searchParams.get("date");
     const typesParam = url.searchParams.get("types");
+    const view = url.searchParams.get("view") === "dialer" ? "dialer" : "general";
 
     if (department !== "b2g" && department !== "b2b") {
       return NextResponse.json({ error: "Invalid department" }, { status: 400 });
@@ -146,6 +148,62 @@ export async function GET(req: NextRequest) {
     const offset = berlinOffsetMin(dateUtc);
     const dayStart = new Date(dateUtc.getTime() - offset * 60_000);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60_000);
+
+    // ===== Dialer detail (CloudTalk) =====
+    // One row per dialer call that day: time + talk/wait durations + phone,
+    // plus the dialer timeline so the modal paints the same segmented bar.
+    if (view === "dialer") {
+      const dialerEvents =
+        department === "b2g"
+          ? await getDialerCallEventsByMaster(
+              [{ id: manager.id, name: manager.name }],
+              department,
+              Math.floor(dayStart.getTime() / 1000),
+              Math.floor(dayEnd.getTime() / 1000),
+            )
+          : [];
+
+      const timeline = buildDialerTimeline({
+        scheduleRow,
+        dateISO,
+        tzOffsetMinutes: offset,
+        calls: dialerEvents.map((e) => ({
+          startedAt: e.createdAt,
+          talkSec: e.talkSec,
+          waitSec: e.waitSec,
+        })),
+      });
+
+      const events: DetailEvent[] = dialerEvents
+        .slice()
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .map((e) => {
+          const local = new Date(e.createdAt.getTime() + offset * 60_000);
+          const hh = String(local.getUTCHours()).padStart(2, "0");
+          const mm = String(local.getUTCMinutes()).padStart(2, "0");
+          return {
+            eventId: e.eventId,
+            eventType: e.direction === "incoming" ? "incoming_call" : "outgoing_call",
+            label: e.direction === "incoming" ? "Входящий звонок" : "Исходящий звонок",
+            group: "Дайлер",
+            createdAt: e.createdAt.toISOString(),
+            timeBerlin: `${hh}:${mm}`,
+            durationSec: e.talkSec,
+            entityType: null,
+            entityId: null,
+            raw: { phone: e.phone, waitSec: e.waitSec },
+          };
+        });
+
+      return NextResponse.json({
+        department,
+        view: "dialer",
+        manager: { id: manager.id, name: manager.name, line: manager.line },
+        date: dateISO,
+        timeline,
+        events,
+      });
+    }
 
     // Pull all events for this manager-day. Calls always included; CRM
     // events filtered by `types` so the modal matches the parent view.

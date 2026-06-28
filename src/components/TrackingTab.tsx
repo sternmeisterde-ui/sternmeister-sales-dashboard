@@ -13,7 +13,7 @@ import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
-type SegmentType = "call" | "crm" | "idle";
+type SegmentType = "call" | "crm" | "idle" | "wait";
 
 interface Segment {
   type: SegmentType;
@@ -32,8 +32,9 @@ interface DayTimeline {
   shiftEnd?: string;
   totalMinutes: number;
   segments: Segment[];
-  pct: { call: number; crm: number; idle: number };
-  minutes: { call: number; crm: number; idle: number };
+  // `wait` is populated only by the dialer view; general leaves it undefined.
+  pct: { call: number; crm: number; idle: number; wait?: number };
+  minutes: { call: number; crm: number; idle: number; wait?: number };
 }
 
 interface ManagerTimeline {
@@ -51,6 +52,22 @@ interface ManagerOption {
 
 interface TrackingResponse {
   department: string;
+  view: "general";
+  dates: string[];
+  managers: ManagerTimeline[];
+  allManagers: ManagerOption[];
+  synced: boolean;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+}
+
+// ── Dialer view (CloudTalk) ──
+// Same per-manager/day timeline shape as the general view (DayTimeline with
+// segments), so it renders through the shared TimelineBar. Segments are
+// dialer-native: «разговор» (call) / «ожидание-дозвон» (wait) / «простой» (idle).
+interface DialerResponse {
+  department: string;
+  view: "dialer";
   dates: string[];
   managers: ManagerTimeline[];
   allManagers: ManagerOption[];
@@ -110,6 +127,11 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   const today = useMemo(() => berlinToday(), []);
   const [range, setRange] = useState<DateRange>({ start: today, end: today });
 
+  // View toggle: general call/crm/idle timeline vs CloudTalk dialer metrics.
+  // Dialer telephony is B2G-only, so the toggle is shown only for b2g.
+  const [view, setView] = useState<"general" | "dialer">("general");
+  const isDialer = view === "dialer";
+
   // Event-type filter
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
     () => new Set(DEFAULT_SELECTED_KEYS),
@@ -121,7 +143,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   const [selectedManagerIds, setSelectedManagerIds] = useState<Set<string> | null>(null);
   const [managerFilterOpen, setManagerFilterOpen] = useState(false);
 
-  const [data, setData] = useState<TrackingResponse | null>(null);
+  const [data, setData] = useState<TrackingResponse | DialerResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [revalidating, setRevalidating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -141,12 +163,15 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   // b2g aren't valid for b2b and would just show "no data" until cleared.
   useEffect(() => {
     setSelectedManagerIds(null);
+    // Dialer is B2G-only — drop back to the general view when not on b2g so a
+    // b2b session never sits on an empty dialer screen.
+    if (department !== "b2g") setView("general");
   }, [department]);
 
   // Client-side cache: keyed by department+from+to+types. Switching between
   // departments or flipping filters shows cached data instantly while a fresh
   // fetch runs in the background — no full-page reload / skeleton spinner.
-  const cacheRef = useRef<Map<string, TrackingResponse>>(new Map());
+  const cacheRef = useRef<Map<string, TrackingResponse | DialerResponse>>(new Map());
 
   // Build the query params
   const queryKey = useMemo(() => {
@@ -164,8 +189,8 @@ export default function TrackingTab({ department }: TrackingTabProps) {
   );
 
   const cacheKey = useMemo(
-    () => `${queryKey.department}|${queryKey.from ?? ""}|${queryKey.to ?? ""}|${typesParam}|${managersParam}`,
-    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam],
+    () => `${queryKey.department}|${queryKey.from ?? ""}|${queryKey.to ?? ""}|${typesParam}|${managersParam}|${view}`,
+    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam, view],
   );
 
   const fetchData = useCallback(
@@ -182,12 +207,13 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           types: typesParam,
         });
         if (managersParam) params.set("managers", managersParam);
+        if (view === "dialer") params.set("view", "dialer");
         const res = await fetch(`/api/tracking?${params.toString()}`, { cache: "no-store" });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API ${res.status}: ${text}`);
         }
-        const json = (await res.json()) as TrackingResponse;
+        const json = (await res.json()) as TrackingResponse | DialerResponse;
         cacheRef.current.set(cacheKey, json);
         setData(json);
       } catch (e) {
@@ -197,7 +223,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
         setRevalidating(false);
       }
     },
-    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam, cacheKey],
+    [queryKey.department, queryKey.from, queryKey.to, typesParam, managersParam, view, cacheKey],
   );
 
   // When inputs change: serve cached immediately if present (skeleton-free
@@ -237,13 +263,16 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     setRange({ start: today, end: today });
   }, [today]);
 
-  const managers = data?.managers ?? [];
   const dates = data?.dates ?? [];
 
   return (
     <div className="flex flex-col gap-4">
       {/* ── Control bar ──────────────────────────────────────────── */}
       <div className="glass-panel rounded-2xl p-4 flex flex-wrap items-center gap-3 border border-white/5">
+        {department === "b2g" && (
+          <ViewToggle view={view} onChange={setView} />
+        )}
+
         <CalendarPicker
           mode="range"
           allowModeToggle
@@ -252,12 +281,15 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           onClear={handleClearDate}
         />
 
-        <EventTypesFilter
-          open={filterOpen}
-          setOpen={setFilterOpen}
-          selected={selectedKeys}
-          onChange={setSelectedKeys}
-        />
+        {/* CRM event-type filter only applies to the general timeline. */}
+        {!isDialer && (
+          <EventTypesFilter
+            open={filterOpen}
+            setOpen={setFilterOpen}
+            selected={selectedKeys}
+            onChange={setSelectedKeys}
+          />
+        )}
 
         <ManagersFilter
           open={managerFilterOpen}
@@ -278,9 +310,19 @@ export default function TrackingTab({ department }: TrackingTabProps) {
         </button>
 
         <div className="ml-auto flex items-center gap-3 text-[11px] text-slate-400">
-          <LegendDot color="bg-blue-500" label="Звонок" />
-          <LegendDot color="bg-emerald-500" label="CRM" />
-          <LegendDot color="bg-rose-500" label="Простой" />
+          {isDialer ? (
+            <>
+              <LegendDot color="bg-blue-500" label="Разговор" />
+              <LegendDot color="bg-amber-500/80" label="Ожидание/дозвон" />
+              <LegendDot color="bg-rose-500" label="Простой" />
+            </>
+          ) : (
+            <>
+              <LegendDot color="bg-blue-500" label="Звонок" />
+              <LegendDot color="bg-emerald-500" label="CRM" />
+              <LegendDot color="bg-rose-500" label="Простой" />
+            </>
+          )}
           {data && (
             <span className="text-slate-500" key={nowTick}>
               синк: {formatLastSynced(data.lastSyncedAt)}
@@ -296,16 +338,30 @@ export default function TrackingTab({ department }: TrackingTabProps) {
       )}
 
       {/* ── Main content ─────────────────────────────────────────── */}
+      {/* Branch on the DATA's own `view` discriminant, never on the toggle
+          state: on a toggle the new cacheKey may have no cached entry, so
+          `data` still holds the previous-shape response until the fetch lands.
+          Rendering the wrong component against that stale shape crashed the tab
+          (DialerDay has no .minutes/.segments, DayTimeline has no .talkMin).
+          `data.view !== view` means we're mid-transition → show the spinner. */}
       <div className="glass-panel rounded-2xl p-4 border border-white/5">
-        {loading && !data ? (
+        {!data || data.view !== view ? (
           <div className="flex items-center justify-center py-16 text-slate-400">
             <Loader2 className="w-6 h-6 animate-spin" />
           </div>
-        ) : managers.length === 0 ? (
+        ) : data.managers.length === 0 ? (
           <div className="text-center py-16 text-slate-500 text-sm">Менеджеры не найдены</div>
+        ) : data.view === "dialer" ? (
+          <DialerList
+            managers={data.managers}
+            dates={dates}
+            onOpenDetail={(managerId, managerName, line, date) =>
+              setDetailTarget({ managerId, managerName, line, date })
+            }
+          />
         ) : (
           <ManagerList
-            managers={managers}
+            managers={data.managers}
             dates={dates}
             onOpenDetail={(managerId, managerName, line, date) =>
               setDetailTarget({ managerId, managerName, line, date })
@@ -317,6 +373,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
       {detailTarget && (
         <DetailModal
           department={department}
+          view={view}
           target={detailTarget}
           typesParam={typesParam}
           onClose={() => setDetailTarget(null)}
@@ -334,6 +391,31 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <span className={`w-2.5 h-2.5 rounded-full ${color}`} />
       {label}
     </span>
+  );
+}
+
+// Segmented toggle: «Общая активность» ⇄ «Дайлер». Makes it unambiguous which
+// view is on screen — dialer metrics never blend into the general timeline.
+function ViewToggle({
+  view,
+  onChange,
+}: {
+  view: "general" | "dialer";
+  onChange: (v: "general" | "dialer") => void;
+}) {
+  const cls = (id: "general" | "dialer") =>
+    `px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+      view === id ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"
+    }`;
+  return (
+    <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-800/50 border border-white/5">
+      <button type="button" onClick={() => onChange("general")} className={cls("general")}>
+        Общая активность
+      </button>
+      <button type="button" onClick={() => onChange("dialer")} className={cls("dialer")}>
+        Дайлер
+      </button>
+    </div>
   );
 }
 
@@ -394,6 +476,97 @@ function ManagerList({
   );
 }
 
+// ==================== Dialer view ====================
+// Reuses the general TimelineBar (same 09:00–20:00 segmented axis) — the dialer
+// response is the same DayTimeline shape, with segments coloured разговор /
+// ожидание-дозвон / простой. Only the side-panel summary differs (talk/wait/
+// idle instead of call/crm/idle), so the loupe/detail modal is omitted here.
+
+function DialerList({
+  managers,
+  dates,
+  onOpenDetail,
+}: {
+  managers: ManagerTimeline[];
+  dates: string[];
+  onOpenDetail: (managerId: string, managerName: string, line: string | null, date: string) => void;
+}) {
+  const multiDay = dates.length > 1;
+  return (
+    <div className="flex flex-col gap-2">
+      {managers.map((m) => (
+        <div
+          key={m.id}
+          className="grid grid-cols-[180px_1fr] gap-3 items-start py-2 border-b border-white/5 last:border-b-0"
+        >
+          <div className="flex flex-col pt-1">
+            <span className="text-sm font-semibold text-white truncate" title={m.name}>
+              {m.name}
+            </span>
+            {m.line && (
+              <span className="text-[10px] uppercase tracking-widest text-slate-500">
+                Линия {m.line}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            {m.days.map((day) => (
+              <div
+                key={day.date}
+                className={`grid items-center gap-3 ${multiDay ? "grid-cols-[60px_1fr_28px_230px]" : "grid-cols-[1fr_28px_230px]"}`}
+              >
+                {multiDay && (
+                  <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
+                )}
+                <TimelineBar day={day} />
+                <button
+                  type="button"
+                  onClick={() => onOpenDetail(m.id, m.name, m.line, day.date)}
+                  className="w-6 h-6 flex items-center justify-center rounded-md bg-slate-800/40 hover:bg-slate-700 border border-white/5 text-slate-400 hover:text-white transition-colors"
+                  title="Подробнее: звонки за день"
+                  aria-label={`Подробнее по ${m.name} ${day.date}`}
+                >
+                  <Search className="w-3 h-3" />
+                </button>
+                <DialerSummary day={day} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Side-panel for the dialer view: разговор / ожидание / простой (mirrors
+// PctSummary but with the dialer rubrics). `wait` is dialer-only.
+function DialerSummary({ day }: { day: DayTimeline }) {
+  if (day.mode === "off") {
+    return <span className="text-[10px] text-slate-500">—</span>;
+  }
+  const wait = day.minutes.wait ?? 0;
+  const waitPct = day.pct.wait ?? 0;
+  return (
+    <div className="flex flex-col items-end font-mono tabular-nums leading-tight gap-0.5">
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-blue-400">{day.pct.call}%</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-amber-400">{waitPct}%</span>
+        <span className="text-slate-600">/</span>
+        <span className="tracking-idle">{day.pct.idle}%</span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-blue-400">{fmtHm(day.minutes.call)}</span>
+        <span className="text-slate-600">/</span>
+        <span className="text-amber-400">{fmtHm(wait)}</span>
+        <span className="text-slate-600">/</span>
+        <span className="tracking-idle">{fmtHm(day.minutes.idle)}</span>
+      </div>
+    </div>
+  );
+}
+
 function TimelineBar({ day }: { day: DayTimeline }) {
   const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
 
@@ -413,7 +586,8 @@ function TimelineBar({ day }: { day: DayTimeline }) {
   // overpower days with real partial idle worth flagging. Render the same
   // muted grey as scheduled-off days plus a "Нет активности" badge so the
   // distinction stays (off-day vs no-show vs partial-idle).
-  const isFullyIdle = day.minutes.call === 0 && day.minutes.crm === 0;
+  const isFullyIdle =
+    day.minutes.call === 0 && day.minutes.crm === 0 && (day.minutes.wait ?? 0) === 0;
   if (isFullyIdle) {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
@@ -440,7 +614,9 @@ function TimelineBar({ day }: { day: DayTimeline }) {
               ? "bg-blue-500"
               : s.type === "crm"
                 ? "bg-emerald-500"
-                : "bg-rose-500/70";
+                : s.type === "wait"
+                  ? "bg-amber-500/80"
+                  : "bg-rose-500/70";
           const text = s.label ?? "";
           return (
             <div
@@ -840,15 +1016,18 @@ interface DetailResponse {
 
 function DetailModal({
   department,
+  view,
   target,
   typesParam,
   onClose,
 }: {
   department: "b2g" | "b2b";
+  view: "general" | "dialer";
   target: { managerId: string; managerName: string; line: string | null; date: string };
   typesParam: string;
   onClose: () => void;
 }) {
+  const isDialer = view === "dialer";
   const [data, setData] = useState<DetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -865,6 +1044,7 @@ function DetailModal({
       date: target.date,
       types: typesParam,
     });
+    if (view === "dialer") params.set("view", "dialer");
     fetch(`/api/tracking/detail?${params.toString()}`, { cache: "no-store" })
       .then(async (res) => {
         if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
@@ -882,7 +1062,7 @@ function DetailModal({
     return () => {
       cancelled = true;
     };
-  }, [department, target.managerId, target.date, typesParam]);
+  }, [department, view, target.managerId, target.date, typesParam]);
 
   // Esc to close
   useEffect(() => {
@@ -971,9 +1151,19 @@ function DetailModal({
               />
 
               <div className="mt-4 grid grid-cols-3 gap-3">
-                <StatTile color="bg-blue-500" label="На звонках" minutes={timeline.minutes.call} pct={timeline.pct.call} />
-                <StatTile color="bg-emerald-500" label="В CRM" minutes={timeline.minutes.crm} pct={timeline.pct.crm} />
-                <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+                {isDialer ? (
+                  <>
+                    <StatTile color="bg-blue-500" label="Разговор" minutes={timeline.minutes.call} pct={timeline.pct.call} />
+                    <StatTile color="bg-amber-500/80" label="Ожидание/дозвон" minutes={timeline.minutes.wait ?? 0} pct={timeline.pct.wait ?? 0} />
+                    <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+                  </>
+                ) : (
+                  <>
+                    <StatTile color="bg-blue-500" label="На звонках" minutes={timeline.minutes.call} pct={timeline.pct.call} />
+                    <StatTile color="bg-emerald-500" label="В CRM" minutes={timeline.minutes.crm} pct={timeline.pct.crm} />
+                    <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+                  </>
+                )}
               </div>
 
               {hoverSeg ? (
@@ -1028,7 +1218,9 @@ function DetailTimelineBar({
             ? "bg-blue-500"
             : s.type === "crm"
               ? "bg-emerald-500"
-              : "bg-rose-500/70";
+              : s.type === "wait"
+                ? "bg-amber-500/80"
+                : "bg-rose-500/70";
         return (
           <div
             key={`${s.type}-${s.startMin}-${i}`}
@@ -1123,7 +1315,7 @@ function SegmentEventList({
   return (
     <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
       <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
-        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : "Простой"}
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "wait" ? "Ожидание/дозвон" : "Простой"}
         <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
           {segStart}–{segEnd}
         </span>
@@ -1175,11 +1367,24 @@ function EventRow({ ev }: { ev: DetailEvent }) {
       : "bg-blue-500"
     : "bg-emerald-500";
 
+  // Dialer detail rows carry waiting_time in raw.waitSec; presence of the field
+  // marks a dialer call, where we label the talk duration explicitly («разговор»)
+  // and the ring/queue time («дозвон») so the two numbers can't be confused.
+  const waitSec = (ev.raw as { waitSec?: number } | null)?.waitSec;
+  const isDialerCall = typeof waitSec === "number";
+
   let suffix = "";
   if (isCall) {
-    if (isMissed) suffix = " · пропущенный";
-    else if (ev.durationSec >= 60) suffix = ` · ${Math.round(ev.durationSec / 60)} мин`;
-    else suffix = ` · ${ev.durationSec} сек`;
+    if (isMissed) {
+      suffix = isDialerCall ? " · недозвон" : " · пропущенный";
+    } else {
+      const talkLabel = isDialerCall ? "разговор " : "";
+      suffix =
+        ev.durationSec >= 60
+          ? ` · ${talkLabel}${Math.round(ev.durationSec / 60)} мин`
+          : ` · ${talkLabel}${ev.durationSec} сек`;
+    }
+    if (isDialerCall && waitSec! > 0) suffix += ` · дозвон ${waitSec} сек`;
     const phone = (ev.raw as { phone?: string } | null)?.phone;
     if (phone) suffix += ` · ${phone}`;
   }

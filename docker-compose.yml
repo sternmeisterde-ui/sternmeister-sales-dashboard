@@ -75,6 +75,10 @@ services:
       - CALLGEAR_ACCESS_TOKEN=${CALLGEAR_ACCESS_TOKEN}
       - CLOUDTALK_API_ID=${CLOUDTALK_API_ID}
       - CLOUDTALK_API_SECRET=${CLOUDTALK_API_SECRET}
+      # Shared secret for the CloudTalk Call-Ended webhook (Workflow Automations
+      # → API Request → /api/analytics/webhook/cloudtalk?token=...). Без записи
+      # здесь переменная невидима в контейнере даже если задана в Dokploy UI.
+      - CLOUDTALK_WEBHOOK_SECRET=${CLOUDTALK_WEBHOOK_SECRET}
 
       # AI / transcription providers
       - XAI_API_KEY=${XAI_API_KEY}
