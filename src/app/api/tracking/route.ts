@@ -9,8 +9,8 @@ import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
-import { buildTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
-import { getAnalyticsCallEventsByMaster } from "@/lib/daily/analytics-calls";
+import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type DialerCall } from "@/lib/tracking/timeline";
+import { getAnalyticsCallEventsByMaster, getDialerCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
 
@@ -47,6 +47,10 @@ export async function GET(req: NextRequest) {
     const typesParam = url.searchParams.get("types"); // comma-separated; omit = defaults
     const managersParam = url.searchParams.get("managers"); // comma-separated manager ids; omit = all
     const skipSync = url.searchParams.get("skipSync") === "1";
+    // view=dialer → CloudTalk dialer metrics (talk/wait/counts) instead of the
+    // general call/crm/idle timeline. Dialer telephony is B2G-only (CloudTalk),
+    // so the toggle is offered only for b2g; a b2b dialer request returns empty.
+    const view = url.searchParams.get("view") === "dialer" ? "dialer" : "general";
 
     if (department !== "b2g" && department !== "b2b") {
       return NextResponse.json({ error: "Invalid department" }, { status: 400 });
@@ -181,7 +185,8 @@ export async function GET(req: NextRequest) {
 
     if (visibleManagers.length === 0) {
       return NextResponse.json({
-        department, dates: [], managers: [], allManagers: [], synced,
+        department, view, dates: [], managers: [], allManagers: [], synced,
+        lastSyncedAt: null, lastError: null,
       });
     }
 
@@ -201,10 +206,13 @@ export async function GET(req: NextRequest) {
     if (managers.length === 0) {
       return NextResponse.json({
         department,
+        view,
         dates: [],
         managers: [],
         allManagers: visibleManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
         synced,
+        lastSyncedAt: null,
+        lastError: null,
       });
     }
 
@@ -244,6 +252,86 @@ export async function GET(req: NextRequest) {
     const rangeEnd = new Date(
       toUtc.getTime() + (24 * 60 - berlinOffsetMin(toUtc)) * 60_000,
     );
+
+    // ===== Dialer view (CloudTalk) =====
+    // Same 09:00–20:00 timeline shape as the general view (DayTimeline with
+    // segments) so the UI renders it with the same TimelineBar — but segments
+    // are dialer-native: «разговор» (talk) / «ожидание-дозвон» (wait) / «простой».
+    // Sourced from analytics.communications ct: rows. B2G-only: b2b has no
+    // dialer, so every day comes back empty (mode off / no segments).
+    if (view === "dialer") {
+      const dialerEvents =
+        department === "b2g"
+          ? await getDialerCallEventsByMaster(
+              managers.map((m) => ({ id: m.id, name: m.name })),
+              department,
+              Math.floor(rangeStart.getTime() / 1000),
+              Math.floor(rangeEnd.getTime() / 1000),
+            )
+          : [];
+
+      // Group calls by manager + Berlin-local calendar date (same bucketing as
+      // the general path's pushEvent).
+      const callsByManagerDate = new Map<string, DialerCall[]>();
+      for (const ev of dialerEvents) {
+        const localDate = new Date(
+          ev.createdAt.getTime() + berlinOffsetMin(ev.createdAt) * 60_000,
+        )
+          .toISOString()
+          .slice(0, 10);
+        const key = `${ev.managerId}|${localDate}`;
+        let list = callsByManagerDate.get(key);
+        if (!list) {
+          list = [];
+          callsByManagerDate.set(key, list);
+        }
+        list.push({ startedAt: ev.createdAt, talkSec: ev.talkSec, waitSec: ev.waitSec });
+      }
+
+      const dialerManagers = managers.map((m) => ({
+        id: m.id,
+        name: m.name,
+        line: m.line,
+        days: dates.map((date) => {
+          const sched = scheduleIndex.get(`${m.id}|${date}`) ?? null;
+          const effectiveSched: ScheduleRow | null = sched ?? (m.shiftStartTime
+            ? {
+              scheduleDate: date,
+              scheduleValue: "8",
+              shiftStartTime: m.shiftStartTime,
+              shiftEndTime: m.shiftEndTime,
+            }
+            : null);
+          const dayUtc = new Date(`${date}T00:00:00Z`);
+          const dayOffset = berlinOffsetMin(dayUtc);
+          const calls = callsByManagerDate.get(`${m.id}|${date}`) ?? [];
+          const tl = buildDialerTimeline({
+            scheduleRow: effectiveSched,
+            dateISO: date,
+            tzOffsetMinutes: dayOffset,
+            calls,
+          });
+          return { date, ...tl };
+        }),
+      }));
+
+      const [dialerSyncState] = await trackingDb
+        .select()
+        .from(trackingSyncState)
+        .where(eq(trackingSyncState.department, department))
+        .limit(1);
+
+      return NextResponse.json({
+        department,
+        view: "dialer",
+        dates,
+        managers: dialerManagers,
+        allManagers: visibleManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
+        synced,
+        lastSyncedAt: dialerSyncState?.lastSyncedAt ?? null,
+        lastError: dialerSyncState?.lastError ?? null,
+      });
+    }
 
     // CRM (non-call) events from tracking_events. Calls are sourced separately
     // from analytics.communications below — populated by our own ETL pulling
@@ -367,6 +455,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       department,
+      view: "general",
       dates,
       managers: result,
       // Full list (id+name+line) so the dropdown can render every active

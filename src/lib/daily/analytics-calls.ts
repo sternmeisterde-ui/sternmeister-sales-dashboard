@@ -12,7 +12,7 @@
 
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
-import { getPipelineIds } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
 import type { UserCallMetrics } from "@/lib/kommo/metrics";
 import { cached } from "@/lib/kommo/cache";
 
@@ -261,6 +261,120 @@ async function fetchCallEventsByMaster(
       eventType: direction,
       createdAt: new Date(row.created_at),
       durationSec: Number(row.duration ?? 0),
+    });
+  }
+  return out;
+}
+
+// Single dialer (CloudTalk) call attributed to a master manager. Drives the
+// "Дайлер" view of the Активность tab. Unlike AnalyticsCallEvent it carries
+// talk + wait seconds SEPARATELY — the dialer view splits «разговор» from
+// «ожидание/дозвон». wrap-up follows once persisted (not yet a column).
+export interface DialerCallEvent {
+  managerId: string;        // master_managers.id
+  eventId: string;          // stable key (analytics communication_id)
+  createdAt: Date;          // CloudTalk started_at (ring start)
+  direction: "incoming" | "outgoing";
+  talkSec: number;          // analytics.communications.duration (talkDurationSec)
+  waitSec: number;          // analytics.communications.wait_seconds (CloudTalk waiting_time)
+  phone: string | null;     // remote party number (for the detail loupe)
+}
+
+/**
+ * Per-call dialer rows for the window. Isolates the dialer by
+ * `communication_id LIKE 'ct:%'` — CloudTalk is the B2G dialer telephony, so
+ * ct: rows ≈ dialer activity (CallGear `cg-leg:` and Kommo `note:` excluded).
+ * Scoping is two-layer:
+ * (1) the pipeline filter `pipeline_id IN (10935879) OR pipeline_id IS NULL`
+ * keeps ONLY the Бух Гос funnel (the dialer's exclusive target) plus NULL-
+ * pipeline phone-fallback rows (pre-enrichment) — Бератер / Medical Gov calls
+ * are dropped; and (2) the caller's manager roster drops any row whose
+ * `manager` name resolves outside `managers`.
+ *
+ * Same DISTINCT ON (communication_id) Pattern-A dedup as
+ * getAnalyticsCallEventsByMaster: one CDR fanned out across N leads collapses
+ * to a single row (talk/wait/manager are constant across the fanout).
+ *
+ * Returned rows are bucketed into Berlin-local days + summed by the caller
+ * (/api/tracking?view=dialer), mirroring how call events are day-bucketed.
+ */
+export async function getDialerCallEventsByMaster(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<DialerCallEvent[]> {
+  // Dialer is B2G-only (CloudTalk Power-Dialer campaign «Бух Гос»). No dialer
+  // outside B2G → nothing to return.
+  if (department !== "b2g") return [];
+  // Scope to the Бух Гос funnel ONLY (10935879), not all B2G pipelines: the
+  // dialer dials that funnel exclusively, so Бератер / Medical Gov CloudTalk
+  // calls are not dialer activity. NULL pipeline is kept (phone-fallback ct:
+  // rows before enrichment).
+  const pipelineIds = [B2G_PIPELINES.FIRST_LINE];
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `dialer-events:b2g:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () =>
+    fetchDialerCallEventsByMaster(managers, pipelineIds, fromTs, toTs),
+  );
+}
+
+async function fetchDialerCallEventsByMaster(
+  managers: Array<{ id: string; name: string }>,
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+): Promise<DialerCallEvent[]> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(
+    pipelineIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+  const nameToMaster = new Map<string, string>();
+  for (const m of managers) {
+    nameToMaster.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) {
+      nameToMaster.set(alias, m.id);
+    }
+  }
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    communication_id: string | number;
+    communication_type: string;
+    manager: string;
+    duration: string | number | null;
+    wait_seconds: string | number | null;
+    created_at: string;
+    phone: string | null;
+  }>(sql`
+    SELECT DISTINCT ON (communication_id)
+      communication_id, communication_type, manager, duration, wait_seconds, phone, created_at
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND communication_id LIKE 'ct:%'
+      AND communication_type LIKE 'call%'
+      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      AND manager IS NOT NULL AND manager <> ''
+    ORDER BY communication_id, lead_id NULLS LAST
+  `);
+
+  const out: DialerCallEvent[] = [];
+  for (const row of result.rows) {
+    const managerId = nameToMaster.get(row.manager);
+    if (!managerId) continue; // ex-manager / other dept / unmapped name → skip
+    out.push({
+      managerId,
+      eventId: `comm:${row.communication_id}`,
+      createdAt: new Date(row.created_at),
+      direction: row.communication_type === "call_in" ? "incoming" : "outgoing",
+      talkSec: Number(row.duration ?? 0),
+      waitSec: Number(row.wait_seconds ?? 0),
+      phone: row.phone ?? null,
     });
   }
   return out;
