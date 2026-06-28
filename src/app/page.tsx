@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package,
+  CalendarClock, Workflow, Package, Megaphone,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -22,6 +22,7 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
+import BroadcastTab from "@/components/BroadcastTab";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -100,7 +101,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "artifacts";
+type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -133,6 +134,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
   { id: "looker", icon: Database, label: "Looker", adminOnly: true },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
+  { id: "broadcast", icon: Megaphone, label: "Рассылка", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   // Только Госники: у Коммерсов ролевки разбираются внутри «Оценки критериев»
   // (toggle OKK/Ролевки в analytics), отдельная вкладка не нужна — убрана 2026-06-19.
@@ -1092,6 +1094,10 @@ export default function Dashboard() {
             даже на кадр до сброса вкладки safety-net эффектом. См. §6.1. */}
         {activeTab === "funnel" && tabAllowedInDept("funnel", activeDepartment) && (
           <FunnelTab department={activeDepartment} />
+        )}
+
+        {activeTab === "broadcast" && tabAllowedInDept("broadcast", activeDepartment) && (
+          <BroadcastTab department={activeDepartment} />
         )}
 
         {activeTab === "termins" && tabAllowedInDept("termins", activeDepartment) && (
