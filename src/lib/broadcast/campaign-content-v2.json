@@ -1,0 +1,354 @@
+{
+  "campaign_id": "termin_warmup_v2",
+  "timezone": "Europe/Berlin",
+  "time_slots": { "morning": "10:00", "late_morning": "11:00", "afternoon": "14:00", "evening": "19:00" },
+  "registry_url": "https://mein-now.de/weiterbildungssuche/termin/355157997",
+  "_meta": {
+    "source": "_Info/Termin - рассылки (1).docx — НОВЫЙ ВАРИАНТ (15 сообщений в доке = 14 сообщений + 1 follow-up)",
+    "global_rule": "Дисклеймер заказчика: СНАЧАЛА фото/видео, затем текст под ним — поэтому media_first=true на всех сообщениях с медиа.",
+    "format": "text_html — готовый Telegram-HTML (<b>, <i>, <blockquote>); абзац = \\n\\n, список = строки с — и одиночным \\n",
+    "media_readiness_rule": "media.required=true → если asset_key не в кэше file_id, всё сообщение НЕ отправляется (пропуск, лог). required=false → сообщение уходит без этого медиа. Видео-отзывы = required; фото/скриншоты/коллажи = опционально.",
+    "album_rule": "2+ фото в одном сообщении уходят альбомом (send_media_group). Сертификат AZAV (2 стр.) = 1 альбом. У альбома нет кнопок — кнопки идут на тексте после медиа.",
+    "opt_out": "Kommo contact-поле 893393 'Запрет рассылки' (checkbox) + локальный флаг suppressed.",
+    "manager_button": "Заказчик: финал (msg_14) ПОКА без кнопки 'Связаться с менеджером'. Кнопка появится автоматически, если задать BROADCAST_MANAGER_URL и добавить button type=manager.",
+    "new_assets_to_upload": [
+      "natalya_intro (video, msg_02)",
+      "students_stories_1 / students_stories_2 (photo, msg_06)",
+      "lesson_clip (video, msg_08)",
+      "reviews_screenshot (photo, msg_09)",
+      "jobs_1 / jobs_2 (photo, msg_10)",
+      "partner_1 / partner_2 / partner_3 (photo, msg_12)",
+      "yulia_review (photo, msg_13)"
+    ],
+    "reused_assets": ["inna_intro (msg_03)", "cert_azav + cert_azav_p2 (msg_04)", "olena_a2 (msg_05 follow-up)", "teachers_collage (msg_07)"],
+    "open_items": [
+      "msg_08 lesson_clip: если видео не зальётся — заменить на скриншот первого кадра + url-кнопку «Смотреть запись урока» (поэтому required=false, чтобы текст уходил при отсутствии видео).",
+      "cert_azav_p2: source=null — стр.2 PDF, заливается вручную (prebuild авто-конвертит только page 1)."
+    ]
+  },
+  "messages": [
+    {
+      "id": "msg_01",
+      "title": "Сообщение 1 — День 1, утром",
+      "day_offset": 0,
+      "slot": "morning",
+      "anchor": "authorization",
+      "text_html": "Совсем скоро у вас встреча с консультантом из агентства по труду. От этого разговора зависит, оплатит ли государство ваше обучение.\n\nСамый частый страх даже не «я не знаю немецкий». Это внутренний голос, от которого руки опускаются ещё до термина:\n\n— «Я слишком долго на пособии, не одобрят»\n— «Уже был один гутшайн, второй не дадут»\n— «У меня нет экономического образования»\n— «Возраст 49+, кому я нужна»\n— «Мой немецкий слабоват, бератер откажет»\n\nЭтот голос мешает даже сесть и подготовиться. А если на термин человек приходит несобранным, любое жёсткое слово бератера рушит разговор.\n\nДля этого и создан наш бот — он закрывает эту проблему. Все типичные вопросы уже есть в ролевках. Если вы услышали их голосом 3–4 раза — на термине вы их <b>узнаёте</b> и отвечаете спокойно.\n\nНаш карьерный эксперт с опытом работы с Jobcenter и Agentur für Arbeit поможет лучше подготовиться к термину и подскажет, что важно подчеркнуть при самопрезентации.",
+      "buttons": [
+        { "label": "Перейти к тренировке", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [],
+      "followups": []
+    },
+    {
+      "id": "msg_02",
+      "title": "Сообщение 2 — День 1, через час",
+      "day_offset": 0,
+      "slot": "late_morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "👉 Делимся историей Натальи — посмотрите видео! Бератер настаивал на курсах на немецком, но она получила гутшайн в SternMeister и теперь учится на курсе бухгалтерии на русском языке.\n\nГотовиться ей помогал наш куратор, а дальше всё решила её настойчивость. И вы сможете говорить с бератером спокойно и уверенно. Для этого мы и тренируем с вами ролевки.",
+      "buttons": [],
+      "media": [
+        {
+          "kind": "video",
+          "asset_key": "natalya_intro",
+          "source": "https://drive.google.com/file/d/1QqhxtZzk9Dvwp78TlsnyGhHt1fudUkHy/view?usp=sharing",
+          "caption": null,
+          "required": true
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_03",
+      "title": "Сообщение 3 — День 2, после обеда",
+      "day_offset": 1,
+      "slot": "afternoon",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "🔥 Посмотрите видео от Инны — она рассказывает, как получила финансирование после неудачного опыта с другими курсами:\n\n<blockquote><i>В первый раз другие курсы просто выдали мне счёт. А в SternMeister меня буквально с первых шагов взяли за руку и провели по всему этапу получения финансирования. У каждой группы есть куратор, который сопровождает от начала и до конца.</i></blockquote>\n\nВсего 15 минут в день на тренировку — этого будет достаточно. За пару недель вы будете знать все вопросы, которые вам зададут на термине с бератером.",
+      "buttons": [
+        { "label": "Начать тренировку", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "video",
+          "asset_key": "inna_intro",
+          "source": "https://drive.google.com/file/d/18L9MDzcnzRaHNymK2vL2Gzkl6JUdul__/view?usp=sharing",
+          "caption": null,
+          "required": true
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_04",
+      "title": "Сообщение 4 — День 4",
+      "day_offset": 3,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "Есть одна вещь, без которой бератер вообще не сможет выдать вам гутшайн.\n\nШкола должна быть <b>zugelassener Träger AZAV</b> — официально допущенным учебным центром. Так требует закон, § 178 SGB III.\n\nУ SternMeister такая аккредитация есть:\n\n— Сертификат № <b>31T0725033</b>\n— Действует до 21 июля 2030\n— Выдан DEKRA Certification GmbH (ведущим европейским центром сертификации, его сертификаты высоко ценятся работодателями по всей Европе)\n\nНаш курс внесён в <b>официальный реестр Bundesagentur für Arbeit</b>.\n\nБератер откроет реестр, найдёт SternMeister — и перейдёт к следующему вопросу. Доказывать ничего не нужно.\n\nОстаётся просто спокойно ответить на вопросы бератера. Этим и занимается бот — проходите ролевки, чтобы уверенно ответить на все вопросы бератера!",
+      "buttons": [
+        { "label": "Посмотреть курс в реестре", "type": "url", "url": "https://mein-now.de/weiterbildungssuche/termin/355157997" },
+        { "label": "Сегодняшняя ролевка", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "cert_azav",
+          "source": "https://drive.google.com/file/d/1V_ork4n8B4p-Pu5I6czg-xDjp2XpKMv3/view?usp=sharing",
+          "caption": null,
+          "required": false,
+          "note": "стр.1 PDF-сертификата (prebuild рендерит page 1)"
+        },
+        {
+          "kind": "photo",
+          "asset_key": "cert_azav_p2",
+          "source": null,
+          "caption": null,
+          "required": false,
+          "note": "стр.2 того же PDF-сертификата — заливается вручную. Уходит одним альбомом со стр.1."
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_05",
+      "title": "Сообщение 5 — День 7 (+ видео Олены follow-up)",
+      "day_offset": 6,
+      "slot": "morning",
+      "anchor": "authorization",
+      "text_html": "Самый частый страх перед термином: «у меня всего A2 или B1, мне точно откажут».\n\nНа самом деле — нет. Бератер смотрит не только на сертификат, а на то, <b>как</b> вы отвечаете.\n\nВот истории наших студентов, которые получили гутшайн, при этом их немецкий ниже B2.\n\n<b>Анна, медсестра из Алматы.</b> Без экономического образования, A2.\nРаботала в Pflege. На термине честно объяснила: высшее образование есть, мотивация уйти в офис — есть. Гутшайн одобрен. Сейчас Buchhalterin в стоматологии Кёльна, <b>€4 000 брутто</b>.\n\n<b>Светлана, 28 лет.</b> Юрист по образованию, без бухгалтерского опыта, B1.\nБератеру сказала прямо: высшее образование есть, цифр не боюсь, готова учиться 8 месяцев. Гутшайн одобрен. Сейчас работает Buchhalterin в Steuerkanzlei Hamburg, <b>€3 500 брутто</b>.\n\nЧто общего? Они <b>уверенно</b> и спокойно ответили на три главных вопроса: кто я, зачем мне нужно учиться, что я буду делать после обучения. Эти вопросы вы и тренируете в боте.",
+      "buttons": [
+        { "label": "Пройти ролевку — уровень 1", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [],
+      "followups": [
+        {
+          "text_html": "Олена тоже пришла к бератеру с уровнем языка A2 — и убедила его выдать гутшайн.\n\nБератер не очень верил, что можно успешно закончить курсы. Но Олена его убедила — карьерный стаж сыграл свою роль. Менеджер Максим был на связи всё время. <b>Уже 2 месяца учится в SternMeister.</b>",
+          "media": [
+            {
+              "kind": "video",
+              "asset_key": "olena_a2",
+              "source": "https://drive.google.com/file/d/1zw8Ll-1k2v2q3pUP4cABfHI-kcD_Ec-t/view?usp=sharing",
+              "caption": null,
+              "required": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "msg_06",
+      "title": "Сообщение 6 — День 8",
+      "day_offset": 7,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "Наши студенты рассказали, как происходил процесс получения гутшайна и насколько они довольны обучением.\n\nСкоро и вы сможете приступить — до собеседования с бератером остаётся всё меньше дней. Прочитайте истории и советы наших учениц и переходите к ролевкам 👇",
+      "buttons": [
+        { "label": "Пройти ролевку", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "students_stories_1",
+          "source": "https://drive.google.com/file/d/1Q7C1gXPhiISyrpclnPsOG0_shO7te6fp/view?usp=sharing",
+          "caption": null,
+          "required": false
+        },
+        {
+          "kind": "photo",
+          "asset_key": "students_stories_2",
+          "source": "https://drive.google.com/file/d/158bXetCnoaVnMgy4iOFicVeMP2efoOTZ/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_07",
+      "title": "Сообщение 7 — День 10, утром (коллаж преподавателей)",
+      "day_offset": 9,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "В SternMeister 50 преподавателей, 30 из них преподают бухгалтерию. У 70% преподавателей — 10+ лет практики, и многие из них эксперты по DATEV.\n\nСреди них:\n\n— Светлана Кеер: 20+ лет практики, эксперт по DATEV, Lexware, Umsatzsteuer\n— Алла Борхула: 18 лет практики, эксперт по DATEV\n— Станислав Янцен: 5+ лет в бухгалтерии, 10+ в финансах, эксперт по DATEV\n\nЕщё 86 часов курса — это профессиональный немецкий специально для бухгалтеров. Все термины, фразы и документы станут для вас знакомыми.\n\nА ещё всё время рядом с вами — ваш карьерный эксперт. Он помогает успешно пройти интервью в центре занятости и поддержит вас на термине, если что-то пойдёт не так.\n\nПреподаватели очень ждут вас на занятиях — но сначала нужно потренировать ролевки, чтобы пройти собеседование с бератером и получить гутшайн.",
+      "buttons": [
+        { "label": "Пройти ролевку", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "teachers_collage",
+          "source": "https://drive.google.com/file/d/1xblUojLUW1UZDQWi1H2opWoHa4SlXGNF/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_08",
+      "title": "Сообщение 8 — День 10, после обеда (фрагмент урока)",
+      "day_offset": 9,
+      "slot": "afternoon",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "<b>Показываем фрагмент реального урока в SternMeister.</b>\n\nНа занятии студенты разобрали, как бухгалтер работает в DATEV. Преподаватель Татьяна шаг за шагом объяснила весь цикл на примере реальной фирмы:\n\n— открытие года и начальные остатки\n— проводки по входящим и исходящим счетам\n— расчёт НДС\n— сведение баланса в годовом отчёте\n\nПосмотрите сами, насколько доступно объяснена работа в программе и как преподаватель спокойно и подробно отвечает на каждый вопрос студентов!\n\n👉 Совсем скоро эти знания будут доступны и вам. Но сначала — собеседование с бератером и получение финансирования. Мы прогоняем ролевки, чтобы вы зашли на встречу спокойно и получили гутшайн с первого раза.\n\n<b>Цель уже близко!</b>",
+      "buttons": [
+        { "label": "Смотреть запись урока", "type": "url", "url": "https://drive.google.com/file/d/1yVTiTFkpXe4L7yOXEk5bp9rv65O-N2b8/view?usp=sharing", "on_media": true },
+        { "label": "Сегодняшняя ролевка", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "lesson_screenshot",
+          "source": null,
+          "caption": null,
+          "required": false,
+          "note": "fallback по ТЗ: видео урока 292 МБ не влезает в Telegram → скриншот первого кадра урока + url-кнопка «Смотреть запись урока». source=null: скриншот залит вручную через scripts/upload_local_media.py (не с Drive)."
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_09",
+      "title": "Сообщение 9 — День 11 (отзывы студентов)",
+      "day_offset": 10,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "<b>Что говорят сами студенты о процессе обучения:</b>\n\n<blockquote><i>Такой подачи материала я не встречала даже в институте. Преподаватели в вашей школе — это клад.</i> — Ольга С.</blockquote>\n\n<blockquote><i>Die Dozenten und Kursleiter hier sind sehr hilfsbereit und qualifiziert. Ich arbeite jetzt sicher mit Excel und anderen wichtigen Programmen, die in Deutschland verwendet werden, wie DATEV. Der Unterricht ist sehr praxisorientiert und verständlich aufgebaut.</i> — Malika D.</blockquote>\n\nЕщё пара отзывов — на скриншоте выше!\n\nСкоро вы сами окажетесь на занятиях по бухгалтерии, как только успешно пройдёте термин. К нему мы и готовимся.",
+      "buttons": [
+        { "label": "Пройти ролевку", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "reviews_screenshot",
+          "source": "https://drive.google.com/file/d/1W6GSUZMOTWl9_PqW58AhLeXCdqN0bLSt/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_10",
+      "title": "Сообщение 10 — День 12 (вакансии)",
+      "day_offset": 11,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "Прямо сейчас на Indeed, StepStone и Xing открыто больше 50 000 вакансий для бухгалтеров.\n\nКаждой компании в Германии нужен человек, который ведёт бухгалтерию. А конкуренция здесь в разы меньше, чем в других отраслях.\n\nПосле курса в SternMeister у вас будет:\n\n— сертификат «Finanz-, Bilanz- und Lohnbuchhalter mit DATEV und Lexware» (1150 часов, признан Agentur für Arbeit)\n— практика в DATEV и Lexware\n— 86 часов профессионального немецкого для бухгалтерии\n— кейсы на реальных проектах для трудоустройства\n\nНо сначала мы с вами должны подготовиться к термину — бот в этом помогает.\n\nБератер обязательно спросит: «Wo möchten Sie nach der Weiterbildung arbeiten?»\n\nГотовы ответить?",
+      "buttons": [
+        { "label": "Перейти к тренировке", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "jobs_1",
+          "source": "https://drive.google.com/file/d/1h07M8mXDyc7Y7XlRs3MQwc3AIXuurSAf/view?usp=sharing",
+          "caption": null,
+          "required": false
+        },
+        {
+          "kind": "photo",
+          "asset_key": "jobs_2",
+          "source": "https://drive.google.com/file/d/1hBt-yQ7XVn4p2VDQOwQbrkqsytpuw2At/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_11",
+      "title": "Сообщение 11 — День 13 (зарплаты)",
+      "day_offset": 12,
+      "slot": "morning",
+      "anchor": "authorization",
+      "text_html": "Вы знаете, что вакансий много. Теперь конкретика: кем именно вы можете работать и сколько зарабатывать.\n\nЦифры из реальных кейсов наших выпускников:\n\n— Junior Buchhalter (Светлана, юрист без опыта в бухгалтерии): €3 500\n— Buchhalter в стоматологии (Анна, медсестра, перешла из Pflege): €4 000\n\nТочный заработок зависит от региона и компании. Выпускники SternMeister выходят на рынок в позиции Finanzbuchhalter — это базовая и востребованная ступень в немецкой бухгалтерии.",
+      "buttons": [
+        { "label": "Потренировать вопросы про карьерный план", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [],
+      "followups": []
+    },
+    {
+      "id": "msg_12",
+      "title": "Сообщение 12 — День 15 (письма партнёров)",
+      "day_offset": 14,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "У SternMeister есть компании-партнёры в Германии. Это не маркетинг — это реальные письма с подписями.\n\nПартнёры готовы рассмотреть успешных учеников и пригласить к себе на собеседование при наличии свободных мест, а по результатам предложить практику или работу.\n\nPolarCount — бухгалтерское бюро в Берлине. Обслуживает малый и средний бизнес в разных отраслях.\n<blockquote><i>Мы заинтересованы в сотрудничестве со SternMeister GmbH: предлагаем выпускникам, успешно завершившим обучение в Finanzbuchhaltung и DATEV, стажировку с возможностью последующего постоянного трудоустройства. Так мы хотим облегчить переход от учёбы к практике и привлечь мотивированных специалистов в нашу растущую команду.</i> — Anna Yushmanova, руководитель (Berlin, 07.11.2025)</blockquote>\n\nHANSA Buchhaltungsservice — команда опытных бухгалтеров под Бременом. Специализация: laufende Buchhaltung, Lohnbuchhaltung и Controlling.\n<blockquote><i>Выпускники SternMeister обладают качественной, ориентированной на практику подготовкой. После успешного завершения обучения мы предлагаем им стажировку с возможностью постоянного трудоустройства при наличии вакансии.</i> — Anastasija Scheidemann, владелица (Lilienthal, 28.10.2025)</blockquote>\n\nKamelie Beauty — салон красоты в центре Бремена, основан в 2021 году. Бизнес растёт и набирает специалистов по бухгалтерии.\n<blockquote><i>Знания выпускников SternMeister в Finanzbuchhaltung — включая DATEV — и их аналитические навыки делают их сильными кандидатами на позиции в Rechnungswesen и Finanzmanagement.</i> — Tetyana Schorlemmer, владелица (Bremen, 05.11.2025)</blockquote>\n\nУсловие у всех одно: успешно закончить программу.\n\nЧтобы начать программу, нужен гутшайн. Чтобы получить гутшайн, нужно пройти термин.",
+      "buttons": [
+        { "label": "Потренировать вопросы про карьеру", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "partner_1",
+          "source": "https://drive.google.com/file/d/18rl1Hj78widPgtiTCoe9aQP0FGT53pIX/view?usp=sharing",
+          "caption": null,
+          "required": false
+        },
+        {
+          "kind": "photo",
+          "asset_key": "partner_2",
+          "source": "https://drive.google.com/file/d/1meuBLz7uORUVq1KTBE5Tk16jE9aPBNGy/view?usp=sharing",
+          "caption": null,
+          "required": false
+        },
+        {
+          "kind": "photo",
+          "asset_key": "partner_3",
+          "source": "https://drive.google.com/file/d/1lI8oxpz_8n8q2B9yK6p1f7PRpkU74gk8/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_13",
+      "title": "Сообщение 13 — День 16 (трудоустройство + отзыв Юлии)",
+      "day_offset": 15,
+      "slot": "morning",
+      "anchor": "authorization",
+      "media_first": true,
+      "text_html": "А вот студенты, которые уже прошли этот путь. Ученики SternMeister прошли термин, и через 8 месяцев у них был сертификат, благодаря которому они устроились на работу:\n\n<b>Анна, медсестра из Алматы.</b> Год в Pflege. Сейчас Buchhalterin в стоматологии Кёльна, €4 000 брутто — на €1 500 больше, чем в Pflege.\n\n<b>Сергей.</b> Работал Buchhalter Helfer в бюро в Гамбурге, на низшей позиции без диплома. После курса и AZAV-сертификата пришёл к шефу — повышение, €4 400 брутто.\n\n<b>Анна (мама троих детей).</b> Пока дети в школе, она всё успевала на курсе. Сейчас работает Buchhalterin 4 часа в день в Steuerkanzlei Düsseldorf — €2 350 брутто за 20 часов в неделю.\n\nИ это весь рынок DACH, а не только Германия.\n\nНедавно наша выпускница Юлия написала нам сразу после собеседования в швейцарской компании — прикрепляем её сообщение!\n\nЧтобы дойти до работы, нужно сначала пройти термин. К нему и готовимся.",
+      "buttons": [
+        { "label": "Тренировать ролевку — уровень 2", "type": "roleplay", "level": "level_2" }
+      ],
+      "media": [
+        {
+          "kind": "photo",
+          "asset_key": "yulia_review",
+          "source": "https://drive.google.com/file/d/15QTDqq2Lxzi80Ea62BQUZanh7stEI2WX/view?usp=sharing",
+          "caption": null,
+          "required": false
+        }
+      ],
+      "followups": []
+    },
+    {
+      "id": "msg_14",
+      "title": "Сообщение 14 — День 20, вечер накануне термина (финал)",
+      "slot": "evening",
+      "anchor": "termin_eve",
+      "is_terminal": true,
+      "text_html": "Совсем скоро у вас термин.\n\nЗа это время бот задал вам все вопросы, которые задаст бератер. Вы слышали их голосом, отвечали на них, разбирали ошибки. На термине будет то же самое — только уже в реальности.\n\nЧто взять с собой:\n\n— паспорт или Aufenthaltstitel\n— Lebenslauf\n— Bildungsgutschein-Antrag — мотивационное письмо (финальная версия, согласованная с менеджером)\n— Angebot\n\nТри мысли, которые могут прийти прямо в моменте, — и что себе ответить:\n\n<b>«Я слишком стара / молода для этого».</b>\nУ вас есть опыт, план трудоустройства и желание учиться. У Елены (49 лет) тоже были сомнения из-за возраста, но её гутшайн одобрили.\n\n<b>«Мой немецкий слабоват, меня раскусят».</b>\nВ курсе 86 часов профессионального немецкого именно для бухгалтерии, так что язык вы подтянете прямо по ходу учёбы. Анна и Олена получили гутшайн с A2. Справитесь и вы.\n\n<b>«Меня всё равно не возьмут потом на работу».</b>\nУ SternMeister есть компании-партнёры, которые заинтересованы в выпускниках. На рынке открыто 50 000+ вакансий, а конкуренция ниже, чем в других сферах.\n\nГлавное правило: <b>не сдаваться после первого «нет»</b>. Если бератер задаёт неудобный вопрос — это не отказ, а проверка вашей реакции.\n\nТри фразы про запас:\n\n— <i>Bitte wiederholen Sie</i> — повторите, пожалуйста\n— <i>Einen Moment bitte</i> — секундочку\n— <i>Können Sie das bitte erklären?</i> — можете объяснить?\n\nВы готовились не зря. У вас всё получится.",
+      "buttons": [
+        { "label": "Последняя ролевка сегодня вечером", "type": "roleplay", "level": "level_1" }
+      ],
+      "media": [],
+      "followups": []
+    }
+  ]
+}
