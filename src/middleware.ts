@@ -33,13 +33,6 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // CloudTalk call webhook (Workflow Automations → API Request) — authed by
-  // CLOUDTALK_WEBHOOK_SECRET, no session. Exact match: the rest of
-  // /api/analytics/** stays session-protected.
-  if (pathname === "/api/analytics/webhook/cloudtalk") {
-    return NextResponse.next();
-  }
-
   // Analysis worker tick (analysis-cron compose service, ~60s loop) — also
   // CRON_SECRET-authed. Exact match on purpose: the rest of /api/analysis/**
   // stays session-protected.
