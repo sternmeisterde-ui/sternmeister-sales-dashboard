@@ -42,9 +42,16 @@ interface CloudTalkAgent {
   email?: string;
 }
 
+interface CloudTalkCallNumber {
+  id: string;
+  internal_name: string | null;
+  caller_id_e164: string | null;
+}
+
 interface CloudTalkCall {
   Cdr: CloudTalkCdr;
   Agent: CloudTalkAgent;
+  CallNumber?: CloudTalkCallNumber;
 }
 
 interface CloudTalkResponse {
@@ -212,15 +219,14 @@ export async function getCallsByDate(
       const cdr = item.Cdr;
       const agent = item.Agent;
 
-      // CloudTalk emits one CDR per missed inbound where no agent picked up.
-      // user_id null + Agent.id null ⇒ no attribution possible. Logged but
-      // not emitted (we'd produce a row that the dashboard can't show
-      // anywhere because per-master breakdown groups by manager NAME).
+      // No operator on the CDR (user_id + Agent.id null) = queue ring / missed
+      // inbound nobody answered. We KEEP these now (was: skipped): CloudTalk's
+      // group report counts inbound by the NUMBER (incl. missed), so we attribute
+      // them by `lineName` instead of by agent. They carry agentId=null and are
+      // dropped from per-agent metrics downstream but counted in inbound-by-line.
       const agentId = cdr.user_id ?? agent.id ?? null;
-      if (!agentId) {
-        skippedNoAgent++;
-        continue;
-      }
+      const noAgent = !agentId;
+      if (noAgent) skippedNoAgent++;
 
       const direction: TelephonyDirection =
         cdr.type === "incoming"
@@ -238,7 +244,7 @@ export async function getCallsByDate(
         source: "cloudtalk",
         externalId: `ct:${cdr.id}`,
         sessionId: cdr.id,
-        agentId: String(agentId),
+        agentId: agentId ? String(agentId) : null,
         agentName: cleanAgentName(agent.fullname),
         type: direction,
         phone: cdr.public_external ?? "",
@@ -247,6 +253,8 @@ export async function getCallsByDate(
         durationSec: billsec,
         talkDurationSec: talk,
         waitSec: wait,
+        lineName: item.CallNumber?.internal_name ?? null,
+        noAgent,
         status: classifyStatus(cdr),
         finishReason: cdr.is_voicemail ? "voicemail" : "",
         recordingUrl: cdr.recorded && cdr.recording_link ? cdr.recording_link : null,
@@ -259,7 +267,7 @@ export async function getCallsByDate(
 
   if (skippedNoAgent > 0) {
     console.log(
-      `[CloudTalk] skipped ${skippedNoAgent} calls without agent attribution (queue rings, no agent picked up)`,
+      `[CloudTalk] kept ${skippedNoAgent} no-agent calls (queue rings / missed inbound) — attributed by line_name`,
     );
   }
 

@@ -38,6 +38,7 @@ import {
   getAnalyticsSlaFirstCallMinutes,
   getAnalyticsSlaFirstCallMinutesByManager,
   getAnalyticsLostCalls,
+  getAnalyticsInboundByLine,
   type DailyCallBucket,
 } from "@/lib/daily/analytics-calls";
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
@@ -497,7 +498,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager, inboundByLine] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -576,6 +577,14 @@ async function buildDashboardResponse(
             return new Map<string, number>();
           })
         : Promise.resolve(new Map<string, number>()),
+      // B2B inbound counted BY NUMBER (line_name LIKE 'KOM%'), incl. missed
+      // no-agent calls — matches CloudTalk's group inbound. Drives «Всего».
+      department === "b2b"
+        ? getAnalyticsInboundByLine(department, from, to).catch((e) => {
+            console.error("[Dashboard] inbound-by-line failed:", e);
+            return 0;
+          })
+        : Promise.resolve(0),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -710,18 +719,28 @@ async function buildDashboardResponse(
           )
         : null;
 
+    // B2B call totals follow CloudTalk's group model: OUTBOUND by agent (already
+    // in todaySummary, now pipeline-filter-free), INBOUND by number (line_name
+    // 'KOM%', incl. missed no-agent calls). «Всего» = outbound + inbound-by-line.
+    // B2G keeps the agent-based call_in totals.
+    const isB2B = department === "b2b";
+    const effectiveIncoming = isB2B ? inboundByLine : todaySummary.incomingTotal;
+    const effectiveCallsTotal = isB2B
+      ? todaySummary.outgoingTotal + inboundByLine
+      : todaySummary.callsTotal;
+
     return {
       date: dateStr,
       period,
       department,
       todayMetrics: {
-        callsTotal: todaySummary.callsTotal,
+        callsTotal: effectiveCallsTotal,
         callsConnected: todaySummary.callsConnected,
         dialPercent: todaySummary.dialPercent,
         totalMinutes: todaySummary.totalMinutes,
         avgDialogMinutes: todaySummary.avgDialogMinutes,
         missedIncoming: todaySummary.missedIncoming,
-        incomingTotal: todaySummary.incomingTotal,
+        incomingTotal: effectiveIncoming,
         outgoingTotal: todaySummary.outgoingTotal,
         // Outgoing answered + answer-wait + first-call SLA drive the B2B
         // 7-tile layout. outgoingConnected sums fine across managers;

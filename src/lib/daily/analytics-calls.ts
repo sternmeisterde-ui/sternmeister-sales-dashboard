@@ -75,6 +75,17 @@ async function fetchCallMetricsByMaster(
     sql`, `,
   );
 
+  // Department scoping. B2B (Коммерсы) is attributed purely by AGENT — same as
+  // CloudTalk's group report counts outbound — so we DROP the pipeline filter:
+  // a B2B master's call belongs to B2B regardless of the lead's pipeline (no
+  // master is in two departments). The old pipeline filter dropped a master's
+  // calls to leads sitting in a B2G pipeline, undercounting «Исходящие».
+  // B2G keeps the pipeline filter (its number-based attribution isn't wired).
+  const deptCond =
+    dept === "b2b"
+      ? sql`TRUE`
+      : sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`;
+
   // Call counting aligned with src/app/api/analytics/looker/data/route.ts on
   // the "which rows count as calls" axis (communication_type LIKE 'call%').
   //
@@ -102,12 +113,7 @@ async function fetchCallMetricsByMaster(
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        -- pipeline_id IS NULL covers calls made before a lead enters a pipeline
-        -- (или после удаления лида). Такие коммуникации всё равно принадлежат
-        -- менеджеру — без NULL теряли ~60% звонков линии 2. Проверено 2026-04-24:
-        -- ни один мастер-менеджер не числится одновременно в b2g и b2b, поэтому
-        -- "double count" между департаментами невозможен.
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND ${deptCond}
         AND manager IS NOT NULL AND manager <> ''
       ORDER BY communication_id, lead_id NULLS LAST
     )
@@ -943,6 +949,43 @@ async function fetchLostCalls(pipelineIds: number[], fromTs: number, toTs: numbe
   `);
 
   return Number(result.rows[0]?.lost ?? 0);
+}
+
+/**
+ * Inbound calls attributed to a department BY NUMBER — matching CloudTalk's
+ * group report (incoming calls belong to a group by the line dialed, including
+ * missed/queue calls nobody answered). Counts call_in rows whose CloudTalk
+ * line_name starts with the dept prefix (KOM = Коммерсы, GOS = Госники),
+ * deduped by communication_id. B2B inbound is CloudTalk-only, so this is where
+ * the missed inbound (no-agent rows) get counted that the per-agent path drops.
+ */
+const LINE_PREFIX: Record<string, string> = { b2b: "KOM", b2g: "GOS" };
+
+export async function getAnalyticsInboundByLine(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const cacheKey = `inbound-by-line:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchInboundByLine(LINE_PREFIX[dept], fromTs, toTs));
+}
+
+async function fetchInboundByLine(prefix: string, fromTs: number, toTs: number): Promise<number> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const like = `${prefix}%`;
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ n: string | number }>(sql`
+    SELECT COUNT(DISTINCT communication_id) AS n
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND communication_type = 'call_in'
+      AND line_name LIKE ${like}
+  `);
+  return Number(result.rows[0]?.n ?? 0);
 }
 
 export interface DailyCallBucket {
