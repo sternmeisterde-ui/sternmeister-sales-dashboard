@@ -13,7 +13,7 @@ import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
-type SegmentType = "call" | "crm" | "idle" | "wait";
+type SegmentType = "call" | "crm" | "idle" | "wait" | "dialer";
 
 interface Segment {
   type: SegmentType;
@@ -32,9 +32,10 @@ interface DayTimeline {
   shiftEnd?: string;
   totalMinutes: number;
   segments: Segment[];
-  // `wait` is populated only by the dialer view; general leaves it undefined.
-  pct: { call: number; crm: number; idle: number; wait?: number };
-  minutes: { call: number; crm: number; idle: number; wait?: number };
+  // `wait`/`dialer` are populated only by the dialer view; general leaves them
+  // undefined. `dialer` = within-window pause; «в дайлере всего» = call+wait+dialer.
+  pct: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
+  minutes: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
 }
 
 interface ManagerTimeline {
@@ -313,8 +314,9 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           {isDialer ? (
             <>
               <LegendDot color="bg-blue-500" label="Разговор" />
-              <LegendDot color="bg-amber-500/80" label="Ожидание/дозвон" />
-              <LegendDot color="bg-rose-500" label="Простой" />
+              <LegendDot color="bg-amber-500/80" label="Дозвон" />
+              <LegendDot color="bg-sky-500/30" label="В дайлере (пауза)" />
+              <LegendDot color="bg-rose-500" label="Вне дайлера" />
             </>
           ) : (
             <>
@@ -539,29 +541,29 @@ function DialerList({
   );
 }
 
-// Side-panel for the dialer view: разговор / ожидание / простой (mirrors
-// PctSummary but with the dialer rubrics). `wait` is dialer-only.
+// Side-panel for the dialer view. Leads with «В дайлере всего» (the headline
+// metric = active dialing time = call+wait+dialer), then the breakdown
+// разговор / дозвон / пауза. `wait`/`dialer` are dialer-only.
 function DialerSummary({ day }: { day: DayTimeline }) {
   if (day.mode === "off") {
     return <span className="text-[10px] text-slate-500">—</span>;
   }
   const wait = day.minutes.wait ?? 0;
-  const waitPct = day.pct.wait ?? 0;
+  const dialerGap = day.minutes.dialer ?? 0;
+  const inDialer = day.minutes.call + wait + dialerGap;
+  const inDialerPct = day.totalMinutes > 0 ? Math.round((inDialer / day.totalMinutes) * 100) : 0;
   return (
     <div className="flex flex-col items-end font-mono tabular-nums leading-tight gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="text-blue-400">{day.pct.call}%</span>
-        <span className="text-slate-600">/</span>
-        <span className="text-amber-400">{waitPct}%</span>
-        <span className="text-slate-600">/</span>
-        <span className="tracking-idle">{day.pct.idle}%</span>
+        <span className="text-sky-300">В дайлере {fmtHm(inDialer)}</span>
+        <span className="text-slate-500">{inDialerPct}%</span>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="text-blue-400">{fmtHm(day.minutes.call)}</span>
-        <span className="text-slate-600">/</span>
-        <span className="text-amber-400">{fmtHm(wait)}</span>
-        <span className="text-slate-600">/</span>
-        <span className="tracking-idle">{fmtHm(day.minutes.idle)}</span>
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+        <span className="text-blue-400">разг {fmtHm(day.minutes.call)}</span>
+        <span className="text-slate-600">·</span>
+        <span className="text-amber-400">дозв {fmtHm(wait)}</span>
+        <span className="text-slate-600">·</span>
+        <span className="text-sky-300/80">пауза {fmtHm(dialerGap)}</span>
       </div>
     </div>
   );
@@ -587,7 +589,10 @@ function TimelineBar({ day }: { day: DayTimeline }) {
   // muted grey as scheduled-off days plus a "Нет активности" badge so the
   // distinction stays (off-day vs no-show vs partial-idle).
   const isFullyIdle =
-    day.minutes.call === 0 && day.minutes.crm === 0 && (day.minutes.wait ?? 0) === 0;
+    day.minutes.call === 0 &&
+    day.minutes.crm === 0 &&
+    (day.minutes.wait ?? 0) === 0 &&
+    (day.minutes.dialer ?? 0) === 0;
   if (isFullyIdle) {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
@@ -616,7 +621,9 @@ function TimelineBar({ day }: { day: DayTimeline }) {
                 ? "bg-emerald-500"
                 : s.type === "wait"
                   ? "bg-amber-500/80"
-                  : "bg-rose-500/70";
+                  : s.type === "dialer"
+                    ? "bg-sky-500/30"
+                    : "bg-rose-500/70";
           const text = s.label ?? "";
           return (
             <div
@@ -1150,12 +1157,13 @@ function DetailModal({
                 totalMinutes={timeline.totalMinutes}
               />
 
-              <div className="mt-4 grid grid-cols-3 gap-3">
+              <div className={`mt-4 grid gap-3 ${isDialer ? "grid-cols-4" : "grid-cols-3"}`}>
                 {isDialer ? (
                   <>
+                    <StatTile color="bg-sky-500/40" label="В дайлере" minutes={timeline.minutes.call + (timeline.minutes.wait ?? 0) + (timeline.minutes.dialer ?? 0)} pct={timeline.pct.call + (timeline.pct.wait ?? 0) + (timeline.pct.dialer ?? 0)} />
                     <StatTile color="bg-blue-500" label="Разговор" minutes={timeline.minutes.call} pct={timeline.pct.call} />
-                    <StatTile color="bg-amber-500/80" label="Ожидание/дозвон" minutes={timeline.minutes.wait ?? 0} pct={timeline.pct.wait ?? 0} />
-                    <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+                    <StatTile color="bg-amber-500/80" label="Дозвон" minutes={timeline.minutes.wait ?? 0} pct={timeline.pct.wait ?? 0} />
+                    <StatTile color="bg-rose-500/70" label="Вне дайлера" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
                   </>
                 ) : (
                   <>
@@ -1315,7 +1323,7 @@ function SegmentEventList({
   return (
     <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
       <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
-        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "wait" ? "Ожидание/дозвон" : "Простой"}
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "wait" ? "Ожидание/дозвон" : seg.type === "dialer" ? "В дайлере (между звонками)" : "Простой"}
         <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
           {segStart}–{segEnd}
         </span>
@@ -1385,6 +1393,8 @@ function EventRow({ ev }: { ev: DetailEvent }) {
           : ` · ${talkLabel}${ev.durationSec} сек`;
     }
     if (isDialerCall && waitSec! > 0) suffix += ` · дозвон ${waitSec} сек`;
+    // Ring longer than the campaign's 60s cap => couldn't be the dialer (manual).
+    if (isDialerCall && waitSec! > 60) suffix += ` · вне дайлера`;
     const phone = (ev.raw as { phone?: string } | null)?.phone;
     if (phone) suffix += ` · ${phone}`;
   }
