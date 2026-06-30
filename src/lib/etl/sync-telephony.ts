@@ -79,7 +79,7 @@ function indexByCloudtalkId(
 // call_status mirrors Kommo's encoding (4 = connected) so the existing
 // Daily-trend query — which counts connected via `call_status = 4` — sees
 // our answered legs as connected without changing its filter.
-function callToCommRow(
+export function callToCommRow(
   call: TelephonyCall,
   manager: ManagerLink | null,
   fallbackName: string,
@@ -104,7 +104,10 @@ function callToCommRow(
     leadDayStart: null,
     callStatus: call.status === "answered" ? 4 : null,
     duration: call.talkDurationSec,
-    manager: manager?.name ?? fallbackName,
+    // No-agent CDRs (queue ring / missed inbound) carry NO manager — they're
+    // attributed to the department by line_name, not by operator. Everyone else
+    // gets the matched master name (or the raw agent name as fallback).
+    manager: call.noAgent ? null : (manager?.name ?? fallbackName),
     statusId: null,
     statusName: null,
     utmSource: null,
@@ -120,6 +123,8 @@ function callToCommRow(
     // Ring/queue seconds before pickup — copied verbatim into fan-out rows by
     // enrich-telephony-leads so the per-CDR value is consistent across copies.
     waitSeconds: call.waitSec ?? null,
+    // CloudTalk line name (KOM…/GOS…) — department-by-number attribution.
+    lineName: call.lineName ?? null,
   };
 }
 
@@ -198,7 +203,12 @@ export async function syncTelephony(
   }
 
   for (const call of ctCalls) {
-    if (!call.agentId) continue;
+    // No-agent CDR (queue ring / missed inbound) — keep it, attributed to the
+    // department by line_name (manager stays NULL via callToCommRow).
+    if (call.noAgent || !call.agentId) {
+      rows.push(callToCommRow(call, null, ""));
+      continue;
+    }
     const manager = ctIndex.get(call.agentId) ?? null;
     if (!manager) {
       const key = `ct:${call.agentId}`;

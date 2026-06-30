@@ -336,6 +336,8 @@ export async function getCallsByDate(
       durationSec: total,
       talkDurationSec: talk,
       waitSec: wait,
+      lineName: null,   // CallGear has no CallNumber.internal_name equivalent
+      noAgent: false,   // CallGear legs always have an employee_id (filtered above)
       status: classifyStatus(leg, sessionDir),
       finishReason: leg.finish_reason ?? "",
       recordingUrl,

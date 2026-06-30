@@ -51,6 +51,16 @@ export type TelephonyCall = {
   // Drives the "Ожидание (сек)" KPI tile on the B2B dashboard.
   waitSec: number;
 
+  // CloudTalk CallNumber.internal_name — the human name of the company line
+  // used (e.g. "KOM mobile 2", "GOS landline 3"). Carries the department.
+  // null for CallGear (no equivalent field) and for any provider without it.
+  lineName: string | null;
+
+  // True when no operator was attached to the call (CloudTalk user_id/Agent.id
+  // null — queue ring / missed inbound nobody answered). These are dropped from
+  // per-agent metrics but counted in inbound-by-line (CloudTalk's group model).
+  noAgent: boolean;
+
   status: TelephonyStatus;
   finishReason: string;   // raw provider reason (debug)
 

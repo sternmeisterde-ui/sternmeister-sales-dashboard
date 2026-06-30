@@ -157,6 +157,11 @@ export const communications = analyticsSchema.table(
     // CloudTalk: точное `waiting_time`. CallGear: приближение total−talk.
     // NULL на Kommo-строках и сообщениях. Added in 0026.
     waitSeconds: integer("wait_seconds"),
+    // Имя номера CloudTalk (CallNumber.internal_name, напр. «KOM mobile 2»).
+    // Несёт отдел: KOM = Коммерсы, GOS = Госники. Дашборд считает входящие
+    // B2B по line_name LIKE 'KOM%' (как CloudTalk — по номеру, с непринятыми).
+    // NULL на CallGear/Kommo-строках. Added in 0028.
+    lineName: text("line_name"),
   },
   (t) => [
     index().on(t.leadId),
