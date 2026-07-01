@@ -21,7 +21,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  getBeraterPipelineIds,
+  getTerminBeraterReviewStatusIds,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 const HARD_CAP = 500;
 
@@ -39,7 +48,7 @@ interface RawRow {
   total_count: string | number;
 }
 
-function dcLegSelect(rangeMatch: SQL): SQL {
+function dcLegSelect(rangeMatch: SQL, pipelineList: SQL): SQL {
   return sql`
     SELECT
       lead_id,
@@ -53,14 +62,14 @@ function dcLegSelect(rangeMatch: SQL): SQL {
       (termin_date AT TIME ZONE 'UTC')::timestamptz AS slot_iso,
       DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::text AS slot_date
     FROM analytics.leads_cohort
-    WHERE pipeline_id = ${B2G_PIPELINES.BERATER}
+    WHERE pipeline_id IN (${pipelineList})
       AND termin_date IS NOT NULL
       AND aa_termin_date IS NULL
       AND ${rangeMatch}
   `;
 }
 
-function aaLegSelect(rangeMatch: SQL): SQL {
+function aaLegSelect(rangeMatch: SQL, pipelineList: SQL, reviewList: SQL): SQL {
   return sql`
     SELECT
       lead_id,
@@ -74,8 +83,8 @@ function aaLegSelect(rangeMatch: SQL): SQL {
       (aa_termin_date AT TIME ZONE 'UTC')::timestamptz AS slot_iso,
       DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::text AS slot_date
     FROM analytics.leads_cohort
-    WHERE pipeline_id = ${B2G_PIPELINES.BERATER}
-      AND status_id <> ${BERATER_STATUSES.BERATER_REVIEW}
+    WHERE pipeline_id IN (${pipelineList})
+      AND status_id NOT IN (${reviewList})
       AND aa_termin_date IS NOT NULL
       AND ${rangeMatch}
   `;
@@ -133,10 +142,13 @@ export async function GET(req: NextRequest) {
     : sql`DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') BETWEEN ${dateFromParam}::date AND ${dateToParam}::date`;
 
   let body: SQL;
-  if (leg === "dc") body = dcLegSelect(dcRange);
-  else if (leg === "aa") body = aaLegSelect(aaRange);
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const pipelineList = sql.join(getBeraterPipelineIds(vertical).map((id) => sql`${id}`), sql`, `);
+  const reviewList = sql.join(getTerminBeraterReviewStatusIds(vertical).map((id) => sql`${id}`), sql`, `);
+  if (leg === "dc") body = dcLegSelect(dcRange, pipelineList);
+  else if (leg === "aa") body = aaLegSelect(aaRange, pipelineList, reviewList);
   else
-    body = sql`(${dcLegSelect(dcRange)}) UNION ALL (${aaLegSelect(aaRange)})`;
+    body = sql`(${dcLegSelect(dcRange, pipelineList)}) UNION ALL (${aaLegSelect(aaRange, pipelineList, reviewList)})`;
 
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }

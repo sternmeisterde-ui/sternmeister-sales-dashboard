@@ -594,6 +594,15 @@ export function getTerminCancelledStatusIds(vertical?: Vertical): number[] {
   return buh; // buh / undefined (legacy)
 }
 
+/** status_id(ы) «На рассмотрении бератера» по вертикали (Термин: AA-исключение). */
+export function getTerminBeraterReviewStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.BERATER_REVIEW];
+  const med = [MED_BERATER_STATUSES.BERATER_REVIEW];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
+
 /**
  * Get pipeline IDs by department + (optional) vertical.
  *

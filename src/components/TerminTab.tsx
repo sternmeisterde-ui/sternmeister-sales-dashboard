@@ -238,7 +238,7 @@ export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "al
       />
       <QualLeadsDocsSection />
       <FunnelTimingSection />
-      <UpcomingTerminsSection />
+      <UpcomingTerminsSection vertical={vertical} />
       <PreTerminSection />
     </div>
   );
@@ -1730,7 +1730,8 @@ interface UpcomingRow {
   totalCount: number;
 }
 
-function UpcomingTerminsSection() {
+function UpcomingTerminsSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [days, setDays] = useState<number>(30);
   // Произвольный диапазон с календаря. Если задан (start+end) — переопределяет
   // пресеты days и запрашивается через from/to.
@@ -1765,10 +1766,11 @@ function UpcomingTerminsSection() {
       if (!hasDataRef.current) setLoading(true);
       setError(null);
       try {
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const qs =
-          customRange?.start && customRange?.end
+          (customRange?.start && customRange?.end
             ? `from=${formatDate(customRange.start)}&to=${formatDate(customRange.end)}`
-            : `days=${days}`;
+            : `days=${days}`) + vqs;
         const res = await fetch(`/api/dashboard/termins-upcoming?${qs}`, {
           signal,
           // Polling-driven refreshes must hit the server. Without no-store the
@@ -1791,7 +1793,7 @@ function UpcomingTerminsSection() {
         setLoading(false);
       }
     },
-    [days, customRange],
+    [days, customRange, vertical],
   );
 
   useEffect(() => {
@@ -1914,7 +1916,7 @@ function UpcomingTerminsSection() {
                   const dateTo = data[data.length - 1].date;
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
-                    params: { dateFrom, dateTo, leg: "dc" },
+                    params: { dateFrom, dateTo, leg: "dc", ...drillVertical },
                     title: `Термин ДЦ · ${periodLabel}`,
                     subtitle: `${stats.totalDc} лидов · по времени слота`,
                   });
@@ -1933,7 +1935,7 @@ function UpcomingTerminsSection() {
                   const dateTo = data[data.length - 1].date;
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
-                    params: { dateFrom, dateTo, leg: "aa" },
+                    params: { dateFrom, dateTo, leg: "aa", ...drillVertical },
                     title: `Термин АА · ${periodLabel}`,
                     subtitle: `${stats.totalAa} лидов · по времени слота`,
                   });
@@ -1960,6 +1962,7 @@ function UpcomingTerminsSection() {
                       dateFrom: peakDate,
                       dateTo: peakDate,
                       leg: "both",
+                      ...drillVertical,
                     },
                     title: `Пиковый день · ${formatRu(new Date(peakDate))}`,
                     subtitle: `${stats.peakDay!.n} слотов (ДЦ + АА) · по времени`,
@@ -2052,7 +2055,7 @@ function UpcomingTerminsSection() {
                     if (!row || row.dcCount === 0) return;
                     setDrill({
                       url: "/api/dashboard/termins-upcoming/leads",
-                      params: { date: row.date, leg: "dc" },
+                      params: { date: row.date, leg: "dc", ...drillVertical },
                       title: `${formatBucketLabel(row.date, "day")} · Термин ДЦ`,
                       subtitle: `${row.dcCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
                     });
@@ -2070,7 +2073,7 @@ function UpcomingTerminsSection() {
                     if (!row || row.aaCount === 0) return;
                     setDrill({
                       url: "/api/dashboard/termins-upcoming/leads",
-                      params: { date: row.date, leg: "aa" },
+                      params: { date: row.date, leg: "aa", ...drillVertical },
                       title: `${formatBucketLabel(row.date, "day")} · Термин АА`,
                       subtitle: `${row.aaCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
                     });
