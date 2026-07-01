@@ -253,7 +253,7 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
 
 /** Вкладки, поддерживающие вертикаль Бух/Мед/Все (тоггл в шапке общий для всех).
  *  Расширять по мере подключения вкладок к мед-направлению. */
-const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics"]);
+const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker"]);
 
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -1159,7 +1159,12 @@ export default function Dashboard() {
           </div>
         )}
 
-        {activeTab === "looker" && <LookerTab department={activeDepartment} />}
+        {activeTab === "looker" && (
+          <LookerTab
+            department={activeDepartment}
+            vertical={activeDepartment === "b2g" ? activeVertical : undefined}
+          />
+        )}
 
         {/* Render-гейт по отделу — детерминированно, не зависит от порядка эффектов:
             funnel/termins (только Бух Гос) никогда не рендерятся под Коммерсами,

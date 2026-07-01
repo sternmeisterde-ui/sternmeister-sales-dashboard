@@ -16,7 +16,8 @@ import {
 const DEPT_CONFIG = {
   b2g: {
     label: "Госники",
-    pipelines: ["Бух Гос", "Бух Бератер"] as const,
+    // Все воронки b2g (Бух + Мед); dropdown сужается по вертикали (visiblePipelines).
+    pipelines: ["Бух Гос", "Бух Бератер", "Мед Гос", "Мед Бератер"] as const,
     statuses: [
       "Термин ДЦ состоялся",
       "Термин ДЦ отменен/перенесен",
@@ -1141,10 +1142,24 @@ function ConversionsSection({ rows, loading }: { rows: ConvRow[]; loading: boole
 
 interface LookerTabProps {
   department: "b2g" | "b2b";
+  /** Вертикаль b2g из общего тоггла в шапке (buh/med/all). undefined на b2b. */
+  vertical?: "buh" | "med" | "all";
 }
 
-export default function LookerTab({ department }: LookerTabProps) {
+/** Имена мед-воронок b2g (совпадают с leads_cohort.pipeline / роутом Looker). */
+const B2G_MED_PIPELINE_NAMES = ["Мед Гос", "Мед Бератер"];
+
+export default function LookerTab({ department, vertical }: LookerTabProps) {
   const config = DEPT_CONFIG[department];
+
+  // Воронки, видимые в dropdown с учётом вертикали (b2g). Мед-воронки в наборе
+  // DEPT_CONFIG.b2g.pipelines; тоггл сужает до нужной вертикали.
+  const visiblePipelines = useMemo<readonly string[]>(() => {
+    if (department !== "b2g") return config.pipelines;
+    if (vertical === "buh") return config.pipelines.filter((p) => !B2G_MED_PIPELINE_NAMES.includes(p));
+    if (vertical === "med") return config.pipelines.filter((p) => B2G_MED_PIPELINE_NAMES.includes(p));
+    return config.pipelines; // all / undefined
+  }, [department, vertical, config.pipelines]);
 
   const [view, setView] = useState<View>("all_calls");
   const [dateRange, setDateRange] = useState<DateRange>(makeDefaultRange);
@@ -1203,6 +1218,15 @@ export default function LookerTab({ department }: LookerTabProps) {
     setCohortDetailError(null);
   }, [department]);
 
+  // При смене вертикали (тоггл в шапке) выбранная воронка может выпасть из
+  // видимого набора (напр. была «Мед Гос», переключили на Бух) → сбрасываем.
+  useEffect(() => {
+    if (pipeline && !visiblePipelines.includes(pipeline)) {
+      setPipeline("");
+      setTltPage(0);
+    }
+  }, [visiblePipelines, pipeline]);
+
   // Collapse the drill-down whenever the underlying data context shifts —
   // a stale lead list under a different date/filter set would mislead the
   // user into clicking on leads that aren't in the new period at all.
@@ -1215,6 +1239,7 @@ export default function LookerTab({ department }: LookerTabProps) {
   // Fetch available date bounds for the calendar
   useEffect(() => {
     const params = new URLSearchParams({ dept: department, view: "meta" });
+    if (department === "b2g" && vertical) params.set("vertical", vertical);
     fetch(`/api/analytics/looker/data?${params}`)
       .then((r) => r.json())
       .then((json: { minDate?: string | null; maxDate?: string | null }) => {
@@ -1226,7 +1251,7 @@ export default function LookerTab({ department }: LookerTabProps) {
         setMaxDate(json.maxDate ? berlinCivilDate(json.maxDate) : null);
       })
       .catch(() => {/* non-critical */});
-  }, [department]);
+  }, [department, vertical]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -1253,6 +1278,7 @@ export default function LookerTab({ department }: LookerTabProps) {
 
     const buildBaseParams = () => {
       const params = new URLSearchParams({ dept: department });
+      if (department === "b2g" && vertical) params.set("vertical", vertical);
       if (dateRange.start) params.set("from", toISODate(dateRange.start));
       if (dateRange.end) params.set("to", toISODate(dateRange.end));
       if (manager) params.set("manager", manager);
@@ -1335,7 +1361,7 @@ export default function LookerTab({ department }: LookerTabProps) {
 
     fetchData();
     return () => controller.abort();
-  }, [department, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, tltPage, slice1, slice2, slice3, config.hasPipeline]);
+  }, [department, vertical, view, dateRange, manager, selectedStatuses, category, slaRange, pipeline, tltPage, slice1, slice2, slice3, config.hasPipeline]);
 
   // Fetch per-lead detail when a Cohorts row is expanded. Honours the same
   // active filters (date / status / category / sla / pipeline) so the
@@ -1350,6 +1376,7 @@ export default function LookerTab({ department }: LookerTabProps) {
     detailAbortRef.current = controller;
 
     const params = new URLSearchParams({ dept: department, view: "cohorts_detail", manager: expandedManager });
+    if (department === "b2g" && vertical) params.set("vertical", vertical);
     if (dateRange.start) params.set("from", toISODate(dateRange.start));
     if (dateRange.end) params.set("to", toISODate(dateRange.end));
     if (selectedStatuses.length > 0) params.set("statuses", selectedStatuses.join(","));
@@ -1379,7 +1406,7 @@ export default function LookerTab({ department }: LookerTabProps) {
       });
 
     return () => controller.abort();
-  }, [view, expandedManager, department, dateRange, selectedStatuses, category, slaRange, pipeline, config.hasPipeline]);
+  }, [view, expandedManager, department, vertical, dateRange, selectedStatuses, category, slaRange, pipeline, config.hasPipeline]);
 
   const handleToggleManager = useCallback((m: string) => {
     setExpandedManager((prev) => (prev === m ? null : m));
@@ -1513,7 +1540,7 @@ export default function LookerTab({ department }: LookerTabProps) {
               <DropdownItem active={pipeline === ""} onClick={() => { setPipeline(""); setTltPage(0); setPipelineOpen(false); }}>
                 Все воронки
               </DropdownItem>
-              {config.pipelines.map((p) => (
+              {visiblePipelines.map((p) => (
                 <DropdownItem key={p} active={pipeline === p} onClick={() => { setPipeline(p); setTltPage(0); setPipelineOpen(false); }}>
                   {p}
                 </DropdownItem>
