@@ -12,7 +12,18 @@
 
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
-import { getPipelineIds, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeline-config";
+
+/**
+ * Включать ли строки с `pipeline_id IS NULL` (телефонные звонки, которые
+ * enrichment ещё не привязал к лиду). В режимах Бух/Мед вертикаль неизвестна →
+ * такие строки НЕЛЬЗЯ отнести к вертикали, поэтому исключаем. В legacy (vertical
+ * не задан) и в «Все» — включаем, чтобы сохранить полный агрегат b2g (ловушка #2,
+ * spec 21 §4). NB: для b2b pipeline-фильтр обычно не применяется вовсе.
+ */
+function includeNullPipeline(vertical?: Vertical): boolean {
+  return vertical !== "buh" && vertical !== "med";
+}
 import type { UserCallMetrics } from "@/lib/kommo/metrics";
 import { cached } from "@/lib/kommo/cache";
 
@@ -51,13 +62,15 @@ export async function getAnalyticsCallMetricsByMaster(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<Map<string, UserCallMetrics>> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return new Map();
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `call-metrics:${dept}:${fromTs}:${toTs}:${managerIds}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchCallMetricsByMaster(managers, dept, pipelineIds, fromTs, toTs));
+  const cacheKey = `call-metrics:${dept}:${vertical ?? "legacy"}:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () =>
+    fetchCallMetricsByMaster(managers, dept, pipelineIds, fromTs, toTs, includeNullPipeline(vertical)));
 }
 
 async function fetchCallMetricsByMaster(
@@ -66,6 +79,7 @@ async function fetchCallMetricsByMaster(
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
+  includeNull: boolean,
 ): Promise<Map<string, UserCallMetrics>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
@@ -84,7 +98,9 @@ async function fetchCallMetricsByMaster(
   const deptCond =
     dept === "b2b"
       ? sql`TRUE`
-      : sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`;
+      : includeNull
+        ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+        : sql`pipeline_id IN (${pipelineList})`;
 
   // Call counting aligned with src/app/api/analytics/looker/data/route.ts on
   // the "which rows count as calls" axis (communication_type LIKE 'call%').
@@ -1006,9 +1022,10 @@ export async function getAnalyticsDailyTrend(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<DailyCallBucket[]> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return [];
 
   const fromDate = new Date(fromTs * 1000);
@@ -1018,6 +1035,10 @@ export async function getAnalyticsDailyTrend(
     pipelineIds.map((id) => sql`${id}`),
     sql`, `,
   );
+  // Ловушка #2: в Бух/Мед NULL-строки (телефон без привязки) исключаем.
+  const pipelineCond = includeNullPipeline(vertical)
+    ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+    : sql`pipeline_id IN (${pipelineList})`;
 
   // Dept-wide trend → one count per CDR per day. DISTINCT ON collapses
   // Pattern-A fan-out (telephony rows linked to multiple leads share a comm_id).
@@ -1040,8 +1061,8 @@ export async function getAnalyticsDailyTrend(
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
         -- pipeline_id IS NULL covers telephony-sourced rows that enrichment
-        -- couldn't resolve to a lead.
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        -- couldn't resolve to a lead (включаются только в legacy/«Все»).
+        AND ${pipelineCond}
       ORDER BY communication_id, lead_id NULLS LAST
     )
     SELECT
@@ -1109,9 +1130,10 @@ export async function getAnalyticsDailyTrendByLine(
   fromTs: number,
   toTs: number,
   managersByLine: { line1: string[]; line2: string[]; line3: string[] },
+  vertical?: Vertical,
 ): Promise<{ line1: DailyCallBucket[]; line2: DailyCallBucket[]; line3: DailyCallBucket[] }> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   const empty = padDailyTrend([], fromTs, toTs);
   if (pipelineIds.length === 0) {
     return { line1: empty, line2: empty, line3: empty };
@@ -1129,6 +1151,9 @@ export async function getAnalyticsDailyTrendByLine(
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const pipelineCond = includeNullPipeline(vertical)
+    ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+    : sql`pipeline_id IN (${pipelineList})`;
   const nameList = sql.join(allNames.map((n) => sql`${n}`), sql`, `);
   const line1List = managersByLine.line1.length > 0
     ? sql.join(managersByLine.line1.map((n) => sql`${n}`), sql`, `)
@@ -1162,7 +1187,7 @@ export async function getAnalyticsDailyTrendByLine(
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND ${pipelineCond}
         AND manager IN (${nameList})
       ORDER BY communication_id, lead_id NULLS LAST
     )

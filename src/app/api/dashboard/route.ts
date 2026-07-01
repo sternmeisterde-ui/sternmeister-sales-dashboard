@@ -22,6 +22,8 @@ import { getManagersWithKommo } from "@/lib/db/queries-daily";
 import {
   getPipelineIds,
   getActiveStatusIds,
+  parseVertical,
+  type Vertical,
   B2G_PIPELINES,
   B2B_PIPELINES,
   COMMERCIAL_STATUSES,
@@ -249,21 +251,34 @@ const BERATER_LINE_3_STATUS_IDS = new Set<number>([
 function buildPipelineBreakdown(
   leads: KommoLead[],
   department: string,
+  vertical?: Vertical,
 ): PipelineStats[] {
   // Department-scoped name maps. Cross-dept labels are NEVER visible from the
   // other tab — even if a lead with a foreign pipeline_id somehow slipped past
   // the inArray filter, it would hit the `|| "Pipeline X"` fallback below
   // instead of rendering the other department's funnel name.
+  //
+  // Для b2g набор плиток зависит от вертикали: Бух → Бух Гос/Бератер, Мед →
+  // Мед Гос/Мед Бератер, Все — обе пары. (spec 21)
+  const b2gBuhNames = {
+    [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
+    [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
+  };
+  const b2gMedNames = {
+    [B2G_PIPELINES.MEDICAL_GOV]: "Мед Гос (квалификатор)",
+    [B2G_PIPELINES.MED_BERATER]: "Мед Бератер (2-3 линия)",
+  };
   const pipelineNames: Record<number, string> =
     department === "b2b"
       ? {
           [B2B_PIPELINES.COMMERCIAL]: "Бух Комм (Бух 1 + Бух 2)",
           [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
         }
-      : {
-          [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
-          [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
-        };
+      : vertical === "buh"
+        ? b2gBuhNames
+        : vertical === "med"
+          ? b2gMedNames
+          : { ...b2gBuhNames, ...b2gMedNames }; // 'all' / legacy
 
   // Pipeline status names (synced 2026-04-22 from Kommo API)
   const statusNames: Record<number, string> = {
@@ -324,6 +339,29 @@ function buildPipelineBreakdown(
     101858271: "Счёт выставлен",
     101858275: "Предоплата получена",
     101858279: "Рассрочка",
+    // Мед Гос (pipeline 13209991)
+    101858059: "Новый лид",
+    101858063: "Взято в работу",
+    101858423: "Недозвон",
+    101858427: "Контакт установлен",
+    108064559: "Принимает решение",
+    101858431: "Консультация проведена",
+    101858435: "Отложенный старт",
+    // Мед Бератер (pipeline 14001515) — задвоенные Kommo-стадии помечены
+    108064611: "Принято от 1й линии",
+    108064615: "Доведение",
+    108064619: "Консультация перед термином ДЦ",
+    108066243: "Конс. перед ДЦ проведена",
+    108066251: "Термин ДЦ состоялся",
+    108066259: "Термин ДЦ состоялся (дубль)",
+    108066247: "Термин ДЦ отмен./перенес.",
+    108066255: "Термин ДЦ отмен./перенес. (дубль)",
+    108066267: "Консультация перед термином АА",
+    108066271: "Конс. перед АА проведена",
+    108066263: "Термин АА отмен./перенес.",
+    108066275: "На рассмотрении бератера",
+    108066279: "Отложенный старт",
+    108066283: "Апелляция",
   };
 
   // Only render cards for pipelines with a registered label in the active
@@ -419,6 +457,10 @@ export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const department = url.searchParams.get("department") || "b2g";
+    // Вертикаль Бух/Мед/Все — осмысленна только для b2g. Для b2b передаём
+    // undefined → хелперы идут по legacy-пути b2b (медицина там уже слита).
+    const vertical: Vertical | undefined =
+      department === "b2g" ? parseVertical(url.searchParams.get("vertical")) : undefined;
     const period = url.searchParams.get("period") || "day";
     // Default "today" is Berlin-local, not UTC — otherwise users in the first
     // ~2h after Berlin midnight see yesterday's date as default.
@@ -432,9 +474,9 @@ export async function GET(req: NextRequest) {
     // v12 cache-key bump (2026-04-29): all date windows now resolve in Europe/
     // Berlin (was UTC). Same dateStr means a different UTC window than v11, so
     // the old cached responses must not leak into the new boundary semantics.
-    const cacheKey = `dashboard-response:v12:${department}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    const cacheKey = `dashboard-response:v12:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
-      buildDashboardResponse(department, period, dateStr, fromStr, toStr)
+      buildDashboardResponse(department, vertical, period, dateStr, fromStr, toStr)
     );
 
     return NextResponse.json(responseData, {
@@ -452,6 +494,7 @@ export async function GET(req: NextRequest) {
 
 async function buildDashboardResponse(
   department: string,
+  vertical: Vertical | undefined,
   period: string,
   dateStr: string,
   fromStr: string | null,
@@ -476,8 +519,8 @@ async function buildDashboardResponse(
     }
     const { trendFrom, trendTo } = getTrendRange(effectivePeriod, from, to);
 
-    const pipelineIds = getPipelineIds(department);
-    const activeStatusIds = getActiveStatusIds(department);
+    const pipelineIds = getPipelineIds(department, vertical);
+    const activeStatusIds = getActiveStatusIds(department, vertical);
 
     const allManagers = await getManagersWithKommo(department);
     const managerKommoIds = allManagers
@@ -510,11 +553,11 @@ async function buildDashboardResponse(
       getTasks(false, managerKommoIds).catch(() => []),
       getAnalyticsLeads({ pipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
       getAnalyticsLeads({ pipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
-      getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch((e) => {
+      getAnalyticsCallMetricsByMaster(allManagers, department, from, to, vertical).catch((e) => {
         console.error("[Dashboard] analytics calls failed:", e);
         return new Map<string, UserCallMetrics>();
       }),
-      getAnalyticsDailyTrend(department, trendFrom, trendTo).catch((e) => {
+      getAnalyticsDailyTrend(department, trendFrom, trendTo, vertical).catch((e) => {
         console.error("[Dashboard] analytics trend failed:", e);
         return [];
       }),
@@ -523,7 +566,7 @@ async function buildDashboardResponse(
       // so the response shape is uniform — client decides whether to show
       // the line dropdown.
       department === "b2g"
-        ? getAnalyticsDailyTrendByLine(department, trendFrom, trendTo, managersByLine).catch((e) => {
+        ? getAnalyticsDailyTrendByLine(department, trendFrom, trendTo, managersByLine, vertical).catch((e) => {
             console.error("[Dashboard] per-line trend failed:", e);
             return null;
           })
@@ -681,7 +724,7 @@ async function buildDashboardResponse(
     // Pipeline breakdown reflects current active pipeline state. Kommo has no
     // historical snapshots to reconstruct what the pipeline looked like on a
     // past date, so tying this to from/to would make past-date views empty.
-    const rawPipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department);
+    const rawPipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department, vertical);
 
     // Belt-and-suspenders whitelist: drop any card whose pipelineId isn't in
     // the active department's pipeline list. Even though buildPipelineBreakdown
@@ -689,7 +732,7 @@ async function buildDashboardResponse(
     // "Бух Бератер (2я линия)") can ever appear on the B2B tab, regardless of
     // upstream bugs or cache drift. Split-cards from the BERATER line-3 split
     // use pipelineId = B2G_PIPELINES.BERATER, so they're covered too.
-    const allowedPipelineIds = new Set(getPipelineIds(department));
+    const allowedPipelineIds = new Set(getPipelineIds(department, vertical));
     const pipelineBreakdown = rawPipelineBreakdown.filter((c) =>
       allowedPipelineIds.has(c.pipelineId),
     );
@@ -733,6 +776,7 @@ async function buildDashboardResponse(
       date: dateStr,
       period,
       department,
+      vertical: vertical ?? null,
       todayMetrics: {
         callsTotal: effectiveCallsTotal,
         callsConnected: todaySummary.callsConnected,

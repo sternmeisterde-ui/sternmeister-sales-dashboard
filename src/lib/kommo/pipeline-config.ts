@@ -28,9 +28,19 @@ export const B2G_PIPELINES = {
   FIRST_LINE: 10935879,
   /** Бух Бератер — second line (berater/consultation) */
   BERATER: 12154099,
-  /** Medical Admin Gov */
+  /** Мед Гос — medical qualifier (Praxisempfang), зеркало FIRST_LINE */
   MEDICAL_GOV: 13209991,
+  /** Мед Бератер — medical 2я/3я линия, зеркало BERATER */
+  MED_BERATER: 14001515,
 } as const;
+
+/**
+ * Вертикаль бизнеса внутри отдела. Осмысленна только для b2g:
+ *   buh = Бух Гос + Бух Бератер, med = Мед Гос + Мед Бератер, all = все четыре.
+ * Для b2b пока игнорируется (медицина там уже слита в общий b2b-агрегат).
+ * См. dev_docs/specs/21-МЕД-АДМИН-В-B2G.md.
+ */
+export type Vertical = "buh" | "med" | "all";
 
 // ==================== STATUS IDS — БУХ КОММ (Коммерсы / B2B) ====================
 
@@ -112,6 +122,51 @@ export const BERATER_STATUSES = {
   BERATER_REVIEW: 93860887,          // На рассмотрении бератера
   DELAYED_START: 95515895,           // Отложенный старт
   APPEAL: 93860891,                  // Апелляция
+  WON: 142,                          // Гутшайн одобрен
+  LOST: 143,                         // Закрыто и не реализовано
+} as const;
+
+// ==================== STATUS IDS — МЕД ГОС (Medical qualifier) ====================
+// Мед Гос (pipeline 13209991) — зеркало Бух Гос 1-й линии для медицинской воронки.
+// Собственный диапазон status_id (не пересекается с Бух Гос). ID перенесены из
+// OKK/src/config/constants.ts (d2_med_qualifier). ⚠ Это статусы рабочей воронки,
+// на которых ОКК оценивает звонки; пред-стадии (Неразобранное/База/Документы в ДЦ)
+// в ОКК-наборе отсутствуют — при необходимости добрать из Kommo API
+// /api/v4/leads/pipelines/13209991. См. spec 21 §6.
+
+export const MED_GOV_STATUSES = {
+  NEW_LEAD: 101858059,        // Новый лид
+  IN_PROGRESS: 101858063,     // Взято в работу
+  NO_ANSWER: 101858423,       // Недозвон
+  CONTACT_MADE: 101858427,    // Контакт установлен
+  DECISION_MAKING: 108064559, // Принимает решение
+  CONSULT_DONE: 101858431,    // Консультация проведена
+  DELAYED_START: 101858435,   // Отложенный старт
+  WON: 142,                   // Успешно реализовано
+  LOST: 143,                  // Закрыто и не реализовано
+} as const;
+
+// ==================== STATUS IDS — МЕД БЕРАТЕР ====================
+// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины. В Kommo две
+// стадии задвоены (по два status_id): «Термин ДЦ состоялся» (108066251/108066259) и
+// «Термин ДЦ отменён/перенесён» (108066247/108066255) — оба ID учтены (…_DUP).
+// ID из OKK/src/config/constants.ts (d2_med_berater / berater2 / dovedenie).
+
+export const MED_BERATER_STATUSES = {
+  RECEIVED_FROM_FIRST: 108064611,    // Принято от первой линии
+  DOVEDENIE: 108064615,              // Доведение
+  CONSULT_BEFORE_DC: 108064619,      // Консультация перед термином ДЦ
+  CONSULT_BEFORE_DC_DONE: 108066243, // Консультация перед термином ДЦ проведена
+  TERM_DC_DONE: 108066251,           // Термин ДЦ состоялся
+  TERM_DC_DONE_DUP: 108066259,       // Термин ДЦ состоялся (дубль Kommo)
+  TERM_DC_CANCELLED: 108066247,      // Термин ДЦ отменён/перенесён
+  TERM_DC_CANCELLED_DUP: 108066255,  // Термин ДЦ отменён/перенесён (дубль Kommo)
+  CONSULT_BEFORE_AA: 108066267,      // Консультация перед термином АА
+  CONSULT_BEFORE_AA_DONE: 108066271, // Консультация перед термином АА проведена
+  TERM_AA_CANCELLED: 108066263,      // Термин АА отменён/перенесён
+  BERATER_REVIEW: 108066275,         // На рассмотрении бератера
+  DELAYED_START: 108066279,          // Отложенный старт
+  APPEAL: 108066283,                 // Апелляция
   WON: 142,                          // Гутшайн одобрен
   LOST: 143,                         // Закрыто и не реализовано
 } as const;
@@ -444,7 +499,65 @@ export const B2B_QUALIFIED_STATUSES: Set<number> = new Set([
 
 // ==================== PIPELINE IDS for filtering ====================
 
-/** All pipeline IDs relevant for B2G daily metrics */
+// ==================== МЕД ACTIVE STATUS IDS ====================
+// Active (non-closed) статусы мед-воронок — для фетча активных лидов из Kommo при
+// vertical='med'/'all'. WON(142)/LOST(143) исключены (закрытые тянутся отдельно).
+
+/** Мед Гос active statuses */
+export const MED_GOV_ALL_ACTIVE_STATUS_IDS: number[] = [
+  MED_GOV_STATUSES.NEW_LEAD,
+  MED_GOV_STATUSES.IN_PROGRESS,
+  MED_GOV_STATUSES.NO_ANSWER,
+  MED_GOV_STATUSES.CONTACT_MADE,
+  MED_GOV_STATUSES.DECISION_MAKING,
+  MED_GOV_STATUSES.CONSULT_DONE,
+  MED_GOV_STATUSES.DELAYED_START,
+];
+
+/** Мед Бератер active statuses (включая задвоенные Kommo-стадии) */
+export const MED_BERATER_ALL_ACTIVE_STATUS_IDS: number[] = [
+  MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  MED_BERATER_STATUSES.DOVEDENIE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_DONE_DUP,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED_DUP,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
+  MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+  MED_BERATER_STATUSES.BERATER_REVIEW,
+  MED_BERATER_STATUSES.DELAYED_START,
+  MED_BERATER_STATUSES.APPEAL,
+];
+
+/** Union — все активные статусы мед-вертикали b2g */
+export const B2G_MED_ALL_ACTIVE_STATUS_IDS: number[] = [
+  ...MED_GOV_ALL_ACTIVE_STATUS_IDS,
+  ...MED_BERATER_ALL_ACTIVE_STATUS_IDS,
+];
+
+// ==================== PIPELINE IDS по вертикали ====================
+
+/** Бух-вертикаль b2g: Бух Гос + Бух Бератер */
+export const B2G_BUH_PIPELINE_IDS = [
+  B2G_PIPELINES.FIRST_LINE,
+  B2G_PIPELINES.BERATER,
+];
+
+/** Мед-вертикаль b2g: Мед Гос + Мед Бератер */
+export const B2G_MED_PIPELINE_IDS = [
+  B2G_PIPELINES.MEDICAL_GOV,
+  B2G_PIPELINES.MED_BERATER,
+];
+
+/**
+ * All pipeline IDs relevant for B2G daily metrics.
+ * ⚠ Legacy-набор (Бух + Мед Гос, БЕЗ Мед Бератер) — сохранён как есть для обратной
+ * совместимости вызовов getPipelineIds без vertical. Новую полную мед-вертикаль
+ * (обе воронки) даёт vertical='all'/'med'. Не менять без ревизии всех вызовов.
+ */
 export const B2G_ALL_PIPELINE_IDS = [
   B2G_PIPELINES.FIRST_LINE,
   B2G_PIPELINES.BERATER,
@@ -457,16 +570,40 @@ export const B2B_ALL_PIPELINE_IDS = [
   B2B_PIPELINES.MEDICAL_COMM,
 ];
 
-/** Get pipeline IDs by department */
-export function getPipelineIds(department: string): number[] {
+/**
+ * Get pipeline IDs by department + (optional) vertical.
+ *
+ * Без `vertical` → legacy-поведение (byte-identical сегодняшнему): для b2g это
+ * B2G_ALL_PIPELINE_IDS (Бух + Мед Гос). С `vertical` — новая семантика Бух/Мед/Все.
+ * Vertical применяется только к b2g; для b2b он игнорируется.
+ */
+export function getPipelineIds(department: string, vertical?: Vertical): number[] {
   if (department === "b2b") return B2B_ALL_PIPELINE_IDS;
-  return B2G_ALL_PIPELINE_IDS; // default: b2g
+  // b2g
+  if (vertical === "buh") return B2G_BUH_PIPELINE_IDS;
+  if (vertical === "med") return B2G_MED_PIPELINE_IDS;
+  if (vertical === "all") return [...B2G_BUH_PIPELINE_IDS, ...B2G_MED_PIPELINE_IDS];
+  return B2G_ALL_PIPELINE_IDS; // legacy default
 }
 
-/** Get active status IDs by department */
-export function getActiveStatusIds(department: string): number[] {
+/**
+ * Get active status IDs by department + (optional) vertical.
+ *
+ * Без `vertical` → legacy-поведение (для b2g — Бух-только ALL_ACTIVE_STATUS_IDS,
+ * как сегодня). С `vertical` — Бух / Мед / объединение.
+ */
+export function getActiveStatusIds(department: string, vertical?: Vertical): number[] {
   if (department === "b2b") return B2B_ALL_ACTIVE_STATUS_IDS;
-  return ALL_ACTIVE_STATUS_IDS; // default: b2g
+  // b2g
+  if (vertical === "buh") return ALL_ACTIVE_STATUS_IDS;
+  if (vertical === "med") return B2G_MED_ALL_ACTIVE_STATUS_IDS;
+  if (vertical === "all") return [...ALL_ACTIVE_STATUS_IDS, ...B2G_MED_ALL_ACTIVE_STATUS_IDS];
+  return ALL_ACTIVE_STATUS_IDS; // legacy default (Бух-только)
+}
+
+/** Нормализовать произвольную строку из query в Vertical (b2g). Дефолт — 'all'. */
+export function parseVertical(raw: string | null | undefined): Vertical {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : "all";
 }
 
 // ==================== B2B CUSTOM FIELDS (Kommo lead) ====================

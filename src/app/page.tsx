@@ -210,10 +210,54 @@ function clearStoredDepartment(): void {
   }
 }
 
+// Вертикаль бизнеса внутри b2g: Бухгалтерия / Медицина / Все. Осмысленна только
+// для b2g; на b2b тоггл не показываем и в запросы не шлём. Персистим отдельно,
+// чтобы выбор переживал F5 (как и отдел). См. dev_docs/specs/21-МЕД-АДМИН-В-B2G.md.
+type Vertical = "buh" | "med" | "all";
+const VERTICAL_STORAGE_KEY = "sm_active_vertical";
+
+function readStoredVertical(): Vertical {
+  if (typeof window === "undefined") return "all";
+  try {
+    const v = window.localStorage.getItem(VERTICAL_STORAGE_KEY);
+    return v === "buh" || v === "med" || v === "all" ? v : "all";
+  } catch {
+    return "all";
+  }
+}
+
+function persistVertical(vertical: Vertical): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VERTICAL_STORAGE_KEY, vertical);
+  } catch {
+    /* недоступность localStorage не должна ломать переключение */
+  }
+}
+
+function clearStoredVertical(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(VERTICAL_STORAGE_KEY);
+  } catch {
+    /* недоступность localStorage не критична */
+  }
+}
+
+/** Подписи и порядок кнопок тоггла вертикали. */
+const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
+  { id: "buh", label: "Бухгалтерия" },
+  { id: "med", label: "Мед админ" },
+  { id: "all", label: "Все" },
+];
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
+  // Вертикаль внутри b2g (Бух/Мед/Все). SSR-safe дефолт "all"; реальное значение
+  // из localStorage применяется после монтирования (в session-effect, ветка admin).
+  const [activeVertical, setActiveVertical] = useState<Vertical>("all");
   // Начальный таб — стабильный SSR-safe "dashboard". Реальный таб из URL hash
   // (#funnel и т.д.) применяется в useEffect ПОСЛЕ монтирования (см. ниже).
   // Читать hash прямо в инициализаторе нельзя: на сервере window нет → "dashboard",
@@ -255,6 +299,8 @@ export default function Dashboard() {
             // Админ: восстанавливаем ранее выбранный отдел (переживает F5),
             // иначе — домашний отдел из сессии.
             setActiveDepartment(readStoredDepartment() ?? data.department);
+            // И ранее выбранную вертикаль внутри b2g (Бух/Мед/Все).
+            setActiveVertical(readStoredVertical());
           }
         }
       })
@@ -948,6 +994,7 @@ export default function Dashboard() {
               onClick={async () => {
                 await fetch("/api/auth/logout", { method: "POST" });
                 clearStoredDepartment();
+                clearStoredVertical();
                 window.location.href = "/login";
               }}
               className="flex items-center gap-3 px-4 py-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all w-full text-sm"
@@ -988,6 +1035,23 @@ export default function Dashboard() {
             </div>
           )}
 
+          {/* Тоггл вертикали Бух/Мед/Все — только для admin, отдела b2g и вкладки
+              Звонки (пока только она умеет vertical; Дейли подключим позже). */}
+          {isAdmin && activeDepartment === "b2g" && activeTab === "dashboard" && (
+            <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
+              {VERTICAL_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => { setActiveVertical(opt.id); persistVertical(opt.id); }}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all duration-300 ${activeVertical === opt.id ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-lg" : "text-slate-400 hover:text-white"
+                    }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Right-side action cluster: report bug + theme toggle */}
           <div className="ml-auto flex items-center gap-2">
             <button
@@ -1018,7 +1082,10 @@ export default function Dashboard() {
             deep-link на другой таб (#funnel) его контент рендерим только когда
             hash уже прочитан — иначе DashboardTab монтируется и грузит данные зря. */}
         {navReady && activeTab === "dashboard" && (
-          <DashboardTab department={activeDepartment} />
+          <DashboardTab
+            department={activeDepartment}
+            vertical={activeDepartment === "b2g" ? activeVertical : undefined}
+          />
         )}
 
         {/* --------------------- DAILY VIEW --------------------- */}
