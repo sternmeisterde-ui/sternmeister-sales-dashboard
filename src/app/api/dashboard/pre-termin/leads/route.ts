@@ -16,14 +16,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  BERATER_STATUSES,
+  MED_BERATER_STATUSES,
+  getBeraterPipelineIds,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
 import { formatDaysDuration } from "@/lib/utils/duration";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 const HARD_CAP = 500;
 
-// Allow-list, mirrors the parent route's STATUS_BUCKETS exactly. Other status
-// IDs would round-trip to PG without filtering protection — block them at the
-// edge instead.
+// Allow-list, mirrors the parent route's STAGE_DEFS (бух + мед). status_id
+// глобально уникален, поэтому одного набора хватает для любой вертикали.
 const ALLOWED_STATUSES = new Set<number>([
   BERATER_STATUSES.RECEIVED_FROM_FIRST,
   BERATER_STATUSES.DOVEDENIE,
@@ -38,6 +47,16 @@ const ALLOWED_STATUSES = new Set<number>([
   BERATER_STATUSES.TERM_AA_CANCELLED,
   BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
   BERATER_STATUSES.TERM_AA,
+  // Мед Бератер
+  MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  MED_BERATER_STATUSES.DOVEDENIE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_DONE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+  MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
 ]);
 
 interface RawRow {
@@ -64,7 +83,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const pipelineId = B2G_PIPELINES.BERATER;
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const pipelineList = sql.join(
+    getBeraterPipelineIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
 
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
@@ -72,7 +95,7 @@ export async function GET(req: NextRequest) {
     WITH last_event AS (
       SELECT lead_id, MAX(event_at) AS last_at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${pipelineList})
       GROUP BY lead_id
     )
     SELECT
@@ -88,7 +111,7 @@ export async function GET(req: NextRequest) {
       COUNT(*) OVER ()::bigint AS total_count
     FROM analytics.leads_cohort lc
     LEFT JOIN last_event le ON le.lead_id = lc.lead_id
-    WHERE lc.pipeline_id = ${pipelineId}
+    WHERE lc.pipeline_id IN (${pipelineList})
       AND lc.status_id = ${statusId}
     ORDER BY le.last_at ASC NULLS FIRST
     LIMIT ${HARD_CAP}

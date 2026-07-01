@@ -135,35 +135,37 @@ export const BERATER_STATUSES = {
 // /api/v4/leads/pipelines/13209991. См. spec 21 §6.
 
 export const MED_GOV_STATUSES = {
+  UNSORTED: 101858051,        // Неразобранное
+  BASE: 101858055,            // База
   NEW_LEAD: 101858059,        // Новый лид
   IN_PROGRESS: 101858063,     // Взято в работу
   NO_ANSWER: 101858423,       // Недозвон
   CONTACT_MADE: 101858427,    // Контакт установлен
   DECISION_MAKING: 108064559, // Принимает решение
   CONSULT_DONE: 101858431,    // Консультация проведена
+  DOCS_SENT_DC: 108064563,    // Документы отправлены в ДЦ
   DELAYED_START: 101858435,   // Отложенный старт
   WON: 142,                   // Успешно реализовано
   LOST: 143,                  // Закрыто и не реализовано
 } as const;
 
 // ==================== STATUS IDS — МЕД БЕРАТЕР ====================
-// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины. В Kommo две
-// стадии задвоены (по два status_id): «Термин ДЦ состоялся» (108066251/108066259) и
-// «Термин ДЦ отменён/перенесён» (108066247/108066255) — оба ID учтены (…_DUP).
-// ID из OKK/src/config/constants.ts (d2_med_berater / berater2 / dovedenie).
+// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины, но воронка
+// КОМПАКТНЕЕ: нет стадий «Взято в работу»/«Недозвон»/«Контакт установлен»/«Термин АА»
+// (on-stage). ID сверены с Kommo API (/api/v4/leads/pipelines/14001515, 2026-07-01):
+// «Термин АА отменён» = 108322459 (НЕ 108066263); дублей 108066255/259 в воронке нет.
 
 export const MED_BERATER_STATUSES = {
+  UNSORTED: 108064607,               // Неразобранное
   RECEIVED_FROM_FIRST: 108064611,    // Принято от первой линии
   DOVEDENIE: 108064615,              // Доведение
   CONSULT_BEFORE_DC: 108064619,      // Консультация перед термином ДЦ
   CONSULT_BEFORE_DC_DONE: 108066243, // Консультация перед термином ДЦ проведена
   TERM_DC_DONE: 108066251,           // Термин ДЦ состоялся
-  TERM_DC_DONE_DUP: 108066259,       // Термин ДЦ состоялся (дубль Kommo)
   TERM_DC_CANCELLED: 108066247,      // Термин ДЦ отменён/перенесён
-  TERM_DC_CANCELLED_DUP: 108066255,  // Термин ДЦ отменён/перенесён (дубль Kommo)
   CONSULT_BEFORE_AA: 108066267,      // Консультация перед термином АА
   CONSULT_BEFORE_AA_DONE: 108066271, // Консультация перед термином АА проведена
-  TERM_AA_CANCELLED: 108066263,      // Термин АА отменён/перенесён
+  TERM_AA_CANCELLED: 108322459,      // Термин АА отменён/перенесён (Kommo-сверено)
   BERATER_REVIEW: 108066275,         // На рассмотрении бератера
   DELAYED_START: 108066279,          // Отложенный старт
   APPEAL: 108066283,                 // Апелляция
@@ -514,16 +516,14 @@ export const MED_GOV_ALL_ACTIVE_STATUS_IDS: number[] = [
   MED_GOV_STATUSES.DELAYED_START,
 ];
 
-/** Мед Бератер active statuses (включая задвоенные Kommo-стадии) */
+/** Мед Бератер active statuses (Kommo-сверено) */
 export const MED_BERATER_ALL_ACTIVE_STATUS_IDS: number[] = [
   MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
   MED_BERATER_STATUSES.DOVEDENIE,
   MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
   MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
   MED_BERATER_STATUSES.TERM_DC_DONE,
-  MED_BERATER_STATUSES.TERM_DC_DONE_DUP,
   MED_BERATER_STATUSES.TERM_DC_CANCELLED,
-  MED_BERATER_STATUSES.TERM_DC_CANCELLED_DUP,
   MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
   MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
   MED_BERATER_STATUSES.TERM_AA_CANCELLED,
@@ -588,7 +588,7 @@ export function getBeraterPipelineIds(vertical?: Vertical): number[] {
  */
 export function getTerminCancelledStatusIds(vertical?: Vertical): number[] {
   const buh = [BERATER_STATUSES.TERM_DC_CANCELLED];
-  const med = [MED_BERATER_STATUSES.TERM_DC_CANCELLED, MED_BERATER_STATUSES.TERM_DC_CANCELLED_DUP];
+  const med = [MED_BERATER_STATUSES.TERM_DC_CANCELLED];
   if (vertical === "med") return med;
   if (vertical === "all") return [...buh, ...med];
   return buh; // buh / undefined (legacy)

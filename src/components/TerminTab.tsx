@@ -239,7 +239,7 @@ export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "al
       <QualLeadsDocsSection />
       <FunnelTimingSection />
       <UpcomingTerminsSection vertical={vertical} />
-      <PreTerminSection />
+      <PreTerminSection vertical={vertical} />
     </div>
   );
 }
@@ -2122,7 +2122,8 @@ const BUCKET_META: Record<
   },
 };
 
-function PreTerminSection() {
+function PreTerminSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [data, setData] = useState<PreTerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2133,7 +2134,8 @@ function PreTerminSection() {
     if (!hasDataRef.current) setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/dashboard/pre-termin`, { signal });
+      const vqs = vertical ? `?vertical=${vertical}` : "";
+      const res = await fetch(`/api/dashboard/pre-termin${vqs}`, { signal });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`API error ${res.status}: ${text}`);
@@ -2148,7 +2150,7 @@ function PreTerminSection() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [vertical]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -2247,7 +2249,7 @@ function PreTerminSection() {
                     if (!row || row.count === 0) return;
                     setDrill({
                       url: "/api/dashboard/pre-termin/leads",
-                      params: { statusId: String(row.statusId) },
+                      params: { statusId: String(row.statusId), ...drillVertical },
                       title: row.statusName,
                       subtitle: `${row.count} лидов · отсортировано по самым «застрявшим» (выше — дольше в статусе)`,
                     });
