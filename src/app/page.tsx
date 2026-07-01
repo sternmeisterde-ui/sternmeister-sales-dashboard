@@ -253,7 +253,7 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
 
 /** Вкладки, поддерживающие вертикаль Бух/Мед/Все (тоггл в шапке общий для всех).
  *  Расширять по мере подключения вкладок к мед-направлению. */
-const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker"]);
+const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker", "real_calls"]);
 
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -547,7 +547,7 @@ export default function Dashboard() {
     );
 
     fetches.push(
-      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}${lineFilter !== "all" ? `&line=${lineFilter}` : ""}`, { signal: ac.signal, cache: "no-store" })
+      fetch(`/api/okk/calls?department=${dept}&from=${dateFrom}&to=${dateTo}${lineFilter !== "all" ? `&line=${lineFilter}` : ""}${dept === "b2g" ? `&vertical=${activeVertical}` : ""}`, { signal: ac.signal, cache: "no-store" })
         .then(r => r.json())
         .then(res => {
           if (okkReqIdRef.current !== myReqId) return;
@@ -561,7 +561,7 @@ export default function Dashboard() {
     );
 
     return () => ac.abort();
-  }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange, lineFilter]);
+  }, [activeDepartment, aiDashPeriod, aiCustomRange, getOkkDateRange, lineFilter, activeVertical]);
 
   // Parse display dates (Сегодня/Вчера/DD.MM) — legacy shim, delegates to
   // the shared util so all consumers have one round-trip implementation.
