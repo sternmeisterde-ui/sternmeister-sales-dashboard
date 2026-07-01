@@ -251,6 +251,10 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
   { id: "all", label: "Все" },
 ];
 
+/** Вкладки, поддерживающие вертикаль Бух/Мед/Все (тоггл в шапке общий для всех).
+ *  Расширять по мере подключения вкладок к мед-направлению. */
+const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics"]);
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
@@ -1035,9 +1039,9 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Тоггл вертикали Бух/Мед/Все — только для admin, отдела b2g и вкладки
-              Звонки (пока только она умеет vertical; Дейли подключим позже). */}
-          {isAdmin && activeDepartment === "b2g" && activeTab === "dashboard" && (
+          {/* Тоггл вертикали Бух/Мед/Все — общий в шапке для всех вкладок,
+              умеющих vertical (VERTICAL_TABS). Только admin + отдел b2g. */}
+          {isAdmin && activeDepartment === "b2g" && VERTICAL_TABS.has(activeTab) && (
             <div className="flex bg-slate-800/50 p-1 rounded-xl border border-white/5 shadow-inner">
               {VERTICAL_OPTIONS.map((opt) => (
                 <button
@@ -1097,6 +1101,7 @@ export default function Dashboard() {
         {activeTab === "analytics" && (
           <AnalyticsTab
             department={activeDepartment}
+            vertical={activeDepartment === "b2g" ? activeVertical : undefined}
             canModerate={
               session?.masterRole === "admin" ||
               session?.masterRole === "rop" ||

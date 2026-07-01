@@ -118,14 +118,29 @@ export interface LineConfig {
    * group="2" in B2G. Use `id` for per-line filters, `group` for summaries.
    */
   group: string;
+  /**
+   * Бизнес-вертикаль внутри отдела (Бух/Мед). Задаётся только у b2g, чтобы
+   * фильтр линий Аналитики можно было делить тумблером Бух/Мед (как в Звонках).
+   * Отсутствие поля = «не мед» → getLines() по умолчанию НЕ показывает такие
+   * линии в чужих вкладках (Скрипты/Критерии/ролевки остаются бух-онли).
+   * b2b поле не использует (там медицина слита в общий список линий).
+   * См. dev_docs/specs/21-МЕД-АДМИН-В-B2G.md.
+   */
+  vertical?: "buh" | "med";
 }
 
 export const LINES: Record<DepartmentId, readonly LineConfig[]> = {
   b2g: [
-    { id: "1",  group: "1", label: "Линия 1 — Квалификатор",             shortLabel: "Квалификатор",  promptType: "d2_qualifier", accent: "blue" },
-    { id: "2a", group: "2", label: "Линия 2 — Бератер 1 (Верх воронки)", shortLabel: "Бератер 1",     promptType: "d2_berater",   accent: "violet" },
-    { id: "2b", group: "2", label: "Линия 2 — Бератер 2 (Низ воронки)",  shortLabel: "Бератер 2",     promptType: "d2_berater2",  accent: "pink" },
-    { id: "3",  group: "3", label: "Линия 3 — Доведение",                shortLabel: "Доведение",     promptType: "d2_dovedenie", accent: "emerald" },
+    { id: "1",  group: "1", vertical: "buh", label: "Линия 1 — Квалификатор",             shortLabel: "Квалификатор",  promptType: "d2_qualifier", accent: "blue" },
+    { id: "2a", group: "2", vertical: "buh", label: "Линия 2 — Бератер 1 (Верх воронки)", shortLabel: "Бератер 1",     promptType: "d2_berater",   accent: "violet" },
+    { id: "2b", group: "2", vertical: "buh", label: "Линия 2 — Бератер 2 (Низ воронки)",  shortLabel: "Бератер 2",     promptType: "d2_berater2",  accent: "pink" },
+    { id: "3",  group: "3", vertical: "buh", label: "Линия 3 — Доведение",                shortLabel: "Доведение",     promptType: "d2_dovedenie", accent: "emerald" },
+    // Мед админ (Praxisempfang) — зеркало бух-линий по медицинской воронке.
+    // promptType совпадает с ОКК (d2_med_*); критерии в src/criteria/d2_med_*.json.
+    { id: "med1",  group: "med1", vertical: "med", label: "Мед — Квалификатор",  shortLabel: "Мед Квал",  promptType: "d2_med_qualifier", accent: "amber" },
+    { id: "med2a", group: "med2", vertical: "med", label: "Мед — Бератер 1",     shortLabel: "Мед Бер 1", promptType: "d2_med_berater",  accent: "violet" },
+    { id: "med2b", group: "med2", vertical: "med", label: "Мед — Бератер 2",     shortLabel: "Мед Бер 2", promptType: "d2_med_berater2", accent: "pink" },
+    { id: "med3",  group: "med3", vertical: "med", label: "Мед — Доведение",     shortLabel: "Мед Довед", promptType: "d2_med_dovedenie", accent: "emerald" },
   ],
   b2b: [
     { id: "buh1", group: "buh1", label: "Бух 1 — Первичное касание", shortLabel: "Бух 1", promptType: "r2_commercial",     accent: "emerald" },
@@ -134,8 +149,24 @@ export const LINES: Record<DepartmentId, readonly LineConfig[]> = {
   ],
 } as const;
 
-export function getLines(dept: DepartmentId): readonly LineConfig[] {
-  return LINES[dept];
+/**
+ * Линии отдела. Без `vertical` → бух-совместимый список (скрывает мед-линии b2g)
+ * — обратная совместимость для всех существующих потребителей. С `vertical`:
+ *   "buh" → бух-линии (и линии без поля), "med" → только мед, "all" → все.
+ */
+export function getLines(
+  dept: DepartmentId,
+  vertical?: "buh" | "med" | "all",
+): readonly LineConfig[] {
+  if (vertical === "all") return LINES[dept];
+  if (vertical === "med") return LINES[dept].filter((l) => l.vertical === "med");
+  // undefined | "buh" → всё, кроме мед-линий (бух + линии без вертикали, напр. b2b)
+  return LINES[dept].filter((l) => l.vertical !== "med");
+}
+
+/** prompt_type'ы линий заданной вертикали (для скоупа «Все» внутри вертикали). */
+export function verticalPromptTypes(dept: DepartmentId, vertical: "buh" | "med"): string[] {
+  return getLines(dept, vertical).map((l) => l.promptType);
 }
 
 export function getLine(dept: DepartmentId, id: string): LineConfig | undefined {
