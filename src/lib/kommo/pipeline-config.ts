@@ -571,6 +571,30 @@ export const B2B_ALL_PIPELINE_IDS = [
 ];
 
 /**
+ * Berater-воронка(и) для вкладки Термин по вертикали:
+ *   buh → Бух Бератер, med → Мед Бератер, all → обе.
+ * Без vertical → буховый набор (legacy — сохраняет прежнее поведение Термина).
+ */
+export function getBeraterPipelineIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [B2G_PIPELINES.MED_BERATER];
+  if (vertical === "all") return [B2G_PIPELINES.BERATER, B2G_PIPELINES.MED_BERATER];
+  return [B2G_PIPELINES.BERATER]; // buh / undefined (legacy)
+}
+
+/**
+ * status_id(ы) «Термин ДЦ отменён/перенесён» по вертикали — для когортного
+ * подсчёта отмен/переносов. Мед-бератер задваивает стадию в Kommo → оба id.
+ * Без vertical → буховый (legacy).
+ */
+export function getTerminCancelledStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.TERM_DC_CANCELLED];
+  const med = [MED_BERATER_STATUSES.TERM_DC_CANCELLED, MED_BERATER_STATUSES.TERM_DC_CANCELLED_DUP];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
+
+/**
  * Get pipeline IDs by department + (optional) vertical.
  *
  * Без `vertical` → legacy-поведение (byte-identical сегодняшнему): для b2g это

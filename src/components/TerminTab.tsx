@@ -207,19 +207,24 @@ function QualLeadsChartTooltip({
 
 // ── Tab root ────────────────────────────────────────
 
-export default function TerminTab() {
+export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "all" }) {
   // One fetch of the Kommo status list, shared by both Termin-cohort charts.
-  const statusRegistry = useBeraterStatuses();
+  // Vertical-aware: статусы бератер-воронки выбранной вертикали.
+  const statusRegistry = useBeraterStatuses(vertical);
+  // Ярлык вертикали в заголовке верхних графиков (когортное «среднее до термина»).
+  // Секции ниже (Qual/Funnel/Upcoming/PreTermin) пока бух-онли — см. spec 21 §11.
+  const verticalTitle = vertical === "med" ? "Мед Бератер" : vertical === "all" ? "Бух + Мед Бератер" : "Бух Бератер";
   return (
     <div className="flex flex-col gap-8 fade-in">
       <TerminDashboardSection
         bucketBy="created_at"
-        chartTitle="Среднее время до термина (Бух Бератер)"
+        chartTitle={`Среднее время до термина (${verticalTitle})`}
         xAxisHint={{
           day: "дата создания сделки",
           week: "неделя создания (с понедельника)",
         }}
         statusRegistry={statusRegistry}
+        vertical={vertical}
       />
       <TerminDashboardSection
         bucketBy="termin_date"
@@ -229,6 +234,7 @@ export default function TerminTab() {
           week: "неделя термина (с понедельника)",
         }}
         statusRegistry={statusRegistry}
+        vertical={vertical}
       />
       <QualLeadsDocsSection />
       <FunnelTimingSection />
@@ -510,12 +516,13 @@ function BeraterStatusMultiselect({
 
 /** Loads the BERATER status list once per Termin-tab mount and shares it
  *  across the two TerminDashboardSection instances. */
-function useBeraterStatuses(): { statuses: StatusMeta[]; loading: boolean } {
+function useBeraterStatuses(vertical?: "buh" | "med" | "all"): { statuses: StatusMeta[]; loading: boolean } {
   const [statuses, setStatuses] = useState<StatusMeta[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     const ac = new AbortController();
-    fetch("/api/dashboard/berater-statuses", { signal: ac.signal })
+    const qs = vertical ? `?vertical=${vertical}` : "";
+    fetch(`/api/dashboard/berater-statuses${qs}`, { signal: ac.signal })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<BeraterStatusesResponse>;
@@ -532,7 +539,7 @@ function useBeraterStatuses(): { statuses: StatusMeta[]; loading: boolean } {
         setLoading(false);
       });
     return () => ac.abort();
-  }, []);
+  }, [vertical]);
   return { statuses, loading };
 }
 
@@ -543,11 +550,13 @@ function TerminDashboardSection({
   chartTitle,
   xAxisHint,
   statusRegistry,
+  vertical,
 }: {
   bucketBy: BucketBy;
   chartTitle: string;
   xAxisHint: Record<Granularity, string>;
   statusRegistry: { statuses: StatusMeta[]; loading: boolean };
+  vertical?: "buh" | "med" | "all";
 }) {
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     defaultRangeLast30Days(),
@@ -616,8 +625,9 @@ function TerminDashboardSection({
         const useFirstParam = useFirst ? "1" : "0";
         // `statusIds` is always sent (empty value means "all deselected → return
         // empty"). Lets the user observe the empty-state intentionally.
+        const verticalParam = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}&statusIds=${encodeURIComponent(statusIdsParam)}`,
+          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}&statusIds=${encodeURIComponent(statusIdsParam)}${verticalParam}`,
           { signal },
         );
         if (!res.ok) {
@@ -643,6 +653,7 @@ function TerminDashboardSection({
       useFirst,
       statusIdsParam,
       statusIds,
+      vertical,
     ],
   );
 

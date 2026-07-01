@@ -57,10 +57,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
-  BERATER_STATUSES,
+  getBeraterPipelineIds,
+  getTerminCancelledStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 interface TerminRow {
   date: string;
@@ -132,21 +138,31 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const pipelineId = B2G_PIPELINES.BERATER;
-  const cancelledStatusId = BERATER_STATUSES.TERM_DC_CANCELLED;
+  // Вертикаль Бух/Мед/Все → Бух Бератер / Мед Бератер / обе.
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const pipelineList = sql.join(
+    getBeraterPipelineIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
+  const cancelledList = sql.join(
+    getTerminCancelledStatusIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
   const dcCol = useFirst ? sql`lc.termin_date_first` : sql`lc.termin_date`;
   const aaCol = useFirst ? sql`lc.aa_termin_date_first` : sql`lc.aa_termin_date`;
 
   // Cohort status filter: explicit allow-list wins; otherwise legacy default
-  // `<> TERM_DC_CANCELLED`. When the user supplies a list, the implicit
+  // `NOT IN (TERM_DC_CANCELLED…)`. When the user supplies a list, the implicit
   // CANCELLED exclusion is dropped — they're already filtering deliberately.
+  // statusIds приходят из vertical-aware пикера (berater-statuses), поэтому id
+  // соответствуют выбранной вертикали.
   const statusFilter: SQL =
     statusIds && statusIds.length > 0
       ? sql`lc.status_id IN (${sql.join(
           statusIds.map((id) => sql`${id}`),
           sql`, `,
         )})`
-      : sql`lc.status_id <> ${cancelledStatusId}`;
+      : sql`lc.status_id NOT IN (${cancelledList})`;
 
   const exec = (q: unknown) =>
     (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<DbRow>(q);
@@ -177,8 +193,8 @@ export async function GET(req: NextRequest) {
       WITH cancellations AS (
         SELECT lead_id, COUNT(*)::int AS cancel_events
         FROM analytics.lead_status_changes
-        WHERE pipeline_id = ${pipelineId}
-          AND status_id = ${cancelledStatusId}
+        WHERE pipeline_id IN (${pipelineList})
+          AND status_id IN (${cancelledList})
         GROUP BY lead_id
       ),
       base_leads AS (
@@ -190,7 +206,7 @@ export async function GET(req: NextRequest) {
           COALESCE(c.cancel_events, 0) AS cancel_events
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
-        WHERE lc.pipeline_id = ${pipelineId}
+        WHERE lc.pipeline_id IN (${pipelineList})
           AND ${statusFilter}
           AND (
             (${dcCol} IS NOT NULL AND ${dcCol} >= ${fromDate} AND ${dcCol} <= ${toDateEnd})
@@ -257,8 +273,8 @@ export async function GET(req: NextRequest) {
       WITH cancellations AS (
         SELECT lead_id, COUNT(*)::int AS cancel_events
         FROM analytics.lead_status_changes
-        WHERE pipeline_id = ${pipelineId}
-          AND status_id = ${cancelledStatusId}
+        WHERE pipeline_id IN (${pipelineList})
+          AND status_id IN (${cancelledList})
         GROUP BY lead_id
       ),
       deals AS (
@@ -271,7 +287,7 @@ export async function GET(req: NextRequest) {
           COALESCE(c.cancel_events, 0) AS cancel_events
         FROM analytics.leads_cohort lc
         LEFT JOIN cancellations c ON c.lead_id = lc.lead_id
-        WHERE lc.pipeline_id = ${pipelineId}
+        WHERE lc.pipeline_id IN (${pipelineList})
           AND lc.created_at >= ${fromDate}
           AND lc.created_at <= ${toDateEnd}
           AND (${dcCol} IS NOT NULL OR ${aaCol} IS NOT NULL)

@@ -253,7 +253,7 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
 
 /** Вкладки, поддерживающие вертикаль Бух/Мед/Все (тоггл в шапке общий для всех).
  *  Расширять по мере подключения вкладок к мед-направлению. */
-const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker", "real_calls"]);
+const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker", "real_calls", "termins"]);
 
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -1178,7 +1178,7 @@ export default function Dashboard() {
         )}
 
         {activeTab === "termins" && tabAllowedInDept("termins", activeDepartment) && (
-          <TerminTab />
+          <TerminTab vertical={activeVertical} />
         )}
 
         {/* "Аудит" скрыт из навигации (см. §6.2 dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md),
