@@ -14,7 +14,7 @@ import {
 
 // ==================== Types ====================
 
-interface CriterionScore { name: string; scores: Record<string, number> }
+interface CriterionScore { name: string; displayName?: string; scores: Record<string, number> }
 interface BlockData { name: string; scores: Record<string, number>; criteria: CriterionScore[] }
 interface ManagerCriterion { name: string; score: number | null }
 interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
@@ -1447,7 +1447,7 @@ function CriteriaTimeTree({
                     <th key={`${b.name}-${c.name}`}
                       className={`px-2 py-1 text-center align-bottom min-w-[58px] max-w-[82px] sticky z-30 ${ci === 0 ? "border-l border-white/10" : ""}`}
                       style={{ backgroundColor: TREE_HEADER_BG, top: TREE_HEADER_H }}>
-                      <div className="text-[9px] text-slate-400 font-medium leading-tight whitespace-normal break-words">{c.name}</div>
+                      <div className="text-[9px] text-slate-400 font-medium leading-tight whitespace-normal break-words">{c.displayName ?? c.name}</div>
                     </th>
                   )),
                 )}

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { getDbForDepartment, db } from "@/lib/db";
 import {
@@ -61,6 +61,9 @@ const EXCLUDED_CRITERIA = new Set([
 
 interface CriterionScore {
   name: string;
+  // Подпись колонки с номером критерия («12. Презентация…»). Ключи scores
+  // остаются на name — displayName только для рендера заголовков.
+  displayName?: string;
   scores: Record<string, number>;
 }
 
@@ -407,12 +410,17 @@ interface CanonicalCriteria {
   blockCriteria: Map<string, string[]>;
   // Set of canonical "block::criterion" keys for fast membership check.
   validKeys: Set<string>;
+  // Каноническое имя → подпись с номером критерия из конфига («12. Презентация
+  // проведена…») — как подписаны колонки «Дашборда 1» Spellit. Только для
+  // отображения: все ключи агрегатов остаются на канонических именах.
+  displayNames: Map<string, string>;
 }
 
 const EMPTY_CANONICAL: CanonicalCriteria = {
   blockOrder: [],
   blockCriteria: new Map(),
   validKeys: new Set(),
+  displayNames: new Map(),
 };
 
 async function loadCanonicalCriteria(
@@ -426,13 +434,25 @@ async function loadCanonicalCriteria(
   const blockCriteria = new Map<string, string[]>();
   const blockCriteriaSets = new Map<string, Set<string>>();
   const validKeys = new Set<string>();
+  const displayNames = new Map<string, string>();
 
   for (const pt of promptTypes) {
     const filePath = path.join(process.cwd(), "src", "criteria", `${pt}.json`);
     try {
       const content = await readFile(filePath, "utf-8");
-      const json = JSON.parse(content) as { stages?: Array<{ name?: string; criteria?: Array<{ name?: string }> }> };
+      const json = JSON.parse(content) as { stages?: Array<{ name?: string; criteria?: Array<{ name?: string; id?: number }> }> };
       const stages = Array.isArray(json.stages) ? json.stages : [];
+      // Подписи с номерами собираем по ВСЕМ stages (включая исключённые из
+      // отображения) — id критерия совпадает с нумерацией Spellit. Скоринг
+      // клиента у Spellit подписан без номеров — пропускаем.
+      for (const stage of stages) {
+        for (const c of stage.criteria ?? []) {
+          if (typeof c.name !== "string" || typeof c.id !== "number") continue;
+          const cName = normalizeName(stripNumericPrefix(c.name), CRITERIA_NAME_MAP);
+          if (CLIENT_SCORING_CRITERIA.includes(cName as typeof CLIENT_SCORING_CRITERIA[number])) continue;
+          if (!displayNames.has(cName)) displayNames.set(cName, `${c.id}. ${cName}`);
+        }
+      }
       for (const stage of stages) {
         const rawBlockName = typeof stage.name === "string" ? stage.name : "";
         if (!rawBlockName || EXCLUDED_BLOCKS.has(rawBlockName)) continue;
@@ -462,7 +482,7 @@ async function loadCanonicalCriteria(
     }
   }
 
-  if (!useSpellit) return { blockOrder, blockCriteria, validKeys };
+  if (!useSpellit) return { blockOrder, blockCriteria, validKeys, displayNames };
 
   // Spellit-раскладка: берём КРИТЕРИИ, реально присутствующие в конфигах
   // (уже нормализованные выше), и раскладываем их по блокам Spellit в порядке
@@ -495,7 +515,7 @@ async function loadCanonicalCriteria(
     sBlockCriteria.set(block, names);
     for (const n of names) sValidKeys.add(`${block}::${n}`);
   }
-  return { blockOrder: sBlockOrder, blockCriteria: sBlockCriteria, validKeys: sValidKeys };
+  return { blockOrder: sBlockOrder, blockCriteria: sBlockCriteria, validKeys: sValidKeys, displayNames };
 }
 
 // ─── Accumulator ────────────────────────────────────────────
@@ -935,6 +955,7 @@ async function fetchOkkData(
       blockOrder: funnels,
       blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
       validKeys: new Set(),
+      displayNames: new Map(),
     };
   } else {
     const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
@@ -1150,6 +1171,7 @@ async function fetchRoleplayData(
       blockOrder: funnels,
       blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
       validKeys: new Set(),
+      displayNames: new Map(),
     };
   } else {
     canonical = EMPTY_CANONICAL;
@@ -1256,7 +1278,8 @@ function buildResponse(
         const ce = acc?.criteria.get(key);
         if (ce && ce.count > 0) cScores[p] = Math.round(ce.scoreSum / ce.count);
       }
-      return { name: cName, scores: cScores };
+      const displayName = canonical.displayNames.get(cName);
+      return { name: cName, ...(displayName ? { displayName } : {}), scores: cScores };
     });
 
     return { name: blockName, scores, criteria };
