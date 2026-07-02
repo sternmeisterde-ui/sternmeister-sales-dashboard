@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
@@ -226,6 +227,16 @@ export default function DashboardTab({ department }: { department: string }) {
     setLostItems(null);
     setLostError(null);
   }, [department, range.start, range.end]);
+
+  // ESC закрывает модалку «Потерянных».
+  useEffect(() => {
+    if (!lostOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLostOpen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [lostOpen]);
 
   const toggleLostDetail = useCallback(async () => {
     const next = !lostOpen;
@@ -510,23 +521,35 @@ export default function DashboardTab({ department }: { department: string }) {
         })()
       )}
 
-      {/* ============ ПОТЕРЯННЫЕ — DRILL-DOWN (спека 22 п.6, B2B) ============ */}
-      {!isB2G && lostOpen && (
-        <div className="glass-panel rounded-2xl p-5 border border-rose-500/20 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
-              <PhoneOff className="w-4 h-4" />
-              Потерянные звонки — детализация
-              {lostItems && <span className="text-slate-500 font-normal">({lostItems.length})</span>}
-            </h3>
-            <button
-              onClick={() => setLostOpen(false)}
-              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-            >
-              Свернуть ✕
-            </button>
-          </div>
+      {/* ============ ПОТЕРЯННЫЕ — DRILL-DOWN МОДАЛКА (спека 22 п.6, B2B) ============ */}
+      {!isB2G && lostOpen && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setLostOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="document"
+          >
+            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+              <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2 min-w-0">
+                <PhoneOff className="w-4 h-4 shrink-0" />
+                <span className="truncate">Потерянные звонки — детализация</span>
+                {lostItems && <span className="text-slate-500 font-normal shrink-0">({lostItems.length})</span>}
+              </h3>
+              <button
+                onClick={() => setLostOpen(false)}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+              >
+                Закрыть ✕
+              </button>
+            </div>
 
+            <div className="overflow-y-auto px-5 py-4">
           {lostLoading && (
             <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
               <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
@@ -598,7 +621,10 @@ export default function DashboardTab({ department }: { department: string }) {
               </div>
             );
           })()}
-        </div>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
 
       {/* ============ PER-MANAGER TABLES — moved up: detail bound to top filter ============ */}
