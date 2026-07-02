@@ -175,6 +175,18 @@ export async function syncTelephony(
     { count: number; name: string; source: "callgear" | "cloudtalk" }
   >();
 
+  // Служебные наборы (короткие номера типа «88» — голосовая почта/функции
+  // АТС): кабинеты телефоний не показывают их в списках звонков, поэтому и
+  // мы не считаем (спека 22 п.10, решение владельца 2026-07-02; история
+  // вычищена scripts/cleanup-service-dials-once.ts — 185 звонков, все CG).
+  // Только ИСХОДЯЩИЕ: входящие с пустым/скрытым номером остаются — они
+  // атрибутируются по линии (inbound-by-line) и нужны для «Пропущенных».
+  const MIN_CLIENT_PHONE_DIGITS = 6;
+  const isServiceDial = (call: TelephonyCall): boolean =>
+    call.type === "outgoing" &&
+    (call.phone ?? "").replace(/\D/g, "").length < MIN_CLIENT_PHONE_DIGITS;
+  let serviceDialsSkipped = 0;
+
   // Pull selected providers in parallel — they're independent APIs.
   const [cgCalls, ctCalls] = await Promise.all([
     wantCallgear
@@ -201,6 +213,7 @@ export async function syncTelephony(
 
   for (const call of cgCalls) {
     if (!call.agentId) continue;
+    if (isServiceDial(call)) { serviceDialsSkipped++; continue; }
     const manager = cgIndex.get(call.agentId) ?? null;
     if (!manager) {
       const key = `cg:${call.agentId}`;
@@ -212,6 +225,7 @@ export async function syncTelephony(
   }
 
   for (const call of ctCalls) {
+    if (isServiceDial(call)) { serviceDialsSkipped++; continue; }
     // No-agent CDR (queue ring / missed inbound) — keep it, attributed to the
     // department by line_name (manager stays NULL via callToCommRow).
     if (call.noAgent || !call.agentId) {
@@ -226,6 +240,12 @@ export async function syncTelephony(
       else unmatched.set(key, { count: 1, name: call.agentName ?? "?", source: "cloudtalk" });
     }
     rows.push(callToCommRow(call, manager, call.agentName ?? `CT:${call.agentId}`));
+  }
+
+  if (serviceDialsSkipped > 0) {
+    console.log(
+      `[ETL telephony] skipped ${serviceDialsSkipped} service dials (outgoing to <${MIN_CLIENT_PHONE_DIGITS}-digit numbers, e.g. «88»)`,
+    );
   }
 
   if (unmatched.size > 0) {
