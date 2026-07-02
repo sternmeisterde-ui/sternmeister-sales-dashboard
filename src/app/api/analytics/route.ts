@@ -764,6 +764,13 @@ async function fetchOkkData(
   if (minDurSec > 0) {
     conditions.push(sql`${okkCalls.durationSeconds} >= ${minDurSec}`);
   }
+  // Демотированные ноги склеенных разговоров (pair_role='primary') не считаем:
+  // их standalone-оценка (если успела появиться до склейки) устарела — весь
+  // разговор представлен СКЛЕЕННОЙ оценкой хвоста. Иначе одна беседа даёт две
+  // строки и двойной счёт в объёме/среднем (worst-calls в OKK фильтрует так же).
+  conditions.push(
+    or(isNull(okkCalls.pairRole), sql`${okkCalls.pairRole} <> 'primary'`),
+  );
 
   // Manager dropdown lists every currently-active manager/ROP in the
   // department. We deliberately do NOT scope it to the selected line so a
