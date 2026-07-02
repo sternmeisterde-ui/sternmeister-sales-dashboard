@@ -60,6 +60,12 @@ export const okkCalls = pgTable("calls", {
   kommoLeadUrl: text("kommo_lead_url"),
   status: text("status"),                   // 'pending' | 'evaluated' | 'error'
   errorMessage: text("error_message"),
+  // Склейка разорванных разговоров (звёздная модель OKK): у не-хвостовых ног
+  // pair_role='primary' и paired_call_id указывает на хвост, который несёт
+  // СКЛЕЕННУЮ оценку всего разговора. Standalone-оценка демотированной ноги
+  // (если успела появиться до склейки) — устаревшая, в агрегатах не считаем.
+  pairRole: text("pair_role"),              // null | 'primary' | 'continuation'
+  pairedCallId: uuid("paired_call_id"),
   callCreatedAt: timestamp("call_created_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
