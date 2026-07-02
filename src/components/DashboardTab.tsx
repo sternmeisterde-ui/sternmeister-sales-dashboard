@@ -22,6 +22,14 @@ import {
   diffDaysCivil,
 } from "@/lib/utils/date";
 
+// «Длительность» B2B в часах и минутах: «997м» глазами не считывается,
+// «16ч 37м» — сразу. До часа оставляем минуты («37м»).
+function fmtHoursMinutes(totalMinutes: number): string {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return h > 0 ? `${h}ч ${m}м` : `${m}м`;
+}
+
 // ==================== Types ====================
 
 interface TodayMetrics {
@@ -417,8 +425,8 @@ export default function DashboardTab({ department }: { department: string }) {
                 tip="Доля исходящих, на которые ответили: принятые ÷ исходящие."
               />
               <CallMetricTile
-                icon={Clock} label="Длительность" color="blue" totalValue={`${m.totalMinutes}м`} rows={null}
-                tip="Суммарное время разговора по всем звонкам, в минутах."
+                icon={Clock} label="Длительность" color="blue" totalValue={fmtHoursMinutes(m.totalMinutes)} rows={null}
+                tip="Суммарное время по всем звонкам (разговор + ожидание ответа, как в кабинетах телефоний), в часах и минутах."
               />
               <CallMetricTile
                 icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
@@ -548,7 +556,7 @@ export default function DashboardTab({ department }: { department: string }) {
                               {b2bDialPct}%
                             </span>
                           </td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
+                          <td className="py-2 px-2 text-right text-slate-300">{fmtHoursMinutes(mgr.totalMinutes)}</td>
                           <td className="py-2 px-2 text-right text-slate-300">{mgr.avgWaitSeconds} с</td>
                           <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
                           <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
