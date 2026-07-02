@@ -14,6 +14,7 @@ import {
 } from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
+import { kommoLeadUrl } from "@/components/TerminLeadDrillModal";
 import {
   fmtLocalDate as formatDate,
   todayBerlinDate,
@@ -103,6 +104,27 @@ interface DashboardData {
   trendByPipeline?: Record<string, DailyBucket[]> | null;
 }
 
+// Строка детализации «Потерянных» (ответ /api/dashboard/lost-calls).
+interface LostCallItem {
+  manager: string | null;
+  phone: string;
+  createdAt: string;
+  leadId: number | null;
+  pipelineName: string | null;
+  statusName: string | null;
+}
+
+// Время потерянного звонка — берлинское, с датой (перид может быть > 1 дня).
+function fmtLostAt(iso: string): string {
+  return new Date(iso).toLocaleString("ru-RU", {
+    timeZone: "Europe/Berlin",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 type LineFilter = "all" | "1" | "2" | "3";
 
 // B2B pipeline IDs + display labels — match server-side B2B_PIPELINES.
@@ -148,6 +170,13 @@ export default function DashboardTab({ department }: { department: string }) {
   // since the dashboard switches modes when the user toggles department,
   // and the new value is reset to "all" on every department change.
   const [trendLine, setTrendLine] = useState<string>("all");
+  // Drill-down «Потерянных» (спека 22 п.6): клик по плитке открывает панель
+  // с разбивкой по менеджерам. Данные грузятся лениво по клику и сбрасываются
+  // при смене периода/отдела (см. useEffect ниже).
+  const [lostOpen, setLostOpen] = useState(false);
+  const [lostItems, setLostItems] = useState<LostCallItem[] | null>(null);
+  const [lostLoading, setLostLoading] = useState(false);
+  const [lostError, setLostError] = useState<string | null>(null);
   // Tracks whether we already have data so subsequent refetches don't
   // re-trigger the full-screen DinoLoader (background-refresh UX). Held
   // in a ref because we DON'T want this flag in the fetchData deps —
@@ -190,6 +219,33 @@ export default function DashboardTab({ department }: { department: string }) {
     fetchData(ac.signal);
     return () => ac.abort();
   }, [fetchData]);
+
+  // Смена периода/отдела инвалидирует детализацию «Потерянных».
+  useEffect(() => {
+    setLostOpen(false);
+    setLostItems(null);
+    setLostError(null);
+  }, [department, range.start, range.end]);
+
+  const toggleLostDetail = useCallback(async () => {
+    const next = !lostOpen;
+    setLostOpen(next);
+    if (!next || lostItems !== null || lostLoading) return;
+    setLostLoading(true);
+    setLostError(null);
+    try {
+      const res = await fetch(
+        `/api/dashboard/lost-calls?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+      );
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const json = (await res.json()) as { items: LostCallItem[] };
+      setLostItems(json.items);
+    } catch (e) {
+      setLostError(String(e));
+    } finally {
+      setLostLoading(false);
+    }
+  }, [lostOpen, lostItems, lostLoading, department, range.start, range.end]);
 
   if (loading && !data) {
     return <DinoLoader />;
@@ -444,13 +500,105 @@ export default function DashboardTab({ department }: { department: string }) {
                 totalValue={lost}
                 rows={null}
                 tipAlign="right"
-                tip="Исходящие недозвоны в 09:00–19:00 (Берлин), на которые не перезвонили на тот же номер в течение 15 минут."
+                tip="Исходящие недозвоны в 09:00–19:00 (Берлин), на которые не перезвонили на тот же номер в течение 15 минут. Клик — детализация по менеджерам."
+                onClick={toggleLostDetail}
               />
               {/* tipAlign right on the last two so the popover opens leftward
                   and doesn't clip past the viewport edge. */}
             </div>
           );
         })()
+      )}
+
+      {/* ============ ПОТЕРЯННЫЕ — DRILL-DOWN (спека 22 п.6, B2B) ============ */}
+      {!isB2G && lostOpen && (
+        <div className="glass-panel rounded-2xl p-5 border border-rose-500/20 shadow-lg">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
+              <PhoneOff className="w-4 h-4" />
+              Потерянные звонки — детализация
+              {lostItems && <span className="text-slate-500 font-normal">({lostItems.length})</span>}
+            </h3>
+            <button
+              onClick={() => setLostOpen(false)}
+              className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              Свернуть ✕
+            </button>
+          </div>
+
+          {lostLoading && (
+            <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
+              <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
+            </div>
+          )}
+          {lostError && <p className="text-rose-400 text-sm py-2">{lostError}</p>}
+
+          {lostItems && lostItems.length === 0 && (
+            <p className="text-slate-400 text-sm py-2">За выбранный период потерянных звонков нет 🎉</p>
+          )}
+
+          {lostItems && lostItems.length > 0 && (() => {
+            // Группировка по ответственному МОПу (Рузанна: «разбито по мопам»).
+            const byManager = new Map<string, LostCallItem[]>();
+            for (const it of lostItems) {
+              const key = it.manager || "Без менеджера";
+              const arr = byManager.get(key) ?? [];
+              arr.push(it);
+              byManager.set(key, arr);
+            }
+            const groups = [...byManager.entries()].sort((a, b) => b[1].length - a[1].length);
+            return (
+              <div className="flex flex-col gap-4">
+                {groups.map(([mgrName, items]) => (
+                  <div key={mgrName}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-sm font-semibold text-slate-200">{mgrName}</span>
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 font-bold">{items.length}</span>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                            <th className="py-1.5 pr-3 font-medium">Время</th>
+                            <th className="py-1.5 pr-3 font-medium">Телефон</th>
+                            <th className="py-1.5 pr-3 font-medium">Сделка</th>
+                            <th className="py-1.5 font-medium">Воронка / статус</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {items.map((it, i) => (
+                            <tr key={`${it.phone}-${it.createdAt}-${i}`} className="border-b border-white/5 hover:bg-white/[0.02]">
+                              <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap tabular-nums">{fmtLostAt(it.createdAt)}</td>
+                              <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone}</td>
+                              <td className="py-1.5 pr-3">
+                                {it.leadId ? (
+                                  <a
+                                    href={kommoLeadUrl(it.leadId)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-400 hover:text-blue-300 hover:underline"
+                                  >
+                                    #{it.leadId} ↗
+                                  </a>
+                                ) : (
+                                  <span className="text-slate-600">не привязан</span>
+                                )}
+                              </td>
+                              <td className="py-1.5 text-slate-400 text-xs">
+                                {it.pipelineName ? `${it.pipelineName}${it.statusName ? ` · ${it.statusName}` : ""}` : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
       )}
 
       {/* ============ PER-MANAGER TABLES — moved up: detail bound to top filter ============ */}
@@ -606,6 +754,7 @@ function CallMetricTile({
   rows,
   tip,
   tipAlign = "left",
+  onClick,
 }: {
   icon: LucideIcon;
   label: string;
@@ -618,6 +767,9 @@ function CallMetricTile({
   // Which edge the tooltip anchors to — "right" opens leftward so the
   // rightmost tiles don't clip past the viewport. Default "left".
   tipAlign?: "left" | "right";
+  // Кликабельная плитка (drill-down). Пока используется только в B2B-ветке
+  // (rows === null) — «Потерянные».
+  onClick?: () => void;
 }) {
   const colorMap = {
     blue: { bg: "bg-blue-500/10", text: "text-blue-400" },
@@ -630,7 +782,12 @@ function CallMetricTile({
   // ── B2B — single big number (no line concept) ──────────────────────
   if (!rows) {
     return (
-      <div className="group relative glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0">
+      <div
+        onClick={onClick}
+        role={onClick ? "button" : undefined}
+        title={onClick ? "Нажми — детализация" : undefined}
+        className={`group relative glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0 ${onClick ? "cursor-pointer hover:border-rose-500/40" : ""}`}
+      >
         <div className="flex items-start justify-between mb-1.5 gap-1">
           <span className="text-slate-400 font-semibold tracking-tight text-[10px] uppercase leading-tight break-words min-w-0">{label}</span>
           <div className={`p-1 ${c.bg} rounded ${c.text} shrink-0`}>

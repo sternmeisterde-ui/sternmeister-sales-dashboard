@@ -928,62 +928,143 @@ async function fetchSlaFirstCallMinutesByManager(
  * lands 19:05 still counts as answered. Only the ORIGINAL miss must be in hours.
  */
 export async function getAnalyticsLostCalls(
+  managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<number> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return 0;
-  const cacheKey = `lost-calls:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCalls(pipelineIds, fromTs, toTs));
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `lost-calls:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const rows = await fetchLostCallsDetail(managers, fromTs, toTs);
+    return rows.length;
+  });
 }
 
-async function fetchLostCalls(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+/** Одна строка детализации «Потерянных» (спека 22 п.6). */
+export interface LostCallDetailRow {
+  manager: string | null;
+  phone: string;
+  createdAt: string;          // ISO UTC
+  leadId: number | null;      // NULL если звонок не привязан к сделке
+  pipelineName: string | null;
+  statusName: string | null;
+}
+
+/**
+ * Детализация «Потерянных» для drill-down плитки (спека 22 п.6): строки
+ * менеджер/телефон/время/сделка. Счётчик плитки = length этого же списка
+ * (getAnalyticsLostCalls) — расхождение невозможно по построению.
+ *
+ * Скоуп — ПО АГЕНТАМ (ростер + алиасы): прежний «воронки + NULL» тащил в
+ * «Потерянные» необогащённые звонки чужого отдела (30.06 половина из 105
+ * были звонками b2g-дайлера) и продления. Перезвон-проверка намеренно шире
+ * ростера: перезвон на номер ЛЮБЫМ сотрудником снимает «потерянность».
+ * LATERAL LIMIT 1 — на случай дублей лида в cohort.
+ */
+export async function getAnalyticsLostCallsDetail(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<LostCallDetailRow[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `lost-calls-detail:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCallsDetail(managers, fromTs, toTs));
+}
+
+async function fetchLostCallsDetail(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<LostCallDetailRow[]> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const names: string[] = [];
+  for (const m of managers) {
+    names.push(m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
+  }
+  if (names.length === 0) return [];
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ lost: string | number }>(sql`
+  }).execute<{
+    manager: string | null;
+    phone: string;
+    created_at: string;
+    lead_id: string | number | null;
+    pipeline_name: string | null;
+    status_name: string | null;
+  }>(sql`
     WITH outs AS (
       SELECT DISTINCT ON (communication_id)
         communication_id,
         created_at,
         duration,
+        manager,
+        lead_id,
+        phone,
         right(regexp_replace(phone, '\D', '', 'g'), 10) AS pnorm
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
         AND communication_type = 'call_out'
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IN (${nameList})
         AND phone IS NOT NULL AND phone <> ''
       ORDER BY communication_id, lead_id NULLS LAST
     ),
     candidates AS (
-      SELECT communication_id, created_at, pnorm
+      SELECT communication_id, created_at, pnorm, manager, lead_id, phone
       FROM outs
       WHERE (duration IS NULL OR duration < 1)
         AND pnorm <> ''
         AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
         AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
     )
-    SELECT COUNT(*) AS lost
+    SELECT
+      c.manager,
+      c.phone,
+      c.created_at,
+      c.lead_id,
+      lc.pipeline AS pipeline_name,
+      lc.status AS status_name
     FROM candidates c
+    LEFT JOIN LATERAL (
+      SELECT pipeline, status FROM analytics.leads_cohort
+      WHERE lead_id = c.lead_id LIMIT 1
+    ) lc ON c.lead_id IS NOT NULL
     WHERE NOT EXISTS (
       SELECT 1
       FROM analytics.communications cb
       WHERE cb.communication_type = 'call_out'
-        AND (cb.pipeline_id IN (${pipelineList}) OR cb.pipeline_id IS NULL)
         AND cb.communication_id <> c.communication_id
         AND cb.created_at > c.created_at
         AND cb.created_at <= c.created_at + interval '15 minutes'
         AND right(regexp_replace(cb.phone, '\D', '', 'g'), 10) = c.pnorm
     )
+    ORDER BY c.manager NULLS LAST, c.created_at
   `);
 
-  return Number(result.rows[0]?.lost ?? 0);
+  return result.rows.map((r) => {
+    // created_at — timestamp WITHOUT time zone (naive = UTC по конвенции
+    // проекта). Драйвер отдаёт строку без пояса; new Date(naive) парсил бы
+    // её в TZ процесса — прибиваем к UTC явно.
+    const raw = String(r.created_at);
+    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+    const hasTz = iso.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(iso);
+    return {
+      manager: r.manager,
+      phone: r.phone,
+      createdAt: new Date(hasTz ? iso : `${iso}Z`).toISOString(),
+      leadId: r.lead_id == null ? null : Number(r.lead_id),
+      pipelineName: r.pipeline_name,
+      statusName: r.status_name,
+    };
+  });
 }
 
 /**
