@@ -950,6 +950,39 @@ export interface LostCallDetailRow {
   leadId: number | null;      // NULL если звонок не привязан к сделке
   pipelineName: string | null;
   statusName: string | null;
+  /** ФИ клиента из зеркала контактов (по сделке или по номеру). */
+  clientName: string | null;
+}
+
+/** ФИ контактов по нормализованным номерам (последние 10 цифр) из зеркала
+ *  analytics.contacts — для строк без привязки к сделке. Один запрос на
+ *  пачку номеров. */
+async function contactNamesByPnorm(pnorms: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const uniq = [...new Set(pnorms.filter((p) => p && p.length >= 6))];
+  if (uniq.length === 0) return map;
+  const json = JSON.stringify(uniq.map((p) => ({ pnorm: p })));
+  const res = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ pnorm: string; name: string | null }>(sql`
+    WITH input AS (
+      SELECT i.pnorm FROM jsonb_to_recordset(${json}::jsonb) AS i(pnorm text)
+    ),
+    contact_phones AS (
+      SELECT c.contact_id, c.name,
+             right(regexp_replace(p.v, '\D', '', 'g'), 10) AS pnorm
+      FROM analytics.contacts c,
+           jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) AS p(v)
+    )
+    SELECT DISTINCT ON (i.pnorm) i.pnorm, cp.name
+    FROM input i
+    JOIN contact_phones cp ON cp.pnorm = i.pnorm
+    ORDER BY i.pnorm, cp.contact_id
+  `);
+  for (const r of res.rows) {
+    if (r.name) map.set(r.pnorm, r.name);
+  }
+  return map;
 }
 
 /**
@@ -1028,15 +1061,23 @@ async function fetchLostCallsDetail(
     SELECT
       c.manager,
       c.phone,
+      c.pnorm,
       c.created_at,
       c.lead_id,
       lc.pipeline AS pipeline_name,
-      lc.status AS status_name
+      lc.status AS status_name,
+      ln.name AS client_name
     FROM candidates c
     LEFT JOIN LATERAL (
       SELECT pipeline, status FROM analytics.leads_cohort
       WHERE lead_id = c.lead_id LIMIT 1
     ) lc ON c.lead_id IS NOT NULL
+    LEFT JOIN LATERAL (
+      SELECT ct.name FROM analytics.lead_contact_links ll
+      JOIN analytics.contacts ct ON ct.contact_id = ll.contact_id
+      WHERE ll.lead_id = c.lead_id AND ll.is_active
+      ORDER BY ll.last_seen_at DESC LIMIT 1
+    ) ln ON c.lead_id IS NOT NULL
     WHERE NOT EXISTS (
       SELECT 1
       FROM analytics.communications cb
@@ -1049,7 +1090,15 @@ async function fetchLostCallsDetail(
     ORDER BY c.manager NULLS LAST, c.created_at
   `);
 
-  return result.rows.map((r) => {
+  // ФИ для строк без сделки — одним batch-запросом по номерам.
+  type Row = (typeof result.rows)[number] & { pnorm?: string; client_name?: string | null };
+  const rows = result.rows as Row[];
+  const unlinkedPnorms = rows
+    .filter((r) => r.lead_id == null && r.pnorm)
+    .map((r) => String(r.pnorm));
+  const nameByPnorm = await contactNamesByPnorm(unlinkedPnorms);
+
+  return rows.map((r) => {
     // created_at — timestamp WITHOUT time zone (naive = UTC по конвенции
     // проекта). Драйвер отдаёт строку без пояса; new Date(naive) парсил бы
     // её в TZ процесса — прибиваем к UTC явно.
@@ -1063,7 +1112,89 @@ async function fetchLostCallsDetail(
       leadId: r.lead_id == null ? null : Number(r.lead_id),
       pipelineName: r.pipeline_name,
       statusName: r.status_name,
+      clientName:
+        r.client_name ?? (r.pnorm ? nameByPnorm.get(String(r.pnorm)) ?? null : null),
     };
+  });
+}
+
+/** Одна строка детализации SLA (спека 22 п.5.3). */
+export interface SlaLeadDetailRow {
+  leadId: number;
+  manager: string | null;
+  slaMinutes: number;
+  /** measured | instant | pending | closed_no_call */
+  slaStatus: string | null;
+  clientName: string | null;
+  phone: string | null;
+  pipelineId: number | null;
+}
+
+/**
+ * Детализация SLA-плитки (drill-down): сделки, из которых состоит среднее.
+ * Тот же скоуп, что у плитки (getAnalyticsSlaFirstCallMinutes для b2b:
+ * лиды воронок отдела, созданные в окне, sla_own_seconds IS NOT NULL) —
+ * среднее по списку всегда равно плитке. ФИ/телефон — из зеркала контактов
+ * по активной связи сделки.
+ */
+export async function getAnalyticsSlaLeadsDetail(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<SlaLeadDetailRow[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return [];
+  const cacheKey = `sla-leads-detail:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const fromDate = new Date(fromTs * 1000);
+    const toDate = new Date(toTs * 1000);
+    const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+    const src = slaSourceSql(dept === "b2b");
+
+    const result = await (analyticsDb as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{
+      lead_id: string | number;
+      manager: string | null;
+      sla_min: string | number;
+      sla_status: string | null;
+      client_name: string | null;
+      client_phone: string | null;
+      pipeline_id: string | number | null;
+    }>(sql`
+      SELECT
+        s.lead_id,
+        s.manager,
+        round(${src}::numeric / 60) AS sla_min,
+        s.sla_own_status AS sla_status,
+        ct.name AS client_name,
+        ct.phone AS client_phone,
+        s.pipeline_id
+      FROM analytics.sla s
+      LEFT JOIN LATERAL (
+        SELECT c.name, c.phone
+        FROM analytics.lead_contact_links ll
+        JOIN analytics.contacts c ON c.contact_id = ll.contact_id
+        WHERE ll.lead_id = s.lead_id AND ll.is_active
+        ORDER BY ll.last_seen_at DESC LIMIT 1
+      ) ct ON TRUE
+      WHERE s.lead_created_at >= ${fromDate}
+        AND s.lead_created_at <= ${toDate}
+        AND s.pipeline_id IN (${pipelineList})
+        AND ${src} IS NOT NULL
+      ORDER BY s.manager NULLS LAST, sla_min DESC
+    `);
+
+    return result.rows.map((r) => ({
+      leadId: Number(r.lead_id),
+      manager: r.manager,
+      slaMinutes: Number(r.sla_min),
+      slaStatus: r.sla_status,
+      clientName: r.client_name,
+      phone: r.client_phone,
+      pipelineId: r.pipeline_id == null ? null : Number(r.pipeline_id),
+    }));
   });
 }
 
