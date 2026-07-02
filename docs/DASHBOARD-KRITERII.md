@@ -1,4 +1,4 @@
-# Dashboard → «Критерии» — как работает
+﻿# Dashboard → «Критерии» — как работает
 
 Last updated: 2026-04-30
 
@@ -42,7 +42,7 @@ Last updated: 2026-04-30
 
 ## Связь с остальными разделами
 
-- **Аналитика** (`/api/analytics`) читает те же JSON-файлы при построении отчёта по блокам/критериям. Это `canonical` структура, по которой группируются `evaluation_json` из `evaluations.evaluation_json`.
+- **Аналитика** (`/api/analytics`) читает те же JSON-файлы при построении отчёта по блокам/критериям. Это `canonical` структура, по которой группируются `evaluation_json` из `evaluations.evaluation_json`. Исключение: для Коммерсов (r2_commercial / r2_med_commercial) РАСКЛАДКА ПО БЛОКАМ берётся не из stages конфига, а из `SPELLIT_GROUPING` в route.ts (сверено с «Дашбордом 1» Spellit); состав и имена критериев по-прежнему из JSON.
 - **OKK-бэкенд** (отдельный сервис, `okk-backend` репо) читает эти же JSON через mounted volume и шлёт в LLM как часть промпта.
 - При сохранении (POST) дёргается `clearCache()` — сбрасывается 2-минутный TTL `/api/analytics`, чтобы новые критерии видны были сразу.
 
