@@ -565,7 +565,7 @@ async function buildDashboardResponse(
       // B2B «Потерянные»: outbound no-answer attempts with no callback to the
       // same number within 15 min (business hours 09–19 Berlin).
       department === "b2b"
-        ? getAnalyticsLostCalls(department, from, to).catch((e) => {
+        ? getAnalyticsLostCalls(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] lost calls failed:", e);
             return 0;
           })
