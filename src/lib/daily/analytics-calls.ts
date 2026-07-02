@@ -39,6 +39,24 @@ interface AnalyticsRow {
   avg_wait_seconds: string | number | null;
 }
 
+// Что суммировать в «Длительность / На линии».
+// B2B (спека 22 п.2): правило Рузанны — плитка должна сходиться с кабинетами
+// телефоний, а кабинеты считают ПО-РАЗНОМУ (сверено поштучно 26.06.2026):
+//   • дашборд CloudTalk «Total talking time» = ЧИСТЫЙ РАЗГОВОР
+//     (talking_time; у нас duration) — совпал секунда-в-секунду (5ч46м41с);
+//   • выгрузка CallGear «Длительность звонка» = ПОЛНОЕ время лега
+//     (total_duration = duration + wait_seconds, т.к. wait для cg считается
+//     как total - talk) — совпала с точностью до округлений (55:49 vs 55:54).
+// Поэтому b2b суммирует каждый источник так, как его считает его кабинет.
+// B2G остаётся на чистом разговоре — их определение не трогаем без Димы.
+// ВАЖНО: только для СУММ длительности; фильтр дозвона duration >= 1 всегда
+// по чистому разговору (иначе гудки станут «дозвонами»).
+function durationExpr(dept: "b2g" | "b2b") {
+  return dept === "b2b"
+    ? sql`(CASE WHEN communication_id LIKE 'cg-leg:%' THEN duration + COALESCE(wait_seconds, 0) ELSE duration END)`
+    : sql`duration`;
+}
+
 /**
  * Fetch per-manager call metrics for a department in the given time window.
  * Returns a Map keyed by master_managers.id (via name match + aliases).
@@ -125,7 +143,7 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                     AS outgoing_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s,
+      COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type LIKE 'call%'), 0)        AS total_duration_s,
       AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)            AS avg_wait_seconds
     FROM deduped
     GROUP BY manager
@@ -402,8 +420,8 @@ export async function getAnalyticsTeamCallMetrics(
   if (pipelineIds.length === 0) {
     return { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 };
   }
-  const cacheKey = `team-calls:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(pipelineIds, fromTs, toTs));
+  const cacheKey = `team-calls:${dept}:${fromTs}:${toTs}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(dept, pipelineIds, fromTs, toTs));
 }
 
 /**
@@ -425,11 +443,12 @@ export async function getAnalyticsTeamCallMetricsByPipeline(
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return new Map();
-  const cacheKey = `team-calls-by-pipeline:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetricsByPipeline(pipelineIds, fromTs, toTs));
+  const cacheKey = `team-calls-by-pipeline:${dept}:${fromTs}:${toTs}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetricsByPipeline(dept, pipelineIds, fromTs, toTs));
 }
 
 async function fetchTeamCallMetricsByPipeline(
+  dept: "b2g" | "b2b",
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
@@ -465,7 +484,7 @@ async function fetchTeamCallMetricsByPipeline(
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1))  AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
+      COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type LIKE 'call%'), 0)         AS total_duration_s
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
@@ -496,7 +515,7 @@ async function fetchTeamCallMetricsByPipeline(
   return out;
 }
 
-async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
+async function fetchTeamCallMetrics(dept: "b2g" | "b2b", pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
@@ -508,7 +527,7 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
   }).execute<AnalyticsRow>(sql`
     WITH deduped AS (
       SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, duration, call_status
+        communication_id, communication_type, duration, wait_seconds, call_status
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
