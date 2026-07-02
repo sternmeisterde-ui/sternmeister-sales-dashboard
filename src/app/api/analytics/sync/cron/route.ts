@@ -22,6 +22,15 @@ export const dynamic = "force-dynamic";
 // ticks from running concurrently when one runs longer than the schedule interval.
 const WINDOW_MINUTES = 15;
 
+// Telephony (CloudTalk) sweep lookback. A failed/skipped tick used to lose
+// its window forever: the 15-min overlap only covers ONE neighbouring tick,
+// so calls landing in a dead tick's exclusive 5 minutes never got re-pulled
+// (наблюдали ~1%/нед. потерь, пачками по 3-10 мин — июль 2026). Each tick
+// now re-reads the last 2 hours of CDRs but, via telephonySkipExisting,
+// INSERTs only ids that are absent — existing rows (and their enrichment
+// fan-out) stay untouched, so the extra cost is one SELECT per tick.
+const TELEPHONY_LOOKBACK_MINUTES = 120;
+
 // Lease lock for the incremental cron. Stored in `analytics.etl_locks`
 // (migration 0010) — chosen over `pg_try_advisory_lock` because Neon's HTTP
 // driver opens a fresh connection per query, so session-scoped advisory
@@ -181,6 +190,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       toDate,
       incremental: true,
       telephonyProviders: ["cloudtalk"],
+      // Wide self-healing sweep for telephony only — add-missing-CDRs mode,
+      // Kommo-facing steps keep the narrow window (see TELEPHONY_LOOKBACK_
+      // MINUTES above). Enrichment in incremental mode sweeps 7d back, so
+      // recovered rows get their lead fan-out on the same tick.
+      telephonyFromDate: new Date(toDate.getTime() - TELEPHONY_LOOKBACK_MINUTES * 60 * 1000),
+      telephonySkipExisting: true,
     });
     // Per-step errors are already captured inside runStep; surface a
     // summary message if any landed so the cron-level dashboard shows a
