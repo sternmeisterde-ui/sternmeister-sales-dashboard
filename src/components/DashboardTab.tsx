@@ -430,7 +430,7 @@ export default function DashboardTab({ department }: { department: string }) {
               />
               <CallMetricTile
                 icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
-                tip="Среднее время ожидания ответа абонентом (гудки/очередь до поднятия трубки), в секундах."
+                tip="Сколько в среднем ждали ответа: время от набора до снятия трубки, по отвеченным звонкам менеджеров отдела."
               />
               <CallMetricTile
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}

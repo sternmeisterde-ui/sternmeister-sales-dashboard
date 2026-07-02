@@ -551,7 +551,7 @@ async function buildDashboardResponse(
       // SLA (min). Cheap dept-wide aggregates; skipped on B2G (those tiles
       // aren't shown there).
       department === "b2b"
-        ? getAnalyticsAvgWaitSeconds(department, from, to).catch((e) => {
+        ? getAnalyticsAvgWaitSeconds(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] avg wait failed:", e);
             return 0;
           })
