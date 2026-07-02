@@ -1130,9 +1130,10 @@ export default function Dashboard() {
                           manager.role === 'rop' ? 'bg-amber-500/20 text-amber-400' :
                           manager.role === 'teamlead' ? 'bg-emerald-500/20 text-emerald-400' :
                           manager.role === 'admin' ? 'bg-purple-500/20 text-purple-400' :
+                          manager.role === 'prolongation' ? 'bg-sky-500/20 text-sky-400' :
                           'bg-blue-500/20 text-blue-400'
                         }`}>
-                          {manager.role === 'rop' ? 'РОП' : manager.role === 'teamlead' ? 'Тимлид' : manager.role === 'admin' ? 'Админ' : 'Менеджер'}
+                          {manager.role === 'rop' ? 'РОП' : manager.role === 'teamlead' ? 'Тимлид' : manager.role === 'admin' ? 'Админ' : manager.role === 'prolongation' ? 'Продления' : 'Менеджер'}
                         </span>
                       )}
                       {activeDepartment === "b2g" && manager.line && (

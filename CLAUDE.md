@@ -305,8 +305,12 @@ drizzle/
 ## Manager Management (`/api/managers` POST)
 
 Master table: `master_managers` (D1). Key поля: `name`, `telegramUsername`, `telegramId`,
-`department`, `role` (manager/rop/admin), `line` (1/2/3), `team` (dima/ruzanna), `inOkk`,
-`inRolevki`, `kommoUserId`, `callgearEmployeeId`, `cloudtalkAgentId`.
+`department`, `role` (manager/teamlead/rop/admin/prolongation), `line` (1/2/3),
+`team` (dima/ruzanna), `inOkk`, `inRolevki`, `kommoUserId`, `callgearEmployeeId`, `cloudtalkAgentId`.
+
+> `prolongation` = менеджер продлений (не МОП, напр. Ирина Сафронова b2b): выпадает из
+> всех продажных выборок автоматически — они whitelist'ят роли manager/teamlead/rop.
+> В roleplay-синк маппится в `manager` (CHECK в d1_users/r1_users), в OKK синкается как есть.
 
 Flow on save:
 
