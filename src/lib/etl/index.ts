@@ -89,6 +89,18 @@ export interface SyncOptions {
    * pulls CallGear on a 7h+ lag.
    */
   telephonyProviders?: TelephonyProvider[];
+  /**
+   * Telephony-only lookback override: syncTelephony runs on
+   * [telephonyFromDate, toDate] instead of [fromDate, toDate]. Lets the
+   * 10-min cron sweep a wide telephony window (self-healing after
+   * failed/skipped ticks) without widening the Kommo-facing steps.
+   * Combine with telephonySkipExisting so the sweep only ADDS missing
+   * CDRs. История: 2026-07 нашли ~1%/нед. потерь CloudTalk — окна
+   * упавших тиков никто не перечитывал.
+   */
+  telephonyFromDate?: Date;
+  /** Pass-through to syncTelephony.skipExisting (см. док там). */
+  telephonySkipExisting?: boolean;
 }
 
 export interface SyncResult {
@@ -309,8 +321,9 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   if (!skip.has("telephony") && hasTelephonyCreds) {
     const telRes = await runStep(
       "sync-telephony",
-      () => syncTelephony(opts.fromDate, opts.toDate, {
+      () => syncTelephony(opts.telephonyFromDate ?? opts.fromDate, opts.toDate, {
         providers: opts.telephonyProviders,
+        skipExisting: opts.telephonySkipExisting,
       }),
       {
         callgearLegs: 0,
