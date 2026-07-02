@@ -1,4 +1,4 @@
-# Dashboard → «Аналитика» — как работает
+﻿# Dashboard → «Аналитика» — как работает
 
 Last updated: 2026-04-30
 
@@ -47,7 +47,7 @@ Roleplay-база выбранного отдела:
 - **Berlin civil-day bucketing**: ключ периода = Berlin civil дата звонка, не UTC. Звонок 23:30 Berlin и 00:30 Berlin следующего дня — разные дни даже если они в часе друг от друга по UTC.
 - **`line=all` mode** (cross-funnel aggregate): группировка не по блокам/критериям, а по «funnel-label» — `okkPromptType` → имя воронки или `roleplay.callType` → имя воронки. Block-criteria тогда пустые.
 - **Reconciliation guarantee**: per-manager сумма звонков всегда = per-period сумме. Реализовано через двухступенчатый guard — звонок попадает в manager-bucket **только если** period-bucket его принял.
-- **Excluded blocks**: не показываются `Рекомендации`, `Фильтры`, `Скоринг`, `Скоринг клиента` — это сервисные блоки, не критерии оценки.
+- **Excluded blocks**: не показываются `Рекомендации`, `Фильтры`, `Скоринг`, `Скоринг клиента` — это сервисные блоки, не критерии оценки. Исключение: в Spellit-виде Коммерсов (r2_commercial / r2_med_commercial) блок «Скоринг клиента» показывается отдельно — 4 колонки сырых баллов из `evaluation_json.client_scoring` (см. accumulateClientScoring в route.ts), а не из строк критериев.
 - **Compare mode**: тот же endpoint вызывается дважды (текущее окно + сравниваемое), результаты рендерятся side-by-side с дельтами.
 
 ## API

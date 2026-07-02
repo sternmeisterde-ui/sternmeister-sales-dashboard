@@ -54,21 +54,32 @@ function getCriteriaColor(v: number | null | undefined): string {
   return "text-rose-400";
 }
 
-// Критерии с особой раскраской (канонические имена из src/criteria/*.json —
-// сервер агрегирует их специальной веткой, см. UNSCORED_BINARY_CRITERIA /
-// VALUE_CRITERIA в /api/analytics):
-//  • инвертированные — значение это «% плохого», выше = хуже. «Потеря
-//    клиента…» = % потерянных горячих клиентов; «Критические ошибки…» =
-//    доля звонков с ошибками (полярность Spellit: сервер инвертирует вердикт
-//    OKK «1 = ошибок не было» в regroupAccToSpellit);
+// Критерии с особой раскраской (канонические имена из src/criteria/*.json):
+//  • ВСЕГДА инвертированные — сырой вердикт OKK уже означает «% плохого»
+//    («Потеря клиента…»: 1 = клиент потерян), выше = хуже во всех вьюхах;
+//  • инвертированные ТОЛЬКО в Spellit-виде — «Критические ошибки…»: сервер
+//    переворачивает вердикт OKK («1 = ошибок не было») в «долю звонков с
+//    ошибками» ТОЛЬКО в regroupAccToSpellit (Бух 1/Мед 1 + ролевки B2B).
+//    На Бух 2 и всех B2G-таблицах значение остаётся прямым («% без ошибок»),
+//    и красить его перевёрнутой шкалой нельзя — поэтому флаг spellitView
+//    прокидывается от вьюхи (см. isSpellitView);
 //  • нейтральные — информационная метрика без «хорошо/плохо» (talk ratio).
-const INVERTED_CRITERIA = new Set([
-  "Потеря клиента на этапе оплаты",
+const ALWAYS_INVERTED_CRITERIA = new Set(["Потеря клиента на этапе оплаты"]);
+const SPELLIT_INVERTED_CRITERIA = new Set([
   "Критические ошибки с точки зрения компании",
   "Критические ошибки с точки зрения клиента",
   "Критические ошибки с точки зрения закона",
 ]);
 const NEUTRAL_CRITERIA = new Set(["Talk ratio Продавца"]);
+
+// Зеркало серверного useSpellit (route.ts SPELLIT_PROMPT_TYPES + roleplay-B2B
+// ветка): где сервер инвертировал «Критические ошибки», там и красим их как
+// «% плохого».
+function isSpellitView(department: "b2g" | "b2b", source: "okk" | "roleplay", line: string): boolean {
+  if (department !== "b2b") return false;
+  if (source === "roleplay") return true;
+  return line === "buh1" || line === "med1";
+}
 
 // Скоринг клиента (Spellit-блок): сырые баллы, не проценты. Пороги окраски —
 // как группы Spellit: отдельные скоринги 0–10 (≤5 / ≤7 / >7), итог 0–30
@@ -87,19 +98,23 @@ function isClientScore(name: string): boolean {
   return name === CLIENT_SCORE_TOTAL || CLIENT_SCORE_10.has(name);
 }
 
-function getCriteriaColorFor(name: string, v: number | null | undefined): string {
+function isInvertedFor(name: string, spellitView: boolean): boolean {
+  return ALWAYS_INVERTED_CRITERIA.has(name) || (spellitView && SPELLIT_INVERTED_CRITERIA.has(name));
+}
+
+function getCriteriaColorFor(name: string, v: number | null | undefined, spellitView = false): string {
   if (v === undefined || v === null) return "text-slate-600";
   if (NEUTRAL_CRITERIA.has(name)) return "text-slate-200";
   if (isClientScore(name)) return getClientScoreColor(name, v);
-  if (INVERTED_CRITERIA.has(name)) return getCriteriaColor(100 - v);
+  if (isInvertedFor(name, spellitView)) return getCriteriaColor(100 - v);
   return getCriteriaColor(v);
 }
 
-function getCriteriaBgFor(name: string, v: number | null | undefined): string {
+function getCriteriaBgFor(name: string, v: number | null | undefined, spellitView = false): string {
   if (v === undefined || v === null) return "";
   if (NEUTRAL_CRITERIA.has(name)) return "";
   if (isClientScore(name)) return "";
-  if (INVERTED_CRITERIA.has(name)) return getCriteriaBg(100 - v);
+  if (isInvertedFor(name, spellitView)) return getCriteriaBg(100 - v);
   return getCriteriaBg(v);
 }
 
@@ -116,10 +131,13 @@ function fmtScore(v: number | null | undefined): string {
 }
 
 // Скоринг клиента показываем сырым баллом (21, 8), остальное — процентом.
+// Обязателен во ВСЕХ местах, где рендерится значение критерия по имени
+// (таблицы динамики, разбивка по менеджерам, compare) — голый fmtScore
+// пририсует «%» к сырым баллам скоринга.
 function fmtScoreFor(name: string | null, v: number | null | undefined): string {
   if (v === undefined || v === null) return "—";
   if (name && isClientScore(name)) return String(v);
-  return `${v}%`;
+  return fmtScore(v);
 }
 
 // M:SS из секунд (длительность звонка).
@@ -765,6 +783,7 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
             labelB={fmtShortRange(compareDateRange)}
             collapsedBlocks={collapsedCompareBlocks}
             onToggle={(n) => toggle(setCollapsedCompareBlocks, n)}
+            spellitView={isSpellitView(department, source, line)}
           />
 
           {managerIds.length !== 1 &&(data.managerBreakdown.length > 0 || compareData.managerBreakdown.length > 0) && (
@@ -951,6 +970,7 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
                 blocks={data.blocks}
                 department={department}
                 source={source}
+                spellitView={isSpellitView(department, source, line)}
                 highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
@@ -1091,7 +1111,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
             const v = c.scores[p];
-            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(c.name, v)} ${getCriteriaBgFor(c.name, v)}`}>{fmtScore(v)}</td>;
+            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(c.name, v)} ${getCriteriaBgFor(c.name, v)}`}>{fmtScoreFor(c.name, v)}</td>;
           })}
         </tr>
       ))}
@@ -1171,7 +1191,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
             const v = m.blocks[blockIdx]?.criteria[ci]?.score;
-            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(cName, v)} ${getCriteriaBgFor(cName, v)}`}>{fmtScore(v)}</td>;
+            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(cName, v)} ${getCriteriaBgFor(cName, v)}`}>{fmtScoreFor(cName, v)}</td>;
           })}
         </tr>
       ))}
@@ -1294,11 +1314,13 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, department, source, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate, canModerate, onExclude,
+  tree, blocks, department, source, spellitView, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate, canModerate, onExclude,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
   department: "b2g" | "b2b";
   source: "okk" | "roleplay";
+  // Сервер инвертировал «Критические ошибки» (Spellit-вид) → красим их как «% плохого».
+  spellitView: boolean;
   highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
@@ -1361,8 +1383,8 @@ function CriteriaTimeTree({
       // Критерии с особой семантикой (потеря клиента, talk ratio) красим
       // по имени; блоки и «ОЦЕНКА» — обычной шкалой.
       const critName = leaf.kind === "crit" ? leaf.crit.name : null;
-      const color = critName ? getCriteriaColorFor(critName, v) : getCriteriaColor(v);
-      const bg = critName ? getCriteriaBgFor(critName, v) : getCriteriaBg(v);
+      const color = critName ? getCriteriaColorFor(critName, v, spellitView) : getCriteriaColor(v);
+      const bg = critName ? getCriteriaBgFor(critName, v, spellitView) : getCriteriaBg(v);
       return (
         <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${color} ${bg}`}>
           {fmtScoreFor(critName, v)}
@@ -1774,10 +1796,11 @@ function aggregateData(data: AnalyticsData): { blocks: AggregatedBlock[]; overal
   return { blocks, overall };
 }
 
-function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks, onToggle }: {
+function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks, onToggle, spellitView }: {
   dataA: AnalyticsData; dataB: AnalyticsData;
   labelA: string; labelB: string;
   collapsedBlocks: Set<string>; onToggle: (n: string) => void;
+  spellitView: boolean;
 }) {
   const aggA = aggregateData(dataA);
   const aggB = aggregateData(dataB);
@@ -1825,7 +1848,7 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
               return (
                 <CompareBlockRows key={blockName} blockName={blockName} scoreA={scoreA} scoreB={scoreB}
                   blockA={blockA} blockB={blockB} criteriaNames={criteriaNames}
-                  isCollapsed={collapsed} onToggle={() => onToggle(blockName)} />
+                  isCollapsed={collapsed} onToggle={() => onToggle(blockName)} spellitView={spellitView} />
               );
             })}
             <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
@@ -1841,10 +1864,10 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
   );
 }
 
-function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaNames, isCollapsed, onToggle }: {
+function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaNames, isCollapsed, onToggle, spellitView }: {
   blockName: string; scoreA: number | null; scoreB: number | null;
   blockA?: AggregatedBlock; blockB?: AggregatedBlock; criteriaNames: string[];
-  isCollapsed: boolean; onToggle: () => void;
+  isCollapsed: boolean; onToggle: () => void; spellitView: boolean;
 }) {
   // «Все» = строка-воронка без критериев → нечего раскрывать (см. BlockTimeRows).
   const hasChildren = criteriaNames.length > 0;
@@ -1868,14 +1891,14 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
         // у нейтральных дельта без оценочного цвета.
         const deltaColor = NEUTRAL_CRITERIA.has(cName)
           ? "text-slate-400"
-          : INVERTED_CRITERIA.has(cName)
+          : isInvertedFor(cName, spellitView)
             ? getDeltaColor(cB, cA)
             : getDeltaColor(cA, cB);
         return (
           <tr key={`${blockName}-cmp-${cName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA)} ${getCriteriaBgFor(cName, cA)}`}>{fmtScore(cA)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB)} ${getCriteriaBgFor(cName, cB)}`}>{fmtScore(cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA, spellitView)} ${getCriteriaBgFor(cName, cA, spellitView)}`}>{fmtScoreFor(cName, cA)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB, spellitView)} ${getCriteriaBgFor(cName, cB, spellitView)}`}>{fmtScoreFor(cName, cB)}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${deltaColor}`}>{fmtDelta(cA, cB)}</td>
           </tr>
         );

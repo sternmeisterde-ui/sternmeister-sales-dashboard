@@ -45,19 +45,17 @@ const EXCLUDED_CRITERIA = new Set([
   "Экспертный стиль установления раппорта",
 ]);
 
-// ИСТОРИЯ (2026-06-11): попытка читать score у scoring:false критериев
-// («Критические ошибки», «Talk ratio», «Потеря клиента») провалилась — OKK-
-// оценщик пишет score=0 ВСЕМ нескоринговым критериям независимо от вердикта
-// LLM (вердикт остаётся только текстом в feedback). Парсинг нулей давал
-// ложные 0% по всем колонкам. Поэтому здесь нет специальных веток: критерий
-// попадает в агрегат только при max_score > 0.
+// ИСТОРИЯ (2026-06-11): раньше OKK писал score=0 ВСЕМ нескоринговым
+// критериям («Критические ошибки», «Talk ratio», «Потеря клиента»)
+// независимо от вердикта LLM — парсинг нулей давал ложные 0%, поэтому
+// критерий попадает в агрегат только при max_score > 0.
 //
-// Контракт на будущее (ТЗ dev_docs/17): OKK начнёт писать реальные значения
-// с max_score=1 (binary: критические ошибки, потеря клиента, вопросы Клиента)
-// и max_score=100 (Talk ratio). Тогда стандартная ветка `cMax > 0` подхватит
-// их автоматически, а старые «нулевые» оценки (max_score=0) отсеются сами.
-// Особая раскраска этих критериев уже готова на клиенте — см.
-// INVERTED_CRITERIA / NEUTRAL_CRITERIA в AnalyticsTab.tsx.
+// КОНТРАКТ ВЫПОЛНЕН (с 2026-06-11 в OKK, проверено на проде 2026-07-02:
+// 127/127 свежих r2-оценок): OKK пишет реальные вердикты с max_score=1
+// (binary) и max_score=100 (Talk ratio) — стандартная ветка `cMax > 0` их
+// подхватывает, а старые «нулевые» оценки (max_score=0) отсеиваются сами и
+// рендерятся «—». Особая раскраска на клиенте — ALWAYS_INVERTED_CRITERIA /
+// SPELLIT_INVERTED_CRITERIA / NEUTRAL_CRITERIA в AnalyticsTab.tsx.
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -600,11 +598,21 @@ function processBlocks(
 // а в таблице Spellit колонка означает «доля звонков С ошибками» (выше =
 // хуже, у идеального менеджера 0%). Инвертируем при материализации
 // Spellit-вида — B2G-таблицы это не задевает. Клиентская раскраска этих
-// колонок — INVERTED_CRITERIA в AnalyticsTab.tsx.
+// колонок — SPELLIT_INVERTED_CRITERIA в AnalyticsTab.tsx (по флагу
+// spellitView, т.к. вне Spellit-вида значения остаются прямыми).
 const SPELLIT_INVERTED = new Set([
   "Критические ошибки с точки зрения компании",
   "Критические ошибки с точки зрения клиента",
   "Критические ошибки с точки зрения закона",
+].map(looseKey));
+
+// Критерии, которые НЕ входят в блочный средний процент (свёрнутая колонка
+// блока): инвертированные (доля ошибок, выше=хуже) и нейтральный Talk ratio
+// смешали бы в одном среднем «% хорошего», «% плохого» и сырой процент
+// говорения — свёрнутые «Стандарты общения» выглядели бы красными при
+// идеальных показателях. Скоринг клиента исключается отдельно (сырые баллы).
+const SPELLIT_BLOCK_SUM_EXCLUDED = new Set([
+  "Talk ratio Продавца",
 ].map(looseKey));
 
 // ─── Перегруппировка под Spellit ────────────────────────────
@@ -626,10 +634,15 @@ function regroupAccToSpellit(acc: PeriodAcc): void {
     const entry = SPELLIT_INVERTED.has(lk)
       ? { scoreSum: 100 * ce.count - ce.scoreSum, count: ce.count }
       : ce;
-    nc.set(`${sb.block}::${cName}`, entry);
-    // Скоринг клиента — сырые баллы, в блочный процент их не мешаем
-    // (свёрнутый блок покажет «—», как и блоки без block_score).
-    if (sb.block === CLIENT_SCORING_BLOCK) continue;
+    // Один и тот же критерий может прийти из разных config-блоков (разные
+    // prompt-версии) — сливаем, а не перезаписываем.
+    const nk = `${sb.block}::${cName}`;
+    const prev = nc.get(nk);
+    if (prev) { prev.scoreSum += entry.scoreSum; prev.count += entry.count; }
+    else nc.set(nk, entry);
+    // В блочный средний идут только «обычные» процентные критерии: сырые
+    // баллы скоринга, доля ошибок и talk ratio исказили бы свёрнутый блок.
+    if (sb.block === CLIENT_SCORING_BLOCK || SPELLIT_INVERTED.has(lk) || SPELLIT_BLOCK_SUM_EXCLUDED.has(lk)) continue;
     const be = nb.get(sb.block);
     if (be) { be.scoreSum += entry.scoreSum; be.count += entry.count; }
     else nb.set(sb.block, { scoreSum: entry.scoreSum, count: entry.count });
