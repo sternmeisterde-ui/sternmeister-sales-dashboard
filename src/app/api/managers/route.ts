@@ -679,11 +679,14 @@ async function syncToTargets(
     try {
       if (row.inRolevki && row.telegramId) {
         // Roleplay tables (d1_users/r1_users) have a CHECK constraint allowing
-        // only role IN ('manager','rop','admin') — no 'teamlead'. A teamlead
-        // does roleplays as a regular manager, so map it down here. Without
-        // this the sync UPDATE/INSERT is rejected by Postgres (the "Roleplay
-        // sync failed" warning). OKK keeps the real 'teamlead' role.
-        const roleplayRole = row.role === "teamlead" ? "manager" : row.role;
+        // only role IN ('manager','rop','admin') — no 'teamlead'/'prolongation'.
+        // A teamlead does roleplays as a regular manager; a prolongation
+        // manager (менеджер продлений) too, while inRolevki=true. Map both
+        // down here — without this the sync UPDATE/INSERT is rejected by
+        // Postgres (the "Roleplay sync failed" warning). OKK keeps the real
+        // role.
+        const roleplayRole =
+          row.role === "teamlead" || row.role === "prolongation" ? "manager" : row.role;
 
         // If telegramId changed, deactivate old record
         if (telegramIdChanged && oldRecord.telegramId) {
