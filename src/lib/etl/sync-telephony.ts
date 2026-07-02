@@ -284,14 +284,25 @@ export async function syncTelephony(
       )) as unknown as { rows: Array<{ communication_id: string }> };
       for (const r of res.rows) existing.add(r.communication_id);
     }
+    // Свежий срез НЕ замораживаем: CloudTalk отдаёт и незавершённые звонки
+    // (Cdr.ended_at nullable) — звонок, шедший во время прошлого тика, мог
+    // лечь в БД с промежуточной длительностью. Всё, что началось за
+    // последние FRESH_MINUTES, проходит полный DELETE+INSERT как в обычном
+    // режиме (это и есть старое поведение 15-мин окна); skip-existing
+    // применяется только к устоявшейся истории.
+    const FRESH_MINUTES = 20;
+    const freshCutoff = new Date(toDate.getTime() - FRESH_MINUTES * 60 * 1000);
     const before = rows.length;
-    const fresh = rows.filter(
-      (r) => !r.communicationId || !existing.has(r.communicationId),
+    const keep = rows.filter(
+      (r) =>
+        !r.communicationId ||
+        !existing.has(r.communicationId) ||
+        (r.createdAt instanceof Date && r.createdAt >= freshCutoff),
     );
     rows.length = 0;
-    rows.push(...fresh);
+    rows.push(...keep);
     console.log(
-      `[ETL telephony] sweep: ${before - rows.length} CDRs already present, ${rows.length} new`,
+      `[ETL telephony] sweep: ${before - rows.length} settled CDRs already present, ${rows.length} new/fresh`,
     );
     if (rows.length === 0) {
       return {
