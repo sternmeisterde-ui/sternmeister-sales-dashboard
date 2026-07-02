@@ -57,15 +57,40 @@ function getCriteriaColor(v: number | null | undefined): string {
 // Критерии с особой раскраской (канонические имена из src/criteria/*.json —
 // сервер агрегирует их специальной веткой, см. UNSCORED_BINARY_CRITERIA /
 // VALUE_CRITERIA в /api/analytics):
-//  • инвертированные — значение это «% плохого», выше = хуже («Потеря
-//    клиента…» = % потерянных горячих клиентов);
+//  • инвертированные — значение это «% плохого», выше = хуже. «Потеря
+//    клиента…» = % потерянных горячих клиентов; «Критические ошибки…» =
+//    доля звонков с ошибками (полярность Spellit: сервер инвертирует вердикт
+//    OKK «1 = ошибок не было» в regroupAccToSpellit);
 //  • нейтральные — информационная метрика без «хорошо/плохо» (talk ratio).
-const INVERTED_CRITERIA = new Set(["Потеря клиента на этапе оплаты"]);
+const INVERTED_CRITERIA = new Set([
+  "Потеря клиента на этапе оплаты",
+  "Критические ошибки с точки зрения компании",
+  "Критические ошибки с точки зрения клиента",
+  "Критические ошибки с точки зрения закона",
+]);
 const NEUTRAL_CRITERIA = new Set(["Talk ratio Продавца"]);
+
+// Скоринг клиента (Spellit-блок): сырые баллы, не проценты. Пороги окраски —
+// как группы Spellit: отдельные скоринги 0–10 (≤5 / ≤7 / >7), итог 0–30
+// (<10 / <20 / ≥20).
+const CLIENT_SCORE_10 = new Set(["Потребность", "Платежеспособность", "Срочность"]);
+const CLIENT_SCORE_TOTAL = "Итоговый скоринг";
+
+function getClientScoreColor(name: string, v: number): string {
+  if (name === CLIENT_SCORE_TOTAL) {
+    return v >= 20 ? "text-emerald-400" : v >= 10 ? "text-amber-400" : "text-rose-400";
+  }
+  return v > 7 ? "text-emerald-400" : v > 5 ? "text-amber-400" : "text-rose-400";
+}
+
+function isClientScore(name: string): boolean {
+  return name === CLIENT_SCORE_TOTAL || CLIENT_SCORE_10.has(name);
+}
 
 function getCriteriaColorFor(name: string, v: number | null | undefined): string {
   if (v === undefined || v === null) return "text-slate-600";
   if (NEUTRAL_CRITERIA.has(name)) return "text-slate-200";
+  if (isClientScore(name)) return getClientScoreColor(name, v);
   if (INVERTED_CRITERIA.has(name)) return getCriteriaColor(100 - v);
   return getCriteriaColor(v);
 }
@@ -73,6 +98,7 @@ function getCriteriaColorFor(name: string, v: number | null | undefined): string
 function getCriteriaBgFor(name: string, v: number | null | undefined): string {
   if (v === undefined || v === null) return "";
   if (NEUTRAL_CRITERIA.has(name)) return "";
+  if (isClientScore(name)) return "";
   if (INVERTED_CRITERIA.has(name)) return getCriteriaBg(100 - v);
   return getCriteriaBg(v);
 }
@@ -86,6 +112,13 @@ function getCriteriaBg(v: number | null | undefined): string {
 
 function fmtScore(v: number | null | undefined): string {
   if (v === undefined || v === null) return "—";
+  return `${v}%`;
+}
+
+// Скоринг клиента показываем сырым баллом (21, 8), остальное — процентом.
+function fmtScoreFor(name: string | null, v: number | null | undefined): string {
+  if (v === undefined || v === null) return "—";
+  if (name && isClientScore(name)) return String(v);
   return `${v}%`;
 }
 
@@ -209,6 +242,9 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>(() => defaultDateRange(department));
+  // Тумблер «≥ 15 мин»: Spellit («Дашборд 1») пускает в таблицу только звонки
+  // от 15 минут, OKK оценивает от 10 — включается для сверки цифр со Spellit.
+  const [spellitMinDur, setSpellitMinDur] = useState(false);
 
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -417,8 +453,9 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
     const effectiveLine = source === "roleplay" && (line === "2a" || line === "2b") ? "2" : line;
     const params = new URLSearchParams({ department, source, line: effectiveLine, groupBy, from: fromStr, to: toStr });
     if (managerIds.length) params.set("managerIds", managerIds.join(","));
+    if (department === "b2b" && source === "okk" && spellitMinDur) params.set("minDur", "900");
     return params;
-  }, [department, source, line, groupBy, managerIds]);
+  }, [department, source, line, groupBy, managerIds, spellitMinDur]);
 
   // Loading-state toggle uses a ref so it doesn't end up in the deps array
   // — having `data` as a dep caused fetchData to get a new identity after
@@ -894,7 +931,19 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
               </div>
             )}
             {source === "okk" && data && (
-              <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
+              <div className="flex items-end justify-between gap-3">
+                <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
+                {/* Паритет со Spellit: их «Дашборд 1» показывает только звонки ≥ 15 мин */}
+                <label className="flex items-center gap-1.5 pb-1 cursor-pointer select-none text-[10px] uppercase tracking-wider font-semibold text-slate-400 hover:text-slate-200 whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={spellitMinDur}
+                    onChange={(e) => setSpellitMinDur(e.target.checked)}
+                    className="accent-blue-500 w-3 h-3"
+                  />
+                  ≥ 15 мин (как в Spellit)
+                </label>
+              </div>
             )}
             {data && data.timeTree.length > 0 ? (
               <CriteriaTimeTree
@@ -1316,7 +1365,7 @@ function CriteriaTimeTree({
       const bg = critName ? getCriteriaBgFor(critName, v) : getCriteriaBg(v);
       return (
         <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${color} ${bg}`}>
-          {fmtScore(v)}
+          {fmtScoreFor(critName, v)}
         </td>
       );
     });
