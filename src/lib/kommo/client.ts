@@ -25,7 +25,11 @@ import { cached, CACHE_TTL } from "./cache";
 // bumping this requires coordinating with the okk client at
 // /Users/user/okk/src/services/kommo.ts (RATE_LIMIT_MS) so the combined
 // ceiling stays ≤ 2 req/sec.
-const RATE_LIMIT_MS = 1000;
+// KOMMO_RATE_LIMIT_MS может только ЗАМЕДЛИТЬ (floor 1000 мс) — для локальных
+// массовых прогонов (drain-enrich и т.п.), идущих параллельно с прод-кроном:
+// ставим 2500-3000, чтобы суммарная нагрузка от нас оставалась щадящей.
+// Ускорить через env нельзя намеренно (правило владельца: ≤1 rps на процесс).
+const RATE_LIMIT_MS = Math.max(1000, Number(process.env.KOMMO_RATE_LIMIT_MS) || 1000);
 // Per-request timeout for Kommo. Most calls complete in <2s; setting 30s
 // guards against socket stalls without rejecting the legitimate slow tail
 // (lead-list pages with `with=` joins occasionally take 10-15s on large
