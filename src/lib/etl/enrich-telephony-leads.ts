@@ -144,6 +144,49 @@ interface InsertRecord {
 const BULK_BATCH_SIZE = 500;
 
 /**
+ * Local-first резолв телефона в сделки (2026-07-02, решение владельца:
+ * «зачем каждый раз обращаться к Kommo»): телефон → analytics.contacts
+ * (матч по последним 10 цифрам ЛЮБОГО номера контакта из phones_all) →
+ * lead_contact_links (is_active) → lead_ids. Зеркало contacts/links
+ * наполняется штатным ETL (sync-leads → sync-contacts), покрытие бэклога
+ * ~99.9% (замер diag-local-enrich-coverage.ts). Kommo остаётся fallback'ом
+ * только для номеров, которых зеркало ещё не видело (совсем свежие
+ * контакты между тиками) — постоянная нагрузка на Kommo падает почти до
+ * нуля (правило владельца ≤1 rps соблюдается с запасом).
+ *
+ * Порядок lead_ids — по возрастанию id (≈ порядок создания, тот же принцип,
+ * что у Kommo `_embedded.leads`) — выбор primary-лида детерминирован.
+ * Короткие/пустые номера (<6 цифр) не матчим — это служебные наборы.
+ */
+export async function resolvePhonesLocally(phones: string[]): Promise<Map<string, number[]>> {
+  const map = new Map<string, number[]>();
+  if (phones.length === 0) return map;
+  const json = JSON.stringify(phones.map((p) => ({ phone: p })));
+  const res = await analyticsDb.execute<{ phone: string; lead_ids: Array<number | string> }>(sql`
+    WITH input AS (
+      SELECT i.phone, right(regexp_replace(i.phone, '\D', '', 'g'), 10) AS pnorm
+      FROM jsonb_to_recordset(${json}::jsonb) AS i(phone text)
+    ),
+    contact_phones AS (
+      SELECT c.contact_id, right(regexp_replace(p.v, '\D', '', 'g'), 10) AS pnorm
+      FROM analytics.contacts c,
+           jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) AS p(v)
+    )
+    SELECT i.phone, array_agg(DISTINCT l.lead_id ORDER BY l.lead_id) AS lead_ids
+    FROM input i
+    JOIN contact_phones cp
+      ON cp.pnorm = i.pnorm AND i.pnorm <> '' AND length(i.pnorm) >= 6
+    JOIN analytics.lead_contact_links l
+      ON l.contact_id = cp.contact_id AND l.is_active
+    GROUP BY i.phone
+  `);
+  for (const r of res.rows) {
+    map.set(r.phone, (r.lead_ids ?? []).map(Number));
+  }
+  return map;
+}
+
+/**
  * Per-tick scan cap. This is a *row* cap, not a phone cap — multiple rows
  * can share the same phone (one caller, multiple CDR legs). Phones are
  * de-duplicated inside `searchContactsByPhone`, so the effective Kommo
@@ -321,7 +364,27 @@ export async function enrichTelephonyLeads(
     `[ETL enrich] scanning ${unenriched.length} unenriched rows across ${distinctPhones.length} distinct phones${cappedNote}`,
   );
 
-  const phoneToLeadIds = await searchContactsByPhone(distinctPhones);
+  // Local-first: сначала зеркало contacts/links, Kommo — только для промахов.
+  // Merged-map сохраняет семантику skip-листа: запись в map = «получили
+  // определённый ответ» (локальный хит ИЛИ ответ Kommo, включая пустой);
+  // Kommo-таймауты в map не попадают → не skip-листятся, ретрай следующим
+  // тиком — как и раньше.
+  const localMap = await resolvePhonesLocally(distinctPhones);
+  const missingPhones = distinctPhones.filter((p) => !(localMap.get(p)?.length));
+  const kommoMap =
+    missingPhones.length > 0
+      ? await searchContactsByPhone(missingPhones)
+      : new Map<string, number[]>();
+  const phoneToLeadIds = new Map<string, number[]>();
+  for (const [p, ids] of localMap) {
+    if (ids.length > 0) phoneToLeadIds.set(p, ids);
+  }
+  for (const [p, ids] of kommoMap) {
+    if (!phoneToLeadIds.has(p)) phoneToLeadIds.set(p, ids);
+  }
+  console.log(
+    `[ETL enrich] resolve: local=${distinctPhones.length - missingPhones.length}, kommo-fallback=${missingPhones.length}`,
+  );
 
   // 3. Bulk-fetch lead metadata from leads_cohort.
   const allLeadIds = new Set<number>();
