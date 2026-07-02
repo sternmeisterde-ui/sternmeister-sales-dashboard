@@ -1,8 +1,17 @@
+// ⛔ УЖЕ ПРИМЕНЕНО 2026-07-02 (через apply-cg-tz-shift-once.ts с маркером
+// onetime-cg-tz-fix-20260702 в analytics.etl_locks). НЕ ЗАПУСКАТЬ.
+// Файл сохранён как документация; формула ниже ИСПРАВЛЕНА (в версии из
+// PR #57 сдвиг был в обратную сторону — колонка оказалась timestamp
+// WITHOUT time zone, см. diag-tz-semantics.ts).
+//
 // Разовый фикс истории: cg-leg строки в analytics.communications записаны со
 // временем «берлинская стенка как UTC» (CallGear отдаёт naive-время в поясе
-// аккаунта = Europe/Berlin, а парсер трактовал его как UTC). Сдвигаем
-// created_at на истинный UTC: (created_at AT TIME ZONE 'UTC') — это та самая
-// берлинская стенка; интерпретируем её в Europe/Berlin (DST-aware в PG).
+// аккаунта = Europe/Berlin, а парсер трактовал его как UTC). Колонка
+// created_at — timestamp WITHOUT time zone (naive, трактуется приложением
+// как UTC). Значит стенка в колонке = берлинская, а истинный UTC:
+//   (created_at AT TIME ZONE 'Europe/Berlin') AT TIME ZONE 'UTC'
+// (naive-как-Берлин → timestamptz → naive-UTC-стенка; DST-aware в PG).
+// Семантика проверена пробой diag-tz-semantics.ts: 18:57 → 16:57 (лето, −2ч).
 //
 // ⚠ НЕ ИДЕМПОТЕНТНО: повторный запуск сдвинет время ещё раз. Запускать РОВНО
 // ОДИН РАЗ, ПОСЛЕ деплоя фикса парсера (feat/callgear-berlin-tz), с cutoff
@@ -44,7 +53,7 @@ async function main() {
 
   const sample = (await adb`
     SELECT communication_id, created_at,
-           ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') AS fixed
+           ((created_at AT TIME ZONE 'Europe/Berlin') AT TIME ZONE 'UTC') AS fixed
     FROM analytics.communications
     WHERE communication_id LIKE 'cg-leg:%' AND created_at < ${cutoff.toISOString()}
     ORDER BY created_at DESC LIMIT 3`) as Array<Record<string, unknown>>;
@@ -60,7 +69,7 @@ async function main() {
     const hi = next < cutoff ? next : cutoff;
     const res = (await adb`
       UPDATE analytics.communications
-      SET created_at = (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'
+      SET created_at = (created_at AT TIME ZONE 'Europe/Berlin') AT TIME ZONE 'UTC'
       WHERE communication_id LIKE 'cg-leg:%'
         AND created_at >= ${m.toISOString()} AND created_at < ${hi.toISOString()}
     `) as unknown as { rowCount?: number };
