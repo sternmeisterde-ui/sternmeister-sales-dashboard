@@ -734,28 +734,44 @@ export async function getFrozenLeadsTeam(
 }
 
 /**
- * Dept-wide average answer-wait (ring/queue seconds before pickup) for the
- * B2B «Ожидание (сек)» tile. Averaged over ANSWERED calls only (duration >= 1)
- * since "ожидание ответа" is undefined for calls nobody picked up. Deduped by
- * communication_id so Pattern-A fan-out doesn't skew the mean. wait_seconds is
- * NULL on Kommo/message rows — AVG skips those automatically.
+ * Dept-wide average answer-wait (ring seconds before pickup, from CDR
+ * wait_seconds) for the B2B «Ожидание (сек)» tile. Averaged over ANSWERED
+ * calls only (duration >= 1) since "ожидание ответа" is undefined for calls
+ * nobody picked up. Deduped by communication_id so Pattern-A fan-out doesn't
+ * skew the mean.
+ *
+ * Scope: BY AGENT (спека 22 п.3) — как и остальные b2b-плитки. Прежний скоуп
+ * «воронки + NULL» подмешивал чужие необогащённые строки (b2g) в среднее.
+ * NB: виджеты аналитики самих телефоний считают «ожидание» по своим
+ * внутренним событиям очереди, которых нет в CDR API — их значения с этой
+ * метрикой сопоставлять нельзя (разные сущности; разбор 2026-07-02).
  */
 export async function getAnalyticsAvgWaitSeconds(
+  managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<number> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return 0;
-  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(pipelineIds, fromTs, toTs));
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(managers, fromTs, toTs));
 }
 
-async function fetchAvgWaitSeconds(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+async function fetchAvgWaitSeconds(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const names: string[] = [];
+  for (const m of managers) {
+    names.push(m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
+  }
+  if (names.length === 0) return 0;
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -766,7 +782,7 @@ async function fetchAvgWaitSeconds(pipelineIds: number[], fromTs: number, toTs: 
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IN (${nameList})
       ORDER BY communication_id, lead_id NULLS LAST
     )
     SELECT AVG(wait_seconds)::float AS avg_wait
