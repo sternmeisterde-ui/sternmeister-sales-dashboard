@@ -426,7 +426,7 @@ export default function DashboardTab({ department }: { department: string }) {
               />
               <CallMetricTile
                 icon={Clock} label="Длительность" color="blue" totalValue={fmtHoursMinutes(m.totalMinutes)} rows={null}
-                tip="Суммарное время по всем звонкам (разговор + ожидание ответа, как в кабинетах телефоний), в часах и минутах."
+                tip="Суммарная длительность по всем звонкам, как её считают кабинеты телефоний: CloudTalk — время разговора, CallGear — полное время звонка."
               />
               <CallMetricTile
                 icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
