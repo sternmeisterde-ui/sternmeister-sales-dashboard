@@ -16,6 +16,7 @@ import type {
   TelephonyDirection,
   TelephonyStatus,
 } from "./types";
+import { tzOffsetMinutes } from "@/lib/utils/date";
 
 const CALLGEAR_API_URL = "https://dataapi.callgear.com/v2.0";
 const PAGE_LIMIT = 1000;
@@ -255,12 +256,19 @@ function cleanAgentName(raw: string | null): string | null {
 }
 
 function parseStartedAt(s: string): Date {
-  // CallGear: "2026-04-27 09:04:23" — assume account TZ ≈ UTC for storage.
-  // The dashboard reads these as UTC then renders Europe/Berlin, same as
-  // the existing analytics.communications rows.
+  // CallGear: "2026-04-27 09:04:23" — naive-время В ПОЯСЕ АККАУНТА, и это
+  // Europe/Berlin, НЕ UTC. Сверено с кабинетом 27.06.2026: звонок в кабинете
+  // 18:58:51 = leg.start_time "18:58:51" (решение владельца 2026-07-02:
+  // «в берлинском правильнее»). Прежнее допущение «≈ UTC» сдвигало все
+  // cg-строки в analytics на +1/+2ч (зима/лето); историю чинит разовый
+  // scripts/fix-cg-created-at-tz.ts.
   const iso = s.includes("T") ? s : s.replace(" ", "T") + "Z";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return new Date();
+  const naiveAsUtc = new Date(iso);
+  if (Number.isNaN(naiveAsUtc.getTime())) return new Date();
+  // naive — берлинская стенка: истинный UTC = naive − offset(Berlin).
+  // Оффсет берём на сам момент (DST-aware через Intl).
+  const offsetMin = tzOffsetMinutes(naiveAsUtc, "Europe/Berlin");
+  const d = new Date(naiveAsUtc.getTime() - offsetMin * 60_000);
   return d;
 }
 
