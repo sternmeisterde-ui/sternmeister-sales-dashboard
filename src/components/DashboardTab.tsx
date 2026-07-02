@@ -525,10 +525,9 @@ export default function DashboardTab({ department }: { department: string }) {
                 icon={PhoneOutgoing} label="Исходящие" color="blue" totalValue={outgoing} rows={null}
                 tip="Количество исходящих звонков (наборов). Сумма CloudTalk и CallGear."
               />
-              <CallMetricTile
-                icon={Phone} label="Всего" color="blue" totalValue={m.callsTotal} rows={null}
-                tip="Все звонки: исходящие + входящие. Сумма CloudTalk и CallGear."
-              />
+              {/* Плитка «Всего» (исх+вх) убрана по просьбе Рузанны (спека 22
+                  п.4, созвон: «мне это вообще не надо») — набор: Исходящие,
+                  Принятых, % дозвона, Длительность, Ожидание, SLA, Потерянные. */}
               <CallMetricTile
                 icon={PhoneCall} label="Принятых" color="emerald" totalValue={answeredOut} rows={null}
                 tip="Исходящие, на которые ответили (длительность ≥ 1 сек)."
