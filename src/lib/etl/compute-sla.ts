@@ -35,9 +35,28 @@ const NEW_LEAD_STATUSES = INCLUDE_NEW_LEAD_23
   ? ["Новый лид", "Новый лид 2", "Новый лид 3"]
   : ["Новый лид"];
 const OWN_SLA_PIPELINE = "Бух Комм";
-// Причины отказа, по которым лид выпадает из своего SLA (плюс флаг
-// exclude_from_analytics). Точные строки сверены с прод-данными.
-const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set(["Спам", "Неквал лид"]);
+// Причины закрытия, исключающие лид из «своего» SLA — список Рузанны
+// (2026-07-02): Спам, Неквал, Предложение сотрудничества, Дубль госник,
+// Бух дубль, Мед дубль. Первичный матч — по enum_id поля 876383 («Причина
+// закрытия» b2b; менеджеры заполняют его, стандартный loss_reason чаще
+// NULL — сверено по прод-данным diag-b2b-close-reasons.ts). Текстовый сет —
+// фолбэк для строк без enum. Id получены из Kommo (diag-b2b-reason-enums).
+const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
+  740593, // Спам
+  740587, // Неквал лид
+  740595, // Предложение сотрудничества
+  752414, // Дубль, госник
+  753716, // Бух дубль
+  753718, // Мед дубль
+]);
+const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
+  "Спам",
+  "Неквал лид",
+  "Предложение сотрудничества",
+  "Дубль, госник",
+  "Бух дубль",
+  "Мед дубль",
+]);
 // Kommo «успешно/закрыт» статусы — для корнер-кейса «звонка нет + лид закрыт».
 const CLOSED_STATUS_IDS = new Set([142, 143]);
 
@@ -68,6 +87,8 @@ export async function computeSla(
       manager: leadsCohort.manager,
       lossReason: leadsCohort.lossReason,
       excludeFromAnalytics: leadsCohort.excludeFromAnalytics,
+      b2bCloseReasonEnumId: leadsCohort.b2bCloseReasonEnumId,
+      closedAt: leadsCohort.closedAt,
     })
     .from(leadsCohort)
     .where(
@@ -358,6 +379,8 @@ export async function computeSla(
     const ownAnchor = ownAnchorByLead.get(lead.leadId);
     if (ownAnchor) {
       const excludedByReason = lead.excludeFromAnalytics === true
+        || (lead.b2bCloseReasonEnumId != null
+          && OWN_SLA_EXCLUDED_REASON_ENUM_IDS.has(Number(lead.b2bCloseReasonEnumId)))
         || (lead.lossReason != null && OWN_SLA_EXCLUDED_LOSS_REASONS.has(lead.lossReason));
       if (excludedByReason) {
         slaOwnStatus = "excluded";                 // значение остаётся NULL
@@ -370,10 +393,16 @@ export async function computeSla(
           slaOwnStatus = "measured";
         }
       } else {
-        // Звонка нет: закрыт → не считаем; открыт → рабочие часы до «сейчас».
+        // Звонка нет. Раньше ЛЮБОЙ закрытый без звонка исключался — по
+        // правке Рузанны (список причин, 2026-07-02) исключают только
+        // причины из списка (отсечены excludedByReason выше). Закрытый без
+        // звонка по «обычной» причине — провал SLA: рабочие часы от входа
+        // до закрытия (closed_at; если пуст — до «сейчас»). Открытый без
+        // звонка — как раньше, тикает до текущего момента.
         const isClosed = lead.statusId != null && CLOSED_STATUS_IDS.has(lead.statusId);
         if (isClosed) {
-          slaOwnStatus = "closed_no_call";         // значение остаётся NULL
+          slaOwnSeconds = businessHoursSeconds(ownAnchor, lead.closedAt ?? nowUtc);
+          slaOwnStatus = "closed_no_call";
         } else {
           slaOwnSeconds = businessHoursSeconds(ownAnchor, nowUtc);
           slaOwnStatus = "pending";

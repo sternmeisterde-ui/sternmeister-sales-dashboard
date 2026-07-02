@@ -113,7 +113,26 @@ interface LostCallItem {
   leadId: number | null;
   pipelineName: string | null;
   statusName: string | null;
+  clientName: string | null;
 }
+
+// Строка детализации SLA (ответ /api/dashboard/sla-leads).
+interface SlaLeadItem {
+  leadId: number;
+  manager: string | null;
+  slaMinutes: number;
+  slaStatus: string | null;
+  clientName: string | null;
+  phone: string | null;
+  pipelineId: number | null;
+}
+
+const SLA_STATUS_LABEL: Record<string, { label: string; cls: string }> = {
+  measured: { label: "звонок сделан", cls: "bg-emerald-500/15 text-emerald-400" },
+  instant: { label: "мгновенно", cls: "bg-emerald-500/15 text-emerald-400" },
+  pending: { label: "ещё без звонка", cls: "bg-amber-500/15 text-amber-400" },
+  closed_no_call: { label: "закрыт без звонка", cls: "bg-rose-500/15 text-rose-400" },
+};
 
 // Время потерянного звонка — берлинское, с датой (перид может быть > 1 дня).
 function fmtLostAt(iso: string): string {
@@ -178,6 +197,11 @@ export default function DashboardTab({ department }: { department: string }) {
   const [lostItems, setLostItems] = useState<LostCallItem[] | null>(null);
   const [lostLoading, setLostLoading] = useState(false);
   const [lostError, setLostError] = useState<string | null>(null);
+  // Drill-down SLA (спека 22 п.5.3) — тот же паттерн, что «Потерянные».
+  const [slaOpen, setSlaOpen] = useState(false);
+  const [slaItems, setSlaItems] = useState<SlaLeadItem[] | null>(null);
+  const [slaLoading, setSlaLoading] = useState(false);
+  const [slaError, setSlaError] = useState<string | null>(null);
   // Tracks whether we already have data so subsequent refetches don't
   // re-trigger the full-screen DinoLoader (background-refresh UX). Held
   // in a ref because we DON'T want this flag in the fetchData deps —
@@ -221,22 +245,28 @@ export default function DashboardTab({ department }: { department: string }) {
     return () => ac.abort();
   }, [fetchData]);
 
-  // Смена периода/отдела инвалидирует детализацию «Потерянных».
+  // Смена периода/отдела инвалидирует детализации.
   useEffect(() => {
     setLostOpen(false);
     setLostItems(null);
     setLostError(null);
+    setSlaOpen(false);
+    setSlaItems(null);
+    setSlaError(null);
   }, [department, range.start, range.end]);
 
-  // ESC закрывает модалку «Потерянных».
+  // ESC закрывает открытую модалку детализации.
   useEffect(() => {
-    if (!lostOpen) return;
+    if (!lostOpen && !slaOpen) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setLostOpen(false);
+      if (e.key === "Escape") {
+        setLostOpen(false);
+        setSlaOpen(false);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [lostOpen]);
+  }, [lostOpen, slaOpen]);
 
   const toggleLostDetail = useCallback(async () => {
     const next = !lostOpen;
@@ -257,6 +287,26 @@ export default function DashboardTab({ department }: { department: string }) {
       setLostLoading(false);
     }
   }, [lostOpen, lostItems, lostLoading, department, range.start, range.end]);
+
+  const toggleSlaDetail = useCallback(async () => {
+    const next = !slaOpen;
+    setSlaOpen(next);
+    if (!next || slaItems !== null || slaLoading) return;
+    setSlaLoading(true);
+    setSlaError(null);
+    try {
+      const res = await fetch(
+        `/api/dashboard/sla-leads?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+      );
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const json = (await res.json()) as { items: SlaLeadItem[] };
+      setSlaItems(json.items);
+    } catch (e) {
+      setSlaError(String(e));
+    } finally {
+      setSlaLoading(false);
+    }
+  }, [slaOpen, slaItems, slaLoading, department, range.start, range.end]);
 
   if (loading && !data) {
     return <DinoLoader />;
@@ -501,8 +551,9 @@ export default function DashboardTab({ department }: { department: string }) {
               />
               <CallMetricTile
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
+                onClick={toggleSlaDetail}
                 tipAlign="right"
-                tip="Среднее рабочее время (Пн–Сб 09:00–18:00 по Берлину) от входа лида в статус «Новый лид» до первого звонка по нему. Если звонка ещё не было, а лид открыт — считается до текущего момента. Не учитываются: лиды без входа в «Новый лид», закрытые без звонка, а также «Спам», «Неквал лид» и помеченные «Исключить из аналитики»."
+                tip="Среднее рабочее время (Пн–Сб 09:00–18:00 по Берлину) от входа лида в статус «Новый лид» до первого звонка по нему. Без звонка: открытый лид считается до текущего момента, закрытый — до момента закрытия. Не учитываются лиды с причинами: Спам, Неквал, Предложение сотрудничества, Дубль госник, Бух дубль, Мед дубль — и помеченные «Исключить из аналитики». Клик — детализация по сделкам."
               />
               <CallMetricTile
                 icon={PhoneOff}
@@ -584,6 +635,7 @@ export default function DashboardTab({ department }: { department: string }) {
                         <thead>
                           <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
                             <th className="py-1.5 pr-3 font-medium">Время</th>
+                            <th className="py-1.5 pr-3 font-medium">Клиент</th>
                             <th className="py-1.5 pr-3 font-medium">Телефон</th>
                             <th className="py-1.5 pr-3 font-medium">Сделка</th>
                             <th className="py-1.5 font-medium">Воронка / статус</th>
@@ -593,6 +645,7 @@ export default function DashboardTab({ department }: { department: string }) {
                           {items.map((it, i) => (
                             <tr key={`${it.phone}-${it.createdAt}-${i}`} className="border-b border-white/5 hover:bg-white/[0.02]">
                               <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap tabular-nums">{fmtLostAt(it.createdAt)}</td>
+                              <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
                               <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone}</td>
                               <td className="py-1.5 pr-3">
                                 {it.leadId ? (
@@ -621,6 +674,124 @@ export default function DashboardTab({ department }: { department: string }) {
               </div>
             );
           })()}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* ============ SLA — DRILL-DOWN МОДАЛКА (спека 22 п.5.3, B2B) ============ */}
+      {!isB2G && slaOpen && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setSlaOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="document"
+          >
+            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+              <h3 className="text-sm font-bold text-blue-400 flex items-center gap-2 min-w-0">
+                <Gauge className="w-4 h-4 shrink-0" />
+                <span className="truncate">SLA — из каких сделок состоит среднее</span>
+                {slaItems && slaItems.length > 0 && (
+                  <span className="text-slate-500 font-normal shrink-0">
+                    ({slaItems.length} · ср. {Math.round(slaItems.reduce((s, x) => s + x.slaMinutes, 0) / slaItems.length)}м)
+                  </span>
+                )}
+              </h3>
+              <button
+                onClick={() => setSlaOpen(false)}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+              >
+                Закрыть ✕
+              </button>
+            </div>
+
+            <div className="overflow-y-auto px-5 py-4">
+              {slaLoading && (
+                <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
+                </div>
+              )}
+              {slaError && <p className="text-rose-400 text-sm py-2">{slaError}</p>}
+              {slaItems && slaItems.length === 0 && (
+                <p className="text-slate-400 text-sm py-2">За выбранный период SLA-сделок нет.</p>
+              )}
+              {slaItems && slaItems.length > 0 && (() => {
+                const byManager = new Map<string, SlaLeadItem[]>();
+                for (const it of slaItems) {
+                  const key = it.manager || "Без менеджера";
+                  const arr = byManager.get(key) ?? [];
+                  arr.push(it);
+                  byManager.set(key, arr);
+                }
+                const groups = [...byManager.entries()].sort((a, b) => b[1].length - a[1].length);
+                return (
+                  <div className="flex flex-col gap-4">
+                    {groups.map(([mgrName, items]) => {
+                      const avg = Math.round(items.reduce((s, x) => s + x.slaMinutes, 0) / items.length);
+                      return (
+                        <div key={mgrName}>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-sm font-semibold text-slate-200">{mgrName}</span>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-bold">{items.length}</span>
+                            <span className="text-xs text-slate-500">ср. {avg}м</span>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                                  <th className="py-1.5 pr-3 font-medium">Сделка</th>
+                                  <th className="py-1.5 pr-3 font-medium">Клиент</th>
+                                  <th className="py-1.5 pr-3 font-medium">Телефон</th>
+                                  <th className="py-1.5 pr-3 font-medium text-right">SLA</th>
+                                  <th className="py-1.5 font-medium">Статус</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {items.map((it) => {
+                                  const st = it.slaStatus ? SLA_STATUS_LABEL[it.slaStatus] : undefined;
+                                  return (
+                                    <tr key={it.leadId} className="border-b border-white/5 hover:bg-white/[0.02]">
+                                      <td className="py-1.5 pr-3">
+                                        <a
+                                          href={kommoLeadUrl(it.leadId)}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-blue-400 hover:text-blue-300 hover:underline"
+                                        >
+                                          #{it.leadId} ↗
+                                        </a>
+                                      </td>
+                                      <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
+                                      <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone ?? "—"}</td>
+                                      <td className={`py-1.5 pr-3 text-right tabular-nums font-semibold ${it.slaMinutes >= 30 ? "text-rose-400" : "text-slate-200"}`}>
+                                        {fmtHoursMinutes(it.slaMinutes)}
+                                      </td>
+                                      <td className="py-1.5">
+                                        {st ? (
+                                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${st.cls}`}>{st.label}</span>
+                                        ) : (
+                                          <span className="text-slate-600 text-xs">—</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>,
