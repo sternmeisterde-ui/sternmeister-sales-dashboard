@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw, ListChecks } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -1332,7 +1332,7 @@ function CriteriaTimeTree({
 }) {
   // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
   // нужном режиме; внутри можно переключаться.
-  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
+  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" | "scores" } | null>(null);
 
   // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
   // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
@@ -1639,6 +1639,13 @@ function CriteriaTimeTree({
           >
             <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
           </button>
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "scores" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <ListChecks className="w-3.5 h-3.5 text-purple-400 shrink-0" /> Детализация оценок
+          </button>
           {canModerate && (
             <button
               type="button"
@@ -1670,17 +1677,32 @@ function CriteriaTimeTree({
 
 // ==================== Call media modal (audio + transcript) ====================
 
+interface EvalDetailCriterion {
+  name: string; score: number | null; maxScore: number;
+  feedback: string; quote: string; applicable?: boolean;
+}
+interface EvalDetailBlock {
+  name: string; score: number; maxScore: number; criteria: EvalDetailCriterion[];
+}
+interface CallMeta {
+  clientName: string | null; phone: string | null; source: string | null;
+  leadCategory: string | null; stageAtCallStart: string | null; stageAtPickup: string | null;
+  week: string | null; callDateTime: string | null; analyzedAt: string | null;
+}
+
 function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   callId: string;
   dept: "b2g" | "b2b";
   source: "okk" | "roleplay";
-  initialView: "audio" | "transcript";
+  initialView: "audio" | "transcript" | "scores";
   onClose: () => void;
 }) {
-  const [view, setView] = useState<"audio" | "transcript">(initialView);
+  const [view, setView] = useState<"audio" | "transcript" | "scores">(initialView);
   const [data, setData] = useState<{
     name: string; date: string; callDuration: string;
     transcript: string; audioUrl: string; hasRecording: boolean;
+    kommoUrl?: string; score?: number;
+    blocks?: EvalDetailBlock[]; meta?: CallMeta;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1718,7 +1740,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
       <div
-        className="glass-panel rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col"
+        className={`glass-panel rounded-2xl border border-white/10 w-full ${view === "scores" ? "max-w-3xl" : "max-w-2xl"} max-h-[85vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Шапка */}
@@ -1746,6 +1768,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
           >
             <FileText className="w-3.5 h-3.5" /> Транскрипт
           </button>
+          <button
+            onClick={() => setView("scores")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "scores" ? "bg-purple-500/20 text-purple-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <ListChecks className="w-3.5 h-3.5" /> Оценки
+          </button>
         </div>
 
         {/* Тело */}
@@ -1754,6 +1782,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="flex items-center justify-center py-10 text-slate-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
           ) : error ? (
             <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
+          ) : view === "scores" ? (
+            data?.blocks?.length ? (
+              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} />
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Детализация оценки недоступна для этого звонка</div>
+            )
           ) : view === "audio" ? (
             data?.hasRecording ? (
               <audio controls preload="none" src={data.audioUrl} className="w-full">
@@ -1771,6 +1805,100 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// «Детализация оценок» — Spellit-вид: шапка с метаданными звонка + по каждому
+// критерию вердикт / причина (feedback) / дословная цитата (quote). Состав
+// полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
+// Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
+// звонков поля пустые — рендерим только то, что есть.
+function EvalDetailView({ blocks, meta, kommoUrl, duration, manager }: {
+  blocks: EvalDetailBlock[];
+  meta?: CallMeta;
+  kommoUrl?: string;
+  duration: string;
+  manager: string;
+}) {
+  const metaRows: Array<[string, string | null | undefined]> = [
+    ["Дата звонка", meta?.callDateTime],
+    ["Неделя звонка", meta?.week],
+    ["Длительность", duration],
+    ["Менеджер", manager],
+    ["Клиент", meta?.clientName],
+    ["Телефон", meta?.phone],
+    ["Источник", meta?.source],
+    ["Категория лида", meta?.leadCategory],
+    ["Этап в начале звонка", meta?.stageAtCallStart],
+    ["Этап при заборе звонка", meta?.stageAtPickup],
+    ["Дата анализа", meta?.analyzedAt],
+  ];
+
+  return (
+    <div className="flex flex-col gap-4 max-h-[65vh] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+      {/* Шапка: метаданные звонка */}
+      <div className="bg-slate-900/50 rounded-xl border border-white/5 p-4 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+        {metaRows.filter(([, v]) => v).map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+            <div className="text-[12px] text-slate-200 truncate" title={value!}>{value}</div>
+          </div>
+        ))}
+        {kommoUrl && (
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">Сделка</div>
+            <a href={kommoUrl} target="_blank" rel="noopener noreferrer" className="text-[12px] text-blue-400 hover:text-blue-300 flex items-center gap-1 truncate">
+              <ExternalLink className="w-3 h-3 shrink-0" /> Открыть в Kommo
+            </a>
+          </div>
+        )}
+      </div>
+
+      {/* Блоки → критерии */}
+      {blocks.map((b, bi) => (
+        <div key={`${bi}-${b.name}`} className="bg-slate-900/50 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{b.name}</span>
+            {b.maxScore > 0 && (
+              <span className="text-[11px] font-bold text-slate-400">{b.score}/{b.maxScore}</span>
+            )}
+          </div>
+          <div className="divide-y divide-white/5">
+            {b.criteria.map((c, ci) => {
+              const isEmpty = c.applicable === false;
+              const isInfo = !isEmpty && c.maxScore === 0;
+              const passed = !isEmpty && !isInfo && (c.score ?? 0) >= c.maxScore;
+              return (
+                <div key={`${ci}-${c.name}`} className="px-4 py-3 flex flex-col gap-1.5">
+                  <div className="flex items-start gap-2">
+                    {isEmpty ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-700/40 text-slate-400">Пусто</span>
+                    ) : isInfo ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">Инфо</span>
+                    ) : c.maxScore > 1 ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300">{c.score}/{c.maxScore}</span>
+                    ) : passed ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">✓ 1</span>
+                    ) : (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400">✗ 0</span>
+                    )}
+                    <span className="text-[12px] font-semibold text-slate-200">{c.name}</span>
+                  </div>
+                  {c.feedback && (
+                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{c.feedback}</p>
+                  )}
+                  {c.quote && (
+                    <blockquote className="text-[11px] text-slate-500 leading-relaxed border-l-2 border-slate-600 pl-2.5 whitespace-pre-wrap">
+                      {c.quote}
+                    </blockquote>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

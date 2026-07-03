@@ -85,11 +85,19 @@ export async function GET(
         direction: okkCalls.direction,
         kommoLeadUrl: okkCalls.kommoLeadUrl,
         callCreatedAt: okkCalls.callCreatedAt,
+        // Метаданные для «Детализации оценок» (Spellit-набор)
+        contactPhone: okkCalls.contactPhone,
+        callgearCallId: okkCalls.callgearCallId,
+        kommoLeadName: okkCalls.kommoLeadName,
+        kommoStatusName: okkCalls.kommoStatusName,
+        initialKommoStatusName: okkCalls.initialKommoStatusName,
+        kommoCustomFields: okkCalls.kommoCustomFields,
         // Evaluation fields (may be null when no evaluation exists yet)
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
         mistakes: okkEvaluations.mistakes,
         recommendations: okkEvaluations.recommendations,
+        evaluationCreatedAt: okkEvaluations.createdAt,
       })
       .from(okkCalls)
       .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
@@ -153,6 +161,7 @@ export async function GET(
                     : 0,
               feedback: c.feedback || "",
               quote: c.quote || "",
+              applicable: c.applicable !== false,
             }))
           : [],
         // Derived summary of failed binary criteria for quick display
@@ -163,6 +172,49 @@ export async function GET(
               .join("\n")
           : b.feedback || "",
       }));
+
+    // ── Метаданные звонка для «Детализации оценок» ────────────
+    // Неделя звонка (Пн–Вс) в Берлине, формат Spellit «YYYY-MM-DD - YYYY-MM-DD».
+    const week = (() => {
+      if (!row.callCreatedAt) return null;
+      const berlin = new Date(
+        row.callCreatedAt.toLocaleString("en-US", { timeZone: "Europe/Berlin" }),
+      );
+      const monday = new Date(berlin);
+      monday.setDate(berlin.getDate() - ((berlin.getDay() + 6) % 7));
+      const sunday = new Date(monday);
+      sunday.setDate(monday.getDate() + 6);
+      const ymd = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      return `${ymd(monday)} - ${ymd(sunday)}`;
+    })();
+
+    const berlinDateTime = (d: Date | null) =>
+      d
+        ? d.toLocaleString("ru-RU", {
+            timeZone: "Europe/Berlin",
+            day: "2-digit", month: "2-digit", year: "numeric",
+            hour: "2-digit", minute: "2-digit",
+          })
+        : null;
+
+    const customFields = (row.kommoCustomFields ?? {}) as Record<string, unknown>;
+    const leadCategoryRaw = customFields["field_866934"];
+
+    const meta = {
+      clientName: row.kommoLeadName || null,
+      phone: row.contactPhone || null,
+      // Источник CDR: префикс ct- = CloudTalk, прочие внешние id = CallGear.
+      source: row.callgearCallId
+        ? (row.callgearCallId.startsWith("ct-") ? "CloudTalk" : "CallGear")
+        : null,
+      leadCategory: leadCategoryRaw == null ? null : String(leadCategoryRaw),
+      stageAtCallStart: row.initialKommoStatusName || null,
+      stageAtPickup: row.kommoStatusName || null,
+      week,
+      callDateTime: berlinDateTime(row.callCreatedAt),
+      analyzedAt: berlinDateTime(row.evaluationCreatedAt),
+    };
 
     // ── Build final call object ───────────────────────────────
     const callData = {
@@ -187,6 +239,7 @@ export async function GET(
       totalMaxScore: totalMaxScore ?? undefined,
       blocks,
       clientScoring,
+      meta,
     };
 
     return NextResponse.json({ success: true, data: callData });

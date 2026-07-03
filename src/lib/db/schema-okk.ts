@@ -58,6 +58,12 @@ export const okkCalls = pgTable("calls", {
   kommoStatusId: text("kommo_status_id"),
   kommoStatusName: text("kommo_status_name"),
   kommoLeadUrl: text("kommo_lead_url"),
+  // Поля ниже давно существуют в D2/R2 (пишет OKK-сервис), объявлены здесь
+  // 2026-07-03 для детализации оценок. custom_fields — { "field_<id>": value },
+  // категория лида = field_866934.
+  kommoLeadName: text("kommo_lead_name"),
+  initialKommoStatusName: text("initial_kommo_status_name"),
+  kommoCustomFields: jsonb("kommo_custom_fields").$type<Record<string, unknown>>(),
   status: text("status"),                   // 'pending' | 'evaluated' | 'error'
   errorMessage: text("error_message"),
   // Склейка разорванных разговоров (звёздная модель OKK): у не-хвостовых ног
@@ -82,6 +88,9 @@ export interface EvalCriterion {
   max_score: number;   // 1 for binary, 0 for informational/tags
   feedback: string;
   quote?: string;
+  // false = «Пусто» (ситуация не возникла, вне знаменателя); отсутствие поля
+  // у legacy-оценок (до criteria-engine, ~май 2026) читать как applicable.
+  applicable?: boolean;
 }
 
 /**
