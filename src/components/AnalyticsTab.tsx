@@ -1814,6 +1814,14 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
 // полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
 // Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
 // звонков поля пустые — рендерим только то, что есть.
+// Движок OKK дописывает в начало причины служебный маркер вида
+// «[Auto-override…: …]», когда сам снимает критерий (call_type, follow-up
+// и т.п.) — для пользователя это шум, «Пусто»-чип уже говорит о неприменимости.
+// Человеческая часть причины после маркера остаётся.
+function stripEngineTags(feedback: string): string {
+  return feedback.replace(/^\s*(\[Auto-override[^\]]*\]\s*)+/i, "").trim();
+}
+
 function EvalDetailView({ blocks, meta, kommoUrl, duration, manager }: {
   blocks: EvalDetailBlock[];
   meta?: CallMeta;
@@ -1885,8 +1893,8 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager }: {
                     )}
                     <span className="text-[12px] font-semibold text-slate-200">{c.name}</span>
                   </div>
-                  {c.feedback && (
-                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{c.feedback}</p>
+                  {stripEngineTags(c.feedback) && (
+                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{stripEngineTags(c.feedback)}</p>
                   )}
                   {c.quote && (
                     <blockquote className="text-[11px] text-slate-500 leading-relaxed border-l-2 border-slate-600 pl-2.5 whitespace-pre-wrap">
