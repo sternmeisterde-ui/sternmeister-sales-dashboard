@@ -520,8 +520,8 @@ export default function DashboardTab({ department }: { department: string }) {
           const slaMin = m.slaFirstCallMin ?? 0;
           const lost = m.lostCalls ?? 0;
           return (
-            {/* 7 колонок под 7 плиток — после удаления «Всего» (спека 22 п.4)
-                8-колоночная сетка оставляла дыру справа. */}
+            // 7 колонок под 7 плиток — после удаления «Всего» (спека 22 п.4)
+            // 8-колоночная сетка оставляла дыру справа.
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
               <CallMetricTile
                 icon={PhoneOutgoing} label="Исходящие" color="blue" totalValue={outgoing} rows={null}
