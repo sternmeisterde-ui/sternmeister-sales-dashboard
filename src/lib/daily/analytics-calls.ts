@@ -767,11 +767,16 @@ export interface B2bTileDetails {
   waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
 }
 
+// B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
+// нот-звонков в b2b нет), поэтому категории «Другое» в срезах нет — если
+// вдруг появится строка с иным префиксом, она попадёт в почасовку/ожидание
+// (там платформа не важна), но не в платформенные карточки.
 const PLATFORM_EXPR = sql`(CASE
   WHEN communication_id LIKE 'ct:%' THEN 'CloudTalk'
   WHEN communication_id LIKE 'cg-leg:%' THEN 'CallGear'
   ELSE 'Другое'
 END)`;
+const KNOWN_PLATFORMS = new Set(["CloudTalk", "CallGear"]);
 
 export async function getAnalyticsB2bTileDetails(
   managers: Array<{ id: string; name: string }>,
@@ -856,14 +861,16 @@ async function fetchB2bTileDetails(
     const avgWait = r.avg_wait == null ? null : Number(r.avg_wait);
     const maxWait = r.max_wait == null ? null : Number(r.max_wait);
 
-    const p = pf.get(platform) ?? { outgoing: 0, connected: 0, talkSeconds: 0 };
-    p.outgoing += outgoing; p.connected += connected; p.talkSeconds += talkS;
-    pf.set(platform, p);
+    if (KNOWN_PLATFORMS.has(platform)) {
+      const p = pf.get(platform) ?? { outgoing: 0, connected: 0, talkSeconds: 0 };
+      p.outgoing += outgoing; p.connected += connected; p.talkSeconds += talkS;
+      pf.set(platform, p);
 
-    const mpKey = `${mgr}::${platform}`;
-    const m2 = mp.get(mpKey) ?? { manager: mgr, platform, outgoing: 0, connected: 0 };
-    m2.outgoing += outgoing; m2.connected += connected;
-    mp.set(mpKey, m2);
+      const mpKey = `${mgr}::${platform}`;
+      const m2 = mp.get(mpKey) ?? { manager: mgr, platform, outgoing: 0, connected: 0 };
+      m2.outgoing += outgoing; m2.connected += connected;
+      mp.set(mpKey, m2);
+    }
 
     if (outgoing > 0) {
       const h = hr.get(r.hour) ?? { outgoing: 0, connected: 0 };
@@ -872,11 +879,13 @@ async function fetchB2bTileDetails(
     }
 
     if (answered > 0 && avgWait != null) {
-      const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, answered: 0 };
-      wp.sumWait += avgWait * answered;
-      wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
-      wp.answered += answered;
-      wpf.set(platform, wp);
+      if (KNOWN_PLATFORMS.has(platform)) {
+        const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, answered: 0 };
+        wp.sumWait += avgWait * answered;
+        wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
+        wp.answered += answered;
+        wpf.set(platform, wp);
+      }
 
       const wm = wmg.get(mgr) ?? { sumWait: 0, answered: 0 };
       wm.sumWait += avgWait * answered;
