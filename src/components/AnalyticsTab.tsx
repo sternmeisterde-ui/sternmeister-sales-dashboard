@@ -1764,13 +1764,63 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             )
           ) : (
             data?.transcript ? (
-              <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">{data.transcript}</div>
+              <TranscriptView transcript={data.transcript} />
             ) : (
               <div className="py-10 text-center text-slate-500 text-sm">Транскрипт недоступен</div>
             )
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Чат-вид транскрипта (пузыри Продавец/Клиент), как в модалке ОКК Госников
+// (src/app/page.tsx, «Детальная Расшифровка»). Понимает оба формата меток:
+// `[Продавец]:`/`[Клиент]:` (ОКК R2/D2, buildSpeakerTranscript) и
+// `Менеджер:`/`Клиент:` (ролевки R1/D1). Если меток нет вовсе (сырой
+// транскрипт без диаризации) — падаем обратно на сплошной текст, чтобы не
+// красить весь разговор «Клиентом».
+function TranscriptView({ transcript }: { transcript: string }) {
+  const lines = transcript.split("\n").filter((l) => l.trim());
+  const hasLabels = lines.some((l) =>
+    l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l)
+  );
+
+  if (!hasLabels) {
+    return (
+      <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">
+        {transcript}
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-[12px] leading-relaxed max-h-[55vh] overflow-y-auto flex flex-col gap-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50">
+      {lines.map((line, idx) => {
+        const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
+        const cleanLine = line
+          .replace(/^\[Продавец\]:\s*/, "")
+          .replace(/^\[Клиент\]:\s*/, "")
+          .replace(/^(Менеджер:|Клиент:)\s*/, "");
+        if (!cleanLine.trim()) return null;
+
+        return (
+          <div key={idx} className={`flex ${isManager ? "justify-end" : "justify-start"} w-full`}>
+            <div className={`flex flex-col gap-1 ${isManager ? "items-end" : "items-start"} max-w-[75%]`}>
+              <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${isManager ? "text-blue-400" : "text-emerald-400"}`}>
+                {isManager ? "Продавец" : "Клиент"}
+              </span>
+              <div className={`p-3 rounded-2xl ${isManager
+                ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
+                : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
+              }`}>
+                {cleanLine}
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
