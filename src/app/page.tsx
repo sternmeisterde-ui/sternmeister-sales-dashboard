@@ -1031,9 +1031,10 @@ export default function Dashboard() {
           <AnalyticsTab
             department={activeDepartment}
             canModerate={
+              // teamlead намеренно не модератор (решение 2026-07-03) — должен
+              // совпадать с MODERATOR_ROLES в api/analytics/exclude/route.ts
               session?.masterRole === "admin" ||
-              session?.masterRole === "rop" ||
-              session?.masterRole === "teamlead"
+              session?.masterRole === "rop"
             }
           />
         )}
