@@ -1701,7 +1701,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   const [data, setData] = useState<{
     name: string; date: string; callDuration: string;
     transcript: string; audioUrl: string; hasRecording: boolean;
-    kommoUrl?: string; score?: number; totalMaxScore?: number;
+    kommoUrl?: string; score?: number; totalMaxScore?: number; totalRawScore?: number;
     blocks?: EvalDetailBlock[]; meta?: CallMeta;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1800,7 +1800,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
           ) : view === "scores" ? (
             data?.blocks?.length ? (
-              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} score={data.score} totalMaxScore={data.totalMaxScore} />
+              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} score={data.score} totalMaxScore={data.totalMaxScore} totalRawScore={data.totalRawScore} />
             ) : (
               <div className="py-10 text-center text-slate-500 text-sm">Детализация оценки недоступна для этого звонка</div>
             )
@@ -1830,15 +1830,14 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
 // полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
 // Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
 // звонков поля пустые — рендерим только то, что есть.
-// Движок OKK дописывает в начало причины служебный маркер вида
-// «[Auto-override…: …]», когда сам снимает критерий (call_type, follow-up
-// и т.п.) — для пользователя это шум, «Пусто»-чип уже говорит о неприменимости.
-// Человеческая часть причины после маркера остаётся.
-function stripEngineTags(feedback: string): string {
-  return feedback.replace(/^\s*(\[Auto-override[^\]]*\]\s*)+/i, "").trim();
+// Пороги цвета оценки (66/41) — единые для бейджа в шапке и блоков.
+// [Auto-override…]-маркеры движка срезаются на стороне API (см.
+// api/okk/calls/[callId]/route.ts stripEngineTags) — здесь feedback уже чистый.
+function scoreTone(pct: number): string {
+  return pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
 }
 
-function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, totalMaxScore }: {
+function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, totalMaxScore, totalRawScore }: {
   blocks: EvalDetailBlock[];
   meta?: CallMeta;
   kommoUrl?: string;
@@ -1846,12 +1845,13 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
   manager: string;
   score?: number;
   totalMaxScore?: number;
+  totalRawScore?: number;
 }) {
   const metaRows: Array<[string, string | null | undefined]> = [
     [
       "Общая оценка",
       typeof score === "number"
-        ? `${score}%${totalMaxScore ? ` (${Math.round((score / 100) * totalMaxScore * 10) / 10}/${totalMaxScore} баллов)` : ""}`
+        ? `${score}%${totalMaxScore != null && totalRawScore != null ? ` (${totalRawScore}/${totalMaxScore} баллов)` : ""}`
         : null,
     ],
     ["Дата звонка", meta?.callDateTime],
@@ -1877,7 +1877,7 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
             <div className="text-[12px] text-slate-200 truncate" title={value!}>{value}</div>
           </div>
         ))}
-        {kommoUrl && (
+        {kommoUrl && kommoUrl !== "#" && (
           <div className="min-w-0">
             <div className="text-[10px] uppercase tracking-wider text-slate-500">Сделка</div>
             <a href={kommoUrl} target="_blank" rel="noopener noreferrer" className="text-[12px] text-blue-400 hover:text-blue-300 flex items-center gap-1 truncate">
@@ -1894,10 +1894,9 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{b.name}</span>
             {b.maxScore > 0 && (() => {
               const pct = Math.round((b.score / b.maxScore) * 100);
-              const color = pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
               return (
                 <span className="text-[11px] font-bold text-slate-400">
-                  {b.score}/{b.maxScore} · <span className={color}>{pct}%</span>
+                  {b.score}/{b.maxScore} · <span className={scoreTone(pct)}>{pct}%</span>
                 </span>
               );
             })()}
@@ -1906,12 +1905,17 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
             {b.criteria.map((c, ci) => {
               const isEmpty = c.applicable === false;
               const isInfo = !isEmpty && c.maxScore === 0;
-              const passed = !isEmpty && !isInfo && (c.score ?? 0) >= c.maxScore;
+              // null (нераспознанный вердикт, okk) и -1 (то же у ролевок) —
+              // «не оценён», а не провал: нейтральный чип вместо «✗ 0».
+              const isUnscored = !isEmpty && !isInfo && (c.score == null || c.score < 0);
+              const passed = !isEmpty && !isInfo && !isUnscored && (c.score ?? 0) >= c.maxScore;
               return (
                 <div key={`${ci}-${c.name}`} className="px-4 py-3 flex flex-col gap-1.5">
                   <div className="flex items-start gap-2">
                     {isEmpty ? (
                       <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-700/40 text-slate-400">Пусто</span>
+                    ) : isUnscored ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700/40 text-slate-400" title="Вердикт не распознан">—</span>
                     ) : isInfo ? (
                       <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">Инфо</span>
                     ) : c.maxScore > 1 ? (
@@ -1923,8 +1927,8 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
                     )}
                     <span className="text-[12px] font-semibold text-slate-200">{c.name}</span>
                   </div>
-                  {stripEngineTags(c.feedback) && (
-                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{stripEngineTags(c.feedback)}</p>
+                  {c.feedback && (
+                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{c.feedback}</p>
                   )}
                   {c.quote && (
                     <blockquote className="text-[11px] text-slate-500 leading-relaxed border-l-2 border-slate-600 pl-2.5 whitespace-pre-wrap">
@@ -1948,10 +1952,32 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, tota
 // транскрипт без диаризации) — падаем обратно на сплошной текст, чтобы не
 // красить весь разговор «Клиентом».
 function TranscriptView({ transcript }: { transcript: string }) {
-  const lines = transcript.split("\n").filter((l) => l.trim());
-  const hasLabels = lines.some((l) =>
-    l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l)
-  );
+  // Парсинг мемоизирован: транскрипт 25-минутного звонка — сотни строк,
+  // пересобирать их на каждый ререндер модалки незачем.
+  const { turns, hasLabels } = useMemo(() => {
+    const lines = transcript.split("\n").filter((l) => l.trim());
+    const labelled = lines.some(
+      (l) => l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l),
+    );
+    // Строка без метки — продолжение предыдущей реплики (utterance с \n
+    // внутри), а не новая реплика «Клиента»: наследует спикера и клеится
+    // к текущему ходу.
+    const acc: Array<{ isManager: boolean; text: string }> = [];
+    for (const line of lines) {
+      const hasLabel =
+        line.includes("[Продавец]") || line.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(line);
+      const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
+      const clean = line
+        .replace(/^\[Продавец\]:\s*/, "")
+        .replace(/^\[Клиент\]:\s*/, "")
+        .replace(/^(Менеджер:|Клиент:)\s*/, "");
+      if (!clean.trim()) continue;
+      const last = acc[acc.length - 1];
+      if (!hasLabel && last) last.text += `\n${clean}`;
+      else acc.push({ isManager: hasLabel ? isManager : false, text: clean });
+    }
+    return { turns: acc, hasLabels: labelled };
+  }, [transcript]);
 
   if (!hasLabels) {
     return (
@@ -1963,30 +1989,21 @@ function TranscriptView({ transcript }: { transcript: string }) {
 
   return (
     <div className="text-[12px] leading-relaxed max-h-[55vh] overflow-y-auto flex flex-col gap-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50">
-      {lines.map((line, idx) => {
-        const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
-        const cleanLine = line
-          .replace(/^\[Продавец\]:\s*/, "")
-          .replace(/^\[Клиент\]:\s*/, "")
-          .replace(/^(Менеджер:|Клиент:)\s*/, "");
-        if (!cleanLine.trim()) return null;
-
-        return (
-          <div key={idx} className={`flex ${isManager ? "justify-end" : "justify-start"} w-full`}>
-            <div className={`flex flex-col gap-1 ${isManager ? "items-end" : "items-start"} max-w-[75%]`}>
-              <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${isManager ? "text-blue-400" : "text-emerald-400"}`}>
-                {isManager ? "Продавец" : "Клиент"}
-              </span>
-              <div className={`p-3 rounded-2xl ${isManager
-                ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
-                : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
-              }`}>
-                {cleanLine}
-              </div>
+      {turns.map((t, idx) => (
+        <div key={idx} className={`flex ${t.isManager ? "justify-end" : "justify-start"} w-full`}>
+          <div className={`flex flex-col gap-1 ${t.isManager ? "items-end" : "items-start"} max-w-[75%]`}>
+            <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${t.isManager ? "text-blue-400" : "text-emerald-400"}`}>
+              {t.isManager ? "Продавец" : "Клиент"}
+            </span>
+            <div className={`p-3 rounded-2xl whitespace-pre-wrap ${t.isManager
+              ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
+              : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
+            }`}>
+              {t.text}
             </div>
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }
