@@ -1701,7 +1701,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   const [data, setData] = useState<{
     name: string; date: string; callDuration: string;
     transcript: string; audioUrl: string; hasRecording: boolean;
-    kommoUrl?: string; score?: number;
+    kommoUrl?: string; score?: number; totalMaxScore?: number;
     blocks?: EvalDetailBlock[]; meta?: CallMeta;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1749,9 +1749,25 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="text-sm font-bold text-slate-200 truncate">{data?.name || "Звонок"}</div>
             {data && <div className="text-[11px] text-slate-500">{data.date} · {data.callDuration}</div>}
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 shrink-0" title="Закрыть">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {typeof data?.score === "number" && (data.blocks?.length ?? 0) > 0 && (
+              <span
+                className={`px-2.5 py-1 rounded-lg text-sm font-black ${
+                  data.score >= 66
+                    ? "bg-emerald-500/15 text-emerald-400"
+                    : data.score >= 41
+                    ? "bg-amber-500/15 text-amber-400"
+                    : "bg-rose-500/15 text-rose-400"
+                }`}
+                title="Общая оценка звонка"
+              >
+                {data.score}%
+              </span>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5" title="Закрыть">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Переключатель Аудио / Транскрипт */}
@@ -1784,7 +1800,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
           ) : view === "scores" ? (
             data?.blocks?.length ? (
-              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} />
+              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} score={data.score} totalMaxScore={data.totalMaxScore} />
             ) : (
               <div className="py-10 text-center text-slate-500 text-sm">Детализация оценки недоступна для этого звонка</div>
             )
@@ -1822,14 +1838,22 @@ function stripEngineTags(feedback: string): string {
   return feedback.replace(/^\s*(\[Auto-override[^\]]*\]\s*)+/i, "").trim();
 }
 
-function EvalDetailView({ blocks, meta, kommoUrl, duration, manager }: {
+function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, totalMaxScore }: {
   blocks: EvalDetailBlock[];
   meta?: CallMeta;
   kommoUrl?: string;
   duration: string;
   manager: string;
+  score?: number;
+  totalMaxScore?: number;
 }) {
   const metaRows: Array<[string, string | null | undefined]> = [
+    [
+      "Общая оценка",
+      typeof score === "number"
+        ? `${score}%${totalMaxScore ? ` (${Math.round((score / 100) * totalMaxScore * 10) / 10}/${totalMaxScore} баллов)` : ""}`
+        : null,
+    ],
     ["Дата звонка", meta?.callDateTime],
     ["Неделя звонка", meta?.week],
     ["Длительность", duration],
@@ -1868,9 +1892,15 @@ function EvalDetailView({ blocks, meta, kommoUrl, duration, manager }: {
         <div key={`${bi}-${b.name}`} className="bg-slate-900/50 rounded-xl border border-white/5">
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{b.name}</span>
-            {b.maxScore > 0 && (
-              <span className="text-[11px] font-bold text-slate-400">{b.score}/{b.maxScore}</span>
-            )}
+            {b.maxScore > 0 && (() => {
+              const pct = Math.round((b.score / b.maxScore) * 100);
+              const color = pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
+              return (
+                <span className="text-[11px] font-bold text-slate-400">
+                  {b.score}/{b.maxScore} · <span className={color}>{pct}%</span>
+                </span>
+              );
+            })()}
           </div>
           <div className="divide-y divide-white/5">
             {b.criteria.map((c, ci) => {
