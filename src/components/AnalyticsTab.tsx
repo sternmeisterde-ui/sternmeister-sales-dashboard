@@ -284,7 +284,7 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
   // из localStorage в эффекте (а не в инициализаторе) — гидрация цела.
   const [hiddenDirections, setHiddenDirections] = useState<Set<string>>(new Set());
 
-  // Moderation: calls excluded from the stats (admin/rop/teamlead only).
+  // Moderation: calls excluded from the stats (admin/rop only).
   // excludedList drives the «Исключённые» panel; excludeBusy guards double-clicks.
   const [excludedList, setExcludedList] = useState<ExcludedCall[]>([]);
   const [excludedOpen, setExcludedOpen] = useState(false);
@@ -541,7 +541,7 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
     }
   }, [department, source, compareMode, dateRange, managerIds]);
 
-  // Moderation: current exclusions for the panel (admin/rop/teamlead only).
+  // Moderation: current exclusions for the panel (admin/rop only).
   const fetchExcluded = useCallback(async (signal?: AbortSignal) => {
     if (!canModerate) { setExcludedList([]); return; }
     try {

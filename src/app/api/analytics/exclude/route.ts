@@ -6,8 +6,8 @@
 //   excluded=false → delete the row (call comes back).
 // GET ?department=&source=  → list current exclusions for the management panel.
 //
-// Moderation only: masterRole ∈ {admin, rop, teamlead}. Plain managers can see
-// the tab but not exclude.
+// Moderation only: masterRole ∈ {admin, rop}. Plain managers and teamleads can
+// see the tab but not exclude.
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
@@ -15,7 +15,10 @@ import { db } from "@/lib/db";
 import { analyticsExcludedCalls } from "@/lib/db/schema-existing";
 import { and, eq, desc } from "drizzle-orm";
 
-const MODERATOR_ROLES = new Set(["admin", "rop", "teamlead"]);
+// Решение 2026-07-03: teamlead намеренно НЕ модератор — исключать звонки
+// из статистики могут только админ и ропы (доступ к вкладкам у тимлида
+// остаётся, см. gateFromMasterRole).
+const MODERATOR_ROLES = new Set(["admin", "rop"]);
 
 function normDept(v: string | null): "b2g" | "b2b" | null {
   return v === "b2g" || v === "b2b" ? v : null;
