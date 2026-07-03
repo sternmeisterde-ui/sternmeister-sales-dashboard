@@ -1,8 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
-import { eq, desc } from "drizzle-orm";
-import { formatCallDate } from "@/lib/utils/date";
+import { eq, desc, sql } from "drizzle-orm";
+import { formatCallDate, fmtLocalDate, addDaysCivil, APP_TZ } from "@/lib/utils/date";
+
+// Kommo custom field «Категория лида» (A/B/C). Аккаунт один на оба отдела
+// (sternmeister.kommo.com), id стабилен; ключи в kommo_custom_fields имеют
+// вид field_<id> (пишет OKK-сервис).
+const KOMMO_LEAD_CATEGORY_FIELD = "field_866934";
+
+// Движок OKK дописывает в начало причины служебный маркер «[Auto-override…]»,
+// когда сам снимает критерий (call_type/follow-up-оверрайды). Для читателей
+// это шум — неприменимость и так видна по applicable/«Пусто». Срезаем на
+// уровне API, чтобы чисто было у ВСЕХ потребителей (модалка Аналитики,
+// модалка ОКК в page.tsx, будущие экспорты).
+function stripEngineTags(feedback: string): string {
+  return feedback.replace(/^\s*(\[Auto-override[^\]]*\]\s*)+/i, "").trim();
+}
 
 // ─── Helper: build speaker-labelled transcript ───────────────────────────────
 // Speakers are labelled "A", "B", etc. (set by the STT pipeline).
@@ -85,11 +99,21 @@ export async function GET(
         direction: okkCalls.direction,
         kommoLeadUrl: okkCalls.kommoLeadUrl,
         callCreatedAt: okkCalls.callCreatedAt,
+        // Метаданные для «Детализации оценок» (Spellit-набор)
+        contactPhone: okkCalls.contactPhone,
+        callgearCallId: okkCalls.callgearCallId,
+        kommoLeadName: okkCalls.kommoLeadName,
+        kommoStatusName: okkCalls.kommoStatusName,
+        initialKommoStatusName: okkCalls.initialKommoStatusName,
+        // Из jsonb тянем только нужный скаляр — блоб custom fields бывает
+        // многокилобайтным, а нужен один ключ.
+        leadCategory: sql<string | null>`${okkCalls.kommoCustomFields} ->> ${KOMMO_LEAD_CATEGORY_FIELD}`,
         // Evaluation fields (may be null when no evaluation exists yet)
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
         mistakes: okkEvaluations.mistakes,
         recommendations: okkEvaluations.recommendations,
+        evaluationCreatedAt: okkEvaluations.createdAt,
       })
       .from(okkCalls)
       .leftJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
@@ -151,18 +175,57 @@ export async function GET(
                   : c.max_score === 1
                     ? 1
                     : 0,
-              feedback: c.feedback || "",
+              feedback: stripEngineTags(c.feedback || ""),
               quote: c.quote || "",
+              applicable: c.applicable !== false,
             }))
           : [],
         // Derived summary of failed binary criteria for quick display
+        // «Пусто» (applicable=false) — не провал: в сводку не включаем.
         feedback: b.criteria
           ? b.criteria
-              .filter((c) => c.score === 0 && c.max_score > 0)
+              .filter((c) => c.score === 0 && c.max_score > 0 && c.applicable !== false)
               .map((c) => `❌ ${c.name}`)
               .join("\n")
           : b.feedback || "",
       }));
+
+    // ── Метаданные звонка для «Детализации оценок» ────────────
+    // Неделя звонка (Пн–Вс), формат Spellit «YYYY-MM-DD - YYYY-MM-DD».
+    // Через civil-хелперы date.ts (правило CLAUDE.md №1): fmtLocalDate даёт
+    // календарную дату в APP_TZ, дальше чистая civil-арифметика без TZ.
+    const week = (() => {
+      if (!row.callCreatedAt) return null;
+      const civil = fmtLocalDate(row.callCreatedAt); // YYYY-MM-DD
+      const [y, m, d] = civil.split("-").map(Number);
+      const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Вс
+      const monday = addDaysCivil(civil, -((dow + 6) % 7));
+      return `${monday} - ${addDaysCivil(monday, 6)}`;
+    })();
+
+    const berlinDateTime = (d: Date | null) =>
+      d
+        ? d.toLocaleString("ru-RU", {
+            timeZone: APP_TZ,
+            day: "2-digit", month: "2-digit", year: "numeric",
+            hour: "2-digit", minute: "2-digit",
+          })
+        : null;
+
+    const meta = {
+      clientName: row.kommoLeadName || null,
+      phone: row.contactPhone || null,
+      // Источник CDR: префикс ct- = CloudTalk, прочие внешние id = CallGear.
+      source: row.callgearCallId
+        ? (row.callgearCallId.startsWith("ct-") ? "CloudTalk" : "CallGear")
+        : null,
+      leadCategory: row.leadCategory ?? null,
+      stageAtCallStart: row.initialKommoStatusName || null,
+      stageAtPickup: row.kommoStatusName || null,
+      week,
+      callDateTime: berlinDateTime(row.callCreatedAt),
+      analyzedAt: berlinDateTime(row.evaluationCreatedAt),
+    };
 
     // ── Build final call object ───────────────────────────────
     const callData = {
@@ -185,8 +248,12 @@ export async function GET(
       summary: row.mistakes || "",
       evalSummary: evalSummary || "",
       totalMaxScore: totalMaxScore ?? undefined,
+      // Сырой набранный балл — сумма скоринговых блоков. Клиент показывает
+      // его как X/Y вместо лоссивного восстановления из округлённого %.
+      totalRawScore: blocks.reduce((a, b) => a + (b.maxScore > 0 ? b.score : 0), 0),
       blocks,
       clientScoring,
+      meta,
     };
 
     return NextResponse.json({ success: true, data: callData });

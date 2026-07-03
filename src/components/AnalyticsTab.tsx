@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw, ListChecks } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -1332,7 +1332,7 @@ function CriteriaTimeTree({
 }) {
   // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
   // нужном режиме; внутри можно переключаться.
-  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
+  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" | "scores" } | null>(null);
 
   // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
   // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
@@ -1639,6 +1639,13 @@ function CriteriaTimeTree({
           >
             <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
           </button>
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "scores" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <ListChecks className="w-3.5 h-3.5 text-purple-400 shrink-0" /> Детализация оценок
+          </button>
           {canModerate && (
             <button
               type="button"
@@ -1670,17 +1677,32 @@ function CriteriaTimeTree({
 
 // ==================== Call media modal (audio + transcript) ====================
 
+interface EvalDetailCriterion {
+  name: string; score: number | null; maxScore: number;
+  feedback: string; quote: string; applicable?: boolean;
+}
+interface EvalDetailBlock {
+  name: string; score: number; maxScore: number; criteria: EvalDetailCriterion[];
+}
+interface CallMeta {
+  clientName: string | null; phone: string | null; source: string | null;
+  leadCategory: string | null; stageAtCallStart: string | null; stageAtPickup: string | null;
+  week: string | null; callDateTime: string | null; analyzedAt: string | null;
+}
+
 function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   callId: string;
   dept: "b2g" | "b2b";
   source: "okk" | "roleplay";
-  initialView: "audio" | "transcript";
+  initialView: "audio" | "transcript" | "scores";
   onClose: () => void;
 }) {
-  const [view, setView] = useState<"audio" | "transcript">(initialView);
+  const [view, setView] = useState<"audio" | "transcript" | "scores">(initialView);
   const [data, setData] = useState<{
     name: string; date: string; callDuration: string;
     transcript: string; audioUrl: string; hasRecording: boolean;
+    kommoUrl?: string; score?: number; totalMaxScore?: number; totalRawScore?: number;
+    blocks?: EvalDetailBlock[]; meta?: CallMeta;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1718,7 +1740,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
       <div
-        className="glass-panel rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col"
+        className={`glass-panel rounded-2xl border border-white/10 w-full ${view === "scores" ? "max-w-3xl" : "max-w-2xl"} max-h-[85vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Шапка */}
@@ -1727,9 +1749,25 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="text-sm font-bold text-slate-200 truncate">{data?.name || "Звонок"}</div>
             {data && <div className="text-[11px] text-slate-500">{data.date} · {data.callDuration}</div>}
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 shrink-0" title="Закрыть">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {typeof data?.score === "number" && (data.blocks?.length ?? 0) > 0 && (
+              <span
+                className={`px-2.5 py-1 rounded-lg text-sm font-black ${
+                  data.score >= 66
+                    ? "bg-emerald-500/15 text-emerald-400"
+                    : data.score >= 41
+                    ? "bg-amber-500/15 text-amber-400"
+                    : "bg-rose-500/15 text-rose-400"
+                }`}
+                title="Общая оценка звонка"
+              >
+                {data.score}%
+              </span>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5" title="Закрыть">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Переключатель Аудио / Транскрипт */}
@@ -1746,6 +1784,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
           >
             <FileText className="w-3.5 h-3.5" /> Транскрипт
           </button>
+          <button
+            onClick={() => setView("scores")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "scores" ? "bg-purple-500/20 text-purple-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <ListChecks className="w-3.5 h-3.5" /> Оценки
+          </button>
         </div>
 
         {/* Тело */}
@@ -1754,6 +1798,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="flex items-center justify-center py-10 text-slate-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
           ) : error ? (
             <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
+          ) : view === "scores" ? (
+            data?.blocks?.length ? (
+              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} score={data.score} totalMaxScore={data.totalMaxScore} totalRawScore={data.totalRawScore} />
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Детализация оценки недоступна для этого звонка</div>
+            )
           ) : view === "audio" ? (
             data?.hasRecording ? (
               <audio controls preload="none" src={data.audioUrl} className="w-full">
@@ -1775,6 +1825,126 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   );
 }
 
+// «Детализация оценок» — Spellit-вид: шапка с метаданными звонка + по каждому
+// критерию вердикт / причина (feedback) / дословная цитата (quote). Состав
+// полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
+// Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
+// звонков поля пустые — рендерим только то, что есть.
+// Пороги цвета оценки (66/41) — единые для бейджа в шапке и блоков.
+// [Auto-override…]-маркеры движка срезаются на стороне API (см.
+// api/okk/calls/[callId]/route.ts stripEngineTags) — здесь feedback уже чистый.
+function scoreTone(pct: number): string {
+  return pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
+}
+
+function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, totalMaxScore, totalRawScore }: {
+  blocks: EvalDetailBlock[];
+  meta?: CallMeta;
+  kommoUrl?: string;
+  duration: string;
+  manager: string;
+  score?: number;
+  totalMaxScore?: number;
+  totalRawScore?: number;
+}) {
+  const metaRows: Array<[string, string | null | undefined]> = [
+    [
+      "Общая оценка",
+      typeof score === "number"
+        ? `${score}%${totalMaxScore != null && totalRawScore != null ? ` (${totalRawScore}/${totalMaxScore} баллов)` : ""}`
+        : null,
+    ],
+    ["Дата звонка", meta?.callDateTime],
+    ["Неделя звонка", meta?.week],
+    ["Длительность", duration],
+    ["Менеджер", manager],
+    ["Клиент", meta?.clientName],
+    ["Телефон", meta?.phone],
+    ["Источник", meta?.source],
+    ["Категория лида", meta?.leadCategory],
+    ["Этап в начале звонка", meta?.stageAtCallStart],
+    ["Этап при заборе звонка", meta?.stageAtPickup],
+    ["Дата анализа", meta?.analyzedAt],
+  ];
+
+  return (
+    <div className="flex flex-col gap-4 max-h-[65vh] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+      {/* Шапка: метаданные звонка */}
+      <div className="bg-slate-900/50 rounded-xl border border-white/5 p-4 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+        {metaRows.filter(([, v]) => v).map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+            <div className="text-[12px] text-slate-200 truncate" title={value!}>{value}</div>
+          </div>
+        ))}
+        {kommoUrl && kommoUrl !== "#" && (
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">Сделка</div>
+            <a href={kommoUrl} target="_blank" rel="noopener noreferrer" className="text-[12px] text-blue-400 hover:text-blue-300 flex items-center gap-1 truncate">
+              <ExternalLink className="w-3 h-3 shrink-0" /> Открыть в Kommo
+            </a>
+          </div>
+        )}
+      </div>
+
+      {/* Блоки → критерии */}
+      {blocks.map((b, bi) => (
+        <div key={`${bi}-${b.name}`} className="bg-slate-900/50 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{b.name}</span>
+            {b.maxScore > 0 && (() => {
+              const pct = Math.round((b.score / b.maxScore) * 100);
+              return (
+                <span className="text-[11px] font-bold text-slate-400">
+                  {b.score}/{b.maxScore} · <span className={scoreTone(pct)}>{pct}%</span>
+                </span>
+              );
+            })()}
+          </div>
+          <div className="divide-y divide-white/5">
+            {b.criteria.map((c, ci) => {
+              const isEmpty = c.applicable === false;
+              const isInfo = !isEmpty && c.maxScore === 0;
+              // null (нераспознанный вердикт, okk) и -1 (то же у ролевок) —
+              // «не оценён», а не провал: нейтральный чип вместо «✗ 0».
+              const isUnscored = !isEmpty && !isInfo && (c.score == null || c.score < 0);
+              const passed = !isEmpty && !isInfo && !isUnscored && (c.score ?? 0) >= c.maxScore;
+              return (
+                <div key={`${ci}-${c.name}`} className="px-4 py-3 flex flex-col gap-1.5">
+                  <div className="flex items-start gap-2">
+                    {isEmpty ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-700/40 text-slate-400">Пусто</span>
+                    ) : isUnscored ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700/40 text-slate-400" title="Вердикт не распознан">—</span>
+                    ) : isInfo ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">Инфо</span>
+                    ) : c.maxScore > 1 ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300">{c.score}/{c.maxScore}</span>
+                    ) : passed ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">✓ 1</span>
+                    ) : (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400">✗ 0</span>
+                    )}
+                    <span className="text-[12px] font-semibold text-slate-200">{c.name}</span>
+                  </div>
+                  {c.feedback && (
+                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{c.feedback}</p>
+                  )}
+                  {c.quote && (
+                    <blockquote className="text-[11px] text-slate-500 leading-relaxed border-l-2 border-slate-600 pl-2.5 whitespace-pre-wrap">
+                      {c.quote}
+                    </blockquote>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Чат-вид транскрипта (пузыри Продавец/Клиент), как в модалке ОКК Госников
 // (src/app/page.tsx, «Детальная Расшифровка»). Понимает оба формата меток:
 // `[Продавец]:`/`[Клиент]:` (ОКК R2/D2, buildSpeakerTranscript) и
@@ -1782,10 +1952,32 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
 // транскрипт без диаризации) — падаем обратно на сплошной текст, чтобы не
 // красить весь разговор «Клиентом».
 function TranscriptView({ transcript }: { transcript: string }) {
-  const lines = transcript.split("\n").filter((l) => l.trim());
-  const hasLabels = lines.some((l) =>
-    l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l)
-  );
+  // Парсинг мемоизирован: транскрипт 25-минутного звонка — сотни строк,
+  // пересобирать их на каждый ререндер модалки незачем.
+  const { turns, hasLabels } = useMemo(() => {
+    const lines = transcript.split("\n").filter((l) => l.trim());
+    const labelled = lines.some(
+      (l) => l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l),
+    );
+    // Строка без метки — продолжение предыдущей реплики (utterance с \n
+    // внутри), а не новая реплика «Клиента»: наследует спикера и клеится
+    // к текущему ходу.
+    const acc: Array<{ isManager: boolean; text: string }> = [];
+    for (const line of lines) {
+      const hasLabel =
+        line.includes("[Продавец]") || line.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(line);
+      const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
+      const clean = line
+        .replace(/^\[Продавец\]:\s*/, "")
+        .replace(/^\[Клиент\]:\s*/, "")
+        .replace(/^(Менеджер:|Клиент:)\s*/, "");
+      if (!clean.trim()) continue;
+      const last = acc[acc.length - 1];
+      if (!hasLabel && last) last.text += `\n${clean}`;
+      else acc.push({ isManager: hasLabel ? isManager : false, text: clean });
+    }
+    return { turns: acc, hasLabels: labelled };
+  }, [transcript]);
 
   if (!hasLabels) {
     return (
@@ -1797,30 +1989,21 @@ function TranscriptView({ transcript }: { transcript: string }) {
 
   return (
     <div className="text-[12px] leading-relaxed max-h-[55vh] overflow-y-auto flex flex-col gap-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50">
-      {lines.map((line, idx) => {
-        const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
-        const cleanLine = line
-          .replace(/^\[Продавец\]:\s*/, "")
-          .replace(/^\[Клиент\]:\s*/, "")
-          .replace(/^(Менеджер:|Клиент:)\s*/, "");
-        if (!cleanLine.trim()) return null;
-
-        return (
-          <div key={idx} className={`flex ${isManager ? "justify-end" : "justify-start"} w-full`}>
-            <div className={`flex flex-col gap-1 ${isManager ? "items-end" : "items-start"} max-w-[75%]`}>
-              <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${isManager ? "text-blue-400" : "text-emerald-400"}`}>
-                {isManager ? "Продавец" : "Клиент"}
-              </span>
-              <div className={`p-3 rounded-2xl ${isManager
-                ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
-                : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
-              }`}>
-                {cleanLine}
-              </div>
+      {turns.map((t, idx) => (
+        <div key={idx} className={`flex ${t.isManager ? "justify-end" : "justify-start"} w-full`}>
+          <div className={`flex flex-col gap-1 ${t.isManager ? "items-end" : "items-start"} max-w-[75%]`}>
+            <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${t.isManager ? "text-blue-400" : "text-emerald-400"}`}>
+              {t.isManager ? "Продавец" : "Клиент"}
+            </span>
+            <div className={`p-3 rounded-2xl whitespace-pre-wrap ${t.isManager
+              ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
+              : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
+            }`}>
+              {t.text}
             </div>
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }
