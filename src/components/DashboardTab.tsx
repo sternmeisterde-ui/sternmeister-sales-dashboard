@@ -127,6 +127,17 @@ interface SlaLeadItem {
   pipelineId: number | null;
 }
 
+// Детализация KPI-плиток B2B — форма ответа /api/dashboard/b2b-tile-details
+// (см. getAnalyticsB2bTileDetails: скоуп/пороги идентичны плиткам).
+type TileDetailKind = "outgoing" | "answered" | "hourly" | "wait";
+interface B2bTileDetails {
+  platforms: Array<{ platform: string; outgoing: number; connected: number; talkSeconds: number }>;
+  managerPlatforms: Array<{ manager: string; platform: string; outgoing: number; connected: number }>;
+  hourly: Array<{ hour: number; outgoing: number; connected: number }>;
+  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; answered: number }>;
+  waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
+}
+
 const SLA_STATUS_LABEL: Record<string, { label: string; cls: string }> = {
   measured: { label: "звонок сделан", cls: "bg-emerald-500/15 text-emerald-400" },
   instant: { label: "мгновенно", cls: "bg-emerald-500/15 text-emerald-400" },
@@ -202,6 +213,13 @@ export default function DashboardTab({ department }: { department: string }) {
   const [slaItems, setSlaItems] = useState<SlaLeadItem[] | null>(null);
   const [slaLoading, setSlaLoading] = useState(false);
   const [slaError, setSlaError] = useState<string | null>(null);
+  // Drill-down остальных B2B-плиток (Исходящие/Принятых/%дозвона/Ожидание).
+  // Один эндпоинт отдаёт данные всех четырёх модалок — фетч по первому клику,
+  // кэш на период (сбрасывается вместе с lost/sla ниже).
+  const [tileDetail, setTileDetail] = useState<TileDetailKind | null>(null);
+  const [tileData, setTileData] = useState<B2bTileDetails | null>(null);
+  const [tileLoading, setTileLoading] = useState(false);
+  const [tileError, setTileError] = useState<string | null>(null);
   // Tracks whether we already have data so subsequent refetches don't
   // re-trigger the full-screen DinoLoader (background-refresh UX). Held
   // in a ref because we DON'T want this flag in the fetchData deps —
@@ -253,20 +271,24 @@ export default function DashboardTab({ department }: { department: string }) {
     setSlaOpen(false);
     setSlaItems(null);
     setSlaError(null);
+    setTileDetail(null);
+    setTileData(null);
+    setTileError(null);
   }, [department, range.start, range.end]);
 
   // ESC закрывает открытую модалку детализации.
   useEffect(() => {
-    if (!lostOpen && !slaOpen) return;
+    if (!lostOpen && !slaOpen && !tileDetail) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setLostOpen(false);
         setSlaOpen(false);
+        setTileDetail(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [lostOpen, slaOpen]);
+  }, [lostOpen, slaOpen, tileDetail]);
 
   const toggleLostDetail = useCallback(async () => {
     const next = !lostOpen;
@@ -287,6 +309,24 @@ export default function DashboardTab({ department }: { department: string }) {
       setLostLoading(false);
     }
   }, [lostOpen, lostItems, lostLoading, department, range.start, range.end]);
+
+  const openTileDetail = useCallback(async (kind: TileDetailKind) => {
+    setTileDetail((cur) => (cur === kind ? null : kind));
+    if (tileData !== null || tileLoading) return;
+    setTileLoading(true);
+    setTileError(null);
+    try {
+      const res = await fetch(
+        `/api/dashboard/b2b-tile-details?department=b2b&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+      );
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      setTileData((await res.json()) as B2bTileDetails);
+    } catch (e) {
+      setTileError(String(e));
+    } finally {
+      setTileLoading(false);
+    }
+  }, [tileData, tileLoading, range.start, range.end]);
 
   const toggleSlaDetail = useCallback(async () => {
     const next = !slaOpen;
@@ -525,14 +565,16 @@ export default function DashboardTab({ department }: { department: string }) {
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
               <CallMetricTile
                 icon={PhoneOutgoing} label="Исходящие" color="blue" totalValue={outgoing} rows={null}
-                tip="Количество исходящих звонков (наборов). Сумма CloudTalk и CallGear."
+                onClick={() => openTileDetail("outgoing")}
+                tip="Количество исходящих звонков (наборов). Сумма CloudTalk и CallGear. Клик — разбивка по платформам и менеджерам."
               />
               {/* Плитка «Всего» (исх+вх) убрана по просьбе Рузанны (спека 22
                   п.4, созвон: «мне это вообще не надо») — набор: Исходящие,
                   Принятых, % дозвона, Длительность, Ожидание, SLA, Потерянные. */}
               <CallMetricTile
                 icon={PhoneCall} label="Принятых" color="emerald" totalValue={answeredOut} rows={null}
-                tip="Исходящие, на которые ответили (длительность ≥ 1 сек)."
+                onClick={() => openTileDetail("answered")}
+                tip="Исходящие, на которые ответили (длительность ≥ 1 сек). Клик — разбивка по платформам и менеджерам."
               />
               <CallMetricTile
                 icon={Target}
@@ -540,7 +582,8 @@ export default function DashboardTab({ department }: { department: string }) {
                 color={dialPct >= 50 ? "emerald" : dialPct >= 30 ? "amber" : "rose"}
                 totalValue={`${dialPct}%`}
                 rows={null}
-                tip="Доля исходящих, на которые ответили: принятые ÷ исходящие."
+                onClick={() => openTileDetail("hourly")}
+                tip="Доля исходящих, на которые ответили: принятые ÷ исходящие. Клик — дозваниваемость по часам дня."
               />
               <CallMetricTile
                 icon={Clock} label="Длительность" color="blue" totalValue={fmtHoursMinutes(m.totalMinutes)} rows={null}
@@ -548,7 +591,8 @@ export default function DashboardTab({ department }: { department: string }) {
               />
               <CallMetricTile
                 icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
-                tip="Сколько в среднем ждали ответа: время от набора до снятия трубки, по отвеченным звонкам менеджеров отдела."
+                onClick={() => openTileDetail("wait")}
+                tip="Сколько в среднем ждали ответа: время от набора до снятия трубки, по отвеченным звонкам менеджеров отдела. Клик — разбивка по платформам и менеджерам."
               />
               <CallMetricTile
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
@@ -571,6 +615,48 @@ export default function DashboardTab({ department }: { department: string }) {
             </div>
           );
         })()
+      )}
+
+      {/* ============ KPI-ПЛИТКИ — DRILL-DOWN МОДАЛКА (B2B) ============ */}
+      {!isB2G && tileDetail && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setTileDetail(null)}
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="document"
+          >
+            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+              <h3 className="text-sm font-bold text-blue-400 flex items-center gap-2 min-w-0">
+                {tileDetail === "outgoing" && <><PhoneOutgoing className="w-4 h-4 shrink-0" /><span className="truncate">Исходящие — по платформам</span></>}
+                {tileDetail === "answered" && <><PhoneCall className="w-4 h-4 shrink-0" /><span className="truncate">Принятые — по платформам</span></>}
+                {tileDetail === "hourly" && <><Target className="w-4 h-4 shrink-0" /><span className="truncate">Дозвон по часам дня (Берлин)</span></>}
+                {tileDetail === "wait" && <><Timer className="w-4 h-4 shrink-0" /><span className="truncate">Ожидание ответа — детализация</span></>}
+              </h3>
+              <button
+                onClick={() => setTileDetail(null)}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+              >
+                Закрыть ✕
+              </button>
+            </div>
+            <div className="overflow-y-auto px-5 py-4">
+              {tileLoading && (
+                <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
+                </div>
+              )}
+              {tileError && <p className="text-rose-400 text-sm py-2">{tileError}</p>}
+              {tileData && <TileDetailContent kind={tileDetail} d={tileData} />}
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
 
       {/* ============ ПОТЕРЯННЫЕ — DRILL-DOWN МОДАЛКА (спека 22 п.6, B2B) ============ */}
@@ -936,6 +1022,168 @@ export default function DashboardTab({ department }: { department: string }) {
 // Generic row for the tile breakdown — works for B2G lines (Л1/Л2/Л3) and
 // for B2B pipelines (БК/МК) without the component caring which dimension
 // it's slicing.
+// ─── Содержимое drill-down модалки KPI-плиток B2B ────────────────────────────
+// Четыре вида: платформенная разбивка исходящих/принятых (менеджер × платформа),
+// почасовая дозваниваемость, ожидание ответа по платформам и менеджерам.
+
+function fmtSec(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}с`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}м ${String(s).padStart(2, "0")}с`;
+}
+
+function dialPctCls(pct: number): string {
+  return pct >= 50 ? "text-emerald-400" : pct >= 30 ? "text-amber-400" : "text-rose-400";
+}
+
+function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetails }) {
+  if (kind === "hourly") {
+    const maxOut = Math.max(1, ...d.hourly.map((h) => h.outgoing));
+    return (
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs text-slate-500 mb-2">
+          Наборы и принятые по часам начала звонка — видно, в какие окна дозваниваемость выше.
+        </p>
+        {d.hourly.length === 0 && <p className="text-slate-400 text-sm">Нет исходящих за период.</p>}
+        {d.hourly.map((h) => {
+          const pct = h.outgoing > 0 ? Math.round((h.connected / h.outgoing) * 100) : 0;
+          return (
+            <div key={h.hour} className="flex items-center gap-3 text-sm">
+              <span className="w-14 shrink-0 text-slate-400 tabular-nums">{String(h.hour).padStart(2, "0")}:00</span>
+              <div className="flex-1 h-4 bg-slate-800/60 rounded overflow-hidden">
+                <div className="h-full bg-blue-500/40 rounded" style={{ width: `${(h.outgoing / maxOut) * 100}%` }} />
+              </div>
+              <span className="w-16 shrink-0 text-right text-slate-300 tabular-nums">{h.connected}/{h.outgoing}</span>
+              <span className={`w-12 shrink-0 text-right font-bold tabular-nums ${dialPctCls(pct)}`}>{pct}%</span>
+            </div>
+          );
+        })}
+        <p className="text-[11px] text-slate-600 mt-2">принятые/наборы · % дозвона за час</p>
+      </div>
+    );
+  }
+
+  if (kind === "wait") {
+    return (
+      <div className="flex flex-col gap-5">
+        <div>
+          <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">По платформам</h4>
+          <div className="grid grid-cols-2 gap-2">
+            {d.waitPlatforms.map((p) => (
+              <div key={p.platform} className="rounded-xl border border-white/5 bg-slate-950/50 p-3">
+                <div className="text-xs text-slate-400">{p.platform}</div>
+                <div className="text-xl font-black text-slate-100 mt-0.5">{fmtSec(p.avgWaitSec)}</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">макс {fmtSec(p.maxWaitSec)} · {p.answered} отвеч.</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">По менеджерам</h4>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                <th className="py-1.5 pr-3 font-medium">Менеджер</th>
+                <th className="py-1.5 pr-3 font-medium text-right">Ср. ожидание</th>
+                <th className="py-1.5 font-medium text-right">Отвеченных</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.waitManagers.map((m) => (
+                <tr key={m.manager} className="border-b border-white/5">
+                  <td className="py-1.5 pr-3 text-slate-200">{m.manager}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-slate-300">{fmtSec(m.avgWaitSec)}</td>
+                  <td className="py-1.5 text-right tabular-nums text-slate-400">{m.answered}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[11px] text-slate-600">
+          Ожидание = от набора до снятия трубки, по отвеченным звонкам. CloudTalk и CallGear
+          регистрируют момент ответа по-разному — сравнение платформ показывает эту разницу.
+        </p>
+      </div>
+    );
+  }
+
+  // outgoing / answered — платформенные карточки + менеджер × платформа.
+  const answeredMode = kind === "answered";
+  const platformNames = d.platforms.map((p) => p.platform);
+  const byMgr = new Map<string, Map<string, { outgoing: number; connected: number }>>();
+  for (const row of d.managerPlatforms) {
+    const inner = byMgr.get(row.manager) ?? new Map<string, { outgoing: number; connected: number }>();
+    inner.set(row.platform, { outgoing: row.outgoing, connected: row.connected });
+    byMgr.set(row.manager, inner);
+  }
+  const mgrRows = [...byMgr.entries()]
+    .map(([manager, inner]) => {
+      const total = [...inner.values()].reduce(
+        (a, v) => a + (answeredMode ? v.connected : v.outgoing), 0,
+      );
+      return { manager, inner, total };
+    })
+    .filter((r) => r.total > 0)
+    .sort((a, b) => b.total - a.total);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="grid grid-cols-2 gap-2">
+        {d.platforms.map((p) => {
+          const pct = p.outgoing > 0 ? Math.round((p.connected / p.outgoing) * 100) : 0;
+          return (
+            <div key={p.platform} className="rounded-xl border border-white/5 bg-slate-950/50 p-3">
+              <div className="text-xs text-slate-400">{p.platform}</div>
+              <div className="text-xl font-black text-slate-100 mt-0.5">
+                {answeredMode ? p.connected : p.outgoing}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {answeredMode
+                  ? `ср. разговор ${p.connected > 0 ? fmtSec(p.talkSeconds / p.connected) : "—"}`
+                  : <>дозвон <span className={dialPctCls(pct)}>{pct}%</span> · принято {p.connected}</>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div>
+        <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Менеджер × платформа</h4>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                <th className="py-1.5 pr-3 font-medium">Менеджер</th>
+                {platformNames.map((p) => (
+                  <th key={p} className="py-1.5 pr-3 font-medium text-right">{p}</th>
+                ))}
+                <th className="py-1.5 font-medium text-right">Всего</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mgrRows.map((r) => (
+                <tr key={r.manager} className="border-b border-white/5">
+                  <td className="py-1.5 pr-3 text-slate-200">{r.manager}</td>
+                  {platformNames.map((p) => {
+                    const v = r.inner.get(p);
+                    const n = v ? (answeredMode ? v.connected : v.outgoing) : 0;
+                    return (
+                      <td key={p} className="py-1.5 pr-3 text-right tabular-nums text-slate-300">
+                        {n > 0 ? n : <span className="text-slate-600">—</span>}
+                      </td>
+                    );
+                  })}
+                  <td className="py-1.5 text-right tabular-nums font-bold text-slate-200">{r.total}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface TileRow {
   key: string;
   label: string;
