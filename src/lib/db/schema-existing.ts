@@ -169,6 +169,7 @@ export const bugReports = pgTable("bug_reports", {
 export const dailyPlans = pgTable("daily_plans", {
   id: serial("id").primaryKey(),
   department: text("department").notNull(),          // 'b2g' | 'b2b'
+  vertical: text("vertical").notNull().default("buh"), // b2g: 'buh' | 'med' (spec 21, миграция d1/0002); b2b — всегда 'buh'
   line: text("line").notNull(),                      // '1' (qualifier), '2' (second line), 'funnel'
   userId: uuid("user_id"),                           // NULL = line-level default plan
   metricKey: text("metric_key").notNull(),

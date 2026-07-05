@@ -6,12 +6,21 @@ import { clearCache } from "@/lib/kommo/cache";
 export async function PUT(req: NextRequest) {
   try {
     const body = await req.json();
-    const { department, line, userId, metricKey, planValue, periodType, periodDate } = body;
+    const { department, line, userId, metricKey, planValue, periodType, periodDate, vertical } = body;
 
     // Validate required fields
     if (!department || !line || !metricKey || planValue === undefined || !periodType || !periodDate) {
       return NextResponse.json(
         { error: "Missing required fields: department, line, metricKey, planValue, periodType, periodDate" },
+        { status: 400 }
+      );
+    }
+
+    // Вертикаль (b2g): планы редактируются только в конкретной вертикали.
+    // 'all' отклоняем — UI в режиме «Все» блокирует редактирование (spec 21).
+    if (vertical !== undefined && vertical !== "buh" && vertical !== "med") {
+      return NextResponse.json(
+        { error: `Invalid vertical: ${vertical} (expected 'buh' or 'med'; editing in 'all' is not allowed)` },
         { status: 400 }
       );
     }
@@ -24,6 +33,7 @@ export async function PUT(req: NextRequest) {
       planValue: String(planValue),
       periodType,
       periodDate,
+      vertical,
     });
 
     // Invalidate daily response cache so new plan is visible immediately

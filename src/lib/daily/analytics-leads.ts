@@ -154,11 +154,13 @@ async function fetchAnalyticsLeads(opts: AnalyticsLeadsFilter): Promise<KommoLea
 export async function getAnalyticsStatusChangeCount(
   fromSec: number,
   toSec: number,
-  pipelineId: number,
+  pipelineId: number | number[],
   statusIds: number[],
 ): Promise<number> {
   if (statusIds.length === 0) return 0;
-  const cacheKey = `status-change:${pipelineId}:${statusIds.join(",")}:${fromSec}:${toSec}`;
+  const pipelineIds = Array.isArray(pipelineId) ? pipelineId : [pipelineId];
+  if (pipelineIds.length === 0) return 0;
+  const cacheKey = `status-change:${pipelineIds.join("+")}:${statusIds.join(",")}:${fromSec}:${toSec}`;
   return cached(cacheKey, 60 * 1000, async () => {
     const fromDate = new Date(fromSec * 1000);
     const toDate = new Date(toSec * 1000);
@@ -167,7 +169,7 @@ export async function getAnalyticsStatusChangeCount(
     }>(sql`
       SELECT COUNT(DISTINCT lead_id)::int AS cnt
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${sql.join(pipelineIds.map((p) => sql`${p}`), sql`, `)})
         AND status_id IN (${sql.join(statusIds.map((s) => sql`${s}`), sql`, `)})
         AND event_at >= ${fromDate}
         AND event_at <= ${toDate}

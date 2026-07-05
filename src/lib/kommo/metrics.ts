@@ -3,12 +3,12 @@ import type { KommoCallNote, KommoLead, KommoTask } from "./types";
 import {
   FUNNEL_STATUS_MAP,
   NEW_VARIANTS_MAP,
-  A2_STATUSES,
-  B1_STATUSES,
-  B2_PLUS_STATUSES,
   B2G_PIPELINES,
   QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
+  getFunnelStatusMap,
+  getQualTierStatuses,
+  type Vertical,
 } from "./pipeline-config";
 
 /**
@@ -239,8 +239,12 @@ export function aggregateLeadFunnelMetrics(
   periodStart: number,
   periodEnd: number,
   department = "b2g",
+  vertical?: Vertical,
 ): LeadFunnelCounts {
   const isB2B = department === "b2b";
+  // Vertical-aware наборы (b2g): без vertical → буховые (legacy, byte-identical).
+  const funnelMap = getFunnelStatusMap(vertical);
+  const tiers = getQualTierStatuses(vertical);
 
   const counts: LeadFunnelCounts = {
     activeDeals: 0,
@@ -275,11 +279,11 @@ export function aggregateLeadFunnelMetrics(
     // Квал = есть буква в Category (CFV 866934) per user spec 2026-04-24.
     if (lead.status_id !== 142 && lead.status_id !== 143) {
       if (hasCategoryLetter(lead)) counts.qualLeads++;
-      // A2/B1/B2+ are B2G-only status-based tiers
+      // A2/B1/B2+ are B2G-only status-based tiers (vertical-aware)
       if (!isB2B) {
-        if (A2_STATUSES.has(lead.status_id)) counts.a2++;
-        if (B1_STATUSES.has(lead.status_id)) counts.b1++;
-        if (B2_PLUS_STATUSES.has(lead.status_id)) counts.b2plus++;
+        if (tiers.a2.has(lead.status_id)) counts.a2++;
+        if (tiers.b1.has(lead.status_id)) counts.b1++;
+        if (tiers.b2plus.has(lead.status_id)) counts.b2plus++;
       }
     }
   }
@@ -298,9 +302,10 @@ export function aggregateLeadFunnelMetrics(
 
     if (qual) counts.qualLeadsFlow++;
 
-    // Count by FUNNEL_STATUS_MAP — "total" counts (B2G-only pipeline mappings)
+    // Count by funnel status map — "total" counts (B2G-only pipeline mappings,
+    // vertical-aware: бух / мед / обе воронки)
     if (!isB2B) {
-      for (const [metricKey, config] of Object.entries(FUNNEL_STATUS_MAP)) {
+      for (const [metricKey, config] of Object.entries(funnelMap)) {
         if (config.pipelineIds && !config.pipelineIds.includes(lead.pipeline_id)) continue;
         if (config.statusIds.has(lead.status_id)) {
           counts.byMetric[metricKey] = (counts.byMetric[metricKey] ?? 0) + 1;
@@ -309,7 +314,7 @@ export function aggregateLeadFunnelMetrics(
 
       if (isNew) {
         for (const [newKey, totalKey] of Object.entries(NEW_VARIANTS_MAP)) {
-          const config = FUNNEL_STATUS_MAP[totalKey];
+          const config = funnelMap[totalKey];
           if (!config) continue;
           if (config.pipelineIds && !config.pipelineIds.includes(lead.pipeline_id)) continue;
           if (config.statusIds.has(lead.status_id)) {

@@ -45,41 +45,54 @@ export async function getD1ManagersWithKommo(): Promise<ManagerRow[]> {
 }
 
 /**
- * Get all plans for a department/period
+ * Get all plans for a department/period.
+ *
+ * `vertical` (b2g, spec 21): 'buh' | 'med' → только эта вертикаль;
+ * 'all' → обе (caller суммирует по ключу); undefined → 'buh' (legacy-поведение,
+ * все старые строки мигрированы с vertical='buh'). Для b2b передавать не нужно.
  */
 export async function getPlans(
   department: string,
   periodType: string,
-  periodDate: string
+  periodDate: string,
+  vertical?: "buh" | "med" | "all",
 ): Promise<
   Array<{
+    vertical: string;
     line: string;
     userId: string | null;
     metricKey: string;
     planValue: string;
   }>
 > {
+  const conditions = [
+    eq(dailyPlans.department, department),
+    eq(dailyPlans.periodType, periodType),
+    eq(dailyPlans.periodDate, periodDate),
+  ];
+  // 'all' → без фильтра (обе вертикали); иначе точная вертикаль (дефолт buh).
+  if (vertical !== "all") {
+    conditions.push(eq(dailyPlans.vertical, vertical ?? "buh"));
+  }
+
   const rows = await db
     .select({
+      vertical: dailyPlans.vertical,
       line: dailyPlans.line,
       userId: dailyPlans.userId,
       metricKey: dailyPlans.metricKey,
       planValue: dailyPlans.planValue,
     })
     .from(dailyPlans)
-    .where(
-      and(
-        eq(dailyPlans.department, department),
-        eq(dailyPlans.periodType, periodType),
-        eq(dailyPlans.periodDate, periodDate)
-      )
-    );
+    .where(and(...conditions));
 
   return rows;
 }
 
 /**
- * Upsert a plan value (insert or update on conflict)
+ * Upsert a plan value (insert or update on conflict).
+ * `vertical` — 'buh' | 'med'; дефолт 'buh' (legacy). Запись в 'all' запрещена
+ * на уровне API (редактирование планов — только в конкретной вертикали).
  */
 export async function upsertPlan(params: {
   department: string;
@@ -89,8 +102,10 @@ export async function upsertPlan(params: {
   planValue: string;
   periodType: string;
   periodDate: string;
+  vertical?: "buh" | "med";
 }): Promise<void> {
   const { department, line, userId, metricKey, planValue, periodType, periodDate } = params;
+  const vertical = params.vertical ?? "buh";
 
   // Check if exists
   const existing = await db
@@ -99,6 +114,7 @@ export async function upsertPlan(params: {
     .where(
       and(
         eq(dailyPlans.department, department),
+        eq(dailyPlans.vertical, vertical),
         eq(dailyPlans.line, line),
         eq(dailyPlans.metricKey, metricKey),
         eq(dailyPlans.periodType, periodType),
@@ -120,6 +136,7 @@ export async function upsertPlan(params: {
     // Insert
     await db.insert(dailyPlans).values({
       department,
+      vertical,
       line,
       userId,
       metricKey,

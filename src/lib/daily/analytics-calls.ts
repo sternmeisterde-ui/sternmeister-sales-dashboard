@@ -601,12 +601,13 @@ export async function getFrozenLeadsCombined(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<{ team: number; perManager: Map<string, number> }> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return { team: 0, perManager: new Map() };
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `frozen-combined:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  const cacheKey = `frozen-combined:${dept}:${vertical ?? "legacy"}:${fromTs}:${toTs}:${managerIds}`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchFrozenLeadsCombined(managers, pipelineIds, fromTs, toTs));
 }
 

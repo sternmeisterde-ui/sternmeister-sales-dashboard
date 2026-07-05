@@ -253,7 +253,7 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
 
 /** Вкладки, поддерживающие вертикаль Бух/Мед/Все (тоггл в шапке общий для всех).
  *  Расширять по мере подключения вкладок к мед-направлению. */
-const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "analytics", "looker", "real_calls", "termins"]);
+const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "daily", "analytics", "looker", "real_calls", "termins"]);
 
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -1094,7 +1094,10 @@ export default function Dashboard() {
 
         {/* --------------------- DAILY VIEW --------------------- */}
         {activeTab === "daily" && (
-          <DailyTab department={activeDepartment} />
+          <DailyTab
+            department={activeDepartment}
+            vertical={activeDepartment === "b2g" ? activeVertical : undefined}
+          />
         )}
 
         {/* --------------------- ANALYTICS VIEW --------------------- */}

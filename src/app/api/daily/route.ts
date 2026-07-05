@@ -1,6 +1,7 @@
-// GET /api/daily?department=b2g&period=day&date=2026-02-28
+// GET /api/daily?department=b2g&period=day&date=2026-02-28[&vertical=buh|med|all]
 import { NextRequest, NextResponse } from "next/server";
 import { buildDailyResponseCached } from "@/lib/daily/build-response";
+import type { Vertical } from "@/lib/kommo/pipeline-config";
 
 const ALLOWED_DEPARTMENTS = new Set(["b2g", "b2b"]);
 const ALLOWED_PERIODS = new Set(["day", "week", "month", "year"]);
@@ -30,7 +31,15 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `Invalid date: ${dateStr} (expected YYYY-MM-DD)` }, { status: 400 });
     }
 
-    const responseData = await buildDailyResponseCached(department, period, dateStr);
+    // Вертикаль (только b2g, spec 21). Без параметра → legacy (буховое
+    // поведение) — так старые клиенты и b2b ничего не замечают.
+    const rawVertical = url.searchParams.get("vertical");
+    const vertical: Vertical | undefined =
+      department === "b2g" && (rawVertical === "buh" || rawVertical === "med" || rawVertical === "all")
+        ? rawVertical
+        : undefined;
+
+    const responseData = await buildDailyResponseCached(department, period, dateStr, vertical);
     return NextResponse.json(responseData, { headers: { "Cache-Control": CACHE_HEADER } });
   } catch (error) {
     console.error("Daily API error:", error);

@@ -234,6 +234,58 @@ export const QUALIFIED_STATUSES: Set<number> = new Set([
   BERATER_STATUSES.WON,
 ]);
 
+// ==================== МЕД QUALIFICATION STAGES ====================
+// Зеркало A2/B1/B2+ по мед-воронкам (та же семантика стадий, мед-ID).
+
+/** Мед-статусы уровня A2 (контакт установлен, консультации ещё нет) */
+export const MED_A2_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.CONTACT_MADE,
+]);
+
+/** Мед-статусы уровня B1 (консультация проведена, документы не отправлены) */
+export const MED_B1_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.CONSULT_DONE,
+]);
+
+/** Мед-статусы уровня B2+ (документы отправлены и дальше, вкл. активный Мед Бератер) */
+export const MED_B2_PLUS_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.DECISION_MAKING,
+  MED_GOV_STATUSES.DOCS_SENT_DC,
+  MED_GOV_STATUSES.DELAYED_START,
+  // Активные стадии Мед Бератер (передан от первой линии)
+  MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  MED_BERATER_STATUSES.DOVEDENIE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+  MED_BERATER_STATUSES.TERM_DC_DONE,
+  MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
+  MED_BERATER_STATUSES.BERATER_REVIEW,
+  MED_BERATER_STATUSES.DELAYED_START,
+  MED_BERATER_STATUSES.APPEAL,
+]);
+
+/** Квал-уровни A2/B1/B2+ по вертикали. Без vertical → буховые (legacy). */
+export function getQualTierStatuses(vertical?: Vertical): {
+  a2: Set<number>;
+  b1: Set<number>;
+  b2plus: Set<number>;
+} {
+  if (vertical === "med") {
+    return { a2: MED_A2_STATUSES, b1: MED_B1_STATUSES, b2plus: MED_B2_PLUS_STATUSES };
+  }
+  if (vertical === "all") {
+    return {
+      a2: new Set([...A2_STATUSES, ...MED_A2_STATUSES]),
+      b1: new Set([...B1_STATUSES, ...MED_B1_STATUSES]),
+      b2plus: new Set([...B2_PLUS_STATUSES, ...MED_B2_PLUS_STATUSES]),
+    };
+  }
+  return { a2: A2_STATUSES, b1: B1_STATUSES, b2plus: B2_PLUS_STATUSES };
+}
+
 // ==================== QUAL FILTER FOR DASHBOARD CHARTS ====================
 // Frozen 2026-05-07 from a Kommo filter URL provided by ROP. Allow-list
 // semantics: a FIRST_LINE lead is "qual" iff
@@ -408,6 +460,122 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
   },
 };
 
+// ==================== МЕД FUNNEL METRICS STATUS MAPPING ====================
+// Зеркало FUNNEL_STATUS_MAP по мед-воронкам (Мед Гос 13209991 + Мед Бератер
+// 14001515) — те же metric-ключи, мед-ID. Питает Дейли в режиме Мед/Все.
+// Структуры воронок идентичны буховым (Kommo-сверка 2026-07-05), поэтому
+// маппинг 1:1. См. dev_docs/specs/21 §5.
+
+export const MED_FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> = {
+  tasksTotal: {
+    pipelineIds: [B2G_PIPELINES.MEDICAL_GOV],
+    statusIds: new Set([MED_GOV_STATUSES.DOCS_SENT_DC]),
+  },
+  consultTotal: {
+    pipelineIds: [B2G_PIPELINES.MEDICAL_GOV],
+    statusIds: new Set([MED_GOV_STATUSES.CONSULT_DONE]),
+  },
+  termDCCancelled: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_DC_CANCELLED]),
+  },
+  termDCDone: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_DC_DONE]),
+  },
+  termAA: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.CONSULT_BEFORE_AA]),
+  },
+  termAACancelled: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_AA_CANCELLED]),
+  },
+  termAADone: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.BERATER_REVIEW,
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_BERATER_STATUSES.APPEAL,
+      MED_BERATER_STATUSES.WON,
+    ]),
+  },
+  beraterReview: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.BERATER_REVIEW]),
+  },
+  delayedStart: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_GOV_STATUSES.DELAYED_START,
+    ]),
+  },
+  appeal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.APPEAL]),
+  },
+  gutscheinsApproved: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.WON]),
+  },
+  beraterReject: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.LOST]),
+  },
+  appealsSubmitted: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.APPEAL]),
+  },
+  termsTotal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+      MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+      MED_BERATER_STATUSES.TERM_DC_DONE,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+      MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+      MED_BERATER_STATUSES.BERATER_REVIEW,
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_BERATER_STATUSES.APPEAL,
+    ]),
+  },
+  awaitTermTotal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+      MED_BERATER_STATUSES.DOVEDENIE,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+    ]),
+  },
+};
+
+// Слитая карта Бух+Мед для vertical='all' — union pipelineIds + statusIds по
+// каждому ключу. Диапазоны status_id воронок не пересекаются (кроме общих
+// 142/143, которые дизамбигуируются через pipelineIds), поэтому union безопасен.
+const ALL_FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> =
+  Object.fromEntries(
+    Object.keys(FUNNEL_STATUS_MAP).map((key) => {
+      const buh = FUNNEL_STATUS_MAP[key];
+      const med = MED_FUNNEL_STATUS_MAP[key];
+      if (!med) return [key, buh];
+      return [key, {
+        pipelineIds: [...(buh.pipelineIds ?? []), ...(med.pipelineIds ?? [])],
+        statusIds: new Set([...buh.statusIds, ...med.statusIds]),
+      }];
+    }),
+  );
+
+/** Карта воронковых метрик Дейли по вертикали. Без vertical → буховая (legacy). */
+export function getFunnelStatusMap(
+  vertical?: Vertical,
+): Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> {
+  if (vertical === "med") return MED_FUNNEL_STATUS_MAP;
+  if (vertical === "all") return ALL_FUNNEL_STATUS_MAP;
+  return FUNNEL_STATUS_MAP;
+}
+
 // ==================== NEW VARIANT MAPPING ====================
 // "New" metric keys → same status sets as "Total" but only leads created in period
 export const NEW_VARIANTS_MAP: Record<string, string> = {
@@ -577,6 +745,55 @@ export function getBeraterPipelineIds(vertical?: Vertical): number[] {
   if (vertical === "med") return [B2G_PIPELINES.MED_BERATER];
   if (vertical === "all") return [B2G_PIPELINES.BERATER, B2G_PIPELINES.MED_BERATER];
   return [B2G_PIPELINES.BERATER]; // buh / undefined (legacy)
+}
+
+/** Первая линия (квалификатор) по вертикали: buh → Бух Гос, med → Мед Гос, all → обе. */
+export function getFirstLinePipelineIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [B2G_PIPELINES.MEDICAL_GOV];
+  if (vertical === "all") return [B2G_PIPELINES.FIRST_LINE, B2G_PIPELINES.MEDICAL_GOV];
+  return [B2G_PIPELINES.FIRST_LINE]; // buh / undefined (legacy)
+}
+
+// ==================== STATUS-СЕТЫ ПО ВЕРТИКАЛИ (для Дейли) ====================
+// Одноимённые стадии бух- и мед-воронок объединяются в Set по вертикали:
+// buh → только буховый id, med → только мед, all → оба. Диапазоны id воронок
+// не пересекаются, поэтому union-проверки membership безопасны.
+
+function pickIds(buhId: number, medId: number, vertical?: Vertical): Set<number> {
+  if (vertical === "med") return new Set([medId]);
+  if (vertical === "all") return new Set([buhId, medId]);
+  return new Set([buhId]); // buh / undefined (legacy)
+}
+
+/** Стадии первой линии (Бух Гос / Мед Гос) по вертикали. */
+export function getFirstLineStatusSets(vertical?: Vertical) {
+  return {
+    unsorted: pickIds(FIRST_LINE_STATUSES.UNSORTED, MED_GOV_STATUSES.UNSORTED, vertical),
+    base: pickIds(FIRST_LINE_STATUSES.BASE, MED_GOV_STATUSES.BASE, vertical),
+    delayedStart: pickIds(FIRST_LINE_STATUSES.DELAYED_START, MED_GOV_STATUSES.DELAYED_START, vertical),
+  };
+}
+
+/** Стадии Бератера (Бух Бератер / Мед Бератер) по вертикали.
+ *  ⚠ Только живые стадии — удалённые из Kommo (2026-07) буховые
+ *  «Взято в работу»/«Недозвон»/«Контакт»/«Термин АА» сюда не входят. */
+export function getBeraterStatusSets(vertical?: Vertical) {
+  const B = BERATER_STATUSES;
+  const M = MED_BERATER_STATUSES;
+  return {
+    receivedFromFirst: pickIds(B.RECEIVED_FROM_FIRST, M.RECEIVED_FROM_FIRST, vertical),
+    dovedenie: pickIds(B.DOVEDENIE, M.DOVEDENIE, vertical),
+    consultBeforeDC: pickIds(B.CONSULT_BEFORE_DC, M.CONSULT_BEFORE_DC, vertical),
+    consultBeforeDCDone: pickIds(B.CONSULT_BEFORE_DC_DONE, M.CONSULT_BEFORE_DC_DONE, vertical),
+    termDCCancelled: pickIds(B.TERM_DC_CANCELLED, M.TERM_DC_CANCELLED, vertical),
+    termDCDone: pickIds(B.TERM_DC_DONE, M.TERM_DC_DONE, vertical),
+    termAACancelled: pickIds(B.TERM_AA_CANCELLED, M.TERM_AA_CANCELLED, vertical),
+    consultBeforeAA: pickIds(B.CONSULT_BEFORE_AA, M.CONSULT_BEFORE_AA, vertical),
+    consultBeforeAADone: pickIds(B.CONSULT_BEFORE_AA_DONE, M.CONSULT_BEFORE_AA_DONE, vertical),
+    beraterReview: pickIds(B.BERATER_REVIEW, M.BERATER_REVIEW, vertical),
+    delayedStart: pickIds(B.DELAYED_START, M.DELAYED_START, vertical),
+    appeal: pickIds(B.APPEAL, M.APPEAL, vertical),
+  };
 }
 
 /**

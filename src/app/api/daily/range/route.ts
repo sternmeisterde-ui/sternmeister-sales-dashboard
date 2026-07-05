@@ -1,7 +1,8 @@
-// GET /api/daily/range?department=b2g&month=2026-03&mode=days
+// GET /api/daily/range?department=b2g&month=2026-03&mode=days[&vertical=buh|med|all]
 // Returns array of daily snapshots for every day in a month (or every month in a year)
 import { NextRequest, NextResponse } from "next/server";
 import { buildDailyResponseCached, getBusinessToday } from "@/lib/daily/build-response";
+import type { Vertical } from "@/lib/kommo/pipeline-config";
 
 const ALLOWED_DEPARTMENTS = new Set(["b2g", "b2b"]);
 const ALLOWED_MODES = new Set(["days", "weeks", "months"]);
@@ -49,6 +50,13 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `Invalid mode: ${mode} (expected days|weeks|months)` }, { status: 400 });
     }
 
+    // Вертикаль (только b2g, spec 21). Без параметра → legacy (бух).
+    const rawVertical = url.searchParams.get("vertical");
+    const vertical: Vertical | undefined =
+      department === "b2g" && (rawVertical === "buh" || rawVertical === "med" || rawVertical === "all")
+        ? rawVertical
+        : undefined;
+
     if (mode === "days") {
       const [yearStr, monthStr] = monthParam.split("-");
       const year = Number(yearStr);
@@ -89,10 +97,10 @@ export async function GET(req: NextRequest) {
       const [results, monthlySummary] = await Promise.all([
         fetchWithConcurrency(
           dates,
-          (dateStr) => buildDailyResponseCached(department, "day", dateStr),
+          (dateStr) => buildDailyResponseCached(department, "day", dateStr, vertical),
           4,
         ),
-        buildDailyResponseCached(department, "month", monthDate),
+        buildDailyResponseCached(department, "month", monthDate, vertical),
       ]);
 
       return jsonOk({
@@ -140,7 +148,7 @@ export async function GET(req: NextRequest) {
 
       const results = await fetchWithConcurrency(
         weekMondays,
-        (mondayStr) => buildDailyResponseCached(department, "week", mondayStr),
+        (mondayStr) => buildDailyResponseCached(department, "week", mondayStr, vertical),
         4,
       );
 
@@ -165,7 +173,7 @@ export async function GET(req: NextRequest) {
 
       const results = await fetchWithConcurrency(
         dates,
-        (dateStr) => buildDailyResponseCached(department, "month", dateStr),
+        (dateStr) => buildDailyResponseCached(department, "month", dateStr, vertical),
         4,
       );
 
