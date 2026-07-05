@@ -47,11 +47,14 @@ export interface BotDayClient {
  */
 export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient[]> {
   try {
+    // День — БЕРЛИНСКАЯ дата (CLAUDE.md #1). finished_at — text ISO с +00:00;
+    // substring давал UTC-день: вечерние тренировки (после 22:00 Berlin летом)
+    // падали на соседний день и drill расходился с графиком.
     const rows = unwrapRows<{ lead_id: string | number | null; cnt: string | number }>(
       await analyticsDb.execute(sql`
         SELECT lead_id, count(*) AS cnt
         FROM analytics.bot_roleplays
-        WHERE substring(finished_at from 1 for 10) = ${dayIso}
+        WHERE to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') = ${dayIso}
           AND lead_id IS NOT NULL
         GROUP BY lead_id
         ORDER BY cnt DESC
@@ -72,16 +75,18 @@ export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient
  */
 export async function getBotDailyStats(fromIso: string, toIso: string): Promise<BotDailyPoint[]> {
   try {
+    // День — БЕРЛИНСКАЯ дата (CLAUDE.md #1), не UTC-substring: иначе вечерние
+    // тренировки после 22:00 Berlin (лето) уезжали на соседний день.
     const rows = unwrapRows<{ day: string; total: string | number; users: string | number; lvl1: string | number; lvl2: string | number }>(
       await analyticsDb.execute(sql`
-        SELECT substring(finished_at from 1 for 10) AS day,
+        SELECT to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
                count(*) AS total,
                count(DISTINCT user_id) AS users,
                count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
                count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
         FROM analytics.bot_roleplays
-        WHERE finished_at >= ${fromIso}
-          AND finished_at <= ${toIso + "T23:59:59"}
+        WHERE to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') >= ${fromIso}
+          AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') <= ${toIso}
         GROUP BY 1 ORDER BY 1
       `),
     );

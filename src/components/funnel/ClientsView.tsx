@@ -544,7 +544,7 @@ function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
       <div className="flex items-center gap-2 mb-1">
         <Users className="w-4 h-4 text-blue-400" />
         <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
-        <span className="text-xs text-slate-500">8 недель · клик по дню — кто тренировался</span>
+        <span className="text-xs text-slate-500">только завершённые ролевки · 8 недель · клик по дню — кто тренировался</span>
       </div>
       <div className="h-56">
         {points === null ? (
@@ -659,7 +659,9 @@ const CORR_FACTORS: { key: string; label: string }[] = [
   { key: "okk", label: "Балл ОКК" },
 ];
 
-const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.25) / 5) * 5);
+// Потолок оси Y: небольшой запас над максимумом (10%), кратно 5. Раньше был
+// запас 25% — над линиями оставалась «пустая» четверть графика.
+const yMax = (dataMax: number) => Math.max(10, Math.ceil((dataMax * 1.1) / 5) * 5);
 const tipStyle = { background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 } as const;
 
 // Тултип линии по времени: группы отсортированы по убыванию (та, что выше на
@@ -685,12 +687,21 @@ function TimeTooltip({ active, payload, label, series }: {
   return (
     <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "6px 10px" }}>
       <div style={{ color: "#94a3b8", marginBottom: 4 }}>{label}</div>
-      {items.map((it) => (
-        <div key={it.key} style={{ color: it.color, display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 8, height: 8, borderRadius: 99, background: it.color, display: "inline-block" }} />
-          {it.name}: <b>{it.value}%</b> <span style={{ color: "#64748b" }}>(n={it.n})</span>
-        </div>
-      ))}
+      {items.map((it) => {
+        // n — решённые сделки группы (Гутшайн ИЛИ закрыто) за 30-дневное окно;
+        // value% — доля Гутшайна среди них. Восстанавливаем абсолют для ясности.
+        const wonN = Math.round((it.value * it.n) / 100);
+        return (
+          <div key={it.key} style={{ color: it.color, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 99, background: it.color, display: "inline-block" }} />
+            {it.name}: <b>{it.value}%</b>
+            <span style={{ color: "#64748b" }}>— {wonN} гутшайн. из {it.n} решённых сделок</span>
+          </div>
+        );
+      })}
+      <div style={{ color: "#64748b", marginTop: 4, fontSize: 11 }}>
+        решённые = Гутшайн или закрыто, за окно 30 дн до этой даты
+      </div>
     </div>
   );
 }

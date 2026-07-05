@@ -255,6 +255,36 @@ export default function ClientDrawer({ client, onClose }: Props) {
                 </div>
               ))}
             </div>
+
+            {/* Формула балла: средневзвешенное ТОЛЬКО по факторам с данными.
+                Явная арифметика — чтобы было видно, откуда взялось число. */}
+            {(() => {
+              const present = client.factors.filter((f) => f.present);
+              if (present.length === 0) return null;
+              const numerator = present
+                .map((f) => `${Math.round(f.weight * 100)}%×${f.value}`)
+                .join(" + ");
+              const denom = Math.round(
+                present.reduce((s, f) => s + f.weight, 0) * 100,
+              );
+              return (
+                <div className="mt-3 rounded-lg bg-slate-800/50 border border-white/5 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-widest font-semibold text-slate-500 mb-1">
+                    Расчёт балла
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-300 leading-relaxed break-words">
+                    ({numerator}) ÷ {denom}% ={" "}
+                    <b className="text-white">{client.score}</b>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                    Средневзвешенное «вес × значение» по факторам, у которых есть
+                    данные. Факторы «нет данных» исключаются целиком — их вес не
+                    входит в знаменатель и не штрафует ({denom}% вместо 100%).
+                  </div>
+                </div>
+              );
+            })()}
+
             <p className="text-[11px] text-slate-500 mt-3">
               «Готовность» — индикатор подготовленности к термину (язык + ролевки +
               активность), <span className="text-slate-400">не</span> предиктор

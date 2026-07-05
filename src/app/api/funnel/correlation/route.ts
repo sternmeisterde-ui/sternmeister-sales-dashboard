@@ -271,8 +271,16 @@ export async function GET(req: NextRequest) {
   const factor = req.nextUrl.searchParams.get("factor") ?? "bot";
   try {
     const fd = await loadFactor(factor);
+    // Пояснение к «слабому» коэффициенту при заметной разнице линий: Пирсон
+    // считается ПО ОТДЕЛЬНЫМ сделкам (исход 0/1), и когда одна из групп мала,
+    // даже двукратная разница win-rate даёт невысокое значение — это норма.
+    const aN = fd.rows.filter((r) => r.macro === "a").length;
+    const caveat =
+      `${fd.caveat} Коэффициент считается по каждой сделке (исход 0/1): ` +
+      `группа «${fd.macro.aLabel}» — ${aN} из ${fd.rows.length} решённых, ` +
+      `при малой группе даже большая разница win-rate даёт невысокое значение.`;
     const payload = {
-      factor: fd.factor, label: fd.label, population: fd.population, caveat: fd.caveat,
+      factor: fd.factor, label: fd.label, population: fd.population, caveat,
       windowDays: TIME_WINDOW,
       ...buildSegments(fd),
       ...buildTime(fd),
