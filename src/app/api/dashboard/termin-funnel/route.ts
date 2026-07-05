@@ -97,10 +97,10 @@ export async function GET(req: NextRequest) {
   const aaEntryIds = getTerminAAEntryStatusIds(vertical);
   const qualStatusIds = getQualFirstLineStatusIds(vertical);
 
-  // Stage 1 — BERATER: TERM_DC_DONE → вход в АА-фазу. Бух — исторический
-  // «Термин АА» (стадия убрана из воронки ~2026-03, последние события
-  // 2026-03-02); мед — «Консультация перед термином АА» (аналог, своей
-  // стадии Термин АА не было).
+  // Stage 1 — BERATER: TERM_DC_DONE → вход в АА-фазу (живой кластер,
+  // 2026-07-06): «Конс. перед термином АА»; для бух в кластере также
+  // исторический «Термин АА» (стадия убрана из воронки ~2026-03-02) —
+  // MIN(event_at) берёт первый вход, старые окна не обнуляются.
   const stage1 = exec(sql`
     WITH from_evt AS (
       SELECT lead_id, MIN(event_at) AS at
@@ -181,12 +181,9 @@ export async function GET(req: NextRequest) {
 
   const [r1, r2, r3] = await Promise.all([stage1, stage2, stage3]);
 
-  // Подписи этапов с учётом вертикали (стадии «Термин АА» у мед нет —
-  // вход в АА-фазу считается по «Консультация перед термином АА»).
-  const aaToName =
-    vertical === "med" ? "Конс. перед термином АА"
-    : vertical === "all" ? "Термин АА / Конс. перед АА"
-    : "Термин АА";
+  // Подпись единая для всех вертикалей: вход в АА-фазу = «Конс. перед
+  // термином АА» (у бух в кластере также исторический «Термин АА»).
+  const aaToName = "Конс. перед термином АА";
   const creationFromName =
     vertical === "med" ? "Создание (Мед Гос)"
     : vertical === "all" ? "Создание (Бух/Мед Гос)"

@@ -242,15 +242,13 @@ export async function GET(req: NextRequest) {
   // as the actual funnel step the lead crossed, not generic "Старт/Финиш".
   // The lead's "сейчас:" status badge is unrelated (current Kommo state may
   // be downstream of the transition; that's expected).
-  const aaLabel =
-    vertical === "med" ? "Конс. перед термином АА"
-    : vertical === "all" ? "Термин АА / Конс. перед АА"
-    : "Термин АА";
+  // Единая подпись: вход в АА-фазу = «Конс. перед термином АА» (у бух в
+  // кластере также исторический «Термин АА», убранный из воронки ~2026-03).
   const stageLabels: Record<1 | 2 | 3, { from: string; to: string; short: string }> = {
     1: {
       from: "Термин ДЦ состоялся",
-      to: aaLabel,
-      short: "ДЦ-состоялся → АА",
+      to: "Конс. перед термином АА",
+      short: "ДЦ-состоялся → АА-фаза",
     },
     2: {
       from: "Создание сделки",

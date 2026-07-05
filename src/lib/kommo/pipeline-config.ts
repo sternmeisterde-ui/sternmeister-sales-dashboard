@@ -348,12 +348,14 @@ export function getDocsSentStatusIds(vertical?: Vertical): number[] {
 }
 
 /** status_id(ы) «вход в АА-фазу» для termin-funnel Stage 1 по вертикали.
- *  Бух — исторический on-stage «Термин АА» (93860879; стадия удалена из Kommo
- *  2026-07 → новые события не пишутся, метрика history-only). У Мед Бератер
- *  такой стадии не было никогда — ближайший аналог входа в АА-фазу =
- *  «Консультация перед термином АА» (108066267). */
+ *  Живой кластер (решение юзера 2026-07-06): вход = первый переход в
+ *  «Консультацию перед термином АА». Для бух дополнительно учитывается
+ *  исторический on-stage «Термин АА» (93860879, убран из воронки ~2026-03-02;
+ *  без него окна до марта-2026 обнулились бы) — MIN(event_at) по кластеру
+ *  берёт хронологически первый вход. У Мед Бератер стадии «Термин АА» не
+ *  было никогда. */
 export function getTerminAAEntryStatusIds(vertical?: Vertical): number[] {
-  const buh = [BERATER_STATUSES.TERM_AA];
+  const buh = [BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.TERM_AA];
   const med = [MED_BERATER_STATUSES.CONSULT_BEFORE_AA];
   if (vertical === "med") return med;
   if (vertical === "all") return [...buh, ...med];
