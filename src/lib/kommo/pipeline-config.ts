@@ -103,6 +103,12 @@ export const FIRST_LINE_STATUSES = {
 } as const;
 
 // ==================== STATUS IDS — BERATER ====================
+// Kommo-сверка 2026-07-05: из воронки удалены 4 стадии — «Взято в работу»,
+// «Недозвон», «Контакт установлен», «Термин АА» (on-stage). Теперь Бух Бератер
+// структурно идентичен Мед Бератер (15 статусов). Константы удалённых стадий
+// СОХРАНЕНЫ (⚠ deleted) — по ним есть история в analytics.lead_status_changes;
+// использовать их можно ТОЛЬКО в history-запросах, не в снапшотах текущего
+// состояния и не в фильтрах Kommo API.
 
 export const BERATER_STATUSES = {
   UNSORTED: 93860327,                // Неразобранное
@@ -110,12 +116,12 @@ export const BERATER_STATUSES = {
   DOVEDENIE: 102183931,              // Доведение
   CONSULT_BEFORE_DC: 102183935,      // Консультация перед термином ДЦ
   CONSULT_BEFORE_DC_DONE: 102183939, // Консультация перед термином ДЦ проведена
-  IN_PROGRESS: 93860335,             // Взято в работу
-  NO_ANSWER: 93860339,               // Недозвон
-  CONTACT_MADE: 93860863,            // Контакт установлен
+  IN_PROGRESS: 93860335,             // ⚠ deleted в Kommo 2026-07 — Взято в работу (history-only)
+  NO_ANSWER: 93860339,               // ⚠ deleted в Kommo 2026-07 — Недозвон (history-only)
+  CONTACT_MADE: 93860863,            // ⚠ deleted в Kommo 2026-07 — Контакт установлен (history-only)
   TERM_DC_CANCELLED: 93860875,       // Термин ДЦ отменен/перенесен
   TERM_DC_DONE: 93886075,            // Термин ДЦ состоялся
-  TERM_AA: 93860879,                 // Термин АА (на этапе)
+  TERM_AA: 93860879,                 // ⚠ deleted в Kommo 2026-07 — Термин АА на этапе (history-only)
   TERM_AA_CANCELLED: 93860883,       // Термин АА отменен/перенесен
   CONSULT_BEFORE_AA: 102183943,      // Консультация перед термином АА
   CONSULT_BEFORE_AA_DONE: 102183947, // Консультация перед термином АА проведена
@@ -150,10 +156,10 @@ export const MED_GOV_STATUSES = {
 } as const;
 
 // ==================== STATUS IDS — МЕД БЕРАТЕР ====================
-// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины, но воронка
-// КОМПАКТНЕЕ: нет стадий «Взято в работу»/«Недозвон»/«Контакт установлен»/«Термин АА»
-// (on-stage). ID сверены с Kommo API (/api/v4/leads/pipelines/14001515, 2026-07-01):
-// «Термин АА отменён» = 108322459 (НЕ 108066263); дублей 108066255/259 в воронке нет.
+// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины.
+// Kommo-сверка 2026-07-05: воронки теперь СТРУКТУРНО ИДЕНТИЧНЫ (по 15 статусов) —
+// из Бух Бератер удалили 4 лишние стадии. «Термин АА отменён» = 108322459
+// (НЕ 108066263 из OKK-констант); дублей 108066255/259 в воронке нет.
 
 export const MED_BERATER_STATUSES = {
   UNSORTED: 108064607,               // Неразобранное
@@ -206,8 +212,6 @@ export const B2_PLUS_STATUSES: Set<number> = new Set([
   BERATER_STATUSES.DOVEDENIE,
   BERATER_STATUSES.CONSULT_BEFORE_DC,
   BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
-  BERATER_STATUSES.IN_PROGRESS,
-  BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
   BERATER_STATUSES.TERM_AA_CANCELLED,
@@ -286,15 +290,12 @@ export const ALL_ACTIVE_STATUS_IDS: number[] = [
   FIRST_LINE_STATUSES.DECISION_MAKING,
   FIRST_LINE_STATUSES.DOCS_SENT_DC,
   FIRST_LINE_STATUSES.DELAYED_START,
-  // Berater
+  // Berater (без стадий, удалённых из Kommo 2026-07 — см. BERATER_STATUSES)
   BERATER_STATUSES.UNSORTED,
   BERATER_STATUSES.RECEIVED_FROM_FIRST,
   BERATER_STATUSES.DOVEDENIE,
   BERATER_STATUSES.CONSULT_BEFORE_DC,
   BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
-  BERATER_STATUSES.IN_PROGRESS,
-  BERATER_STATUSES.NO_ANSWER,
-  BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
   BERATER_STATUSES.TERM_AA_CANCELLED,
@@ -385,9 +386,6 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     pipelineIds: [B2G_PIPELINES.BERATER],
     statusIds: new Set([
       BERATER_STATUSES.RECEIVED_FROM_FIRST,
-      BERATER_STATUSES.IN_PROGRESS,
-      BERATER_STATUSES.NO_ANSWER,
-      BERATER_STATUSES.CONTACT_MADE,
       BERATER_STATUSES.TERM_DC_CANCELLED,
       BERATER_STATUSES.TERM_DC_DONE,
       BERATER_STATUSES.CONSULT_BEFORE_AA,

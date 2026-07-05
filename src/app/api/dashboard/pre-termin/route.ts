@@ -46,9 +46,10 @@ interface PreTerminRow {
   avgDaysInStatus: number | null;
 }
 
-// Стадии по имени с бух/мед status_id. Мед-бератер воронка компактнее: у части
-// стадий мед-эквивалента нет (`med: null`) — такие строки в режиме Мед не
-// показываются. Порядок = порядок отображения. Order in list IS display order.
+// Стадии по имени с бух/мед status_id. Kommo-сверка 2026-07-05: воронки Бух и
+// Мед Бератер структурно идентичны (из буховой удалили «Взято в работу»/
+// «Недозвон»/«Контакт установлен»/«Термин АА»), поэтому у каждой стадии есть
+// оба id. Порядок = порядок отображения. Order in list IS display order.
 const STAGE_DEFS: Array<{
   bucket: PreTerminRow["bucket"];
   name: string;
@@ -57,9 +58,6 @@ const STAGE_DEFS: Array<{
 }> = [
   { bucket: "pre_dc", name: "Принято от первой линии", buh: BERATER_STATUSES.RECEIVED_FROM_FIRST, med: MED_BERATER_STATUSES.RECEIVED_FROM_FIRST },
   { bucket: "pre_dc", name: "Доведение", buh: BERATER_STATUSES.DOVEDENIE, med: MED_BERATER_STATUSES.DOVEDENIE },
-  { bucket: "pre_dc", name: "Взято в работу", buh: BERATER_STATUSES.IN_PROGRESS, med: null },
-  { bucket: "pre_dc", name: "Недозвон", buh: BERATER_STATUSES.NO_ANSWER, med: null },
-  { bucket: "pre_dc", name: "Контакт установлен", buh: BERATER_STATUSES.CONTACT_MADE, med: null },
   { bucket: "pre_dc", name: "Консультация перед термином ДЦ", buh: BERATER_STATUSES.CONSULT_BEFORE_DC, med: MED_BERATER_STATUSES.CONSULT_BEFORE_DC },
   { bucket: "pre_dc", name: "Термин ДЦ отменен/перенесен", buh: BERATER_STATUSES.TERM_DC_CANCELLED, med: MED_BERATER_STATUSES.TERM_DC_CANCELLED },
   { bucket: "pre_dc", name: "Консультация перед термином ДЦ проведена", buh: BERATER_STATUSES.CONSULT_BEFORE_DC_DONE, med: MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE },
@@ -67,7 +65,6 @@ const STAGE_DEFS: Array<{
   { bucket: "post_dc", name: "Консультация перед термином АА", buh: BERATER_STATUSES.CONSULT_BEFORE_AA, med: MED_BERATER_STATUSES.CONSULT_BEFORE_AA },
   { bucket: "post_dc", name: "Термин АА отменен/перенесен", buh: BERATER_STATUSES.TERM_AA_CANCELLED, med: MED_BERATER_STATUSES.TERM_AA_CANCELLED },
   { bucket: "post_dc", name: "Консультация перед термином АА проведена", buh: BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, med: MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE },
-  { bucket: "post_dc", name: "Термин АА", buh: BERATER_STATUSES.TERM_AA, med: null },
 ];
 
 export async function GET(request: Request) {

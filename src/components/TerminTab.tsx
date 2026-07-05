@@ -264,12 +264,12 @@ export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "al
 type StatusGroup = "pre_dc" | "post_dc" | "closed" | "other";
 
 const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
+  // ── Бух Бератер (12154099). Kommo-сверка 2026-07-05: стадии «Взято в
+  // работу»/«Недозвон»/«Контакт установлен»/«Термин АА» удалены из воронки —
+  // текущих лидов на них не бывает, из карты убраны.
   // Pre-ДЦ
   93860331: "pre_dc", // RECEIVED_FROM_FIRST
   102183931: "pre_dc", // DOVEDENIE
-  93860335: "pre_dc", // IN_PROGRESS
-  93860339: "pre_dc", // NO_ANSWER
-  93860863: "pre_dc", // CONTACT_MADE
   102183935: "pre_dc", // CONSULT_BEFORE_DC
   102183939: "pre_dc", // CONSULT_BEFORE_DC_DONE
   93860875: "pre_dc", // TERM_DC_CANCELLED
@@ -278,7 +278,6 @@ const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
   102183943: "post_dc", // CONSULT_BEFORE_AA
   102183947: "post_dc", // CONSULT_BEFORE_AA_DONE
   93860883: "post_dc", // TERM_AA_CANCELLED
-  93860879: "post_dc", // TERM_AA
   // Closed / прочие
   93860887: "closed", // BERATER_REVIEW
   95515895: "closed", // DELAYED_START
@@ -286,13 +285,31 @@ const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
   142: "closed", // WON
   143: "closed", // LOST
   93860327: "closed", // UNSORTED
+  // ── Мед Бератер (14001515) — структурное зеркало Бух Бератер.
+  // Pre-ДЦ
+  108064611: "pre_dc", // RECEIVED_FROM_FIRST
+  108064615: "pre_dc", // DOVEDENIE
+  108064619: "pre_dc", // CONSULT_BEFORE_DC
+  108066243: "pre_dc", // CONSULT_BEFORE_DC_DONE
+  108066247: "pre_dc", // TERM_DC_CANCELLED
+  // Post-ДЦ
+  108066251: "post_dc", // TERM_DC_DONE
+  108066267: "post_dc", // CONSULT_BEFORE_AA
+  108066271: "post_dc", // CONSULT_BEFORE_AA_DONE
+  108322459: "post_dc", // TERM_AA_CANCELLED
+  // Closed / прочие
+  108066275: "closed", // BERATER_REVIEW
+  108066279: "closed", // DELAYED_START
+  108066283: "closed", // APPEAL
+  108064607: "closed", // UNSORTED
 };
 
 // Default-deselected on first load. Mirrors the prior implicit
 // `<> TERM_DC_CANCELLED` cohort filter so chart values don't shift for
 // existing users.
 const DEFAULT_EXCLUDED_FROM_SELECTION: ReadonlySet<number> = new Set([
-  93860875, // TERM_DC_CANCELLED
+  93860875, // TERM_DC_CANCELLED (Бух Бератер)
+  108066247, // TERM_DC_CANCELLED (Мед Бератер)
 ]);
 
 const GROUP_LABELS: Record<StatusGroup, string> = {
