@@ -497,11 +497,16 @@ export default function FunnelTab({
       {viewMode === "cohorts" && (
         <>
       <div className="flex flex-col lg:flex-row gap-3 items-stretch">
-        <div className="flex-1 min-w-0">
-          <UnifiedFunnel
-            stages={overview?.funnel ?? []}
-            loading={overviewLoading && !overview}
-          />
+        {/* Высоту ряда задаёт колонка KPI-карточек справа: на lg+ воронка
+            absolute внутри своей колонки (не растягивает ряд), список этапов
+            скроллится внутри. На мобиле — обычный поток с max-h в компоненте. */}
+        <div className="flex-1 min-w-0 relative">
+          <div className="lg:absolute lg:inset-0">
+            <UnifiedFunnel
+              stages={overview?.funnel ?? []}
+              loading={overviewLoading && !overview}
+            />
+          </div>
         </div>
         <div className="lg:w-60 shrink-0">
           <KpiBar
