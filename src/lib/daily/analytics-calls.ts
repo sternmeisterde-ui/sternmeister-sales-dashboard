@@ -746,6 +746,180 @@ export async function getFrozenLeadsTeam(
  * внутренним событиям очереди, которых нет в CDR API — их значения с этой
  * метрикой сопоставлять нельзя (разные сущности; разбор 2026-07-02).
  */
+// ─── B2B: детализация KPI-плиток (спека: клик по Исходящие/Принятых/%дозвона/Ожидание) ───
+//
+// Скоуп и пороги — 1-в-1 с плитками: ростер по агентам (имена + NAME_ALIASES),
+// dedup по communication_id (Pattern-A), исходящие = call_out, принятый =
+// duration >= 1, ожидание — по отвеченным call%. Платформа определяется по
+// префиксу communication_id, который ставит sync-telephony: 'ct:' = CloudTalk,
+// 'cg-leg:' = CallGear; остальное (например 'note:' из Kommo) — «Другое».
+
+export interface B2bTileDetails {
+  /** Разбивка исходящих по платформам + суммарное время разговора. */
+  platforms: Array<{ platform: string; outgoing: number; connected: number; talkSeconds: number }>;
+  /** Менеджер × платформа (наборы/принятые), имена канонические (master). */
+  managerPlatforms: Array<{ manager: string; platform: string; outgoing: number; connected: number }>;
+  /** Почасовка по Берлину: наборы/принятые за каждый час с активностью. */
+  hourly: Array<{ hour: number; outgoing: number; connected: number }>;
+  /** Ожидание ответа по платформам (по отвеченным звонкам). */
+  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; answered: number }>;
+  /** Ожидание по менеджерам (канонические имена). */
+  waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
+}
+
+// B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
+// нот-звонков в b2b нет), поэтому категории «Другое» в срезах нет — если
+// вдруг появится строка с иным префиксом, она попадёт в почасовку/ожидание
+// (там платформа не важна), но не в платформенные карточки.
+const PLATFORM_EXPR = sql`(CASE
+  WHEN communication_id LIKE 'ct:%' THEN 'CloudTalk'
+  WHEN communication_id LIKE 'cg-leg:%' THEN 'CallGear'
+  ELSE 'Другое'
+END)`;
+const KNOWN_PLATFORMS = new Set(["CloudTalk", "CallGear"]);
+
+export async function getAnalyticsB2bTileDetails(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<B2bTileDetails> {
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `b2b-tile-details:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchB2bTileDetails(managers, fromTs, toTs));
+}
+
+async function fetchB2bTileDetails(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<B2bTileDetails> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+
+  // Имена ростера + алиасы; alias → каноническое имя для склейки в выдаче.
+  const names: string[] = [];
+  const canonical = new Map<string, string>();
+  for (const m of managers) {
+    names.push(m.name);
+    canonical.set(m.name, m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) {
+      names.push(alias);
+      canonical.set(alias, m.name);
+    }
+  }
+  const empty: B2bTileDetails = { platforms: [], managerPlatforms: [], hourly: [], waitPlatforms: [], waitManagers: [] };
+  if (names.length === 0) return empty;
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
+
+  // Общий dedup-подзапрос — тот же, что у плиток (fetchCallMetricsByMaster /
+  // fetchAvgWaitSeconds). Один SQL-раунд: агрегируем по (platform, manager,
+  // берлинский час), остальные срезы складываем в JS — строк максимум
+  // платформы × менеджеры × часы, копейки.
+  const exec = analyticsDb as unknown as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> };
+  const result = await exec.execute<{
+    platform: string; manager: string; hour: number;
+    outgoing: string; connected: string; talk_s: string;
+    answered: string; avg_wait: string | number | null; max_wait: string | number | null;
+  }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, manager, duration, wait_seconds, created_at
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND manager IN (${nameList})
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
+    SELECT
+      ${PLATFORM_EXPR} AS platform,
+      manager,
+      EXTRACT(HOUR FROM (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::int AS hour,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                    AS outgoing,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                  AS connected,
+      COALESCE(SUM(${durationExpr("b2b")}) FILTER (WHERE communication_type = 'call_out' AND duration >= 1), 0) AS talk_s,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                  AS answered,
+      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS avg_wait,
+      MAX(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS max_wait
+    FROM deduped
+    GROUP BY 1, 2, 3
+  `);
+
+  // JS-свёртки по срезам.
+  const pf = new Map<string, { outgoing: number; connected: number; talkSeconds: number }>();
+  const mp = new Map<string, { manager: string; platform: string; outgoing: number; connected: number }>();
+  const hr = new Map<number, { outgoing: number; connected: number }>();
+  const wpf = new Map<string, { sumWait: number; maxWait: number; answered: number }>();
+  const wmg = new Map<string, { sumWait: number; answered: number }>();
+
+  for (const r of result.rows) {
+    const platform = r.platform;
+    const mgr = canonical.get(r.manager) ?? r.manager;
+    const outgoing = Number(r.outgoing);
+    const connected = Number(r.connected);
+    const talkS = Number(r.talk_s);
+    const answered = Number(r.answered);
+    const avgWait = r.avg_wait == null ? null : Number(r.avg_wait);
+    const maxWait = r.max_wait == null ? null : Number(r.max_wait);
+
+    if (KNOWN_PLATFORMS.has(platform)) {
+      const p = pf.get(platform) ?? { outgoing: 0, connected: 0, talkSeconds: 0 };
+      p.outgoing += outgoing; p.connected += connected; p.talkSeconds += talkS;
+      pf.set(platform, p);
+
+      const mpKey = `${mgr}::${platform}`;
+      const m2 = mp.get(mpKey) ?? { manager: mgr, platform, outgoing: 0, connected: 0 };
+      m2.outgoing += outgoing; m2.connected += connected;
+      mp.set(mpKey, m2);
+    }
+
+    if (outgoing > 0) {
+      const h = hr.get(r.hour) ?? { outgoing: 0, connected: 0 };
+      h.outgoing += outgoing; h.connected += connected;
+      hr.set(r.hour, h);
+    }
+
+    if (answered > 0 && avgWait != null) {
+      if (KNOWN_PLATFORMS.has(platform)) {
+        const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, answered: 0 };
+        wp.sumWait += avgWait * answered;
+        wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
+        wp.answered += answered;
+        wpf.set(platform, wp);
+      }
+
+      const wm = wmg.get(mgr) ?? { sumWait: 0, answered: 0 };
+      wm.sumWait += avgWait * answered;
+      wm.answered += answered;
+      wmg.set(mgr, wm);
+    }
+  }
+
+  return {
+    platforms: [...pf.entries()]
+      .map(([platform, v]) => ({ platform, ...v }))
+      .sort((a, b) => b.outgoing - a.outgoing),
+    managerPlatforms: [...mp.values()].sort((a, b) => b.outgoing - a.outgoing),
+    hourly: [...hr.entries()]
+      .map(([hour, v]) => ({ hour, ...v }))
+      .sort((a, b) => a.hour - b.hour),
+    waitPlatforms: [...wpf.entries()]
+      .map(([platform, v]) => ({
+        platform,
+        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
+        maxWaitSec: Math.round(v.maxWait),
+        answered: v.answered,
+      }))
+      .sort((a, b) => b.answered - a.answered),
+    waitManagers: [...wmg.entries()]
+      .map(([manager, v]) => ({
+        manager,
+        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
+        answered: v.answered,
+      }))
+      .sort((a, b) => b.avgWaitSec - a.avgWaitSec),
+  };
+}
+
 export async function getAnalyticsAvgWaitSeconds(
   managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
