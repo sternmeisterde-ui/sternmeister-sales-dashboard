@@ -30,7 +30,11 @@ export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 const LAG_HOURS = 7;
-const WINDOW_HOURS = 1;
+// 3h window with zero-cost overlap: a failed hourly tick used to lose its
+// hour of CallGear forever (window had NO overlap with neighbours). Each
+// tick now covers [now-10h, now-7h] but INSERTs only missing CDR ids
+// (telephonySkipExisting) — up to 2 consecutive dead ticks self-heal.
+const WINDOW_HOURS = 3;
 
 const LOCK_NAME = "callgear-cron";
 // Hourly schedule with 5-min lease — well under the 1-hour interval, so
@@ -152,6 +156,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       incremental: false,
       skip: ["leads", "communications", "status_changes", "tasks"],
       telephonyProviders: ["callgear"],
+      // Add-missing-only: the 3h window overlaps prior ticks — re-pulled
+      // CDRs that are already stored (incl. their enrichment fan-out) are
+      // left untouched.
+      telephonySkipExisting: true,
     });
     if (result.stepErrors.length > 0) {
       captureEtlMessage(

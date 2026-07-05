@@ -308,6 +308,11 @@ export default function ManagersTab({ department }: ManagersTabProps) {
                         <option value="manager">Менеджер</option>
                         <option value="teamlead">Тимлид</option>
                         <option value="rop">РОП</option>
+                        {/* Менеджер продлений (не МОП): все продажные выборки
+                            (Звонки/Дейли/Активность/ОКК) — белые списки ролей
+                            manager/teamlead/rop, поэтому эта роль выводит
+                            человека из подсчётов, сохраняя историю звонков. */}
+                        <option value="prolongation">Продления</option>
                       </select>
                     </td>
                     {department === "b2g" && (

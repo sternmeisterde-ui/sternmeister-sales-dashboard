@@ -143,6 +143,15 @@ export interface SyncTelephonyOptions {
    *  10-min cron should pass `["cloudtalk"]` and let a separate hourly
    *  job pull CallGear with a 7h+ lag (see /api/analytics/sync/callgear). */
   providers?: TelephonyProvider[];
+  /** Sweep mode: INSERT only CDRs whose communication_id is absent from
+   *  analytics.communications; rows already present are left untouched
+   *  (no DELETE+re-INSERT). For wide-lookback cron ticks that self-heal
+   *  windows lost to failed/skipped ticks: a full replace would wipe the
+   *  enrichment fan-out of every re-pulled row and burn Kommo lookups
+   *  re-resolving the same phones every tick. CDRs are post-completion
+   *  records (effectively immutable), so skipping the replace loses
+   *  nothing. Backfills should keep the default (full replace). */
+  skipExisting?: boolean;
 }
 
 export async function syncTelephony(
@@ -165,6 +174,18 @@ export async function syncTelephony(
     string,
     { count: number; name: string; source: "callgear" | "cloudtalk" }
   >();
+
+  // Служебные наборы (короткие номера типа «88» — голосовая почта/функции
+  // АТС): кабинеты телефоний не показывают их в списках звонков, поэтому и
+  // мы не считаем (спека 22 п.10, решение владельца 2026-07-02; история
+  // вычищена scripts/cleanup-service-dials-once.ts — 185 звонков, все CG).
+  // Только ИСХОДЯЩИЕ: входящие с пустым/скрытым номером остаются — они
+  // атрибутируются по линии (inbound-by-line) и нужны для «Пропущенных».
+  const MIN_CLIENT_PHONE_DIGITS = 6;
+  const isServiceDial = (call: TelephonyCall): boolean =>
+    call.type === "outgoing" &&
+    (call.phone ?? "").replace(/\D/g, "").length < MIN_CLIENT_PHONE_DIGITS;
+  let serviceDialsSkipped = 0;
 
   // Pull selected providers in parallel — they're independent APIs.
   const [cgCalls, ctCalls] = await Promise.all([
@@ -192,6 +213,7 @@ export async function syncTelephony(
 
   for (const call of cgCalls) {
     if (!call.agentId) continue;
+    if (isServiceDial(call)) { serviceDialsSkipped++; continue; }
     const manager = cgIndex.get(call.agentId) ?? null;
     if (!manager) {
       const key = `cg:${call.agentId}`;
@@ -203,6 +225,7 @@ export async function syncTelephony(
   }
 
   for (const call of ctCalls) {
+    if (isServiceDial(call)) { serviceDialsSkipped++; continue; }
     // No-agent CDR (queue ring / missed inbound) — keep it, attributed to the
     // department by line_name (manager stays NULL via callToCommRow).
     if (call.noAgent || !call.agentId) {
@@ -217,6 +240,12 @@ export async function syncTelephony(
       else unmatched.set(key, { count: 1, name: call.agentName ?? "?", source: "cloudtalk" });
     }
     rows.push(callToCommRow(call, manager, call.agentName ?? `CT:${call.agentId}`));
+  }
+
+  if (serviceDialsSkipped > 0) {
+    console.log(
+      `[ETL telephony] skipped ${serviceDialsSkipped} service dials (outgoing to <${MIN_CLIENT_PHONE_DIGITS}-digit numbers, e.g. «88»)`,
+    );
   }
 
   if (unmatched.size > 0) {
@@ -251,6 +280,64 @@ export async function syncTelephony(
   }
   rows.length = 0;
   for (const r of telDedup.values()) rows.push(r);
+
+  // ── Sweep mode: keep only CDRs we don't have yet ────────────────────
+  if (opts.skipExisting) {
+    const ids = [
+      ...new Set(
+        rows
+          .map((r) => r.communicationId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const existing = new Set<string>();
+    const LOOKUP_CHUNK = 1000;
+    for (let i = 0; i < ids.length; i += LOOKUP_CHUNK) {
+      const chunk = ids.slice(i, i + LOOKUP_CHUNK);
+      const res = (await analyticsDb.execute(
+        sql`SELECT DISTINCT communication_id
+            FROM analytics.communications
+            WHERE communication_id IN (${sql.join(
+              chunk.map((id) => sql`${id}`),
+              sql`, `,
+            )})`,
+      )) as unknown as { rows: Array<{ communication_id: string }> };
+      for (const r of res.rows) existing.add(r.communication_id);
+    }
+    // Свежий срез НЕ замораживаем: CloudTalk отдаёт и незавершённые звонки
+    // (Cdr.ended_at nullable) — звонок, шедший во время прошлого тика, мог
+    // лечь в БД с промежуточной длительностью. Всё, что началось за
+    // последние FRESH_MINUTES, проходит полный DELETE+INSERT как в обычном
+    // режиме (это и есть старое поведение 15-мин окна); skip-existing
+    // применяется только к устоявшейся истории.
+    const FRESH_MINUTES = 20;
+    const freshCutoff = new Date(toDate.getTime() - FRESH_MINUTES * 60 * 1000);
+    const before = rows.length;
+    const keep = rows.filter(
+      (r) =>
+        !r.communicationId ||
+        !existing.has(r.communicationId) ||
+        (r.createdAt instanceof Date && r.createdAt >= freshCutoff),
+    );
+    rows.length = 0;
+    rows.push(...keep);
+    console.log(
+      `[ETL telephony] sweep: ${before - rows.length} settled CDRs already present, ${rows.length} new/fresh`,
+    );
+    if (rows.length === 0) {
+      return {
+        callgearLegs: cgCalls.length,
+        cloudtalkCalls: ctCalls.length,
+        unmatchedAgents: [...unmatched.entries()].map(([key, info]) => ({
+          source: info.source,
+          agentId: key.replace(/^(cg|ct):/, ""),
+          name: info.name,
+          count: info.count,
+        })),
+        inserted: 0,
+      };
+    }
+  }
 
   // ── Persist: per-CDR replacement (window-agnostic) ─────────────────
   // Wipe EVERY prior copy of each incoming communication_id — raw NULL,

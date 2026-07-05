@@ -593,7 +593,7 @@ async function buildDashboardResponse(
       // SLA (min). Cheap dept-wide aggregates; skipped on B2G (those tiles
       // aren't shown there).
       department === "b2b"
-        ? getAnalyticsAvgWaitSeconds(department, from, to).catch((e) => {
+        ? getAnalyticsAvgWaitSeconds(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] avg wait failed:", e);
             return 0;
           })
@@ -607,7 +607,7 @@ async function buildDashboardResponse(
       // B2B «Потерянные»: outbound no-answer attempts with no callback to the
       // same number within 15 min (business hours 09–19 Berlin).
       department === "b2b"
-        ? getAnalyticsLostCalls(department, from, to).catch((e) => {
+        ? getAnalyticsLostCalls(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] lost calls failed:", e);
             return 0;
           })

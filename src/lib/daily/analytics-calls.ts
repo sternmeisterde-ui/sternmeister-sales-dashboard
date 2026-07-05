@@ -50,6 +50,24 @@ interface AnalyticsRow {
   avg_wait_seconds: string | number | null;
 }
 
+// Что суммировать в «Длительность / На линии».
+// B2B (спека 22 п.2): правило Рузанны — плитка должна сходиться с кабинетами
+// телефоний, а кабинеты считают ПО-РАЗНОМУ (сверено поштучно 26.06.2026):
+//   • дашборд CloudTalk «Total talking time» = ЧИСТЫЙ РАЗГОВОР
+//     (talking_time; у нас duration) — совпал секунда-в-секунду (5ч46м41с);
+//   • выгрузка CallGear «Длительность звонка» = ПОЛНОЕ время лега
+//     (total_duration = duration + wait_seconds, т.к. wait для cg считается
+//     как total - talk) — совпала с точностью до округлений (55:49 vs 55:54).
+// Поэтому b2b суммирует каждый источник так, как его считает его кабинет.
+// B2G остаётся на чистом разговоре — их определение не трогаем без Димы.
+// ВАЖНО: только для СУММ длительности; фильтр дозвона duration >= 1 всегда
+// по чистому разговору (иначе гудки станут «дозвонами»).
+function durationExpr(dept: "b2g" | "b2b") {
+  return dept === "b2b"
+    ? sql`(CASE WHEN communication_id LIKE 'cg-leg:%' THEN duration + COALESCE(wait_seconds, 0) ELSE duration END)`
+    : sql`duration`;
+}
+
 /**
  * Fetch per-manager call metrics for a department in the given time window.
  * Returns a Map keyed by master_managers.id (via name match + aliases).
@@ -141,7 +159,7 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                     AS outgoing_connected,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                     AS total_duration_s,
+      COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type LIKE 'call%'), 0)        AS total_duration_s,
       AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)            AS avg_wait_seconds
     FROM deduped
     GROUP BY manager
@@ -418,8 +436,8 @@ export async function getAnalyticsTeamCallMetrics(
   if (pipelineIds.length === 0) {
     return { kommoUserId: 0, callsTotal: 0, callsConnected: 0, totalMinutes: 0, avgDialogMinutes: 0, dialPercent: 0, missedIncoming: 0, incomingTotal: 0, outgoingTotal: 0 };
   }
-  const cacheKey = `team-calls:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(pipelineIds, fromTs, toTs));
+  const cacheKey = `team-calls:${dept}:${fromTs}:${toTs}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetrics(dept, pipelineIds, fromTs, toTs));
 }
 
 /**
@@ -441,11 +459,12 @@ export async function getAnalyticsTeamCallMetricsByPipeline(
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return new Map();
-  const cacheKey = `team-calls-by-pipeline:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetricsByPipeline(pipelineIds, fromTs, toTs));
+  const cacheKey = `team-calls-by-pipeline:${dept}:${fromTs}:${toTs}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchTeamCallMetricsByPipeline(dept, pipelineIds, fromTs, toTs));
 }
 
 async function fetchTeamCallMetricsByPipeline(
+  dept: "b2g" | "b2b",
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
@@ -481,7 +500,7 @@ async function fetchTeamCallMetricsByPipeline(
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                        AS outgoing_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                         AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1))  AS missed_incoming,
-      COALESCE(SUM(duration) FILTER (WHERE communication_type LIKE 'call%'), 0)                      AS total_duration_s
+      COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type LIKE 'call%'), 0)         AS total_duration_s
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
@@ -512,7 +531,7 @@ async function fetchTeamCallMetricsByPipeline(
   return out;
 }
 
-async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
+async function fetchTeamCallMetrics(dept: "b2g" | "b2b", pipelineIds: number[], fromTs: number, toTs: number): Promise<UserCallMetrics> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
@@ -524,7 +543,7 @@ async function fetchTeamCallMetrics(pipelineIds: number[], fromTs: number, toTs:
   }).execute<AnalyticsRow>(sql`
     WITH deduped AS (
       SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, duration, call_status
+        communication_id, communication_type, duration, wait_seconds, call_status
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
@@ -731,28 +750,218 @@ export async function getFrozenLeadsTeam(
 }
 
 /**
- * Dept-wide average answer-wait (ring/queue seconds before pickup) for the
- * B2B «Ожидание (сек)» tile. Averaged over ANSWERED calls only (duration >= 1)
- * since "ожидание ответа" is undefined for calls nobody picked up. Deduped by
- * communication_id so Pattern-A fan-out doesn't skew the mean. wait_seconds is
- * NULL on Kommo/message rows — AVG skips those automatically.
+ * Dept-wide average answer-wait (ring seconds before pickup, from CDR
+ * wait_seconds) for the B2B «Ожидание (сек)» tile. Averaged over ANSWERED
+ * calls only (duration >= 1) since "ожидание ответа" is undefined for calls
+ * nobody picked up. Deduped by communication_id so Pattern-A fan-out doesn't
+ * skew the mean.
+ *
+ * Scope: BY AGENT (спека 22 п.3) — как и остальные b2b-плитки. Прежний скоуп
+ * «воронки + NULL» подмешивал чужие необогащённые строки (b2g) в среднее.
+ * NB: виджеты аналитики самих телефоний считают «ожидание» по своим
+ * внутренним событиям очереди, которых нет в CDR API — их значения с этой
+ * метрикой сопоставлять нельзя (разные сущности; разбор 2026-07-02).
  */
+// ─── B2B: детализация KPI-плиток (спека: клик по Исходящие/Принятых/%дозвона/Ожидание) ───
+//
+// Скоуп и пороги — 1-в-1 с плитками: ростер по агентам (имена + NAME_ALIASES),
+// dedup по communication_id (Pattern-A), исходящие = call_out, принятый =
+// duration >= 1, ожидание — по отвеченным call%. Платформа определяется по
+// префиксу communication_id, который ставит sync-telephony: 'ct:' = CloudTalk,
+// 'cg-leg:' = CallGear; остальное (например 'note:' из Kommo) — «Другое».
+
+export interface B2bTileDetails {
+  /** Разбивка исходящих по платформам + суммарное время разговора. */
+  platforms: Array<{ platform: string; outgoing: number; connected: number; talkSeconds: number }>;
+  /** Менеджер × платформа (наборы/принятые), имена канонические (master). */
+  managerPlatforms: Array<{ manager: string; platform: string; outgoing: number; connected: number }>;
+  /** Почасовка по Берлину: наборы/принятые за каждый час с активностью. */
+  hourly: Array<{ hour: number; outgoing: number; connected: number }>;
+  /** Ожидание ответа по платформам (по отвеченным звонкам). */
+  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; answered: number }>;
+  /** Ожидание по менеджерам (канонические имена). */
+  waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
+}
+
+// B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
+// нот-звонков в b2b нет), поэтому категории «Другое» в срезах нет — если
+// вдруг появится строка с иным префиксом, она попадёт в почасовку/ожидание
+// (там платформа не важна), но не в платформенные карточки.
+const PLATFORM_EXPR = sql`(CASE
+  WHEN communication_id LIKE 'ct:%' THEN 'CloudTalk'
+  WHEN communication_id LIKE 'cg-leg:%' THEN 'CallGear'
+  ELSE 'Другое'
+END)`;
+const KNOWN_PLATFORMS = new Set(["CloudTalk", "CallGear"]);
+
+export async function getAnalyticsB2bTileDetails(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<B2bTileDetails> {
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `b2b-tile-details:${fromTs}:${toTs}:${managerIds}`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchB2bTileDetails(managers, fromTs, toTs));
+}
+
+async function fetchB2bTileDetails(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<B2bTileDetails> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+
+  // Имена ростера + алиасы; alias → каноническое имя для склейки в выдаче.
+  const names: string[] = [];
+  const canonical = new Map<string, string>();
+  for (const m of managers) {
+    names.push(m.name);
+    canonical.set(m.name, m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) {
+      names.push(alias);
+      canonical.set(alias, m.name);
+    }
+  }
+  const empty: B2bTileDetails = { platforms: [], managerPlatforms: [], hourly: [], waitPlatforms: [], waitManagers: [] };
+  if (names.length === 0) return empty;
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
+
+  // Общий dedup-подзапрос — тот же, что у плиток (fetchCallMetricsByMaster /
+  // fetchAvgWaitSeconds). Один SQL-раунд: агрегируем по (platform, manager,
+  // берлинский час), остальные срезы складываем в JS — строк максимум
+  // платформы × менеджеры × часы, копейки.
+  const exec = analyticsDb as unknown as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> };
+  const result = await exec.execute<{
+    platform: string; manager: string; hour: number;
+    outgoing: string; connected: string; talk_s: string;
+    answered: string; avg_wait: string | number | null; max_wait: string | number | null;
+  }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, manager, duration, wait_seconds, created_at
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND manager IN (${nameList})
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
+    SELECT
+      ${PLATFORM_EXPR} AS platform,
+      manager,
+      EXTRACT(HOUR FROM (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::int AS hour,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                    AS outgoing,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                  AS connected,
+      COALESCE(SUM(${durationExpr("b2b")}) FILTER (WHERE communication_type = 'call_out' AND duration >= 1), 0) AS talk_s,
+      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                  AS answered,
+      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS avg_wait,
+      MAX(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS max_wait
+    FROM deduped
+    GROUP BY 1, 2, 3
+  `);
+
+  // JS-свёртки по срезам.
+  const pf = new Map<string, { outgoing: number; connected: number; talkSeconds: number }>();
+  const mp = new Map<string, { manager: string; platform: string; outgoing: number; connected: number }>();
+  const hr = new Map<number, { outgoing: number; connected: number }>();
+  const wpf = new Map<string, { sumWait: number; maxWait: number; answered: number }>();
+  const wmg = new Map<string, { sumWait: number; answered: number }>();
+
+  for (const r of result.rows) {
+    const platform = r.platform;
+    const mgr = canonical.get(r.manager) ?? r.manager;
+    const outgoing = Number(r.outgoing);
+    const connected = Number(r.connected);
+    const talkS = Number(r.talk_s);
+    const answered = Number(r.answered);
+    const avgWait = r.avg_wait == null ? null : Number(r.avg_wait);
+    const maxWait = r.max_wait == null ? null : Number(r.max_wait);
+
+    if (KNOWN_PLATFORMS.has(platform)) {
+      const p = pf.get(platform) ?? { outgoing: 0, connected: 0, talkSeconds: 0 };
+      p.outgoing += outgoing; p.connected += connected; p.talkSeconds += talkS;
+      pf.set(platform, p);
+
+      const mpKey = `${mgr}::${platform}`;
+      const m2 = mp.get(mpKey) ?? { manager: mgr, platform, outgoing: 0, connected: 0 };
+      m2.outgoing += outgoing; m2.connected += connected;
+      mp.set(mpKey, m2);
+    }
+
+    if (outgoing > 0) {
+      const h = hr.get(r.hour) ?? { outgoing: 0, connected: 0 };
+      h.outgoing += outgoing; h.connected += connected;
+      hr.set(r.hour, h);
+    }
+
+    if (answered > 0 && avgWait != null) {
+      if (KNOWN_PLATFORMS.has(platform)) {
+        const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, answered: 0 };
+        wp.sumWait += avgWait * answered;
+        wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
+        wp.answered += answered;
+        wpf.set(platform, wp);
+      }
+
+      const wm = wmg.get(mgr) ?? { sumWait: 0, answered: 0 };
+      wm.sumWait += avgWait * answered;
+      wm.answered += answered;
+      wmg.set(mgr, wm);
+    }
+  }
+
+  return {
+    platforms: [...pf.entries()]
+      .map(([platform, v]) => ({ platform, ...v }))
+      .sort((a, b) => b.outgoing - a.outgoing),
+    managerPlatforms: [...mp.values()].sort((a, b) => b.outgoing - a.outgoing),
+    hourly: [...hr.entries()]
+      .map(([hour, v]) => ({ hour, ...v }))
+      .sort((a, b) => a.hour - b.hour),
+    waitPlatforms: [...wpf.entries()]
+      .map(([platform, v]) => ({
+        platform,
+        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
+        maxWaitSec: Math.round(v.maxWait),
+        answered: v.answered,
+      }))
+      .sort((a, b) => b.answered - a.answered),
+    waitManagers: [...wmg.entries()]
+      .map(([manager, v]) => ({
+        manager,
+        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
+        answered: v.answered,
+      }))
+      .sort((a, b) => b.avgWaitSec - a.avgWaitSec),
+  };
+}
+
 export async function getAnalyticsAvgWaitSeconds(
+  managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<number> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return 0;
-  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(pipelineIds, fromTs, toTs));
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(managers, fromTs, toTs));
 }
 
-async function fetchAvgWaitSeconds(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+async function fetchAvgWaitSeconds(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const names: string[] = [];
+  for (const m of managers) {
+    names.push(m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
+  }
+  if (names.length === 0) return 0;
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -763,7 +972,7 @@ async function fetchAvgWaitSeconds(pipelineIds: number[], fromTs: number, toTs: 
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IN (${nameList})
       ORDER BY communication_id, lead_id NULLS LAST
     )
     SELECT AVG(wait_seconds)::float AS avg_wait
@@ -909,62 +1118,274 @@ async function fetchSlaFirstCallMinutesByManager(
  * lands 19:05 still counts as answered. Only the ORIGINAL miss must be in hours.
  */
 export async function getAnalyticsLostCalls(
+  managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<number> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
-  if (pipelineIds.length === 0) return 0;
-  const cacheKey = `lost-calls:${dept}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCalls(pipelineIds, fromTs, toTs));
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `lost-calls:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const rows = await fetchLostCallsDetail(managers, fromTs, toTs);
+    return rows.length;
+  });
 }
 
-async function fetchLostCalls(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
+/** Одна строка детализации «Потерянных» (спека 22 п.6). */
+export interface LostCallDetailRow {
+  manager: string | null;
+  phone: string;
+  createdAt: string;          // ISO UTC
+  leadId: number | null;      // NULL если звонок не привязан к сделке
+  pipelineName: string | null;
+  statusName: string | null;
+  /** ФИ клиента из зеркала контактов (по сделке или по номеру). */
+  clientName: string | null;
+}
+
+/** ФИ контактов по нормализованным номерам (последние 10 цифр) из зеркала
+ *  analytics.contacts — для строк без привязки к сделке. Один запрос на
+ *  пачку номеров. */
+async function contactNamesByPnorm(pnorms: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const uniq = [...new Set(pnorms.filter((p) => p && p.length >= 6))];
+  if (uniq.length === 0) return map;
+  const json = JSON.stringify(uniq.map((p) => ({ pnorm: p })));
+  const res = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ pnorm: string; name: string | null }>(sql`
+    WITH input AS (
+      SELECT i.pnorm FROM jsonb_to_recordset(${json}::jsonb) AS i(pnorm text)
+    ),
+    contact_phones AS (
+      SELECT c.contact_id, c.name,
+             right(regexp_replace(p.v, '\D', '', 'g'), 10) AS pnorm
+      FROM analytics.contacts c,
+           jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) AS p(v)
+    )
+    SELECT DISTINCT ON (i.pnorm) i.pnorm, cp.name
+    FROM input i
+    JOIN contact_phones cp ON cp.pnorm = i.pnorm
+    ORDER BY i.pnorm, cp.contact_id
+  `);
+  for (const r of res.rows) {
+    if (r.name) map.set(r.pnorm, r.name);
+  }
+  return map;
+}
+
+/**
+ * Детализация «Потерянных» для drill-down плитки (спека 22 п.6): строки
+ * менеджер/телефон/время/сделка. Счётчик плитки = length этого же списка
+ * (getAnalyticsLostCalls) — расхождение невозможно по построению.
+ *
+ * Скоуп — ПО АГЕНТАМ (ростер + алиасы): прежний «воронки + NULL» тащил в
+ * «Потерянные» необогащённые звонки чужого отдела (30.06 половина из 105
+ * были звонками b2g-дайлера) и продления. Перезвон-проверка намеренно шире
+ * ростера: перезвон на номер ЛЮБЫМ сотрудником снимает «потерянность».
+ * LATERAL LIMIT 1 — на случай дублей лида в cohort.
+ */
+export async function getAnalyticsLostCallsDetail(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<LostCallDetailRow[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const managerIds = managers.map((m) => m.id).sort().join(",");
+  const cacheKey = `lost-calls-detail:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCallsDetail(managers, fromTs, toTs));
+}
+
+async function fetchLostCallsDetail(
+  managers: Array<{ id: string; name: string }>,
+  fromTs: number,
+  toTs: number,
+): Promise<LostCallDetailRow[]> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const names: string[] = [];
+  for (const m of managers) {
+    names.push(m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
+  }
+  if (names.length === 0) return [];
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ lost: string | number }>(sql`
+  }).execute<{
+    manager: string | null;
+    phone: string;
+    created_at: string;
+    lead_id: string | number | null;
+    pipeline_name: string | null;
+    status_name: string | null;
+  }>(sql`
     WITH outs AS (
       SELECT DISTINCT ON (communication_id)
         communication_id,
         created_at,
         duration,
+        manager,
+        lead_id,
+        phone,
         right(regexp_replace(phone, '\D', '', 'g'), 10) AS pnorm
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
         AND communication_type = 'call_out'
-        AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+        AND manager IN (${nameList})
         AND phone IS NOT NULL AND phone <> ''
       ORDER BY communication_id, lead_id NULLS LAST
     ),
     candidates AS (
-      SELECT communication_id, created_at, pnorm
+      SELECT communication_id, created_at, pnorm, manager, lead_id, phone
       FROM outs
       WHERE (duration IS NULL OR duration < 1)
         AND pnorm <> ''
         AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
         AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
     )
-    SELECT COUNT(*) AS lost
+    SELECT
+      c.manager,
+      c.phone,
+      c.pnorm,
+      c.created_at,
+      c.lead_id,
+      lc.pipeline AS pipeline_name,
+      lc.status AS status_name,
+      ln.name AS client_name
     FROM candidates c
+    LEFT JOIN LATERAL (
+      SELECT pipeline, status FROM analytics.leads_cohort
+      WHERE lead_id = c.lead_id LIMIT 1
+    ) lc ON c.lead_id IS NOT NULL
+    LEFT JOIN LATERAL (
+      SELECT ct.name FROM analytics.lead_contact_links ll
+      JOIN analytics.contacts ct ON ct.contact_id = ll.contact_id
+      WHERE ll.lead_id = c.lead_id AND ll.is_active
+      ORDER BY ll.last_seen_at DESC LIMIT 1
+    ) ln ON c.lead_id IS NOT NULL
     WHERE NOT EXISTS (
       SELECT 1
       FROM analytics.communications cb
       WHERE cb.communication_type = 'call_out'
-        AND (cb.pipeline_id IN (${pipelineList}) OR cb.pipeline_id IS NULL)
         AND cb.communication_id <> c.communication_id
         AND cb.created_at > c.created_at
         AND cb.created_at <= c.created_at + interval '15 minutes'
         AND right(regexp_replace(cb.phone, '\D', '', 'g'), 10) = c.pnorm
     )
+    ORDER BY c.manager NULLS LAST, c.created_at
   `);
 
-  return Number(result.rows[0]?.lost ?? 0);
+  // ФИ для строк без сделки — одним batch-запросом по номерам.
+  type Row = (typeof result.rows)[number] & { pnorm?: string; client_name?: string | null };
+  const rows = result.rows as Row[];
+  const unlinkedPnorms = rows
+    .filter((r) => r.lead_id == null && r.pnorm)
+    .map((r) => String(r.pnorm));
+  const nameByPnorm = await contactNamesByPnorm(unlinkedPnorms);
+
+  return rows.map((r) => {
+    // created_at — timestamp WITHOUT time zone (naive = UTC по конвенции
+    // проекта). Драйвер отдаёт строку без пояса; new Date(naive) парсил бы
+    // её в TZ процесса — прибиваем к UTC явно.
+    const raw = String(r.created_at);
+    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+    const hasTz = iso.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(iso);
+    return {
+      manager: r.manager,
+      phone: r.phone,
+      createdAt: new Date(hasTz ? iso : `${iso}Z`).toISOString(),
+      leadId: r.lead_id == null ? null : Number(r.lead_id),
+      pipelineName: r.pipeline_name,
+      statusName: r.status_name,
+      clientName:
+        r.client_name ?? (r.pnorm ? nameByPnorm.get(String(r.pnorm)) ?? null : null),
+    };
+  });
+}
+
+/** Одна строка детализации SLA (спека 22 п.5.3). */
+export interface SlaLeadDetailRow {
+  leadId: number;
+  manager: string | null;
+  slaMinutes: number;
+  /** measured | instant | pending | closed_no_call */
+  slaStatus: string | null;
+  clientName: string | null;
+  phone: string | null;
+  pipelineId: number | null;
+}
+
+/**
+ * Детализация SLA-плитки (drill-down): сделки, из которых состоит среднее.
+ * Тот же скоуп, что у плитки (getAnalyticsSlaFirstCallMinutes для b2b:
+ * лиды воронок отдела, созданные в окне, sla_own_seconds IS NOT NULL) —
+ * среднее по списку всегда равно плитке. ФИ/телефон — из зеркала контактов
+ * по активной связи сделки.
+ */
+export async function getAnalyticsSlaLeadsDetail(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<SlaLeadDetailRow[]> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept);
+  if (pipelineIds.length === 0) return [];
+  const cacheKey = `sla-leads-detail:${dept}:${fromTs}:${toTs}`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const fromDate = new Date(fromTs * 1000);
+    const toDate = new Date(toTs * 1000);
+    const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+    const src = slaSourceSql(dept === "b2b");
+
+    const result = await (analyticsDb as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{
+      lead_id: string | number;
+      manager: string | null;
+      sla_min: string | number;
+      sla_status: string | null;
+      client_name: string | null;
+      client_phone: string | null;
+      pipeline_id: string | number | null;
+    }>(sql`
+      SELECT
+        s.lead_id,
+        s.manager,
+        round(${src}::numeric / 60) AS sla_min,
+        s.sla_own_status AS sla_status,
+        ct.name AS client_name,
+        ct.phone AS client_phone,
+        s.pipeline_id
+      FROM analytics.sla s
+      LEFT JOIN LATERAL (
+        SELECT c.name, c.phone
+        FROM analytics.lead_contact_links ll
+        JOIN analytics.contacts c ON c.contact_id = ll.contact_id
+        WHERE ll.lead_id = s.lead_id AND ll.is_active
+        ORDER BY ll.last_seen_at DESC LIMIT 1
+      ) ct ON TRUE
+      WHERE s.lead_created_at >= ${fromDate}
+        AND s.lead_created_at <= ${toDate}
+        AND s.pipeline_id IN (${pipelineList})
+        AND ${src} IS NOT NULL
+      ORDER BY s.manager NULLS LAST, sla_min DESC
+    `);
+
+    return result.rows.map((r) => ({
+      leadId: Number(r.lead_id),
+      manager: r.manager,
+      slaMinutes: Number(r.sla_min),
+      slaStatus: r.sla_status,
+      clientName: r.client_name,
+      phone: r.client_phone,
+      pipelineId: r.pipeline_id == null ? null : Number(r.pipeline_id),
+    }));
+  });
 }
 
 /**

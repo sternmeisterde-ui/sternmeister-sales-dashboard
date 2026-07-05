@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { getDbForDepartment, db } from "@/lib/db";
 import {
@@ -45,24 +45,25 @@ const EXCLUDED_CRITERIA = new Set([
   "Экспертный стиль установления раппорта",
 ]);
 
-// ИСТОРИЯ (2026-06-11): попытка читать score у scoring:false критериев
-// («Критические ошибки», «Talk ratio», «Потеря клиента») провалилась — OKK-
-// оценщик пишет score=0 ВСЕМ нескоринговым критериям независимо от вердикта
-// LLM (вердикт остаётся только текстом в feedback). Парсинг нулей давал
-// ложные 0% по всем колонкам. Поэтому здесь нет специальных веток: критерий
-// попадает в агрегат только при max_score > 0.
+// ИСТОРИЯ (2026-06-11): раньше OKK писал score=0 ВСЕМ нескоринговым
+// критериям («Критические ошибки», «Talk ratio», «Потеря клиента»)
+// независимо от вердикта LLM — парсинг нулей давал ложные 0%, поэтому
+// критерий попадает в агрегат только при max_score > 0.
 //
-// Контракт на будущее (ТЗ dev_docs/17): OKK начнёт писать реальные значения
-// с max_score=1 (binary: критические ошибки, потеря клиента, вопросы Клиента)
-// и max_score=100 (Talk ratio). Тогда стандартная ветка `cMax > 0` подхватит
-// их автоматически, а старые «нулевые» оценки (max_score=0) отсеются сами.
-// Особая раскраска этих критериев уже готова на клиенте — см.
-// INVERTED_CRITERIA / NEUTRAL_CRITERIA в AnalyticsTab.tsx.
+// КОНТРАКТ ВЫПОЛНЕН (с 2026-06-11 в OKK, проверено на проде 2026-07-02:
+// 127/127 свежих r2-оценок): OKK пишет реальные вердикты с max_score=1
+// (binary) и max_score=100 (Talk ratio) — стандартная ветка `cMax > 0` их
+// подхватывает, а старые «нулевые» оценки (max_score=0) отсеиваются сами и
+// рендерятся «—». Особая раскраска на клиенте — ALWAYS_INVERTED_CRITERIA /
+// SPELLIT_INVERTED_CRITERIA / NEUTRAL_CRITERIA в AnalyticsTab.tsx.
 
 // ─── Types ──────────────────────────────────────────────────
 
 interface CriterionScore {
   name: string;
+  // Подпись колонки с номером критерия («12. Презентация…»). Ключи scores
+  // остаются на name — displayName только для рендера заголовков.
+  displayName?: string;
   scores: Record<string, number>;
 }
 
@@ -300,7 +301,102 @@ const BLOCK_NAME_MAP: Record<string, string> = {
 const CRITERIA_NAME_MAP: Record<string, string> = {
   "Экспертный стиль установновления раппорта": "Экспертный стиль установления раппорта",
   'Продавец корректно отработал ложные возражения ("подумаю", "посоветуюсь", "не сейчас")': "Продавец корректно отработал ложные возражения",
+  // Мед-конфиг использует «фигурные» кавычки — сводим к тому же канону, что и Бух.
+  "Продавец корректно отработал ложные возражения (“подумаю”, “посоветуюсь”, “не сейчас”)": "Продавец корректно отработал ложные возражения",
 };
+
+// ── Раскладка Spellit («Дашборд 1 — Применимость критериев») ─────────
+// Владелец сверяет вкладку «Оценка критериев» с отчётом Spellit: те же
+// критерии, та же группировка. Группировка Spellit НЕ совпадает со `stages`
+// конфига (напр., «Small talk» → Установление контакта, «Преимущества
+// профессии» → Презентация, «Реферальная» + сторителлинг/слушание/
+// самоконтроль → Экспертный блок, «Критические ошибки» + Talk ratio →
+// Стандарты общения). Раскладка сверена с pivot-определением самого
+// «Дашборда 1» (OKK dev_docs/spellit-dashboard1-analysis, 2026-07-02).
+// Поэтому для Коммерсов (r2_commercial / r2_med_commercial) блоки берём
+// ОТСЮДА, а не из stages конфига. Строки — нормализованные имена критериев
+// (после stripNumericPrefix + CRITERIA_NAME_MAP); матчинг через looseKey
+// (кавычки/регистр/пробелы).
+const SPELLIT_PROMPT_TYPES = new Set(["r2_commercial", "r2_med_commercial"]);
+
+// Скоринг клиента: сырые баллы (0–10, итог 0–30), НЕ проценты. Живут не в
+// blocks оценки, а в evaluation_json.client_scoring (см.
+// accumulateClientScoring). Порядок колонок — как у Spellit.
+const CLIENT_SCORING_BLOCK = "Скоринг клиента";
+const CLIENT_SCORING_CRITERIA = [
+  "Итоговый скоринг",
+  "Потребность",
+  "Платежеспособность",
+  "Срочность",
+] as const;
+
+const SPELLIT_GROUPING: ReadonlyArray<{ block: string; criteria: readonly string[] }> = [
+  { block: "Установление контакта", criteria: [
+    "Приветствие и установление контакта",
+    "Озвучен план разговора (программирование)",
+    "Корректная отработка вопроса о стоимости (если он прозвучал)",
+    "Корректная отработка вопроса о JobCenter (если он прозвучал)",
+    "Small talk и установление контакта",
+  ] },
+  { block: "Выявление потребностей", criteria: [
+    "Точка А (выявить и усилить боль)",
+    "Ситуативные вопросы в Точке А",
+    "Точка В (ожидания, готовность, срочность)",
+    "Уточнение SMART-целей Клиента",
+    "Резюмирование целей и сроков перед презентацией",
+  ] },
+  { block: "Презентация продукта", criteria: [
+    "Презентация проведена с опорой на цели и запрос Клиента",
+    "Презентация проведена в формате диалога, с вовлечением Клиента",
+    "Преимущества профессии Бухгалтера",
+    "Преимущества профессии Медицинский администратор",
+  ] },
+  { block: "Предзакрытие и ФОМО", criteria: [
+    "Что откликнулось Клиенту в презентации и готовность клиента начать",
+    "Предзакрытие, FOMO и тактика дефицита",
+  ] },
+  { block: "Отработка возражений", criteria: [
+    "Отработка возражений по структуре",
+    "Продавец корректно отработал ложные возражения",
+  ] },
+  { block: "Этап оплаты", criteria: [
+    "Продавец порекомендовал вариант оплаты и дал аргументацию",
+    "Продавец узнал, подходит ли предложенный вариант оплаты Клиенту",
+    "Продавец предложил приступить к обучению",
+    "Следующие шаги",
+  ] },
+  { block: "Экспертный блок", criteria: [
+    "Реферальная программа",
+    "Применение сторителлинга",
+    "Продавец использовал активное слушание и отзеркаливание Клиента",
+    "Продавец был корректен и сохранял самоконтроль",
+  ] },
+  { block: "Стандарты общения", criteria: [
+    "Общая доброжелательность и вежливость Продавца",
+    "Критические ошибки с точки зрения компании",
+    "Критические ошибки с точки зрения клиента",
+    "Критические ошибки с точки зрения закона",
+    "Talk ratio Продавца",
+  ] },
+  { block: CLIENT_SCORING_BLOCK, criteria: CLIENT_SCORING_CRITERIA },
+];
+
+// Матчинг имён: «фигурные» кавычки → прямые, схлопнуть пробелы, lower-case.
+function looseKey(s: string): string {
+  return s.replace(/[“”„«»]/g, '"').replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+const SPELLIT_BLOCK_ORDER: string[] = SPELLIT_GROUPING.map((g) => g.block);
+
+// looseKey(критерий) → { block, order }. Критерии вне карты в Spellit-виде НЕ
+// показываются (инфо-теги, рекомендации, нарратив, «Потеря клиента» и т.п.).
+const SPELLIT_BLOCK_OF: Map<string, { block: string; order: number }> = (() => {
+  const m = new Map<string, { block: string; order: number }>();
+  SPELLIT_GROUPING.forEach(({ block, criteria }, bi) =>
+    criteria.forEach((c, ci) => m.set(looseKey(c), { block, order: bi * 100 + ci })),
+  );
+  return m;
+})();
 
 function normalizeName(name: string, map: Record<string, string>): string {
   return map[name] ?? name;
@@ -329,26 +425,49 @@ interface CanonicalCriteria {
   blockCriteria: Map<string, string[]>;
   // Set of canonical "block::criterion" keys for fast membership check.
   validKeys: Set<string>;
+  // Каноническое имя → подпись с номером критерия из конфига («12. Презентация
+  // проведена…») — как подписаны колонки «Дашборда 1» Spellit. Только для
+  // отображения: все ключи агрегатов остаются на канонических именах.
+  displayNames: Map<string, string>;
 }
 
 const EMPTY_CANONICAL: CanonicalCriteria = {
   blockOrder: [],
   blockCriteria: new Map(),
   validKeys: new Set(),
+  displayNames: new Map(),
 };
 
-async function loadCanonicalCriteria(promptTypes: string[]): Promise<CanonicalCriteria> {
+async function loadCanonicalCriteria(
+  promptTypes: string[],
+  useSpellit = false,
+  // Колонки «Скоринга клиента» показываем только там, где их реально
+  // накапливаем (OKK-звонки Коммерсов); у ролевок их нет.
+  includeClientScoring = false,
+): Promise<CanonicalCriteria> {
   const blockOrder: string[] = [];
   const blockCriteria = new Map<string, string[]>();
   const blockCriteriaSets = new Map<string, Set<string>>();
   const validKeys = new Set<string>();
+  const displayNames = new Map<string, string>();
 
   for (const pt of promptTypes) {
     const filePath = path.join(process.cwd(), "src", "criteria", `${pt}.json`);
     try {
       const content = await readFile(filePath, "utf-8");
-      const json = JSON.parse(content) as { stages?: Array<{ name?: string; criteria?: Array<{ name?: string }> }> };
+      const json = JSON.parse(content) as { stages?: Array<{ name?: string; criteria?: Array<{ name?: string; id?: number }> }> };
       const stages = Array.isArray(json.stages) ? json.stages : [];
+      // Подписи с номерами собираем по ВСЕМ stages (включая исключённые из
+      // отображения) — id критерия совпадает с нумерацией Spellit. Скоринг
+      // клиента у Spellit подписан без номеров — пропускаем.
+      for (const stage of stages) {
+        for (const c of stage.criteria ?? []) {
+          if (typeof c.name !== "string" || typeof c.id !== "number") continue;
+          const cName = normalizeName(stripNumericPrefix(c.name), CRITERIA_NAME_MAP);
+          if (CLIENT_SCORING_CRITERIA.includes(cName as typeof CLIENT_SCORING_CRITERIA[number])) continue;
+          if (!displayNames.has(cName)) displayNames.set(cName, `${c.id}. ${cName}`);
+        }
+      }
       for (const stage of stages) {
         const rawBlockName = typeof stage.name === "string" ? stage.name : "";
         if (!rawBlockName || EXCLUDED_BLOCKS.has(rawBlockName)) continue;
@@ -378,7 +497,40 @@ async function loadCanonicalCriteria(promptTypes: string[]): Promise<CanonicalCr
     }
   }
 
-  return { blockOrder, blockCriteria, validKeys };
+  if (!useSpellit) return { blockOrder, blockCriteria, validKeys, displayNames };
+
+  // Spellit-раскладка: берём КРИТЕРИИ, реально присутствующие в конфигах
+  // (уже нормализованные выше), и раскладываем их по блокам Spellit в порядке
+  // SPELLIT_GROUPING. Имена критериев берём фактические — чтобы совпадали с
+  // ключами, которые построит regroupAccToSpellit.
+  const present = new Set<string>();
+  for (const arr of blockCriteria.values()) for (const c of arr) present.add(c);
+  // Скоринг клиента лежит в конфиге под EXCLUDED_BLOCKS (его строки-критерии
+  // в оценках пустые, 0/0) — данные приходят из evaluation_json.client_scoring,
+  // поэтому включаем колонки принудительно.
+  if (includeClientScoring) for (const c of CLIENT_SCORING_CRITERIA) present.add(c);
+
+  const perBlock = new Map<string, Array<{ name: string; order: number }>>();
+  for (const cName of present) {
+    const sb = SPELLIT_BLOCK_OF.get(looseKey(cName));
+    if (!sb) continue; // критерий не входит в Spellit-вид → не показываем
+    if (!perBlock.has(sb.block)) perBlock.set(sb.block, []);
+    perBlock.get(sb.block)!.push({ name: cName, order: sb.order });
+  }
+
+  const sBlockOrder: string[] = [];
+  const sBlockCriteria = new Map<string, string[]>();
+  const sValidKeys = new Set<string>();
+  for (const block of SPELLIT_BLOCK_ORDER) {
+    const arr = perBlock.get(block);
+    if (!arr || arr.length === 0) continue;
+    arr.sort((a, b) => a.order - b.order);
+    const names = arr.map((x) => x.name);
+    sBlockOrder.push(block);
+    sBlockCriteria.set(block, names);
+    for (const n of names) sValidKeys.add(`${block}::${n}`);
+  }
+  return { blockOrder: sBlockOrder, blockCriteria: sBlockCriteria, validKeys: sValidKeys, displayNames };
 }
 
 // ─── Accumulator ────────────────────────────────────────────
@@ -477,6 +629,100 @@ function processBlocks(
   return hadData;
 }
 
+// Полярность Spellit для «Критических ошибок»: OKK пишет 1 = ошибок НЕ было,
+// а в таблице Spellit колонка означает «доля звонков С ошибками» (выше =
+// хуже, у идеального менеджера 0%). Инвертируем при материализации
+// Spellit-вида — B2G-таблицы это не задевает. Клиентская раскраска этих
+// колонок — SPELLIT_INVERTED_CRITERIA в AnalyticsTab.tsx (по флагу
+// spellitView, т.к. вне Spellit-вида значения остаются прямыми).
+const SPELLIT_INVERTED = new Set([
+  "Критические ошибки с точки зрения компании",
+  "Критические ошибки с точки зрения клиента",
+  "Критические ошибки с точки зрения закона",
+].map(looseKey));
+
+// Критерии, которые НЕ входят в блочный средний процент (свёрнутая колонка
+// блока): инвертированные (доля ошибок, выше=хуже) и нейтральный Talk ratio
+// смешали бы в одном среднем «% хорошего», «% плохого» и сырой процент
+// говорения — свёрнутые «Стандарты общения» выглядели бы красными при
+// идеальных показателях. Скоринг клиента исключается отдельно (сырые баллы).
+const SPELLIT_BLOCK_SUM_EXCLUDED = new Set([
+  "Talk ratio Продавца",
+].map(looseKey));
+
+// ─── Перегруппировка под Spellit ────────────────────────────
+// Перекладывает аккумулятор с ключей «configBlock::крит» на «spellitBlock::
+// крит» и пересобирает блочные агрегаты (сумма по критериям блока). Критерии
+// вне карты Spellit отбрасываются. totalScore/overall не трогаем — они не
+// зависят от группировки. Применяется после набора всех аккумуляторов и до
+// buildResponse, только для Коммерсов (см. SPELLIT_PROMPT_TYPES).
+function regroupAccToSpellit(acc: PeriodAcc): void {
+  const nc = new Map<string, { scoreSum: number; count: number }>();
+  const nb = new Map<string, { scoreSum: number; count: number }>();
+  for (const [key, ce] of acc.criteria) {
+    const sepIdx = key.indexOf("::");
+    const cName = sepIdx >= 0 ? key.slice(sepIdx + 2) : key;
+    const lk = looseKey(cName);
+    const sb = SPELLIT_BLOCK_OF.get(lk);
+    if (!sb) continue;
+    // Инверсия полярности: avg → 100−avg через сырые суммы (sum/count).
+    const entry = SPELLIT_INVERTED.has(lk)
+      ? { scoreSum: 100 * ce.count - ce.scoreSum, count: ce.count }
+      : ce;
+    // Один и тот же критерий может прийти из разных config-блоков (разные
+    // prompt-версии) — сливаем, а не перезаписываем.
+    const nk = `${sb.block}::${cName}`;
+    const prev = nc.get(nk);
+    if (prev) { prev.scoreSum += entry.scoreSum; prev.count += entry.count; }
+    else nc.set(nk, entry);
+    // В блочный средний идут только «обычные» процентные критерии: сырые
+    // баллы скоринга, доля ошибок и talk ratio исказили бы свёрнутый блок.
+    if (sb.block === CLIENT_SCORING_BLOCK || SPELLIT_INVERTED.has(lk) || SPELLIT_BLOCK_SUM_EXCLUDED.has(lk)) continue;
+    const be = nb.get(sb.block);
+    if (be) { be.scoreSum += entry.scoreSum; be.count += entry.count; }
+    else nb.set(sb.block, { scoreSum: entry.scoreSum, count: entry.count });
+  }
+  acc.criteria = nc;
+  acc.blocks = nb;
+}
+
+function regroupAllToSpellit(...maps: Array<Map<string, PeriodAcc>>): void {
+  for (const m of maps) for (const acc of m.values()) regroupAccToSpellit(acc);
+}
+
+// Скоринг клиента из evaluation_json.client_scoring → аккумулятор (сырые
+// баллы 0–10, итог 0–30; average по звонкам). «Итоговый скоринг» считаем
+// суммой компонентов сами: OKK хранит его обрезанным до 10 (LLM-схема
+// критерия 51 — scale_0_10), а Spellit ждёт 0–30; «Пусто» в компоненте
+// суммируется как 0 — ровно по промту критерия 51. Ключи кладём сразу в
+// Spellit-блок, чтобы regroupAccToSpellit их сохранил (звонки без
+// client_scoring просто не входят в среднее).
+function accumulateClientScoring(evalJson: Record<string, unknown> | null, acc: PeriodAcc): void {
+  const cs = evalJson?.client_scoring as Record<string, unknown> | undefined;
+  if (!cs || typeof cs !== "object") return;
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const urgency = num(cs.urgency);
+  const solvency = num(cs.solvency);
+  const need = num(cs.need);
+  const total = urgency === null && solvency === null && need === null
+    ? null
+    : (urgency ?? 0) + (solvency ?? 0) + (need ?? 0);
+  const vals: Array<[string, number | null]> = [
+    ["Итоговый скоринг", total],
+    ["Потребность", need],
+    ["Платежеспособность", solvency],
+    ["Срочность", urgency],
+  ];
+  for (const [name, v] of vals) {
+    if (v === null) continue;
+    const key = `${CLIENT_SCORING_BLOCK}::${name}`;
+    const ce = acc.criteria.get(key);
+    if (ce) { ce.scoreSum += v; ce.count++; }
+    else acc.criteria.set(key, { scoreSum: v, count: 1 });
+  }
+}
+
 // ─── OKK data fetcher ───────────────────────────────────────
 
 async function fetchOkkData(
@@ -490,10 +736,15 @@ async function fetchOkkData(
   managerIds: string[],
   wantTree: boolean,
   excludedCallIds: Set<string>,
+  minDurSec: number,
   vertical?: "buh" | "med" | "all",
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
   const promptTypes = getOkkPromptTypes(department, line, vertical);
+  // Коммерсы (r2_commercial / r2_med_commercial) → таблицы критериев в
+  // раскладке Spellit (перегруппировка блоков). Применяется только в режиме
+  // конкретной линии (не «все воронки»), т.е. внутри ветки !isAllFunnels.
+  const useSpellit = !!promptTypes && promptTypes.some((pt) => SPELLIT_PROMPT_TYPES.has(pt));
 
   // Уволенных менеджеров не показываем нигде в ОКК. Флаг okkManagers.isActive
   // синкается из master_managers (источник правды): при увольнении sync ставит
@@ -524,6 +775,18 @@ async function fetchOkkData(
   if (managerIds.length) {
     conditions.push(inArray(okkEvaluations.managerId, managerIds));
   }
+  // Тумблер «как в Spellit»: их Дашборд 1 пускает только звонки от 15 минут,
+  // OKK оценивает от 10 — для сверки цифр бок о бок нужна одинаковая выборка.
+  if (minDurSec > 0) {
+    conditions.push(sql`${okkCalls.durationSeconds} >= ${minDurSec}`);
+  }
+  // Демотированные ноги склеенных разговоров (pair_role='primary') не считаем:
+  // их standalone-оценка (если успела появиться до склейки) устарела — весь
+  // разговор представлен СКЛЕЕННОЙ оценкой хвоста. Иначе одна беседа даёт две
+  // строки и двойной счёт в объёме/среднем (worst-calls в OKK фильтрует так же).
+  conditions.push(
+    or(isNull(okkCalls.pairRole), sql`${okkCalls.pairRole} <> 'primary'`),
+  );
 
   // Manager dropdown lists every currently-active manager/ROP in the
   // department. We deliberately do NOT scope it to the selected line so a
@@ -619,6 +882,7 @@ async function fetchOkkData(
       had = processCallAsFunnel(acc, row.totalScore, funnel);
     } else {
       had = processBlocks(blocks, acc, row.totalScore);
+      if (had && useSpellit) accumulateClientScoring(evalJson, acc);
     }
     if (!had) continue;
     processedCount++;
@@ -630,6 +894,7 @@ async function fetchOkkData(
       processCallAsFunnel(managerAccMap.get(mgrKey)!, row.totalScore, funnel);
     } else {
       processBlocks(blocks, managerAccMap.get(mgrKey)!, row.totalScore);
+      if (useSpellit) accumulateClientScoring(evalJson, managerAccMap.get(mgrKey)!);
     }
 
     // Тот же звонок → бакет «менеджер × день» (B2B). Решение accept/reject
@@ -648,6 +913,11 @@ async function fetchOkkData(
       } else {
         processBlocks(blocks, mdAcc, row.totalScore);
         processBlocks(blocks, callAcc, row.totalScore);
+        if (useSpellit) {
+          accumulateClientScoring(evalJson, mdAcc);
+          accumulateClientScoring(evalJson, callAcc);
+          regroupAccToSpellit(callAcc);
+        }
       }
       const cAgg = aggAccs([callAcc]);
       const list = managerDayCallsMap.get(mdKey) ?? [];
@@ -708,10 +978,12 @@ async function fetchOkkData(
       blockOrder: funnels,
       blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
       validKeys: new Set(),
+      displayNames: new Map(),
     };
   } else {
     const promptTypesForCanonical = promptTypes ?? getLines(department).map((l) => l.promptType);
-    canonical = await loadCanonicalCriteria(promptTypesForCanonical);
+    canonical = await loadCanonicalCriteria(promptTypesForCanonical, useSpellit, useSpellit);
+    if (useSpellit) regroupAllToSpellit(accMap, managerAccMap, managerDayAccMap);
   }
 
   return buildResponse(periods, accMap, managers, managerAccMap, "okk", department, processedCount, allManagersForBreakdown, canonical, managerDayAccMap, managerDayCallsMap);
@@ -859,6 +1131,7 @@ async function fetchRoleplayData(
       } else {
         processBlocks(blocks, mdAcc, row.score ?? null);
         processBlocks(blocks, callAcc, row.score ?? null);
+        if (department === "b2b") regroupAccToSpellit(callAcc);
       }
       const cAgg = aggAccs([callAcc]);
       const list = managerDayCallsMap.get(mdKey) ?? [];
@@ -913,13 +1186,15 @@ async function fetchRoleplayData(
     // Ролевки B2B оцениваются движком-портом ОКК по r2_commercial → грузим тот
     // же канонический набор критериев, что и у реальных звонков (Бух 1). Так
     // дерево показывает пооценочный разбор, согласованный с ОКК.
-    canonical = await loadCanonicalCriteria(["r2_commercial"]);
+    canonical = await loadCanonicalCriteria(["r2_commercial"], true);
+    regroupAllToSpellit(accMap, managerAccMap, managerDayAccMap);
   } else if (isAllFunnels) {
     const funnels = funnelOrderForRoleplay(department);
     canonical = {
       blockOrder: funnels,
       blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
       validKeys: new Set(),
+      displayNames: new Map(),
     };
   } else {
     canonical = EMPTY_CANONICAL;
@@ -1026,7 +1301,8 @@ function buildResponse(
         const ce = acc?.criteria.get(key);
         if (ce && ce.count > 0) cScores[p] = Math.round(ce.scoreSum / ce.count);
       }
-      return { name: cName, scores: cScores };
+      const displayName = canonical.displayNames.get(cName);
+      return { name: cName, ...(displayName ? { displayName } : {}), scores: cScores };
     });
 
     return { name: blockName, scores, criteria };
@@ -1173,6 +1449,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // B2B-детализации). Сводка (line=all) и режим сравнения его не запрашивают,
     // поэтому лишняя работа и payload не делаются.
     const wantTree = sp.get("tree") === "1";
+    // minDur (сек) — фильтр минимальной длительности звонка. Используется
+    // тумблером «≥ 15 мин (как в Spellit)» у Коммерсов; 0/пусто = без фильтра.
+    const minDurRaw = Number.parseInt(sp.get("minDur") ?? "0", 10);
+    const minDurSec = Number.isFinite(minDurRaw) && minDurRaw > 0 ? minDurRaw : 0;
 
     // Civil dates (YYYY-MM-DD) — what the user picks in the calendar — are
     // always interpreted as Berlin civil days here. Both the SQL filter and
@@ -1197,12 +1477,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const excludedCallIds = await loadExcludedCallIds(department, source);
     const excludedSig = [...excludedCallIds].sort().join(",");
 
-    const cacheKey = `analytics:${department}:${source}:${vertical ?? "-"}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}:excl=${excludedSig}`;
+    const cacheKey = `analytics:${department}:${source}:${vertical ?? "-"}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}:minDur=${minDurSec}:excl=${excludedSig}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
         ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds)
-        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds, vertical),
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds, minDurSec, vertical),
     );
 
     return NextResponse.json({ success: true, data });

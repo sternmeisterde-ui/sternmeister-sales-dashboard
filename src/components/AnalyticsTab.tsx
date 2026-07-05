@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
-import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw } from "lucide-react";
+import { RefreshCw, Loader2, ChevronDown, ChevronUp, ChevronsUpDown, ChevronsDownUp, ArrowLeftRight, ExternalLink, Copy, PhoneIncoming, PhoneOutgoing, Clock, Timer, Check, Search, X, Play, FileText, MoreHorizontal, Ban, RotateCcw, ListChecks } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -14,7 +14,7 @@ import {
 
 // ==================== Types ====================
 
-interface CriterionScore { name: string; scores: Record<string, number> }
+interface CriterionScore { name: string; displayName?: string; scores: Record<string, number> }
 interface BlockData { name: string; scores: Record<string, number>; criteria: CriterionScore[] }
 interface ManagerCriterion { name: string; score: number | null }
 interface ManagerBlock { name: string; score: number | null; criteria: ManagerCriterion[] }
@@ -54,26 +54,67 @@ function getCriteriaColor(v: number | null | undefined): string {
   return "text-rose-400";
 }
 
-// Критерии с особой раскраской (канонические имена из src/criteria/*.json —
-// сервер агрегирует их специальной веткой, см. UNSCORED_BINARY_CRITERIA /
-// VALUE_CRITERIA в /api/analytics):
-//  • инвертированные — значение это «% плохого», выше = хуже («Потеря
-//    клиента…» = % потерянных горячих клиентов);
+// Критерии с особой раскраской (канонические имена из src/criteria/*.json):
+//  • ВСЕГДА инвертированные — сырой вердикт OKK уже означает «% плохого»
+//    («Потеря клиента…»: 1 = клиент потерян), выше = хуже во всех вьюхах;
+//  • инвертированные ТОЛЬКО в Spellit-виде — «Критические ошибки…»: сервер
+//    переворачивает вердикт OKK («1 = ошибок не было») в «долю звонков с
+//    ошибками» ТОЛЬКО в regroupAccToSpellit (Бух 1/Мед 1 + ролевки B2B).
+//    На Бух 2 и всех B2G-таблицах значение остаётся прямым («% без ошибок»),
+//    и красить его перевёрнутой шкалой нельзя — поэтому флаг spellitView
+//    прокидывается от вьюхи (см. isSpellitView);
 //  • нейтральные — информационная метрика без «хорошо/плохо» (talk ratio).
-const INVERTED_CRITERIA = new Set(["Потеря клиента на этапе оплаты"]);
+const ALWAYS_INVERTED_CRITERIA = new Set(["Потеря клиента на этапе оплаты"]);
+const SPELLIT_INVERTED_CRITERIA = new Set([
+  "Критические ошибки с точки зрения компании",
+  "Критические ошибки с точки зрения клиента",
+  "Критические ошибки с точки зрения закона",
+]);
 const NEUTRAL_CRITERIA = new Set(["Talk ratio Продавца"]);
 
-function getCriteriaColorFor(name: string, v: number | null | undefined): string {
+// Зеркало серверного useSpellit (route.ts SPELLIT_PROMPT_TYPES + roleplay-B2B
+// ветка): где сервер инвертировал «Критические ошибки», там и красим их как
+// «% плохого».
+function isSpellitView(department: "b2g" | "b2b", source: "okk" | "roleplay", line: string): boolean {
+  if (department !== "b2b") return false;
+  if (source === "roleplay") return true;
+  return line === "buh1" || line === "med1";
+}
+
+// Скоринг клиента (Spellit-блок): сырые баллы, не проценты. Пороги окраски —
+// как группы Spellit: отдельные скоринги 0–10 (≤5 / ≤7 / >7), итог 0–30
+// (<10 / <20 / ≥20).
+const CLIENT_SCORE_10 = new Set(["Потребность", "Платежеспособность", "Срочность"]);
+const CLIENT_SCORE_TOTAL = "Итоговый скоринг";
+
+function getClientScoreColor(name: string, v: number): string {
+  if (name === CLIENT_SCORE_TOTAL) {
+    return v >= 20 ? "text-emerald-400" : v >= 10 ? "text-amber-400" : "text-rose-400";
+  }
+  return v > 7 ? "text-emerald-400" : v > 5 ? "text-amber-400" : "text-rose-400";
+}
+
+function isClientScore(name: string): boolean {
+  return name === CLIENT_SCORE_TOTAL || CLIENT_SCORE_10.has(name);
+}
+
+function isInvertedFor(name: string, spellitView: boolean): boolean {
+  return ALWAYS_INVERTED_CRITERIA.has(name) || (spellitView && SPELLIT_INVERTED_CRITERIA.has(name));
+}
+
+function getCriteriaColorFor(name: string, v: number | null | undefined, spellitView = false): string {
   if (v === undefined || v === null) return "text-slate-600";
   if (NEUTRAL_CRITERIA.has(name)) return "text-slate-200";
-  if (INVERTED_CRITERIA.has(name)) return getCriteriaColor(100 - v);
+  if (isClientScore(name)) return getClientScoreColor(name, v);
+  if (isInvertedFor(name, spellitView)) return getCriteriaColor(100 - v);
   return getCriteriaColor(v);
 }
 
-function getCriteriaBgFor(name: string, v: number | null | undefined): string {
+function getCriteriaBgFor(name: string, v: number | null | undefined, spellitView = false): string {
   if (v === undefined || v === null) return "";
   if (NEUTRAL_CRITERIA.has(name)) return "";
-  if (INVERTED_CRITERIA.has(name)) return getCriteriaBg(100 - v);
+  if (isClientScore(name)) return "";
+  if (isInvertedFor(name, spellitView)) return getCriteriaBg(100 - v);
   return getCriteriaBg(v);
 }
 
@@ -87,6 +128,16 @@ function getCriteriaBg(v: number | null | undefined): string {
 function fmtScore(v: number | null | undefined): string {
   if (v === undefined || v === null) return "—";
   return `${v}%`;
+}
+
+// Скоринг клиента показываем сырым баллом (21, 8), остальное — процентом.
+// Обязателен во ВСЕХ местах, где рендерится значение критерия по имени
+// (таблицы динамики, разбивка по менеджерам, compare) — голый fmtScore
+// пририсует «%» к сырым баллам скоринга.
+function fmtScoreFor(name: string | null, v: number | null | undefined): string {
+  if (v === undefined || v === null) return "—";
+  if (name && isClientScore(name)) return String(v);
+  return fmtScore(v);
 }
 
 // M:SS из секунд (длительность звонка).
@@ -226,6 +277,9 @@ export default function AnalyticsTab({
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>(() => defaultDateRange(department));
+  // Тумблер «≥ 15 мин»: Spellit («Дашборд 1») пускает в таблицу только звонки
+  // от 15 минут, OKK оценивает от 10 — включается для сверки цифр со Spellit.
+  const [spellitMinDur, setSpellitMinDur] = useState(false);
 
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -247,7 +301,7 @@ export default function AnalyticsTab({
   // из localStorage в эффекте (а не в инициализаторе) — гидрация цела.
   const [hiddenDirections, setHiddenDirections] = useState<Set<string>>(new Set());
 
-  // Moderation: calls excluded from the stats (admin/rop/teamlead only).
+  // Moderation: calls excluded from the stats (admin/rop only).
   // excludedList drives the «Исключённые» panel; excludeBusy guards double-clicks.
   const [excludedList, setExcludedList] = useState<ExcludedCall[]>([]);
   const [excludedOpen, setExcludedOpen] = useState(false);
@@ -446,8 +500,9 @@ export default function AnalyticsTab({
     // Вертикаль шлём только для b2g+OKK (мед-ролевок пока нет; b2b без вертикали).
     if (department === "b2g" && source === "okk" && vertical) params.set("vertical", vertical);
     if (managerIds.length) params.set("managerIds", managerIds.join(","));
+    if (department === "b2b" && source === "okk" && spellitMinDur) params.set("minDur", "900");
     return params;
-  }, [department, source, line, groupBy, managerIds, vertical]);
+  }, [department, source, line, groupBy, managerIds, vertical, spellitMinDur]);
 
   // Loading-state toggle uses a ref so it doesn't end up in the deps array
   // — having `data` as a dep caused fetchData to get a new identity after
@@ -515,7 +570,7 @@ export default function AnalyticsTab({
     }
   }, [department, source, compareMode, dateRange, managerIds]);
 
-  // Moderation: current exclusions for the panel (admin/rop/teamlead only).
+  // Moderation: current exclusions for the panel (admin/rop only).
   const fetchExcluded = useCallback(async (signal?: AbortSignal) => {
     if (!canModerate) { setExcludedList([]); return; }
     try {
@@ -759,6 +814,7 @@ export default function AnalyticsTab({
             labelB={fmtShortRange(compareDateRange)}
             collapsedBlocks={collapsedCompareBlocks}
             onToggle={(n) => toggle(setCollapsedCompareBlocks, n)}
+            spellitView={isSpellitView(department, source, line)}
           />
 
           {managerIds.length !== 1 &&(data.managerBreakdown.length > 0 || compareData.managerBreakdown.length > 0) && (
@@ -925,7 +981,19 @@ export default function AnalyticsTab({
               </div>
             )}
             {source === "okk" && data && (
-              <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
+              <div className="flex items-end justify-between gap-3">
+                <LineTabs lines={getAnalyticsLines(department)} active={line} onSelect={setLine} />
+                {/* Паритет со Spellit: их «Дашборд 1» показывает только звонки ≥ 15 мин */}
+                <label className="flex items-center gap-1.5 pb-1 cursor-pointer select-none text-[10px] uppercase tracking-wider font-semibold text-slate-400 hover:text-slate-200 whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={spellitMinDur}
+                    onChange={(e) => setSpellitMinDur(e.target.checked)}
+                    className="accent-blue-500 w-3 h-3"
+                  />
+                  ≥ 15 мин (как в Spellit)
+                </label>
+              </div>
             )}
             {data && data.timeTree.length > 0 ? (
               <CriteriaTimeTree
@@ -933,6 +1001,7 @@ export default function AnalyticsTab({
                 blocks={data.blocks}
                 department={department}
                 source={source}
+                spellitView={isSpellitView(department, source, line)}
                 highlightedCallIds={highlightedCallIds}
                 collapsedBlocks={collapsedMgrBlocks}
                 onToggleBlock={(n) => toggle(setCollapsedMgrBlocks, n)}
@@ -1073,7 +1142,7 @@ function BlockTimeRows({ block, periods, isCollapsed, onToggle }: { block: Block
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{c.name}</td>
           {periods.map((p) => {
             const v = c.scores[p];
-            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(c.name, v)} ${getCriteriaBgFor(c.name, v)}`}>{fmtScore(v)}</td>;
+            return <td key={p} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(c.name, v)} ${getCriteriaBgFor(c.name, v)}`}>{fmtScoreFor(c.name, v)}</td>;
           })}
         </tr>
       ))}
@@ -1153,7 +1222,7 @@ function BlockManagerRows({ blockName, blockIdx, criteriaNames, managers, isColl
           <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
           {managers.map((m) => {
             const v = m.blocks[blockIdx]?.criteria[ci]?.score;
-            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(cName, v)} ${getCriteriaBgFor(cName, v)}`}>{fmtScore(v)}</td>;
+            return <td key={m.id} className={`px-2 py-1.5 text-right font-mono text-[11px] ${getCriteriaColorFor(cName, v)} ${getCriteriaBgFor(cName, v)}`}>{fmtScoreFor(cName, v)}</td>;
           })}
         </tr>
       ))}
@@ -1276,11 +1345,13 @@ function leafColId(leaf: TreeLeaf): string {
 }
 
 function CriteriaTimeTree({
-  tree, blocks, department, source, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate, canModerate, onExclude,
+  tree, blocks, department, source, spellitView, highlightedCallIds, collapsedBlocks, onToggleBlock, expandedWeeks, onToggleWeek, expandedMgrs, onToggleMgr, expandedDates, onToggleDate, canModerate, onExclude,
 }: {
   tree: TimeTreeWeek[]; blocks: BlockData[];
   department: "b2g" | "b2b";
   source: "okk" | "roleplay";
+  // Сервер инвертировал «Критические ошибки» (Spellit-вид) → красим их как «% плохого».
+  spellitView: boolean;
   highlightedCallIds: Set<string>;
   collapsedBlocks: Set<string>; onToggleBlock: (n: string) => void;
   expandedWeeks: Set<string>; onToggleWeek: (k: string) => void;
@@ -1292,7 +1363,7 @@ function CriteriaTimeTree({
 }) {
   // Модалка «Аудио / Транскрипт» для звонка — открывается из меню строки в
   // нужном режиме; внутри можно переключаться.
-  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" } | null>(null);
+  const [mediaModal, setMediaModal] = useState<{ callId: string; view: "audio" | "transcript" | "scores" } | null>(null);
 
   // Меню действий «⋯» у строки звонка (одна иконка вместо россыпи). Позиция
   // fixed по rect кнопки — таблица скроллится (overflow:auto), обычный
@@ -1343,11 +1414,11 @@ function CriteriaTimeTree({
       // Критерии с особой семантикой (потеря клиента, talk ratio) красим
       // по имени; блоки и «ОЦЕНКА» — обычной шкалой.
       const critName = leaf.kind === "crit" ? leaf.crit.name : null;
-      const color = critName ? getCriteriaColorFor(critName, v) : getCriteriaColor(v);
-      const bg = critName ? getCriteriaBgFor(critName, v) : getCriteriaBg(v);
+      const color = critName ? getCriteriaColorFor(critName, v, spellitView) : getCriteriaColor(v);
+      const bg = critName ? getCriteriaBgFor(critName, v, spellitView) : getCriteriaBg(v);
       return (
         <td key={i} className={`px-2 py-1.5 text-center font-mono text-[11px] ${strong ? "font-bold" : ""} ${color} ${bg}`}>
-          {fmtScore(v)}
+          {fmtScoreFor(critName, v)}
         </td>
       );
     });
@@ -1407,7 +1478,7 @@ function CriteriaTimeTree({
                     <th key={`${b.name}-${c.name}`}
                       className={`px-2 py-1 text-center align-bottom min-w-[58px] max-w-[82px] sticky z-30 ${ci === 0 ? "border-l border-white/10" : ""}`}
                       style={{ backgroundColor: TREE_HEADER_BG, top: TREE_HEADER_H }}>
-                      <div className="text-[9px] text-slate-400 font-medium leading-tight whitespace-normal break-words">{c.name}</div>
+                      <div className="text-[9px] text-slate-400 font-medium leading-tight whitespace-normal break-words">{c.displayName ?? c.name}</div>
                     </th>
                   )),
                 )}
@@ -1599,6 +1670,13 @@ function CriteriaTimeTree({
           >
             <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" /> Транскрипт
           </button>
+          <button
+            type="button"
+            onClick={() => { setMediaModal({ callId: menu.callId, view: "scores" }); setMenu(null); }}
+            className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5"
+          >
+            <ListChecks className="w-3.5 h-3.5 text-purple-400 shrink-0" /> Детализация оценок
+          </button>
           {canModerate && (
             <button
               type="button"
@@ -1630,17 +1708,32 @@ function CriteriaTimeTree({
 
 // ==================== Call media modal (audio + transcript) ====================
 
+interface EvalDetailCriterion {
+  name: string; score: number | null; maxScore: number;
+  feedback: string; quote: string; applicable?: boolean;
+}
+interface EvalDetailBlock {
+  name: string; score: number; maxScore: number; criteria: EvalDetailCriterion[];
+}
+interface CallMeta {
+  clientName: string | null; phone: string | null; source: string | null;
+  leadCategory: string | null; stageAtCallStart: string | null; stageAtPickup: string | null;
+  week: string | null; callDateTime: string | null; analyzedAt: string | null;
+}
+
 function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   callId: string;
   dept: "b2g" | "b2b";
   source: "okk" | "roleplay";
-  initialView: "audio" | "transcript";
+  initialView: "audio" | "transcript" | "scores";
   onClose: () => void;
 }) {
-  const [view, setView] = useState<"audio" | "transcript">(initialView);
+  const [view, setView] = useState<"audio" | "transcript" | "scores">(initialView);
   const [data, setData] = useState<{
     name: string; date: string; callDuration: string;
     transcript: string; audioUrl: string; hasRecording: boolean;
+    kommoUrl?: string; score?: number; totalMaxScore?: number; totalRawScore?: number;
+    blocks?: EvalDetailBlock[]; meta?: CallMeta;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1678,7 +1771,7 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
       <div
-        className="glass-panel rounded-2xl border border-white/10 w-full max-w-2xl max-h-[85vh] flex flex-col"
+        className={`glass-panel rounded-2xl border border-white/10 w-full ${view === "scores" ? "max-w-3xl" : "max-w-2xl"} max-h-[85vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Шапка */}
@@ -1687,9 +1780,25 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="text-sm font-bold text-slate-200 truncate">{data?.name || "Звонок"}</div>
             {data && <div className="text-[11px] text-slate-500">{data.date} · {data.callDuration}</div>}
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5 shrink-0" title="Закрыть">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {typeof data?.score === "number" && (data.blocks?.length ?? 0) > 0 && (
+              <span
+                className={`px-2.5 py-1 rounded-lg text-sm font-black ${
+                  data.score >= 66
+                    ? "bg-emerald-500/15 text-emerald-400"
+                    : data.score >= 41
+                    ? "bg-amber-500/15 text-amber-400"
+                    : "bg-rose-500/15 text-rose-400"
+                }`}
+                title="Общая оценка звонка"
+              >
+                {data.score}%
+              </span>
+            )}
+            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-white/5" title="Закрыть">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Переключатель Аудио / Транскрипт */}
@@ -1706,6 +1815,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
           >
             <FileText className="w-3.5 h-3.5" /> Транскрипт
           </button>
+          <button
+            onClick={() => setView("scores")}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${view === "scores" ? "bg-purple-500/20 text-purple-400" : "text-slate-500 hover:text-slate-300"}`}
+          >
+            <ListChecks className="w-3.5 h-3.5" /> Оценки
+          </button>
         </div>
 
         {/* Тело */}
@@ -1714,6 +1829,12 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             <div className="flex items-center justify-center py-10 text-slate-500"><Loader2 className="w-5 h-5 animate-spin" /></div>
           ) : error ? (
             <div className="py-10 text-center text-rose-400 text-sm">{error}</div>
+          ) : view === "scores" ? (
+            data?.blocks?.length ? (
+              <EvalDetailView blocks={data.blocks} meta={data.meta} kommoUrl={data.kommoUrl} duration={data.callDuration} manager={data.name} score={data.score} totalMaxScore={data.totalMaxScore} totalRawScore={data.totalRawScore} />
+            ) : (
+              <div className="py-10 text-center text-slate-500 text-sm">Детализация оценки недоступна для этого звонка</div>
+            )
           ) : view === "audio" ? (
             data?.hasRecording ? (
               <audio controls preload="none" src={data.audioUrl} className="w-full">
@@ -1724,13 +1845,196 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
             )
           ) : (
             data?.transcript ? (
-              <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">{data.transcript}</div>
+              <TranscriptView transcript={data.transcript} />
             ) : (
               <div className="py-10 text-center text-slate-500 text-sm">Транскрипт недоступен</div>
             )
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// «Детализация оценок» — Spellit-вид: шапка с метаданными звонка + по каждому
+// критерию вердикт / причина (feedback) / дословная цитата (quote). Состав
+// полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
+// Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
+// звонков поля пустые — рендерим только то, что есть.
+// Пороги цвета оценки (66/41) — единые для бейджа в шапке и блоков.
+// [Auto-override…]-маркеры движка срезаются на стороне API (см.
+// api/okk/calls/[callId]/route.ts stripEngineTags) — здесь feedback уже чистый.
+function scoreTone(pct: number): string {
+  return pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
+}
+
+function EvalDetailView({ blocks, meta, kommoUrl, duration, manager, score, totalMaxScore, totalRawScore }: {
+  blocks: EvalDetailBlock[];
+  meta?: CallMeta;
+  kommoUrl?: string;
+  duration: string;
+  manager: string;
+  score?: number;
+  totalMaxScore?: number;
+  totalRawScore?: number;
+}) {
+  const metaRows: Array<[string, string | null | undefined]> = [
+    [
+      "Общая оценка",
+      typeof score === "number"
+        ? `${score}%${totalMaxScore != null && totalRawScore != null ? ` (${totalRawScore}/${totalMaxScore} баллов)` : ""}`
+        : null,
+    ],
+    ["Дата звонка", meta?.callDateTime],
+    ["Неделя звонка", meta?.week],
+    ["Длительность", duration],
+    ["Менеджер", manager],
+    ["Клиент", meta?.clientName],
+    ["Телефон", meta?.phone],
+    ["Источник", meta?.source],
+    ["Категория лида", meta?.leadCategory],
+    ["Этап в начале звонка", meta?.stageAtCallStart],
+    ["Этап при заборе звонка", meta?.stageAtPickup],
+    ["Дата анализа", meta?.analyzedAt],
+  ];
+
+  return (
+    <div className="flex flex-col gap-4 max-h-[65vh] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+      {/* Шапка: метаданные звонка */}
+      <div className="bg-slate-900/50 rounded-xl border border-white/5 p-4 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+        {metaRows.filter(([, v]) => v).map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+            <div className="text-[12px] text-slate-200 truncate" title={value!}>{value}</div>
+          </div>
+        ))}
+        {kommoUrl && kommoUrl !== "#" && (
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500">Сделка</div>
+            <a href={kommoUrl} target="_blank" rel="noopener noreferrer" className="text-[12px] text-blue-400 hover:text-blue-300 flex items-center gap-1 truncate">
+              <ExternalLink className="w-3 h-3 shrink-0" /> Открыть в Kommo
+            </a>
+          </div>
+        )}
+      </div>
+
+      {/* Блоки → критерии */}
+      {blocks.map((b, bi) => (
+        <div key={`${bi}-${b.name}`} className="bg-slate-900/50 rounded-xl border border-white/5">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{b.name}</span>
+            {b.maxScore > 0 && (() => {
+              const pct = Math.round((b.score / b.maxScore) * 100);
+              return (
+                <span className="text-[11px] font-bold text-slate-400">
+                  {b.score}/{b.maxScore} · <span className={scoreTone(pct)}>{pct}%</span>
+                </span>
+              );
+            })()}
+          </div>
+          <div className="divide-y divide-white/5">
+            {b.criteria.map((c, ci) => {
+              const isEmpty = c.applicable === false;
+              const isInfo = !isEmpty && c.maxScore === 0;
+              // null (нераспознанный вердикт, okk) и -1 (то же у ролевок) —
+              // «не оценён», а не провал: нейтральный чип вместо «✗ 0».
+              const isUnscored = !isEmpty && !isInfo && (c.score == null || c.score < 0);
+              const passed = !isEmpty && !isInfo && !isUnscored && (c.score ?? 0) >= c.maxScore;
+              return (
+                <div key={`${ci}-${c.name}`} className="px-4 py-3 flex flex-col gap-1.5">
+                  <div className="flex items-start gap-2">
+                    {isEmpty ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-slate-700/40 text-slate-400">Пусто</span>
+                    ) : isUnscored ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700/40 text-slate-400" title="Вердикт не распознан">—</span>
+                    ) : isInfo ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">Инфо</span>
+                    ) : c.maxScore > 1 ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300">{c.score}/{c.maxScore}</span>
+                    ) : passed ? (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-400">✓ 1</span>
+                    ) : (
+                      <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400">✗ 0</span>
+                    )}
+                    <span className="text-[12px] font-semibold text-slate-200">{c.name}</span>
+                  </div>
+                  {c.feedback && (
+                    <p className="text-[12px] text-slate-400 leading-relaxed whitespace-pre-wrap">{c.feedback}</p>
+                  )}
+                  {c.quote && (
+                    <blockquote className="text-[11px] text-slate-500 leading-relaxed border-l-2 border-slate-600 pl-2.5 whitespace-pre-wrap">
+                      {c.quote}
+                    </blockquote>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Чат-вид транскрипта (пузыри Продавец/Клиент), как в модалке ОКК Госников
+// (src/app/page.tsx, «Детальная Расшифровка»). Понимает оба формата меток:
+// `[Продавец]:`/`[Клиент]:` (ОКК R2/D2, buildSpeakerTranscript) и
+// `Менеджер:`/`Клиент:` (ролевки R1/D1). Если меток нет вовсе (сырой
+// транскрипт без диаризации) — падаем обратно на сплошной текст, чтобы не
+// красить весь разговор «Клиентом».
+function TranscriptView({ transcript }: { transcript: string }) {
+  // Парсинг мемоизирован: транскрипт 25-минутного звонка — сотни строк,
+  // пересобирать их на каждый ререндер модалки незачем.
+  const { turns, hasLabels } = useMemo(() => {
+    const lines = transcript.split("\n").filter((l) => l.trim());
+    const labelled = lines.some(
+      (l) => l.includes("[Продавец]") || l.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(l),
+    );
+    // Строка без метки — продолжение предыдущей реплики (utterance с \n
+    // внутри), а не новая реплика «Клиента»: наследует спикера и клеится
+    // к текущему ходу.
+    const acc: Array<{ isManager: boolean; text: string }> = [];
+    for (const line of lines) {
+      const hasLabel =
+        line.includes("[Продавец]") || line.includes("[Клиент]") || /^(Менеджер|Клиент):/.test(line);
+      const isManager = line.includes("[Продавец]") || line.startsWith("Менеджер:");
+      const clean = line
+        .replace(/^\[Продавец\]:\s*/, "")
+        .replace(/^\[Клиент\]:\s*/, "")
+        .replace(/^(Менеджер:|Клиент:)\s*/, "");
+      if (!clean.trim()) continue;
+      const last = acc[acc.length - 1];
+      if (!hasLabel && last) last.text += `\n${clean}`;
+      else acc.push({ isManager: hasLabel ? isManager : false, text: clean });
+    }
+    return { turns: acc, hasLabels: labelled };
+  }, [transcript]);
+
+  if (!hasLabels) {
+    return (
+      <div className="text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto">
+        {transcript}
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-[12px] leading-relaxed max-h-[55vh] overflow-y-auto flex flex-col gap-3 pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-slate-900/50">
+      {turns.map((t, idx) => (
+        <div key={idx} className={`flex ${t.isManager ? "justify-end" : "justify-start"} w-full`}>
+          <div className={`flex flex-col gap-1 ${t.isManager ? "items-end" : "items-start"} max-w-[75%]`}>
+            <span className={`text-[10px] uppercase tracking-wider font-bold px-2 ${t.isManager ? "text-blue-400" : "text-emerald-400"}`}>
+              {t.isManager ? "Продавец" : "Клиент"}
+            </span>
+            <div className={`p-3 rounded-2xl whitespace-pre-wrap ${t.isManager
+              ? "bg-blue-500/15 text-blue-50 rounded-tr-none border border-blue-500/30 shadow-sm"
+              : "bg-emerald-500/10 text-slate-100 rounded-tl-none border border-emerald-500/20 shadow-sm"
+            }`}>
+              {t.text}
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1756,10 +2060,11 @@ function aggregateData(data: AnalyticsData): { blocks: AggregatedBlock[]; overal
   return { blocks, overall };
 }
 
-function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks, onToggle }: {
+function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks, onToggle, spellitView }: {
   dataA: AnalyticsData; dataB: AnalyticsData;
   labelA: string; labelB: string;
   collapsedBlocks: Set<string>; onToggle: (n: string) => void;
+  spellitView: boolean;
 }) {
   const aggA = aggregateData(dataA);
   const aggB = aggregateData(dataB);
@@ -1807,7 +2112,7 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
               return (
                 <CompareBlockRows key={blockName} blockName={blockName} scoreA={scoreA} scoreB={scoreB}
                   blockA={blockA} blockB={blockB} criteriaNames={criteriaNames}
-                  isCollapsed={collapsed} onToggle={() => onToggle(blockName)} />
+                  isCollapsed={collapsed} onToggle={() => onToggle(blockName)} spellitView={spellitView} />
               );
             })}
             <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
@@ -1823,10 +2128,10 @@ function ComparisonCriteriaTable({ dataA, dataB, labelA, labelB, collapsedBlocks
   );
 }
 
-function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaNames, isCollapsed, onToggle }: {
+function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaNames, isCollapsed, onToggle, spellitView }: {
   blockName: string; scoreA: number | null; scoreB: number | null;
   blockA?: AggregatedBlock; blockB?: AggregatedBlock; criteriaNames: string[];
-  isCollapsed: boolean; onToggle: () => void;
+  isCollapsed: boolean; onToggle: () => void; spellitView: boolean;
 }) {
   // «Все» = строка-воронка без критериев → нечего раскрывать (см. BlockTimeRows).
   const hasChildren = criteriaNames.length > 0;
@@ -1850,14 +2155,14 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
         // у нейтральных дельта без оценочного цвета.
         const deltaColor = NEUTRAL_CRITERIA.has(cName)
           ? "text-slate-400"
-          : INVERTED_CRITERIA.has(cName)
+          : isInvertedFor(cName, spellitView)
             ? getDeltaColor(cB, cA)
             : getDeltaColor(cA, cB);
         return (
           <tr key={`${blockName}-cmp-${cName}`} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
             <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA)} ${getCriteriaBgFor(cName, cA)}`}>{fmtScore(cA)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB)} ${getCriteriaBgFor(cName, cB)}`}>{fmtScore(cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA, spellitView)} ${getCriteriaBgFor(cName, cA, spellitView)}`}>{fmtScoreFor(cName, cA)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB, spellitView)} ${getCriteriaBgFor(cName, cB, spellitView)}`}>{fmtScoreFor(cName, cB)}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${deltaColor}`}>{fmtDelta(cA, cB)}</td>
           </tr>
         );
