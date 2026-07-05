@@ -98,8 +98,9 @@ export async function GET(req: NextRequest) {
   const qualStatusIds = getQualFirstLineStatusIds(vertical);
 
   // Stage 1 — BERATER: TERM_DC_DONE → вход в АА-фазу. Бух — исторический
-  // «Термин АА» (стадия удалена из Kommo 2026-07, новых событий нет); мед —
-  // «Консультация перед термином АА» (аналог, своей стадии Термин АА не было).
+  // «Термин АА» (стадия убрана из воронки ~2026-03, последние события
+  // 2026-03-02); мед — «Консультация перед термином АА» (аналог, своей
+  // стадии Термин АА не было).
   const stage1 = exec(sql`
     WITH from_evt AS (
       SELECT lead_id, MIN(event_at) AS at

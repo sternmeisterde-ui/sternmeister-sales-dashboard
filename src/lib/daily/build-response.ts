@@ -1448,7 +1448,7 @@ export async function buildDailyResponse(department: string, period: string, dat
           ...brStatus.consultBeforeDCDone,
         ]);
         // «Термин АА на этапе» = кластер Консультация перед АА (+проведена):
-        // отдельной стадии «Термин АА» в Kommo больше нет (удалена 2026-07),
+        // отдельной стадии «Термин АА» в воронке больше нет (убрана ~2026-03),
         // per-manager зеркалит team-логику getFunnelFact.termAACount.
         const aaOnStage = new Set<number>([
           ...brStatus.consultBeforeAA,
@@ -1624,7 +1624,7 @@ export async function buildDailyResponse(department: string, period: string, dat
                 }
                 case "termAACount": {
                   // Кластер «Консультация перед АА (+проведена)» — стадии
-                  // «Термин АА» в Kommo больше нет (удалена 2026-07).
+                  // «Термин АА» в воронке больше нет (убрана ~2026-03).
                   fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && aaOnStage.has(l.status_id)).length);
                   break;
                 }
