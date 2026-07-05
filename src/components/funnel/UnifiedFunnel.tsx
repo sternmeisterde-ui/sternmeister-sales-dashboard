@@ -35,7 +35,10 @@ export default function UnifiedFunnel({
           Нет данных по выбранным фильтрам
         </div>
       ) : (
-        stages.map((s, i) => {
+        /* Полная лестница (18 ступеней) выше прежних 9 — держим высоту блока
+           как раньше и скроллим список внутри (touch-свайп работает нативно). */
+        <div className="flex flex-col gap-1.5 max-h-[620px] overflow-y-auto pr-1 overscroll-contain">
+        {stages.map((s, i) => {
           const widthPct = max > 0 ? Math.max(2, (s.count / max) * 100) : 0;
           const next = stages[i + 1];
           return (
@@ -82,7 +85,8 @@ export default function UnifiedFunnel({
               )}
             </div>
           );
-        })
+        })}
+        </div>
       )}
     </section>
   );
