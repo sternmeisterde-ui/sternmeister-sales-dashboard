@@ -18,7 +18,11 @@
 
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  B2G_PIPELINES,
+  BERATER_STATUSES,
+  FIRST_LINE_STATUSES,
+} from "@/lib/kommo/pipeline-config";
 import { computeClients } from "./clients";
 import { todayBerlinUTC } from "./cohort-math";
 import {
@@ -42,16 +46,13 @@ import type {
 } from "./api-types";
 
 const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
-const CONSULT_DC_DONE = BERATER_STATUSES.CONSULT_BEFORE_DC_DONE; // 102183939
-const TERM_DC_DONE = BERATER_STATUSES.TERM_DC_DONE; // 93886075 «Термин ДЦ состоялся»
-const CONSULT_AA_DONE = BERATER_STATUSES.CONSULT_BEFORE_AA_DONE; // 102183947
-// «Термин АА» — встреча в АА. Сам статус TERM_AA (на этапе) транзитный и в
-// истории логируется реже, чем даже Гутшайн, поэтому веху считаем по кластеру
-// «встреча АА была»: состоялась / отменена-перенесена / ушла на рассмотрение.
+// «Термин АА» — встреча в АА. Стадия TERM_AA убрана из воронки ~2026-03
+// (history-only), поэтому веху считаем по кластеру «встреча АА назначалась»:
+// исторический on-stage + отменена/перенесена. «На рассмотрении бератера» —
+// теперь отдельная ступень ниже (пост-АА подтверждает АА через инференс глубины).
 const TERM_AA_STATUSES = [
-  BERATER_STATUSES.TERM_AA, // 93860879 на этапе
+  BERATER_STATUSES.TERM_AA, // 93860879 на этапе (history-only)
   BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 отменён/перенесён (встреча всё равно была назначена)
-  BERATER_STATUSES.BERATER_REVIEW, // 93860887 на рассмотрении бератера (пост-АА)
 ];
 const FRESH_CALL_DAYS = 7;
 const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
@@ -60,20 +61,60 @@ const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
 // (client-safe), чтобы их могли импортить и фронтовые компоненты.
 
 // ── Стадии (в порядке пути клиента) ─────────────────────────────────────────
+// Полная лестница по запросу РОПа (2026-07-06): ВСЕ прогрессионные этапы обеих
+// Kommo-воронок в их порядке. Служебные состояния (Неразобранное, База,
+// Недозвон, отмены терминов, Отложенный старт, Апелляция, Закрыто) — не
+// ступени пути и в накопительную воронку не входят.
 
 const STAGE_DEFS = [
   { key: "new", label: "Новый лид" },
   { key: "qual", label: "Квал лид" },
+  // ── Бух Гос ──
+  { key: "in_progress", label: "Взято в работу" },
+  { key: "contact", label: "Контакт установлен" },
+  { key: "decision", label: "Принимает решение" },
+  { key: "consult_gos", label: "Консультация проведена" },
   { key: "docs", label: "Документы в ДЦ" },
   { key: "term_dc", label: "Термин ДЦ" },
+  // ── Бух Бератер ──
+  { key: "received", label: "Принято от 1-й линии" },
+  { key: "dovedenie", label: "Доведение" },
   { key: "consult_dc", label: "Конс. перед ДЦ" },
+  { key: "consult_dc_done", label: "Конс. перед ДЦ проведена" },
   { key: "term_dc_done", label: "Термин ДЦ состоялся" },
   { key: "consult_aa", label: "Конс. перед АА" },
+  { key: "consult_aa_done", label: "Конс. перед АА проведена" },
   { key: "term_aa", label: "Термин АА" },
+  { key: "berater_review", label: "На рассмотрении бератера" },
   { key: "gutschein", label: "Гутшайн" },
 ] as const;
 
 type StageKey = (typeof STAGE_DEFS)[number]["key"];
+
+// Цепочка после «Квал лид» (для инференса глубины): порядок = STAGE_DEFS без
+// new/qual. Достижение более глубокой ступени помечает все предыдущие.
+const CHAIN_KEYS = STAGE_DEFS.slice(2).map((d) => d.key) as StageKey[];
+
+// Гос-этапы, чьи события подтягиваются дополнительно к C1/C2-целям.
+const EXTRA_GOS_STAGE_STATUSES: ReadonlyArray<[StageKey, number]> = [
+  ["in_progress", FIRST_LINE_STATUSES.IN_PROGRESS], // 90367079
+  ["contact", FIRST_LINE_STATUSES.CONTACT_MADE], // 90367087
+  ["decision", FIRST_LINE_STATUSES.DECISION_MAKING], // 104211575
+  ["consult_gos", FIRST_LINE_STATUSES.CONSULT_DONE], // 95514983
+];
+
+// Бератер-этапы: ступень → статус(ы)-свидетельства (событие или текущий статус).
+const BERATER_STAGE_STATUSES: ReadonlyArray<[StageKey, readonly number[]]> = [
+  ["received", [BERATER_STATUSES.RECEIVED_FROM_FIRST]], // 93860331
+  ["dovedenie", [BERATER_STATUSES.DOVEDENIE]], // 102183931
+  ["consult_dc", [BERATER_STATUSES.CONSULT_BEFORE_DC]], // 102183935
+  ["consult_dc_done", [BERATER_STATUSES.CONSULT_BEFORE_DC_DONE]], // 102183939
+  ["term_dc_done", [BERATER_STATUSES.TERM_DC_DONE]], // 93886075
+  ["consult_aa", [BERATER_STATUSES.CONSULT_BEFORE_AA]], // 102183943
+  ["consult_aa_done", [BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]], // 102183947
+  ["term_aa", TERM_AA_STATUSES],
+  ["berater_review", [BERATER_STATUSES.BERATER_REVIEW]], // 93860887
+];
 
 /** Достижение этапов + дата каждого этапа (для среднего времени перехода). */
 interface LeadStages {
@@ -95,8 +136,9 @@ export async function computeOverview(
   ]);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
 
-  // 2. Параллельно: «Новый лид» + история CFV 879824 + события Гос + Бератер.
-  const [newLeadCount, closeReasonHistory, targetEvents, beraterContext] =
+  // 2. Параллельно: «Новый лид» + история CFV 879824 + события Гос + Бератер
+  //    + события промежуточных Гос-этапов (полная лестница воронки).
+  const [newLeadCount, closeReasonHistory, targetEvents, beraterContext, extraGosEvents] =
     await Promise.all([
       fetchNewLeadCount(opts),
       leadIds.length
@@ -104,6 +146,7 @@ export async function computeOverview(
         : Promise.resolve(new Map<number, CloseReasonEvent[]>()),
       leadIds.length ? fetchTargetEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
       leadIds.length ? fetchBeraterContext(leadIds) : Promise.resolve(new Map<number, BeraterLead[]>()),
+      leadIds.length ? fetchExtraGosEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
     ]);
 
   // Точная дата дисквала из истории (как в computeCohorts) → вехи 1-в-1 с карточками.
@@ -113,7 +156,7 @@ export async function computeOverview(
 
   // 3. По каждому лиду — достигнутые этапы (накопительно) + даты.
   const stages = baseLeads.map((lead) =>
-    computeLeadStages(lead, targetEvents, beraterContext)
+    computeLeadStages(lead, targetEvents, beraterContext, extraGosEvents)
   );
 
   // 4. Квал лид = база минус дисквал (= «Лиды» в когортах, displayLeadCount).
@@ -144,7 +187,14 @@ export async function computeOverview(
   const noFreshCallCount = await countNoFreshCall(baseLeads, beraterContext);
 
   // 7. Сборка воронки: count[stage] + % перехода + среднее время.
-  const funnel = buildFunnel(newLeadCount, qualCount, stages);
+  // Этапы цепочки считаем ТОЛЬКО по недисквалифицированным лидам — иначе
+  // ранние этапы (Взято в работу и т.п.) превышают «Квал лид» (>100%),
+  // т.к. дисквал исключён из квал-счёта, но его этапы до дисквала засчитаны.
+  // ⚠ Поэтому Документы/Термин ДЦ/Гутшайн здесь могут быть чуть МЕНЬШЕ сумм
+  // target в карточках C1/C2/C5 (карточки считают цели, достигнутые до
+  // дисквала, и у ныне-дисквалифицированных лидов).
+  const chainStages = stages.filter((_, i) => !baseLeads[i].isDisqualified);
+  const funnel = buildFunnel(newLeadCount, qualCount, chainStages);
 
   // C5 KPI = Гутшайн / Квал (последний / второй этап воронки).
   const qualStage = funnel.find((s) => s.key === "qual")?.count ?? 0;
@@ -194,9 +244,22 @@ async function computeUpcomingReadiness(
 function computeLeadStages(
   lead: BaseLead,
   targetEvents: Map<string, Date>,
-  beraterContext: Map<number, BeraterLead[]>
+  beraterContext: Map<number, BeraterLead[]>,
+  extraGosEvents: Map<string, Date>
 ): LeadStages {
   const berater = beraterContext.get(lead.leadId) ?? [];
+
+  const reached = Object.fromEntries(
+    STAGE_DEFS.map((d) => [d.key, false])
+  ) as Record<StageKey, boolean>;
+  const at = Object.fromEntries(
+    STAGE_DEFS.map((d) => [d.key, null])
+  ) as Record<StageKey, Date | null>;
+
+  reached.new = true;
+  reached.qual = true;
+  at.new = lead.anchorAt;
+  at.qual = lead.anchorAt; // anchor = created_at (упрощение, как у когорт)
 
   // Главные вехи — то же drill-правило, что в lead-list/карточках: цель засчитана,
   // если достигнута ДО дисквала (или лид не дисквалифицирован). Поэтому счётчики
@@ -210,56 +273,57 @@ function computeLeadStages(
     r.targetAt !== null &&
     (lead.disqualifiedAt === null || r.targetAt <= lead.disqualifiedAt);
 
-  const docsAt = c1.targetAt;
-  const termDcAt = c2.targetAt;
-  const gutscheinAt = c5.targetAt;
-  const docs = targetCounts(c1);
-  const term_dc = targetCounts(c2);
-  const gutschein = targetCounts(c5);
+  reached.docs = targetCounts(c1);
+  at.docs = c1.targetAt;
+  reached.term_dc = targetCounts(c2);
+  at.term_dc = c2.targetAt;
+  reached.gutschein = targetCounts(c5);
+  at.gutschein = c5.targetAt;
 
-  // Бератер-вехи между C2 (Термин ДЦ назначен) и C5 (Гутшайн). Воронка
-  // кумулятивная — «дошёл до этапа», поэтому считаем ГЛУБИНУ по цепочке и
-  // помечаем достигнутыми ВСЕ этапы до неё (инференс вверх). Это надёжнее
-  // пер-этапных клэмпов: статусы логируются неравномерно (напр. TERM_AA реже
-  // Гутшайна), а от глубины монотонность гарантирована по построению.
-  //   1 consult_dc → 2 term_dc_done → 3 consult_aa → 4 term_aa → 5 gutschein.
-  const consultDcAt = earliestBeraterEvent(berater, CONSULT_DC_DONE);
-  const termDcDoneAt = earliestBeraterEvent(berater, TERM_DC_DONE);
-  const consultAaAt = earliestBeraterEvent(berater, CONSULT_AA_DONE);
-  const termAaAt = earliestBeraterEventAny(berater, TERM_AA_STATUSES);
+  // Промежуточные Гос-этапы: событие ≥ anchor (и до дисквала) ИЛИ snapshot
+  // текущего статуса (дата неизвестна → в средние переходов не попадает).
+  for (const [key, statusId] of EXTRA_GOS_STAGE_STATUSES) {
+    const ev = extraGosEvents.get(`${lead.leadId}|${statusId}`);
+    if (
+      ev !== undefined &&
+      ev.getTime() >= lead.anchorAt.getTime() &&
+      (lead.disqualifiedAt === null || ev <= lead.disqualifiedAt)
+    ) {
+      reached[key] = true;
+      at[key] = ev;
+    } else if (lead.currentStatusId === statusId && !lead.isDisqualified) {
+      reached[key] = true;
+    }
+  }
 
-  let depth = 0;
-  if (consultDcAt !== null) depth = 1;
-  if (termDcDoneAt !== null) depth = Math.max(depth, 2);
-  if (consultAaAt !== null) depth = Math.max(depth, 3);
-  if (termAaAt !== null) depth = Math.max(depth, 4);
-  if (gutschein) depth = 5;
+  // Бератер-этапы: самое раннее событие (до дисквала) ИЛИ текущий статус
+  // линкованного Бератер-лида (snapshot, дата неизвестна).
+  for (const [key, statusIds] of BERATER_STAGE_STATUSES) {
+    const ev = earliestBeraterEventAny(berater, statusIds);
+    if (
+      ev !== null &&
+      (lead.disqualifiedAt === null || ev <= lead.disqualifiedAt)
+    ) {
+      reached[key] = true;
+      at[key] = ev;
+    } else if (
+      !lead.isDisqualified &&
+      berater.some((bl) => statusIds.includes(bl.currentStatusId))
+    ) {
+      reached[key] = true;
+    }
+  }
 
-  // Знаменатель берётер-цепочки — Гос «Термин ДЦ назначен» (term_dc, C2). Кросс-
-  // пайплайн Гутшайн без Гос-события всё равно прошёл этапы → пол по gutschein.
-  const reachedBerater = term_dc || gutschein;
-  const consult_dc = reachedBerater && depth >= 1;
-  const term_dc_done = reachedBerater && depth >= 2;
-  const consult_aa = reachedBerater && depth >= 3;
-  const term_aa = reachedBerater && depth >= 4;
+  // Инференс глубины: воронка кумулятивная («дошёл до этапа»), статусы
+  // логируются неравномерно — достижение более глубокой ступени помечает все
+  // предыдущие. Монотонность гарантирована по построению.
+  let depth = -1;
+  CHAIN_KEYS.forEach((key, i) => {
+    if (reached[key]) depth = i;
+  });
+  for (let i = 0; i < depth; i++) reached[CHAIN_KEYS[i]] = true;
 
-  return {
-    reached: {
-      new: true, qual: true, docs, term_dc, consult_dc,
-      term_dc_done, consult_aa, term_aa, gutschein,
-    },
-    at: {
-      new: lead.anchorAt,
-      qual: lead.anchorAt, // anchor = created_at (упрощение, как у когорт)
-      docs: docsAt,
-      term_dc: termDcAt,
-      consult_dc: consultDcAt,
-      term_dc_done: termDcDoneAt,
-      consult_aa: consultAaAt,
-      term_aa: termAaAt,
-      gutschein: gutscheinAt,
-    },
-  };
+  return { reached, at };
 }
 
 function earliestBeraterEvent(
@@ -295,25 +359,15 @@ function buildFunnel(
   stages: LeadStages[]
 ): OverviewFunnelStage[] {
   // Счётчики достигнутых этапов среди квал-лидов.
-  const counts: Record<StageKey, number> = {
-    new: newLeadCount,
-    qual: qualCount,
-    docs: 0,
-    term_dc: 0,
-    consult_dc: 0,
-    term_dc_done: 0,
-    consult_aa: 0,
-    term_aa: 0,
-    gutschein: 0,
-  };
+  const counts = Object.fromEntries(
+    STAGE_DEFS.map((d) => [d.key, 0])
+  ) as Record<StageKey, number>;
+  counts.new = newLeadCount;
+  counts.qual = qualCount;
   for (const s of stages) {
-    if (s.reached.docs) counts.docs += 1;
-    if (s.reached.term_dc) counts.term_dc += 1;
-    if (s.reached.consult_dc) counts.consult_dc += 1;
-    if (s.reached.term_dc_done) counts.term_dc_done += 1;
-    if (s.reached.consult_aa) counts.consult_aa += 1;
-    if (s.reached.term_aa) counts.term_aa += 1;
-    if (s.reached.gutschein) counts.gutschein += 1;
+    for (const key of CHAIN_KEYS) {
+      if (s.reached[key]) counts[key] += 1;
+    }
   }
 
   return STAGE_DEFS.map((def, idx) => {
@@ -350,6 +404,35 @@ function buildFunnel(
       avgDaysFromPrev,
     };
   });
+}
+
+// ── SQL: события промежуточных Гос-этапов (полная лестница воронки) ──────────
+// fetchTargetEvents тянет только C1/C2-цели; здесь добираем «Взято в работу» /
+// «Контакт установлен» / «Принимает решение» / «Консультация проведена».
+// Ключ карты: `${leadId}|${statusId}` → earliest event_at.
+
+async function fetchExtraGosEvents(leadIds: number[]): Promise<Map<string, Date>> {
+  const statusIds = EXTRA_GOS_STAGE_STATUSES.map(([, id]) => id);
+  const rows = await analyticsDb.execute(sql`
+    SELECT lead_id AS "leadId", status_id AS "statusId", MIN(event_at) AS "eventAt"
+    FROM analytics.lead_status_changes
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+      AND pipeline_id = ${BUH_GOS}
+      AND status_id IN (${sql.raw(statusIds.join(","))})
+    GROUP BY lead_id, status_id
+  `);
+  const m = new Map<string, Date>();
+  for (const r of unwrapRows<{
+    leadId: string | number;
+    statusId: string | number;
+    eventAt: string | Date;
+  }>(rows)) {
+    m.set(
+      `${Number(r.leadId)}|${Number(r.statusId)}`,
+      r.eventAt instanceof Date ? r.eventAt : new Date(r.eventAt)
+    );
+  }
+  return m;
 }
 
 // ── SQL: «Новый лид» — все Гос-лиды за период (top воронки) ──────────────────

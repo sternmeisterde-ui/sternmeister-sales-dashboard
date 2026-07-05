@@ -173,6 +173,11 @@ const ALL_BERATER_RELEVANT_STATUSES = [
     ...C31_FORWARD_STATUSES,
     C31_CLOSED_STATUS,
     C31_AA_CANCELLED_STATUS,
+    // Полная лестница «Объединённой воронки» (overview.ts, 2026-07-06):
+    // ранние Бератер-этапы + исторический «Термин АА» (убран из воронки ~2026-03).
+    BERATER_STATUSES.RECEIVED_FROM_FIRST, // 93860331
+    BERATER_STATUSES.DOVEDENIE, // 102183931
+    BERATER_STATUSES.TERM_AA, // 93860879 (history-only)
   ]),
 ];
 
