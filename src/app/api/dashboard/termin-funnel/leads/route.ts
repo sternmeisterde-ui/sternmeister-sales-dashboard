@@ -19,16 +19,25 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
-  BERATER_STATUSES,
-  FIRST_LINE_STATUSES,
-  QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
+  getBeraterPipelineIds,
+  getBeraterStatusSets,
+  getFirstLinePipelineIds,
+  getQualFirstLineStatusIds,
+  getTerminAAEntryStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
 import { formatDaysDuration } from "@/lib/utils/duration";
 
 const HARD_CAP = 500;
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
+
+const inList = (ids: number[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
 
 interface RawRow {
   lead_id: string | number;
@@ -51,24 +60,27 @@ function buildStageQuery(
   stage: 1 | 2 | 3,
   fromDate: Date,
   toDateEnd: Date,
+  vertical?: Vertical,
 ): SQL {
-  const beraterId = B2G_PIPELINES.BERATER;
-  const firstLineId = B2G_PIPELINES.FIRST_LINE;
+  // Vertical-aware наборы (spec 21 §11). Без vertical → буховые (legacy).
+  const beraterIds = getBeraterPipelineIds(vertical);
+  const firstLineIds = getFirstLinePipelineIds(vertical);
+  const brS = getBeraterStatusSets(vertical);
 
   if (stage === 1) {
     return sql`
       WITH from_evt AS (
         SELECT lead_id, MIN(event_at) AS at
         FROM analytics.lead_status_changes
-        WHERE pipeline_id = ${beraterId}
-          AND status_id = ${BERATER_STATUSES.TERM_DC_DONE}
+        WHERE pipeline_id IN (${inList(beraterIds)})
+          AND status_id IN (${inList([...brS.termDCDone])})
         GROUP BY lead_id
       ),
       to_evt AS (
         SELECT lead_id, MIN(event_at) AS at
         FROM analytics.lead_status_changes
-        WHERE pipeline_id = ${beraterId}
-          AND status_id = ${BERATER_STATUSES.TERM_AA}
+        WHERE pipeline_id IN (${inList(beraterIds)})
+          AND status_id IN (${inList(getTerminAAEntryStatusIds(vertical))})
         GROUP BY lead_id
       ),
       eligible AS (
@@ -104,8 +116,8 @@ function buildStageQuery(
       WITH to_evt AS (
         SELECT lead_id, MIN(event_at) AS at
         FROM analytics.lead_status_changes
-        WHERE pipeline_id = ${firstLineId}
-          AND status_id = ${FIRST_LINE_STATUSES.WON}
+        WHERE pipeline_id IN (${inList(firstLineIds)})
+          AND status_id = 142
         GROUP BY lead_id
       ),
       eligible AS (
@@ -121,16 +133,10 @@ function buildStageQuery(
         JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
         WHERE t.at >= ${fromDate} AND t.at <= ${toDateEnd}
           AND lc.created_at <= t.at
-          AND lc.status_id IN (${sql.join(
-            QUAL_FIRST_LINE_STATUS_IDS.map((id) => sql`${id}`),
-            sql`, `,
-          )})
+          AND lc.status_id IN (${inList(getQualFirstLineStatusIds(vertical))})
           AND (
             lc.non_qual_enum_id IS NULL
-            OR lc.non_qual_enum_id IN (${sql.join(
-              QUAL_REASON_ENUM_IDS.map((id) => sql`${id}`),
-              sql`, `,
-            )})
+            OR lc.non_qual_enum_id IN (${inList([...QUAL_REASON_ENUM_IDS])})
           )
       )
       SELECT
@@ -153,15 +159,15 @@ function buildStageQuery(
     WITH from_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.RECEIVED_FROM_FIRST}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList([...brS.receivedFromFirst])})
       GROUP BY lead_id
     ),
     to_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.CONSULT_BEFORE_DC}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList([...brS.consultBeforeDC])})
       GROUP BY lead_id
     ),
     eligible AS (
@@ -222,9 +228,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
-  ).execute<RawRow>(buildStageQuery(stage, fromDate, toDateEnd));
+  ).execute<RawRow>(buildStageQuery(stage, fromDate, toDateEnd, vertical));
 
   const totalCount =
     result.rows.length > 0 ? Number(result.rows[0].total_count) : 0;
@@ -234,10 +242,14 @@ export async function GET(req: NextRequest) {
   // as the actual funnel step the lead crossed, not generic "Старт/Финиш".
   // The lead's "сейчас:" status badge is unrelated (current Kommo state may
   // be downstream of the transition; that's expected).
+  const aaLabel =
+    vertical === "med" ? "Конс. перед термином АА"
+    : vertical === "all" ? "Термин АА / Конс. перед АА"
+    : "Термин АА";
   const stageLabels: Record<1 | 2 | 3, { from: string; to: string; short: string }> = {
     1: {
       from: "Термин ДЦ состоялся",
-      to: "Термин АА",
+      to: aaLabel,
       short: "ДЦ-состоялся → АА",
     },
     2: {

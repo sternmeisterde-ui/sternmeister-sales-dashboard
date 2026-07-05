@@ -33,13 +33,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
-  BERATER_STATUSES,
-  FIRST_LINE_STATUSES,
-  QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
+  getBeraterPipelineIds,
+  getBeraterStatusSets,
+  getFirstLinePipelineIds,
+  getQualFirstLineStatusIds,
+  getTerminAAEntryStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
+
+const inList = (ids: number[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
 
 interface FunnelStage {
   from: string;
@@ -80,23 +89,30 @@ export async function GET(req: NextRequest) {
   const exec = (q: unknown) =>
     (analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }).execute<StageResult>(q);
 
-  const beraterId = B2G_PIPELINES.BERATER;
-  const firstLineId = B2G_PIPELINES.FIRST_LINE;
+  // Vertical-aware наборы (spec 21 §11). Без vertical → буховые (legacy).
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const beraterIds = getBeraterPipelineIds(vertical);
+  const firstLineIds = getFirstLinePipelineIds(vertical);
+  const brS = getBeraterStatusSets(vertical);
+  const aaEntryIds = getTerminAAEntryStatusIds(vertical);
+  const qualStatusIds = getQualFirstLineStatusIds(vertical);
 
-  // Stage 1 — BERATER: TERM_DC_DONE → TERM_AA (kept verbatim from prior impl).
+  // Stage 1 — BERATER: TERM_DC_DONE → вход в АА-фазу. Бух — исторический
+  // «Термин АА» (стадия удалена из Kommo 2026-07, новых событий нет); мед —
+  // «Консультация перед термином АА» (аналог, своей стадии Термин АА не было).
   const stage1 = exec(sql`
     WITH from_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.TERM_DC_DONE}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList([...brS.termDCDone])})
       GROUP BY lead_id
     ),
     to_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.TERM_AA}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList(aaEntryIds)})
       GROUP BY lead_id
     )
     SELECT
@@ -110,13 +126,14 @@ export async function GET(req: NextRequest) {
 
   // Stage 2 — FIRST_LINE qualified: created_at → first time entering "Термин
   // ДЦ" (status_id 142 in FIRST_LINE pipeline). Uses the same allow-list
-  // qual filter as chart 3 (frozen Kommo URL 2026-05-07).
+  // qual filter as chart 3 (frozen Kommo URL 2026-05-07); мед — зеркальные
+  // статусы Мед Гос, reason-enum'ы общие (cf 879824, решение 2026-07-06).
   const stage2 = exec(sql`
     WITH to_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${firstLineId}
-        AND status_id = ${FIRST_LINE_STATUSES.WON}
+      WHERE pipeline_id IN (${inList(firstLineIds)})
+        AND status_id = 142
       GROUP BY lead_id
     )
     SELECT
@@ -126,16 +143,10 @@ export async function GET(req: NextRequest) {
     FROM to_evt t
     JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
     WHERE t.at >= ${fromDate} AND t.at <= ${toDateEnd}
-      AND lc.status_id IN (${sql.join(
-        QUAL_FIRST_LINE_STATUS_IDS.map((id) => sql`${id}`),
-        sql`, `,
-      )})
+      AND lc.status_id IN (${inList(qualStatusIds)})
       AND (
         lc.non_qual_enum_id IS NULL
-        OR lc.non_qual_enum_id IN (${sql.join(
-          QUAL_REASON_ENUM_IDS.map((id) => sql`${id}`),
-          sql`, `,
-        )})
+        OR lc.non_qual_enum_id IN (${inList([...QUAL_REASON_ENUM_IDS])})
       )
   `);
 
@@ -146,15 +157,15 @@ export async function GET(req: NextRequest) {
     WITH from_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.RECEIVED_FROM_FIRST}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList([...brS.receivedFromFirst])})
       GROUP BY lead_id
     ),
     to_evt AS (
       SELECT lead_id, MIN(event_at) AS at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${beraterId}
-        AND status_id = ${BERATER_STATUSES.CONSULT_BEFORE_DC}
+      WHERE pipeline_id IN (${inList(beraterIds)})
+        AND status_id IN (${inList([...brS.consultBeforeDC])})
       GROUP BY lead_id
     )
     SELECT
@@ -169,18 +180,29 @@ export async function GET(req: NextRequest) {
 
   const [r1, r2, r3] = await Promise.all([stage1, stage2, stage3]);
 
+  // Подписи этапов с учётом вертикали (стадии «Термин АА» у мед нет —
+  // вход в АА-фазу считается по «Консультация перед термином АА»).
+  const aaToName =
+    vertical === "med" ? "Конс. перед термином АА"
+    : vertical === "all" ? "Термин АА / Конс. перед АА"
+    : "Термин АА";
+  const creationFromName =
+    vertical === "med" ? "Создание (Мед Гос)"
+    : vertical === "all" ? "Создание (Бух/Мед Гос)"
+    : "Создание (Бухгос)";
+
   const stages: FunnelStage[] = [
     {
       from: "term_dc_done",
       fromName: "Термин ДЦ состоялся",
       to: "term_aa",
-      toName: "Термин АА",
+      toName: aaToName,
       count: Number(r1.rows[0]?.cnt ?? 0),
       avgDays: r1.rows[0]?.avg_days == null ? null : Number(r1.rows[0].avg_days),
     },
     {
       from: "first_line_creation",
-      fromName: "Создание (Бухгос)",
+      fromName: creationFromName,
       to: "first_line_term_dc",
       toName: "Термин ДЦ",
       count: Number(r2.rows[0]?.cnt ?? 0),

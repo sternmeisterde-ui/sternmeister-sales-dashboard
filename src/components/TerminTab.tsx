@@ -212,7 +212,7 @@ export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "al
   // Vertical-aware: статусы бератер-воронки выбранной вертикали.
   const statusRegistry = useBeraterStatuses(vertical);
   // Ярлык вертикали в заголовке верхних графиков (когортное «среднее до термина»).
-  // Секции ниже (Qual/Funnel/Upcoming/PreTermin) пока бух-онли — см. spec 21 §11.
+  // Все секции vertical-aware (spec 21 §11; квал-фильтр мед = зеркало бух, 2026-07-06).
   const verticalTitle = vertical === "med" ? "Мед Бератер" : vertical === "all" ? "Бух + Мед Бератер" : "Бух Бератер";
   return (
     <div className="flex flex-col gap-8 fade-in">
@@ -236,8 +236,8 @@ export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "al
         statusRegistry={statusRegistry}
         vertical={vertical}
       />
-      <QualLeadsDocsSection />
-      <FunnelTimingSection />
+      <QualLeadsDocsSection vertical={vertical} />
+      <FunnelTimingSection vertical={vertical} />
       <UpcomingTerminsSection vertical={vertical} />
       <PreTerminSection vertical={vertical} />
     </div>
@@ -1096,7 +1096,8 @@ function TerminDashboardSection({
 
 // ── Qual-leads → Документы отправлены в ДЦ section ───
 
-function QualLeadsDocsSection() {
+function QualLeadsDocsSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     defaultRangeLast30Days(),
   );
@@ -1114,8 +1115,9 @@ function QualLeadsDocsSection() {
       try {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/qual-leads-docs?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}`,
+          `/api/dashboard/qual-leads-docs?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}${vqs}`,
           { signal },
         );
         if (!res.ok) {
@@ -1133,7 +1135,7 @@ function QualLeadsDocsSection() {
         setLoading(false);
       }
     },
-    [range.start, range.end, granularity],
+    [range.start, range.end, granularity, vertical],
   );
 
   useEffect(() => {
@@ -1274,7 +1276,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "cohort" },
+                    params: { dateFrom, dateTo, mode: "cohort", ...drillVertical },
                     title: `Квал-когорта · ${dateDisplay}`,
                     subtitle: `${stats.qualTotal} лидов · сверху — без перехода в «Док. в ДЦ»`,
                   });
@@ -1293,7 +1295,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "docs" },
+                    params: { dateFrom, dateTo, mode: "docs", ...drillVertical },
                     title: `Дошли до Док. / прямого Termin · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} лидов · сверху — самые долгие переходы`,
                   });
@@ -1316,7 +1318,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "docs" },
+                    params: { dateFrom, dateTo, mode: "docs", ...drillVertical },
                     title: `Ср. дней до Док. в ДЦ · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} лидов · ср. ${(stats.avgOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
                   });
@@ -1339,7 +1341,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "cohort" },
+                    params: { dateFrom, dateTo, mode: "cohort", ...drillVertical },
                     title: `Конверсия в «Док. в ДЦ» · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} из ${stats.qualTotal} (${stats.conversionOverall?.toFixed(1) ?? "—"}%) · сверху — кто не дошёл`,
                   });
@@ -1416,7 +1418,7 @@ function QualLeadsDocsSection() {
                       if (!row || row.docsCount === 0) return;
                       setDrill({
                         url: "/api/dashboard/qual-leads-docs/leads",
-                        params: { date: row.date, granularity },
+                        params: { date: row.date, granularity, ...drillVertical },
                         title: formatBucketLabel(row.date, granularity),
                         subtitle: `${row.docsCount} лидов с переходом в «Док. в ДЦ» (из ${row.qualCount} квал-когорты) · ср. ${row.avgDays?.toFixed(1) ?? "—"} дн · самые долгие сверху`,
                       });
@@ -1454,7 +1456,8 @@ interface FunnelStageRow {
   avgDays: number | null;
 }
 
-function FunnelTimingSection() {
+function FunnelTimingSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   // 90d default: stage transitions take 20+ days each, so the 30d default used
   // by the cohort sections leaves the funnel mostly empty (most leads in the
   // window haven't completed the next transition yet). 90d shows mature data.
@@ -1477,8 +1480,9 @@ function FunnelTimingSection() {
       try {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/termin-funnel?dateFrom=${dateFrom}&dateTo=${dateTo}`,
+          `/api/dashboard/termin-funnel?dateFrom=${dateFrom}&dateTo=${dateTo}${vqs}`,
           { signal },
         );
         if (!res.ok) {
@@ -1496,7 +1500,7 @@ function FunnelTimingSection() {
         setLoading(false);
       }
     },
-    [range.start, range.end],
+    [range.start, range.end, vertical],
   );
 
   useEffect(() => {
@@ -1608,6 +1612,7 @@ function FunnelTimingSection() {
                           stage: String(stage),
                           dateFrom,
                           dateTo,
+                          ...drillVertical,
                         },
                         title: `${s.fromName} → ${s.toName}`,
                         subtitle: `${s.count} переходов · ср. ${s.avgDays?.toFixed(1) ?? "—"} дн · сверху — самые долгие · окно ${dateDisplay}`,
@@ -1670,6 +1675,7 @@ function FunnelTimingSection() {
                         stage: String(row.stage),
                         dateFrom,
                         dateTo,
+                        ...drillVertical,
                       },
                       title: `${row.fromName} → ${row.toName}`,
                       subtitle: `${row.count} переходов · самые долгие сверху · окно ${formatRu(range.start)} — ${formatRu(range.end)}`,

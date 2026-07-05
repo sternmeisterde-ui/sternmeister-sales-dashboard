@@ -312,6 +312,52 @@ export const QUAL_FIRST_LINE_STATUS_IDS: readonly number[] = [
   FIRST_LINE_STATUSES.LOST,            // 143 Закрыто и не реализовано
 ];
 
+/** Мед-зеркало QUAL_FIRST_LINE_STATUS_IDS — те же стадии-аналоги Мед Гос
+ *  (подтверждено 2026-07-06: «в мед всё аналогично бух, квалы те же»).
+ *  Исключены Неразобранное (101858051) и База (101858055). */
+export const MED_QUAL_FIRST_LINE_STATUS_IDS: readonly number[] = [
+  MED_GOV_STATUSES.NEW_LEAD,        // 101858059 Новый лид
+  MED_GOV_STATUSES.IN_PROGRESS,     // 101858063 Взято в работу
+  MED_GOV_STATUSES.NO_ANSWER,       // 101858423 Недозвон
+  MED_GOV_STATUSES.CONTACT_MADE,    // 101858427 Контакт установлен
+  MED_GOV_STATUSES.CONSULT_DONE,    // 101858431 Консультация проведена
+  MED_GOV_STATUSES.DECISION_MAKING, // 108064559 Принимает решение
+  MED_GOV_STATUSES.DOCS_SENT_DC,    // 108064563 Документы отправлены в ДЦ
+  MED_GOV_STATUSES.DELAYED_START,   // 101858435 Отложенный старт
+  MED_GOV_STATUSES.WON,             // 142 Успешно реализовано
+  MED_GOV_STATUSES.LOST,            // 143 Закрыто и не реализовано
+];
+
+/** Квал-статусы первой линии по вертикали (для Термина: qual-leads-docs +
+ *  termin-funnel Stage 2). Reason-enum'ы (QUAL_REASON_ENUM_IDS) общие — поле
+ *  «Причина закрытия госники» (cf 879824) одно на обе воронки. */
+export function getQualFirstLineStatusIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [...MED_QUAL_FIRST_LINE_STATUS_IDS];
+  if (vertical === "all") return [...QUAL_FIRST_LINE_STATUS_IDS, ...MED_QUAL_FIRST_LINE_STATUS_IDS];
+  return [...QUAL_FIRST_LINE_STATUS_IDS]; // buh / undefined (legacy)
+}
+
+/** Milestone-статусы «Документы отправлены в ДЦ» по вертикали (qual-leads-docs).
+ *  WON(142) общий и добавляется вызывающей стороной отдельно. */
+export function getDocsSentStatusIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [MED_GOV_STATUSES.DOCS_SENT_DC];
+  if (vertical === "all") return [FIRST_LINE_STATUSES.DOCS_SENT_DC, MED_GOV_STATUSES.DOCS_SENT_DC];
+  return [FIRST_LINE_STATUSES.DOCS_SENT_DC]; // buh / undefined (legacy)
+}
+
+/** status_id(ы) «вход в АА-фазу» для termin-funnel Stage 1 по вертикали.
+ *  Бух — исторический on-stage «Термин АА» (93860879; стадия удалена из Kommo
+ *  2026-07 → новые события не пишутся, метрика history-only). У Мед Бератер
+ *  такой стадии не было никогда — ближайший аналог входа в АА-фазу =
+ *  «Консультация перед термином АА» (108066267). */
+export function getTerminAAEntryStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.TERM_AA];
+  const med = [MED_BERATER_STATUSES.CONSULT_BEFORE_AA];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
+
 /** "Причина закрытия госники" (cf 879824) enum values that count as qual.
  *  Frozen from ROP-provided Kommo URL — list of reasons that DON'T disqualify
  *  the lead. NULL (поле не заполнено) ALSO counts as qual; that case is
