@@ -5,9 +5,26 @@ import { sql } from "drizzle-orm";
 import { getDeptManagerWhitelist, getDeptScheduleOverrides } from "@/lib/daily/dept-manager-whitelist";
 
 const DEPT_PIPELINES: Record<string, readonly string[]> = {
-  b2g: ["Бух Гос", "Бух Бератер"],
+  // b2g — суперсет всех вертикалей (Бух + Мед). Раньше был только Бух → мед-лиды
+  // вообще не показывались в Looker; теперь входят (сужаются тогглом вертикали).
+  b2g: ["Бух Гос", "Бух Бератер", "Мед Гос", "Мед Бератер"],
   b2b: ["Бух Комм", "Мед Комм"],
 } as const;
+
+// Имена воронок по вертикали (b2g). Совпадают со строками leads_cohort.pipeline.
+const B2G_VERTICAL_PIPELINES: Record<"buh" | "med", readonly string[]> = {
+  buh: ["Бух Гос", "Бух Бератер"],
+  med: ["Мед Гос", "Мед Бератер"],
+};
+
+/** Воронки в области видимости для (dept, vertical). Для b2g+buh/med — набор
+ *  вертикали; иначе (b2b, либо b2g all/undefined) — весь список отдела. */
+function scopedPipelines(dept: string, vertical?: "buh" | "med" | "all"): readonly string[] {
+  if (dept === "b2g" && (vertical === "buh" || vertical === "med")) {
+    return B2G_VERTICAL_PIPELINES[vertical];
+  }
+  return DEPT_PIPELINES[dept] ?? [];
+}
 
 const VALID_STATUSES = new Set([
   "Термин ДЦ состоялся",
@@ -83,10 +100,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const dept = sp.get("dept") ?? "";
     const view = sp.get("view") ?? "all_calls";
 
-    const allowedPipelines = DEPT_PIPELINES[dept];
-    if (!allowedPipelines) {
+    if (!DEPT_PIPELINES[dept]) {
       return NextResponse.json({ error: "Invalid dept" }, { status: 400 });
     }
+    // Вертикаль Бух/Мед/Все — только b2g. Сужает набор воронок; 'all'/отсутствие
+    // → все воронки отдела (для b2g это Бух+Мед). См. spec 21 §8.
+    const rawVertical = sp.get("vertical");
+    const vertical: "buh" | "med" | "all" | undefined =
+      dept === "b2g" && (rawVertical === "buh" || rawVertical === "med" || rawVertical === "all")
+        ? rawVertical
+        : undefined;
+    const allowedPipelines = scopedPipelines(dept, vertical);
     if (!VALID_VIEWS.has(view)) {
       return NextResponse.json({ error: "Invalid view" }, { status: 400 });
     }
@@ -379,17 +403,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       if (!needSlaEligibility) return "";
       // For each pipeline in scope, build a "pipeline=X AND (whitelist OR all)" branch.
       const branches: string[] = [];
-      const pipelinesInScope = pipelineParam && (isB2B || isB2G)
-        ? [pipelineParam]
-        : isB2B
-          ? ["Бух Комм", "Мед Комм"]
-          : ["Бух Гос", "Бух Бератер"];
+      // Область = выбранная воронка либо весь vertical-scoped набор отдела.
+      const pipelinesInScope = pipelineParam ? [pipelineParam] : allowedPipelines;
       for (const p of pipelinesInScope) {
         let wl: string[] | null = null;
         if (p === "Бух Гос") wl = B2G_KVALIFIKATOR_STATUSES;
         else if (p === "Бух Бератер") wl = B2G_DOVEDENIE_STATUSES;
         else if (p === "Мед Гос") wl = B2G_MED_STATUSES;
-        // Бух Комм / Мед Комм: wl stays null → match-all
+        // Бух Комм / Мед Комм / Мед Бератер: wl stays null → match-all
         if (wl === null) {
           branches.push(`(sle.current_pipeline = '${esc(p)}')`);
         } else {
@@ -632,11 +653,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const eligibilityFlagExpr = needSlaEligibility
         ? (() => {
             const branches: string[] = [];
-            const pipelinesInScope = pipelineParam && (isB2B || isB2G)
-              ? [pipelineParam]
-              : isB2B
-                ? ["Бух Комм", "Мед Комм"]
-                : ["Бух Гос", "Бух Бератер"];
+            const pipelinesInScope = pipelineParam ? [pipelineParam] : allowedPipelines;
             for (const p of pipelinesInScope) {
               let wl: string[] | null = null;
               if (p === "Бух Гос") wl = B2G_KVALIFIKATOR_STATUSES;

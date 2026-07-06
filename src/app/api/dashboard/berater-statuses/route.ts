@@ -22,7 +22,12 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { getBeraterPipelineIds, type Vertical } from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 interface RawRow {
   status_id: string | number;
@@ -30,8 +35,15 @@ interface RawRow {
   lead_count: string | number;
 }
 
-export async function GET() {
-  const pipelineId = B2G_PIPELINES.BERATER;
+export async function GET(request: Request) {
+  // Статус-пикер Термина — статусы бератер-воронки выбранной вертикали. Иначе
+  // (undefined) — буховый набор (legacy). id соответствуют лидам этой вертикали,
+  // поэтому termins-роут корректно фильтрует по ним в любом режиме.
+  const vertical = parseTerminVertical(new URL(request.url).searchParams.get("vertical"));
+  const pipelineList = sql.join(
+    getBeraterPipelineIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
 
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
@@ -42,14 +54,14 @@ export async function GET() {
         status AS status_name,
         created_at AS last_seen_at
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${pipelineList})
         AND status IS NOT NULL
       ORDER BY status_id, created_at DESC
     ),
     counts AS (
       SELECT status_id, COUNT(*)::bigint AS lead_count
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${pipelineList})
       GROUP BY status_id
     )
     SELECT

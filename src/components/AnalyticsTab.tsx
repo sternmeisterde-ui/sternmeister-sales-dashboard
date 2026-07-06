@@ -206,8 +206,11 @@ function getDeltaColor(a: number | null | undefined, b: number | null | undefine
 // (src/lib/config/tenant.ts) flows through to Analytics automatically.
 import { getLines, isValidLineId } from "@/lib/config/tenant";
 
-function getAnalyticsLines(dept: "b2g" | "b2b"): { id: string; label: string }[] {
-  return getLines(dept).map((l) => ({ id: l.id, label: l.shortLabel ?? l.label }));
+function getAnalyticsLines(
+  dept: "b2g" | "b2b",
+  vertical?: "buh" | "med" | "all",
+): { id: string; label: string }[] {
+  return getLines(dept, vertical).map((l) => ({ id: l.id, label: l.shortLabel ?? l.label }));
 }
 
 // Скрытые направления верхней сводки B2B (мультивыбор) — сохраняются между
@@ -252,11 +255,25 @@ interface ExcludedCall {
   createdAt: string | null;
 }
 
-export default function AnalyticsTab({ department, canModerate = false }: { department: "b2g" | "b2b"; canModerate?: boolean }) {
+export default function AnalyticsTab({
+  department,
+  vertical,
+  canModerate = false,
+}: {
+  department: "b2g" | "b2b";
+  /** Вертикаль b2g из общего тоггла в шапке (buh/med/all). undefined на b2b.
+   *  Применяется только к источнику OKK (мед-ролевок нет). */
+  vertical?: "buh" | "med" | "all";
+  canModerate?: boolean;
+}) {
   const [source, setSource] = useState<"okk" | "roleplay">("okk");
   // Коммерсы: вид по вкладкам линий без «Все» → стартуем на первой линии.
   // Госники: кросс-воронка «Все» + опциональный per-line drill-down.
   const [line, setLine] = useState<string>(() => (department === "b2b" ? getLines("b2b")[0]?.id ?? "all" : "all"));
+  // Вертикаль применима к линиям только для b2g+OKK. Нормализуем: 'all'/undefined
+  // → показываем все линии (Бух+Мед); конкретную вертикаль — её линии.
+  const lineVertical: "buh" | "med" | "all" =
+    department === "b2g" && source === "okk" ? (vertical ?? "all") : "buh";
   const [groupBy, setGroupBy] = useState<"day" | "week" | "month">("day");
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>(() => defaultDateRange(department));
@@ -448,10 +465,20 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
     // B2G: при переключении на ролевки схлопываем под-линии в группу (ролевки
     // не размечены под-линией, напр. "2b" → "2"). "all" не трогаем.
     if (source === "roleplay" && line !== "all") {
+      // Мед-линий в ролевках нет — сбрасываем на «Все», иначе выбор «повиснет».
+      const isMedLine = getLines(department, "med").some((l) => l.id === line);
+      if (isMedLine) { setLine("all"); return; }
       const current = getLines(department).find((l) => l.id === line);
       if (current && current.id !== current.group) setLine(current.group);
     }
   }, [source, line, department]);
+  // При смене вертикали в верхнем тоггле (b2g+OKK) выбранная линия может уйти из
+  // видимого набора (напр. был "med2a", переключили на Бух) — сбрасываем на «Все».
+  useEffect(() => {
+    if (department !== "b2g" || source !== "okk" || line === "all") return;
+    const visible = getLines(department, vertical ?? "all").some((l) => l.id === line);
+    if (!visible) { setLine("all"); setManagerIds([]); }
+  }, [vertical, department, source, line]);
   // If selected manager is not in current list, clear selection
   useEffect(() => {
     if (managerIds.length && data?.managers) {
@@ -470,10 +497,12 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
     // is async; doing it here too eliminates the race-window.
     const effectiveLine = source === "roleplay" && (line === "2a" || line === "2b") ? "2" : line;
     const params = new URLSearchParams({ department, source, line: effectiveLine, groupBy, from: fromStr, to: toStr });
+    // Вертикаль шлём только для b2g+OKK (мед-ролевок пока нет; b2b без вертикали).
+    if (department === "b2g" && source === "okk" && vertical) params.set("vertical", vertical);
     if (managerIds.length) params.set("managerIds", managerIds.join(","));
     if (department === "b2b" && source === "okk" && spellitMinDur) params.set("minDur", "900");
     return params;
-  }, [department, source, line, groupBy, managerIds, spellitMinDur]);
+  }, [department, source, line, groupBy, managerIds, vertical, spellitMinDur]);
 
   // Loading-state toggle uses a ref so it doesn't end up in the deps array
   // — having `data` as a dep caused fetchData to get a new identity after
@@ -664,7 +693,9 @@ export default function AnalyticsTab({ department, canModerate = false }: { depa
               Все
             </button>
             {(() => {
-              const lines = getAnalyticsLines(department);
+              // OKK у Госников — линии выбранной вертикали (Бух/Мед/Все). Ролевки
+              // и b2b — бух-дефолт (мед-ролевок нет). lineVertical это учитывает.
+              const lines = getAnalyticsLines(department, lineVertical);
               // For roleplay, dedupe by group so each group shows once.
               if (source === "roleplay") {
                 const seen = new Set<string>();

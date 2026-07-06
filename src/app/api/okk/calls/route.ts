@@ -4,7 +4,7 @@ import { okkCalls, okkEvaluations, okkManagers } from "@/lib/db/schema-okk";
 import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
-import { promptTypeForLine } from "@/lib/config/tenant";
+import { promptTypeForLine, verticalPromptTypes } from "@/lib/config/tenant";
 
 // ─── GET handler ─────────────────────────────────────────────
 // Returns data in the SAME shape as /api/calls:
@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
     const deptParam = sp.get("department") ?? "b2g";
     const department = (deptParam === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
 
-    const cacheKey = `okk-calls:${department}:${sp.get("from") || ""}:${sp.get("to") || ""}:${sp.get("status") || ""}:${sp.get("manager_id") || ""}:${sp.get("line") || ""}`;
+    const cacheKey = `okk-calls:${department}:${sp.get("from") || ""}:${sp.get("to") || ""}:${sp.get("status") || ""}:${sp.get("manager_id") || ""}:${sp.get("line") || ""}:${sp.get("vertical") || ""}`;
     const result = await cached(cacheKey, OKK_CACHE_TTL, () => buildOkkResponse(department, sp));
     return NextResponse.json(result);
   } catch (error) {
@@ -98,6 +98,20 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       const pt = promptTypeForLine(department, lineParam);
       if (pt) {
         conditions.push(sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE prompt_type = ${pt})`);
+      }
+    }
+
+    // Вертикаль Бух/Мед (только b2g) → фильтр по prompt_type мед/бух-линий.
+    // 'all'/отсутствие → без фильтра (обе вертикали). Линейный фильтр b2g
+    // (manager.line) применяется на клиенте и ортогонален вертикали.
+    const verticalParam = sp.get("vertical");
+    if (department === "b2g" && (verticalParam === "buh" || verticalParam === "med")) {
+      const pts = verticalPromptTypes("b2g", verticalParam);
+      if (pts.length > 0) {
+        const ptList = sql.join(pts.map((p) => sql`${p}`), sql`, `);
+        conditions.push(
+          sql`${okkCalls.id} IN (SELECT call_id FROM evaluations WHERE prompt_type IN (${ptList}))`,
+        );
       }
     }
 

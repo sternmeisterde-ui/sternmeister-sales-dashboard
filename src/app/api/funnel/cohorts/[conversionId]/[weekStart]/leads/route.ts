@@ -69,6 +69,7 @@ export async function GET(
   }
 
   try {
+    const rawVertical = sp.get("vertical");
     const payload = await computeCohortLeads({
       conversionId,
       weekStartIso: weekStart,
@@ -79,6 +80,10 @@ export async function GET(
       source,
       responsibleUserId,
       lang: parseLangBuckets(sp.get("lang")),
+      vertical:
+        rawVertical === "buh" || rawVertical === "med" || rawVertical === "all"
+          ? rawVertical
+          : undefined,
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

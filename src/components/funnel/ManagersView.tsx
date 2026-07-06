@@ -24,6 +24,8 @@ const cache = new Map<string, ManagersResult>();
 
 interface Props {
   filters: FunnelFiltersState;
+  /** Вертикаль b2g (Бух/Мед/Все) из глобального тоггла. Без неё — бух (legacy). */
+  vertical?: "buh" | "med" | "all";
 }
 
 const ROLES: { key: ManagerRoleKey; label: string; hint: string }[] = [
@@ -74,7 +76,7 @@ function buildColumns(role: ManagerRoleKey): Column[] {
   ];
 }
 
-export default function ManagersView({ filters }: Props) {
+export default function ManagersView({ filters, vertical }: Props) {
   const [data, setData] = useState<ManagersResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -86,8 +88,8 @@ export default function ManagersView({ filters }: Props) {
   const cacheKey = useMemo(() => {
     const from = filters.dateRange.start ? fmtLocalDate(filters.dateRange.start) : "";
     const to = filters.dateRange.end ? fmtLocalDate(filters.dateRange.end) : "";
-    return `${from}|${to}|${filters.source}|${filters.lang}`;
-  }, [filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang]);
+    return `${from}|${to}|${filters.source}|${filters.lang}|${vertical ?? "-"}`;
+  }, [filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang, vertical]);
 
   const load = useCallback(async () => {
     if (!filters.dateRange.start || !filters.dateRange.end) return;
@@ -108,6 +110,7 @@ export default function ManagersView({ filters }: Props) {
       });
       if (filters.source) params.set("source", filters.source);
       if (filters.lang) params.set("lang", filters.lang);
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/funnel/managers?${params}`, { signal: ctrl.signal });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
@@ -121,7 +124,7 @@ export default function ManagersView({ filters }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [cacheKey, filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang]);
+  }, [cacheKey, filters.dateRange.start, filters.dateRange.end, filters.source, filters.lang, vertical]);
 
   useEffect(() => {
     load();

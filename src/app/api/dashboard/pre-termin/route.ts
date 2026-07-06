@@ -26,7 +26,17 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  BERATER_STATUSES,
+  MED_BERATER_STATUSES,
+  getBeraterPipelineIds,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 interface PreTerminRow {
   bucket: "pre_dc" | "post_dc";
@@ -36,30 +46,33 @@ interface PreTerminRow {
   avgDaysInStatus: number | null;
 }
 
-const STATUS_BUCKETS: Array<{
+// Стадии по имени с бух/мед status_id. Kommo-сверка 2026-07-05: воронки Бух и
+// Мед Бератер структурно идентичны (из буховой удалили «Взято в работу»/
+// «Недозвон»/«Контакт установлен»/«Термин АА»), поэтому у каждой стадии есть
+// оба id. Порядок = порядок отображения. Order in list IS display order.
+const STAGE_DEFS: Array<{
   bucket: PreTerminRow["bucket"];
-  id: number;
   name: string;
+  buh: number;
+  med: number | null;
 }> = [
-  { bucket: "pre_dc", id: BERATER_STATUSES.RECEIVED_FROM_FIRST, name: "Принято от первой линии" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.DOVEDENIE, name: "Доведение" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.IN_PROGRESS, name: "Взято в работу" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.NO_ANSWER, name: "Недозвон" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.CONTACT_MADE, name: "Контакт установлен" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.CONSULT_BEFORE_DC, name: "Консультация перед термином ДЦ" },
-  // Moved up next to its consultation pair (was in "limbo" bucket previously).
-  { bucket: "pre_dc", id: BERATER_STATUSES.TERM_DC_CANCELLED, name: "Термин ДЦ отменен/перенесен" },
-  { bucket: "pre_dc", id: BERATER_STATUSES.CONSULT_BEFORE_DC_DONE, name: "Консультация перед термином ДЦ проведена" },
-  { bucket: "post_dc", id: BERATER_STATUSES.TERM_DC_DONE, name: "Термин ДЦ состоялся" },
-  { bucket: "post_dc", id: BERATER_STATUSES.CONSULT_BEFORE_AA, name: "Консультация перед термином АА" },
-  // Moved up next to its consultation pair (was in "limbo" bucket previously).
-  { bucket: "post_dc", id: BERATER_STATUSES.TERM_AA_CANCELLED, name: "Термин АА отменен/перенесен" },
-  { bucket: "post_dc", id: BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, name: "Консультация перед термином АА проведена" },
-  { bucket: "post_dc", id: BERATER_STATUSES.TERM_AA, name: "Термин АА" },
+  { bucket: "pre_dc", name: "Принято от первой линии", buh: BERATER_STATUSES.RECEIVED_FROM_FIRST, med: MED_BERATER_STATUSES.RECEIVED_FROM_FIRST },
+  { bucket: "pre_dc", name: "Доведение", buh: BERATER_STATUSES.DOVEDENIE, med: MED_BERATER_STATUSES.DOVEDENIE },
+  { bucket: "pre_dc", name: "Консультация перед термином ДЦ", buh: BERATER_STATUSES.CONSULT_BEFORE_DC, med: MED_BERATER_STATUSES.CONSULT_BEFORE_DC },
+  { bucket: "pre_dc", name: "Термин ДЦ отменен/перенесен", buh: BERATER_STATUSES.TERM_DC_CANCELLED, med: MED_BERATER_STATUSES.TERM_DC_CANCELLED },
+  { bucket: "pre_dc", name: "Консультация перед термином ДЦ проведена", buh: BERATER_STATUSES.CONSULT_BEFORE_DC_DONE, med: MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE },
+  { bucket: "post_dc", name: "Термин ДЦ состоялся", buh: BERATER_STATUSES.TERM_DC_DONE, med: MED_BERATER_STATUSES.TERM_DC_DONE },
+  { bucket: "post_dc", name: "Консультация перед термином АА", buh: BERATER_STATUSES.CONSULT_BEFORE_AA, med: MED_BERATER_STATUSES.CONSULT_BEFORE_AA },
+  { bucket: "post_dc", name: "Термин АА отменен/перенесен", buh: BERATER_STATUSES.TERM_AA_CANCELLED, med: MED_BERATER_STATUSES.TERM_AA_CANCELLED },
+  { bucket: "post_dc", name: "Консультация перед термином АА проведена", buh: BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, med: MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE },
 ];
 
-export async function GET() {
-  const pipelineId = B2G_PIPELINES.BERATER;
+export async function GET(request: Request) {
+  const vertical = parseTerminVertical(new URL(request.url).searchParams.get("vertical"));
+  const pipelineList = sql.join(
+    getBeraterPipelineIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
 
   // Fetch counts + most-recent-event-per-lead in a single round-trip.
   const result = await (
@@ -72,7 +85,7 @@ export async function GET() {
     WITH last_event AS (
       SELECT lead_id, MAX(event_at) AS last_at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${pipelineId}
+      WHERE pipeline_id IN (${pipelineList})
       GROUP BY lead_id
     )
     SELECT
@@ -82,7 +95,7 @@ export async function GET() {
         FILTER (WHERE le.last_at IS NOT NULL)::numeric, 1) AS avg_days
     FROM analytics.leads_cohort lc
     LEFT JOIN last_event le ON le.lead_id = lc.lead_id
-    WHERE lc.pipeline_id = ${pipelineId}
+    WHERE lc.pipeline_id IN (${pipelineList})
     GROUP BY lc.status_id
   `);
 
@@ -94,16 +107,38 @@ export async function GET() {
     });
   }
 
-  const data: PreTerminRow[] = STATUS_BUCKETS.map((s) => {
-    const hit = byStatus.get(s.id);
-    return {
-      bucket: s.bucket,
-      statusId: s.id,
-      statusName: s.name,
-      count: hit?.count ?? 0,
-      avgDaysInStatus: hit?.avgDays ?? null,
-    };
-  });
+  // id(ы) стадии для выбранной вертикали (buh → [buh], med → [med?], all → оба).
+  const stageIds = (s: (typeof STAGE_DEFS)[number]): number[] => {
+    if (vertical === "med") return s.med != null ? [s.med] : [];
+    if (vertical === "all") return s.med != null ? [s.buh, s.med] : [s.buh];
+    return [s.buh]; // buh / undefined
+  };
+
+  const data: PreTerminRow[] = STAGE_DEFS
+    // Стадии без мед-эквивалента скрываем в режиме Мед.
+    .filter((s) => stageIds(s).length > 0)
+    .map((s) => {
+      const ids = stageIds(s);
+      let count = 0;
+      let daysWeighted = 0;
+      let daysCount = 0;
+      for (const id of ids) {
+        const hit = byStatus.get(id);
+        if (!hit) continue;
+        count += hit.count;
+        if (hit.avgDays != null) {
+          daysWeighted += hit.avgDays * hit.count;
+          daysCount += hit.count;
+        }
+      }
+      return {
+        bucket: s.bucket,
+        statusId: ids[0], // репрезентативный id (для ключа на фронте)
+        statusName: s.name,
+        count,
+        avgDaysInStatus: daysCount > 0 ? Math.round((daysWeighted / daysCount) * 10) / 10 : null,
+      };
+    });
 
   return NextResponse.json(data, {
     headers: { "Cache-Control": "private, max-age=60" },

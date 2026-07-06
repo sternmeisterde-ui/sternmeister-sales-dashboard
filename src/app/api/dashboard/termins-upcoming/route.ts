@@ -33,7 +33,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  getBeraterPipelineIds,
+  getTerminBeraterReviewStatusIds,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 import { addDaysCivil, todayCivil } from "@/lib/utils/date";
 
 interface UpcomingRow {
@@ -71,11 +80,19 @@ export async function GET(req: NextRequest) {
     toDay = addDaysCivil(fromDay, days - 1);
   }
 
-  const beraterId = B2G_PIPELINES.BERATER;
-  // AA exclusion: BERATER_REVIEW (93860887) means the AA appointment already
-  // happened and the lead is sitting in review — its aa_termin_date is the
-  // historical record, not an upcoming slot. Exclude from AA counter only.
-  const beraterReviewStatus = BERATER_STATUSES.BERATER_REVIEW;
+  // Вертикаль Бух/Мед/Все → Бух Бератер / Мед Бератер / обе.
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const pipelineList = sql.join(
+    getBeraterPipelineIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
+  // AA exclusion: BERATER_REVIEW means the AA appointment already happened and
+  // the lead sits in review — its aa_termin_date is historical, not an upcoming
+  // slot. Exclude from AA counter only. (Vertical-aware: buh/med review IDs.)
+  const reviewList = sql.join(
+    getTerminBeraterReviewStatusIds(vertical).map((id) => sql`${id}`),
+    sql`, `,
+  );
 
   const result = await (
     analyticsDb as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> }
@@ -100,7 +117,7 @@ export async function GET(req: NextRequest) {
         DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') AS bday,
         COUNT(*)::int AS n
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${beraterId}
+      WHERE pipeline_id IN (${pipelineList})
         AND termin_date IS NOT NULL
         AND aa_termin_date IS NULL
         AND DATE((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${fromDay}::date
@@ -115,8 +132,8 @@ export async function GET(req: NextRequest) {
         DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') AS bday,
         COUNT(*)::int AS n
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${beraterId}
-        AND status_id <> ${beraterReviewStatus}
+      WHERE pipeline_id IN (${pipelineList})
+        AND status_id NOT IN (${reviewList})
         AND aa_termin_date IS NOT NULL
         AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') >= ${fromDay}::date
         AND DATE((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin') <= ${toDay}::date

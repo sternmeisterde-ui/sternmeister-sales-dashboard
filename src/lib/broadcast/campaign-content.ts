@@ -113,3 +113,34 @@ export function getMessageContent(
 export function hasCampaignContent(campaignId: string | null): boolean {
   return !!campaignId && campaignId in BY_CAMPAIGN;
 }
+
+/**
+ * ЕДИНОЕ правило «у сообщения есть кнопка ролевки» — используется И сервером
+ * (инференс-атрибуция stats.ts), И клиентом (0 vs «—» в BroadcastTab), чтобы
+ * они не расходились (code-review 2026-07-06: серверный и клиентский fallback
+ * для сообщения вне известного контента были противоположными).
+ * Fallback: кампания без копии контента → true (лучше пере-, чем недо-);
+ * кампания известна, но сообщения в копии нет (дрифт контента) → false —
+ * сервер не атрибуцирует, клиент показывает «—», сигнал «обнови копию».
+ */
+export function messageHasRoleplayButton(
+  campaignId: string | null,
+  messageId: string,
+): boolean {
+  if (!hasCampaignContent(campaignId)) return true;
+  const c = getMessageContent(campaignId, messageId);
+  return !!c && c.buttons.some((b) => b.type === "roleplay");
+}
+
+/**
+ * message_id'ы кампании С КНОПКОЙ РОЛЕВКИ, или null если копии контента нет
+ * (тогда фильтровать нечем — атрибуция применяется ко всем сообщениям).
+ */
+export function roleplayMessageIds(campaignId: string | null): string[] | null {
+  if (!campaignId || !(campaignId in BY_CAMPAIGN)) return null;
+  const out: string[] = [];
+  for (const m of BY_CAMPAIGN[campaignId].values()) {
+    if (m.buttons.some((b) => b.type === "roleplay")) out.push(m.id);
+  }
+  return out;
+}

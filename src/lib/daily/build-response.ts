@@ -15,14 +15,14 @@ import { getDailySections } from "@/lib/daily/metrics-config";
 import {
   getPipelineIds,
   getActiveStatusIds,
-  B2G_PIPELINES,
   B2B_PIPELINES,
-  A2_STATUSES,
-  B1_STATUSES,
-  B2_PLUS_STATUSES,
-  FUNNEL_STATUS_MAP,
-  FIRST_LINE_STATUSES,
-  BERATER_STATUSES,
+  getFirstLinePipelineIds,
+  getBeraterPipelineIds,
+  getFirstLineStatusSets,
+  getBeraterStatusSets,
+  getQualTierStatuses,
+  getFunnelStatusMap,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { getB2BPipelineStatsSQL, getB2BPerManagerStatsSQL, type B2BPipelineStats as B2BStatsSQL } from "@/lib/daily/analytics-b2b";
@@ -257,18 +257,19 @@ const EMPTY_SLA: SlaFacts = {
  *  resolution is the only per-request work, rest comes from DB once. */
 async function getSlaFactsCombined(
   managers: Array<{ id: string; name: string }>,
-  pipelineId: number,
+  pipelineId: number | number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<{ team: SlaFacts; perManager: Map<string, SlaFacts> }> {
+  const pipelineIds = Array.isArray(pipelineId) ? pipelineId : [pipelineId];
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const key = `sla-combined:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
-  return cached(key, ANALYTICS_FACTS_TTL, () => fetchSlaFactsCombined(managers, pipelineId, fromDate, toDate));
+  const key = `sla-combined:${pipelineIds.join("+")}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchSlaFactsCombined(managers, pipelineIds, fromDate, toDate));
 }
 
 async function fetchSlaFactsCombined(
   managers: Array<{ id: string; name: string }>,
-  pipelineId: number,
+  pipelineIds: number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<{ team: SlaFacts; perManager: Map<string, SlaFacts> }> {
@@ -288,7 +289,7 @@ async function fetchSlaFactsCombined(
           round(avg(sla_first_call_from_shift_seconds))::int AS avg_sla_shift_s,
           round(avg(business_hours_since_last_contact))::int AS avg_tlt_s
         FROM analytics.sla
-        WHERE pipeline_id = ${pipelineId}
+        WHERE pipeline_id IN (${drizzleSql.join(pipelineIds.map((p) => drizzleSql`${p}`), drizzleSql`, `)})
           AND lead_created_at >= ${fromDate}
           AND lead_created_at <= ${toDate}
           AND sla_first_call_seconds IS NOT NULL
@@ -326,16 +327,17 @@ async function fetchSlaFactsCombined(
  *  Per-lead: if both are set we count the enum-field value (more specific);
  *  if only text is set we fall back to it. */
 async function getRefusalReasons(
-  pipelineId: number,
+  pipelineId: number | number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<Array<{ reason: string; count: number; percent: number }>> {
-  const key = `refusal-reasons:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}`;
-  return cached(key, ANALYTICS_FACTS_TTL, () => fetchRefusalReasons(pipelineId, fromDate, toDate));
+  const pipelineIds = Array.isArray(pipelineId) ? pipelineId : [pipelineId];
+  const key = `refusal-reasons:${pipelineIds.join("+")}:${fromDate.getTime()}:${toDate.getTime()}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchRefusalReasons(pipelineIds, fromDate, toDate));
 }
 
 async function fetchRefusalReasons(
-  pipelineId: number,
+  pipelineIds: number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<Array<{ reason: string; count: number; percent: number }>> {
@@ -353,7 +355,7 @@ async function fetchRefusalReasons(
             ) AS reason
           FROM analytics.leads_cohort lc
           LEFT JOIN analytics.refusal_enums re ON re.enum_id = lc.non_qual_enum_id
-          WHERE lc.pipeline_id = ${pipelineId}
+          WHERE lc.pipeline_id IN (${drizzleSql.join(pipelineIds.map((p) => drizzleSql`${p}`), drizzleSql`, `)})
             AND lc.status_id = 143
             AND lc.closed_at >= ${fromDate}
             AND lc.closed_at <= ${toDate}
@@ -382,18 +384,19 @@ async function fetchRefusalReasons(
  *  together — replaces the old getAvgCallsPerLead + getAvgCallsPerLeadByManager pair. */
 async function getAvgCallsPerLeadCombined(
   managers: Array<{ id: string; name: string }>,
-  pipelineId: number,
+  pipelineId: number | number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<{ team: number | null; perManager: Map<string, number> }> {
+  const pipelineIds = Array.isArray(pipelineId) ? pipelineId : [pipelineId];
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const key = `acpl-combined:${pipelineId}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
-  return cached(key, ANALYTICS_FACTS_TTL, () => fetchAvgCallsPerLeadCombined(managers, pipelineId, fromDate, toDate));
+  const key = `acpl-combined:${pipelineIds.join("+")}:${fromDate.getTime()}:${toDate.getTime()}:${managerIds}`;
+  return cached(key, ANALYTICS_FACTS_TTL, () => fetchAvgCallsPerLeadCombined(managers, pipelineIds, fromDate, toDate));
 }
 
 async function fetchAvgCallsPerLeadCombined(
   managers: Array<{ id: string; name: string }>,
-  pipelineId: number,
+  pipelineIds: number[],
   fromDate: Date,
   toDate: Date,
 ): Promise<{ team: number | null; perManager: Map<string, number> }> {
@@ -419,7 +422,7 @@ async function fetchAvgCallsPerLeadCombined(
           COUNT(*)::int                  AS total_calls,
           COUNT(DISTINCT lead_id)::int   AS unique_leads
         FROM analytics.communications
-        WHERE pipeline_id = ${pipelineId}
+        WHERE pipeline_id IN (${drizzleSql.join(pipelineIds.map((p) => drizzleSql`${p}`), drizzleSql`, `)})
           AND created_at >= ${fromDate}
           AND created_at <= ${toDate}
           AND communication_type LIKE 'call%'
@@ -451,9 +454,14 @@ async function fetchAvgCallsPerLeadCombined(
 // automatically flow through to Daily without touching this file.
 import { groupPromptTypes } from "@/lib/config/tenant";
 
-function lineToOkkPrompts(group: string): string[] {
+function lineToOkkPrompts(group: string, vertical?: Vertical): string[] {
   // B2G-only in the current setup; if B2B Daily rolls out, call with "b2b".
-  return groupPromptTypes("b2g", group);
+  // Мед-линии в tenant.ts имеют group='med1'/'med2'/'med3' — зеркало буховых
+  // групп '1'/'2'/'3'. В режиме Мед берём мед-промпты, в «Все» — union.
+  const buh = groupPromptTypes("b2g", group);
+  if (vertical !== "med" && vertical !== "all") return buh; // buh / legacy
+  const med = groupPromptTypes("b2g", `med${group}`);
+  return vertical === "med" ? med : [...buh, ...med];
 }
 
 // Line → roleplay call types mapping
@@ -567,7 +575,7 @@ const RESPONSE_CACHE_TTL = 30 * 1000;
 let _lastKommoError: { message: string; at: string } | null = null;
 export function getLastKommoError() { return _lastKommoError; }
 
-export async function buildDailyResponseCached(department: string, period: string, dateStr: string) {
+export async function buildDailyResponseCached(department: string, period: string, dateStr: string, vertical?: Vertical) {
   // daily_snapshots removed: analytics.* is now the single source of truth,
   // so every request recomputes from Postgres directly (sub-second). We keep
   // a 5-minute in-memory TTL per department+period+date to absorb bursts.
@@ -579,9 +587,9 @@ export async function buildDailyResponseCached(department: string, period: strin
   const { to } = getDateRange(period, dateStr);
   const nowSec = Math.floor(Date.now() / 1000);
   const isHistorical = to < nowSec;
-  const cacheKey = `daily-response:${department}:${period}:${dateStr}`;
+  const cacheKey = `daily-response:${department}:${vertical ?? "legacy"}:${period}:${dateStr}`;
   return cached(cacheKey, RESPONSE_CACHE_TTL, () =>
-    buildDailyResponse(department, period, dateStr, isHistorical),
+    buildDailyResponse(department, period, dateStr, isHistorical, vertical),
   );
 }
 
@@ -593,16 +601,27 @@ export async function buildDailyResponseCached(department: string, period: strin
  *   return today's data instead of the historical date's data.
  *   Affected metrics get fact=null so the UI shows "—" instead of wrong numbers.
  */
-export async function buildDailyResponse(department: string, period: string, dateStr: string, isHistorical = false) {
+export async function buildDailyResponse(department: string, period: string, dateStr: string, isHistorical = false, vertical?: Vertical) {
   const { from, to, periodType, periodDate } = getDateRange(period, dateStr);
   // getMaxPages was used for Kommo pagination caps; no longer needed now that
   // leads come from analytics.leads_cohort (single SQL query, no pagination).
 
-  // Department-aware pipeline/status IDs
-  const allPipelineIds = getPipelineIds(department);
-  const allActiveStatusIds = getActiveStatusIds(department);
-  const firstLinePipelineId = department === "b2b" ? allPipelineIds[0] : B2G_PIPELINES.FIRST_LINE;
-  const beraterPipelineId = department === "b2b" ? allPipelineIds[0] : B2G_PIPELINES.BERATER;
+  // Вертикаль осмысленна только для b2g (spec 21); для b2b сбрасываем.
+  // Без vertical → legacy-набор (byte-identical прежнему поведению).
+  const v = department === "b2g" ? vertical : undefined;
+
+  // Department-aware pipeline/status IDs (vertical-aware для b2g)
+  const allPipelineIds = getPipelineIds(department, v);
+  const allActiveStatusIds = getActiveStatusIds(department, v);
+  const firstLinePipelineIds = department === "b2b" ? [allPipelineIds[0]] : getFirstLinePipelineIds(v);
+  const beraterPipelineIds = department === "b2b" ? [allPipelineIds[0]] : getBeraterPipelineIds(v);
+  const flPipes = new Set(firstLinePipelineIds);
+  const brPipes = new Set(beraterPipelineIds);
+  // Status-сеты по вертикали (одноимённые стадии бух+мед; b2g-only использование)
+  const flStatus = getFirstLineStatusSets(v);
+  const brStatus = getBeraterStatusSets(v);
+  const qualTiers = getQualTierStatuses(v);
+  const funnelMapV = getFunnelStatusMap(v);
 
   const base = new Date(`${dateStr}T00:00:00Z`);
   const monthPeriodDate = `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -632,8 +651,8 @@ export async function buildDailyResponse(department: string, period: string, dat
   //     never reached getPlan.
   const [allManagers, monthlyPlans, dayPlans, scheduleMap] = await Promise.all([
     getManagersWithKommo(department),
-    getPlans(department, "month", monthPeriodDate),
-    periodType === "day" ? getPlans(department, "day", dateStr) : Promise.resolve([]),
+    getPlans(department, "month", monthPeriodDate, v),
+    periodType === "day" ? getPlans(department, "day", dateStr, v) : Promise.resolve([]),
     period === "day" ? getScheduleForDate(dateStr) : Promise.resolve(null),
   ]);
 
@@ -718,10 +737,10 @@ export async function buildDailyResponse(department: string, period: string, dat
     getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(trackError("won leads")),
     getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(trackError("lost leads")),
     // Call metrics come from the analytics DB (integrator mirror). Keyed by master_managers.id.
-    getAnalyticsCallMetricsByMaster(allManagers, department, from, to).catch(trackAnalyticsError),
-    getAnalyticsLeads({ pipelineIds: [firstLinePipelineId], statusIds: [142], dateFilter: termsDateFilter }).catch(trackError("terms won")),
-    getAnalyticsLeads({ pipelineIds: [firstLinePipelineId], dateFilter: createdDateFilter }).catch(trackError("new leads")),
-    getAnalyticsStatusChangeCount(from, to, beraterPipelineId, [BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]).catch(trackError("term AA events")),
+    getAnalyticsCallMetricsByMaster(allManagers, department, from, to, v).catch(trackAnalyticsError),
+    getAnalyticsLeads({ pipelineIds: firstLinePipelineIds, statusIds: [142], dateFilter: termsDateFilter }).catch(trackError("terms won")),
+    getAnalyticsLeads({ pipelineIds: firstLinePipelineIds, dateFilter: createdDateFilter }).catch(trackError("new leads")),
+    getAnalyticsStatusChangeCount(from, to, beraterPipelineIds, [...brStatus.consultBeforeAA, ...brStatus.consultBeforeAADone]).catch(trackError("term AA events")),
     // Historical: fetch leads closed AFTER this date (they were active on this date)
     closedAfterDateFilter
       ? getAnalyticsLeads({ pipelineIds: allPipelineIds, statusIds: [142, 143], dateFilter: closedAfterDateFilter }).catch(trackError("closed after date"))
@@ -823,7 +842,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   // Analytics-backed per-master-id call map. Falls back to empty map on failure
   // (already handled upstream in trackAnalyticsError → new Map()).
   const callMetricsMap = analyticsCallMap;
-  const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department);
+  const funnelCounts = aggregateLeadFunnelMetrics(snapshotLeads, flowLeads, from, to, department, v);
   const taskMetricsMap = aggregateTaskMetrics(safeTasks);
 
   // Frozen-lead counts (team + per-manager in one round-trip via GROUPING SETS)
@@ -831,7 +850,7 @@ export async function buildDailyResponse(department: string, period: string, dat
   // single highest-value diagnostic for "which manager is sitting on new
   // leads without calling?" (recommended by sales-ops agent, 2026-04-24).
   const [frozenLeads, overdueTasksAnalytics] = await Promise.all([
-    getFrozenLeadsCombined(allManagers, department, from, to).catch(() => ({ team: 0, perManager: new Map<string, number>() })),
+    getFrozenLeadsCombined(allManagers, department, from, to, v).catch(() => ({ team: 0, perManager: new Map<string, number>() })),
     // Overdue tasks from analytics.tasks (authoritative mirror). Falls back
     // to the Kommo taskMetricsMap below if empty.
     getOverdueTasksByManager(allManagers, to).catch(() => new Map<string, number>()),
@@ -839,25 +858,11 @@ export async function buildDailyResponse(department: string, period: string, dat
   const frozenLeadsMap = frozenLeads.perManager;
   const frozenLeadsTotal = frozenLeads.team;
 
-  const planLookup = new Map<string, string>();
-  for (const p of plans) {
-    const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
-    planLookup.set(key, p.planValue);
-  }
-  // Day-granular overrides (period_type='day'). Kept in a SEPARATE map so
-  // the getPlan fetcher can distinguish "admin typed a specific day value,
-  // use as-is" from "admin typed a monthly value, scale by planDivisor".
-  const dayPlanLookup = new Map<string, string>();
-  for (const p of dayPlans) {
-    const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
-    dayPlanLookup.set(key, p.planValue);
-  }
-
   // Non-cumulative planов НЕ делятся по дням: они — константы (процент,
   // среднее, время, количество-на-линии). Без этого, напр., SLA план 25 мин
   // для дня = Math.round(25/30) = 1 мин → UI показывает 1 что ошибочно.
   // Суммируемые (лиды, продажи, выручка, минуты звонков, количество звонков) —
-  // делятся как раньше.
+  // делятся как раньше. (Также НЕ суммируются между вертикалями в режиме «Все».)
   const NON_CUMULATIVE_PLAN_KEYS = new Set<string>([
     // Проценты / средние — не суммируются
     "buh_avgCheck_p", "med_avgCheck_p", "total_avgCheck_p",
@@ -875,6 +880,40 @@ export async function buildDailyResponse(department: string, period: string, dat
     // B2G roleplay / окк константы
     "sla_p", "okk_p", "roleplay_p", "avgWait_p", "regulationPercent",
   ]);
+
+  // Планы → lookup по ключу line:userId:metricKey. В режиме «Все» (v='all')
+  // getPlans вернул строки ОБЕИХ вертикалей: числовые значения суммируем
+  // (план Бух + план Мед), несуммируемые (проценты/средние) — берёт бух
+  // (строки отсортированы buh-first). Редактирование планов в «Все»
+  // заблокировано на API/UI, так что коллизий записи нет.
+  const buildPlanLookup = (
+    rows: Array<{ vertical: string; line: string; userId: string | null; metricKey: string; planValue: string }>,
+  ): Map<string, string> => {
+    const sorted = v === "all"
+      ? [...rows].sort((a, b) => (a.vertical === b.vertical ? 0 : a.vertical === "buh" ? -1 : 1))
+      : rows;
+    const map = new Map<string, string>();
+    for (const p of sorted) {
+      const key = `${p.line}:${p.userId || "null"}:${p.metricKey}`;
+      const prev = map.get(key);
+      if (prev === undefined) {
+        map.set(key, p.planValue);
+        continue;
+      }
+      // Вторая вертикаль по тому же ключу (только при v='all')
+      if (NON_CUMULATIVE_PLAN_KEYS.has(p.metricKey)) continue; // бух побеждает
+      const a = Number(prev);
+      const b = Number(p.planValue);
+      if (!Number.isNaN(a) && !Number.isNaN(b)) map.set(key, String(a + b));
+    }
+    return map;
+  };
+
+  const planLookup = buildPlanLookup(plans);
+  // Day-granular overrides (period_type='day'). Kept in a SEPARATE map so
+  // the getPlan fetcher can distinguish "admin typed a specific day value,
+  // use as-is" from "admin typed a monthly value, scale by planDivisor".
+  const dayPlanLookup = buildPlanLookup(dayPlans);
 
   const getPlan = (line: string, userId: string | null, metricKey: string): string | null => {
     // Day-level override wins for day views — admin edited THIS specific
@@ -951,8 +990,9 @@ export async function buildDailyResponse(department: string, period: string, dat
     const toDate = new Date(to * 1000);
 
     // OKK: one combined team+per-manager query per line-group (prompts vary).
+    // Vertical-aware: в режиме Мед — только d2_med_* промпты (решение 2026-07-06).
     const okkPromises = Object.keys(LINE_TO_ROLEPLAY_TYPES).map(async (group) => {
-      const prompts = lineToOkkPrompts(group);
+      const prompts = lineToOkkPrompts(group, v);
       if (prompts.length === 0) return;
       const { team, perManager } = await getOkkScores("b2g", from, to, prompts);
       if (team !== null) okkScores.set(group, team);
@@ -974,40 +1014,37 @@ export async function buildDailyResponse(department: string, period: string, dat
     // tlt_f cells on every date (audit finding 2026-04-25). The cached()
     // wrapper on getSlaFactsCombined dedups the duplicate BERATER fetch
     // so line 2 and 3 share a single DB round-trip.
-    const B2G_LINE_PIPELINES: Record<string, number> = {
-      "1": B2G_PIPELINES.FIRST_LINE,
-      "2": B2G_PIPELINES.BERATER,
-      "3": B2G_PIPELINES.BERATER,
+    const B2G_LINE_PIPELINES: Record<string, number[]> = {
+      "1": firstLinePipelineIds,
+      "2": beraterPipelineIds,
+      "3": beraterPipelineIds,
     };
-    const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineId]) => {
-      const { team, perManager } = await getSlaFactsCombined(allManagers, pipelineId, fromDate, toDate);
+    const slaPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineIds]) => {
+      const { team, perManager } = await getSlaFactsCombined(allManagers, pipelineIds, fromDate, toDate);
       slaFacts.set(line, team);
       slaPerManager.set(line, perManager);
     });
 
     // Refusal reasons per pipeline — aggregated, two cards in UI
-    // (FIRST_LINE = квалификатор, BERATER = бератер+доведение).
+    // (первая линия = квалификатор, бератер = бератер+доведение); в режиме
+    // Мед/Все — соответствующие мед-воронки включены.
     const refusalPromises = [
-      ["firstLine", B2G_PIPELINES.FIRST_LINE] as const,
-      ["berater", B2G_PIPELINES.BERATER] as const,
-    ].map(async ([key, pipelineId]) => {
-      const rows = await getRefusalReasons(pipelineId, fromDate, toDate);
+      ["firstLine", firstLinePipelineIds] as const,
+      ["berater", beraterPipelineIds] as const,
+    ].map(async ([key, pipelineIds]) => {
+      const rows = await getRefusalReasons(pipelineIds, fromDate, toDate);
       refusalReasons.set(key, rows);
     });
 
-    // Avg calls per lead per line. Line 2 and 3 share the BERATER pipeline,
-    // so the SQL is fired once per unique pipeline and reused across lines.
-    const B2G_LINE_PIPELINES_FOR_CALLS: Record<string, number> = {
-      "1": B2G_PIPELINES.FIRST_LINE,
-      "2": B2G_PIPELINES.BERATER,
-      "3": B2G_PIPELINES.BERATER,
-    };
-    const acplByPipeline = new Map<number, Promise<{ team: number | null; perManager: Map<string, number> }>>();
-    const acplPromises = Object.entries(B2G_LINE_PIPELINES_FOR_CALLS).map(async ([line, pipelineId]) => {
-      let promise = acplByPipeline.get(pipelineId);
+    // Avg calls per lead per line. Line 2 and 3 share the BERATER pipeline(s),
+    // so the SQL is fired once per unique pipeline set and reused across lines.
+    const acplByPipeline = new Map<string, Promise<{ team: number | null; perManager: Map<string, number> }>>();
+    const acplPromises = Object.entries(B2G_LINE_PIPELINES).map(async ([line, pipelineIds]) => {
+      const pipeKey = pipelineIds.join("+");
+      let promise = acplByPipeline.get(pipeKey);
       if (!promise) {
-        promise = getAvgCallsPerLeadCombined(allManagers, pipelineId, fromDate, toDate);
-        acplByPipeline.set(pipelineId, promise);
+        promise = getAvgCallsPerLeadCombined(allManagers, pipelineIds, fromDate, toDate);
+        acplByPipeline.set(pipeKey, promise);
       }
       const { team, perManager } = await promise;
       avgCallsPerLead.set(line, team);
@@ -1200,7 +1237,7 @@ export async function buildDailyResponse(department: string, period: string, dat
           frozenLeadsTotal,
         });
       } else if (section.key === "funnel") {
-        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
+        fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, flPipes, brPipes, dateStr, flStatus, brStatus);
       } else {
         // For per-manager sections: overdueTasks is snapshot-only (no date filter)
         if (metric.key === "overdueTasks" && !hasSnapshotData) {
@@ -1273,7 +1310,7 @@ export async function buildDailyResponse(department: string, period: string, dat
       // Computed metrics that need access to other metrics in the same section
       if (metric.key === "gutscheinPlanDone") {
         const gutPlan = getPlan(section.dbLine, null, "gutscheinsApproved_p");
-        const gutFactStr = getFunnelFact("gutscheinsApproved", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, firstLinePipelineId, beraterPipelineId, dateStr);
+        const gutFactStr = getFunnelFact("gutscheinsApproved", funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, flPipes, brPipes, dateStr, flStatus, brStatus);
         const gutFact = Number(gutFactStr ?? 0);
         fact = gutPlan && Number(gutPlan) > 0 ? String(Math.round((gutFact / Number(gutPlan)) * 100)) : "0";
       }
@@ -1396,21 +1433,27 @@ export async function buildDailyResponse(department: string, period: string, dat
       if (funnelManagers.length > 0) {
         // Portfolio excludes won/lost + База + Отложенный старт — leads in
         // these statuses shouldn't weight a manager's active portfolio.
+        // (142/143 общие для всех воронок; База/Отложенный — vertical-aware.)
         const excludePortfolio = new Set<number>([
-          FIRST_LINE_STATUSES.WON,
-          FIRST_LINE_STATUSES.LOST,
-          FIRST_LINE_STATUSES.BASE,
-          FIRST_LINE_STATUSES.DELAYED_START,
+          142,
+          143,
+          ...flStatus.base,
+          ...flStatus.delayedStart,
         ]);
         // Berater statuses where the lead is awaiting a term appointment.
         const awaitStatuses = new Set<number>([
-          BERATER_STATUSES.RECEIVED_FROM_FIRST,
-          BERATER_STATUSES.DOVEDENIE,
-          BERATER_STATUSES.CONSULT_BEFORE_DC,
-          BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+          ...brStatus.receivedFromFirst,
+          ...brStatus.dovedenie,
+          ...brStatus.consultBeforeDC,
+          ...brStatus.consultBeforeDCDone,
         ]);
-        const beraterPipeline = beraterPipelineId;
-        const firstLinePipeline = firstLinePipelineId;
+        // «Термин АА на этапе» = кластер Консультация перед АА (+проведена):
+        // отдельной стадии «Термин АА» в воронке больше нет (убрана ~2026-03),
+        // per-manager зеркалит team-логику getFunnelFact.termAACount.
+        const aaOnStage = new Set<number>([
+          ...brStatus.consultBeforeAA,
+          ...brStatus.consultBeforeAADone,
+        ]);
 
         managerData = funnelManagers.map((mgr) => {
           const uid = mgr.kommoUserId;
@@ -1440,26 +1483,26 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = "1";
                   break;
                 case "totalLeads": {
-                  // Exclude Неразобранное(83873487) and База(93485479)
-                  fact = String(mgrNewLeads.filter((l) => l.status_id !== FIRST_LINE_STATUSES.UNSORTED && l.status_id !== FIRST_LINE_STATUSES.BASE).length);
+                  // Exclude Неразобранное and База (бух+мед по вертикали)
+                  fact = String(mgrNewLeads.filter((l) => !flStatus.unsorted.has(l.status_id) && !flStatus.base.has(l.status_id)).length);
                   break;
                 }
                 case "qualLeads": {
                   // Квал = есть буква в Category (CFV 866934). Per user spec 2026-04-24.
                   fact = String(mgrNewLeads.filter((l) => {
-                    if (l.status_id === FIRST_LINE_STATUSES.UNSORTED || l.status_id === FIRST_LINE_STATUSES.BASE) return false;
+                    if (flStatus.unsorted.has(l.status_id) || flStatus.base.has(l.status_id)) return false;
                     return hasCategoryLetter(l);
                   }).length);
                   break;
                 }
                 case "qualLeadsPercent": {
-                  const mgrFiltered = mgrNewLeads.filter((l) => l.status_id !== FIRST_LINE_STATUSES.UNSORTED && l.status_id !== FIRST_LINE_STATUSES.BASE);
+                  const mgrFiltered = mgrNewLeads.filter((l) => !flStatus.unsorted.has(l.status_id) && !flStatus.base.has(l.status_id));
                   const mgrQual = mgrFiltered.filter(hasCategoryLetter).length;
                   fact = mgrFiltered.length > 0 ? String(Math.round((mgrQual / mgrFiltered.length) * 100)) : "0";
                   break;
                 }
                 case "avgPortfolio":
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && !excludePortfolio.has(l.status_id)).length);
+                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && !excludePortfolio.has(l.status_id)).length);
                   break;
                 case "termsTotal":
                   fact = String(mgrTermsWon.length);
@@ -1471,58 +1514,54 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "awaitTermTotal":
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id)).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && awaitStatuses.has(l.status_id)).length);
                   break;
                 case "awaitTermNew": {
                   const { start: ms, end: me } = monthBoundsSec(dateStr);
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && awaitStatuses.has(l.status_id) && l.created_at >= ms && l.created_at <= me).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && awaitStatuses.has(l.status_id) && l.created_at >= ms && l.created_at <= me).length);
                   break;
                 }
                 case "gutscheinsApproved": {
-                  const mgrGut = uid ? safeWonLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
+                  const mgrGut = uid ? safeWonLeads.filter((l) => l.responsible_user_id === uid && brPipes.has(l.pipeline_id)).length : 0;
                   fact = String(mgrGut);
                   break;
                 }
                 case "a2": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && A2_STATUSES.has(l.status_id)).length);
+                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.a2.has(l.status_id)).length);
                   break;
                 }
                 case "b1": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && B1_STATUSES.has(l.status_id)).length);
+                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.b1.has(l.status_id)).length);
                   break;
                 }
                 case "b2plus": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && B2_PLUS_STATUSES.has(l.status_id)).length);
+                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.b2plus.has(l.status_id)).length);
                   break;
                 }
                 case "tasksTotal": {
-                  const map = FUNNEL_STATUS_MAP.tasksTotal;
-                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)).length);
+                  const map = funnelMapV.tasksTotal;
+                  fact = String(mgrActiveLeads.filter((l) => map && (map.pipelineIds?.includes(l.pipeline_id) ?? flPipes.has(l.pipeline_id)) && map.statusIds.has(l.status_id)).length);
                   break;
                 }
                 case "tasksNew": {
-                  const map = FUNNEL_STATUS_MAP.tasksTotal;
-                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  const map = funnelMapV.tasksTotal;
                   const { start: ms, end: me } = monthBoundsSec(dateStr);
                   fact = String(mgrActiveLeads.filter((l) =>
-                    l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
+                    map && (map.pipelineIds?.includes(l.pipeline_id) ?? flPipes.has(l.pipeline_id)) && map.statusIds.has(l.status_id)
                       && l.created_at >= ms && l.created_at <= me,
                   ).length);
                   break;
                 }
                 case "consultTotal": {
-                  const map = FUNNEL_STATUS_MAP.consultTotal;
-                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)).length);
+                  const map = funnelMapV.consultTotal;
+                  fact = String(mgrActiveLeads.filter((l) => map && (map.pipelineIds?.includes(l.pipeline_id) ?? flPipes.has(l.pipeline_id)) && map.statusIds.has(l.status_id)).length);
                   break;
                 }
                 case "consultNew": {
-                  const map = FUNNEL_STATUS_MAP.consultTotal;
-                  const pipe = map?.pipelineIds?.[0] ?? firstLinePipeline;
+                  const map = funnelMapV.consultTotal;
                   const { start: ms, end: me } = monthBoundsSec(dateStr);
                   fact = String(mgrActiveLeads.filter((l) =>
-                    l.pipeline_id === pipe && map && map.statusIds.has(l.status_id)
+                    map && (map.pipelineIds?.includes(l.pipeline_id) ?? flPipes.has(l.pipeline_id)) && map.statusIds.has(l.status_id)
                       && l.created_at >= ms && l.created_at <= me,
                   ).length);
                   break;
@@ -1530,31 +1569,31 @@ export async function buildDailyResponse(department: string, period: string, dat
                 case "convQualTask": {
                   // tasksTotal / qualLeads × 100. Qual = has category letter.
                   const mgrQual = mgrNewLeads.filter((l) => {
-                    if (l.status_id === FIRST_LINE_STATUSES.UNSORTED || l.status_id === FIRST_LINE_STATUSES.BASE) return false;
+                    if (flStatus.unsorted.has(l.status_id) || flStatus.base.has(l.status_id)) return false;
                     return hasCategoryLetter(l);
                   }).length;
-                  const mgrTasks = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.tasksTotal?.statusIds.has(l.status_id)).length;
+                  const mgrTasks = mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && funnelMapV.tasksTotal?.statusIds.has(l.status_id)).length;
                   fact = mgrQual > 0 ? String(Math.round((mgrTasks / mgrQual) * 100)) : "0";
                   break;
                 }
                 case "convTaskConsult": {
-                  const mgrTasks = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.tasksTotal?.statusIds.has(l.status_id)).length;
-                  const mgrConsult = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.consultTotal?.statusIds.has(l.status_id)).length;
+                  const mgrTasks = mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && funnelMapV.tasksTotal?.statusIds.has(l.status_id)).length;
+                  const mgrConsult = mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && funnelMapV.consultTotal?.statusIds.has(l.status_id)).length;
                   fact = mgrTasks > 0 ? String(Math.round((mgrConsult / mgrTasks) * 100)) : "0";
                   break;
                 }
                 case "convConsultTerm": {
-                  const mgrConsult = mgrActiveLeads.filter((l) => l.pipeline_id === firstLinePipeline && FUNNEL_STATUS_MAP.consultTotal?.statusIds.has(l.status_id)).length;
+                  const mgrConsult = mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && funnelMapV.consultTotal?.statusIds.has(l.status_id)).length;
                   fact = mgrConsult > 0 ? String(Math.round((mgrTermsWon.length / mgrConsult) * 100)) : "0";
                   break;
                 }
                 case "beraterReject": {
-                  const mgrRej = uid ? safeLostLeads.filter((l) => l.responsible_user_id === uid && l.pipeline_id === beraterPipeline).length : 0;
+                  const mgrRej = uid ? safeLostLeads.filter((l) => l.responsible_user_id === uid && brPipes.has(l.pipeline_id)).length : 0;
                   fact = String(mgrRej);
                   break;
                 }
                 case "appealsSubmitted": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.APPEAL).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.appeal.has(l.status_id)).length);
                   break;
                 }
                 case "revenue": {
@@ -1563,11 +1602,11 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "termDCCancelled": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_DC_CANCELLED).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.termDCCancelled.has(l.status_id)).length);
                   break;
                 }
                 case "termDCDone": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_DC_DONE).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.termDCDone.has(l.status_id)).length);
                   break;
                 }
                 case "termAATransferred": {
@@ -1580,30 +1619,30 @@ export async function buildDailyResponse(department: string, period: string, dat
                   break;
                 }
                 case "termAACancelled": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_AA_CANCELLED).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.termAACancelled.has(l.status_id)).length);
                   break;
                 }
                 case "termAACount": {
-                  // BERATER_STATUSES.TERM_AA is the intermediate "Термин АА"
-                  // stage — distinct from CONSULT_BEFORE_AA which feeds it.
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.TERM_AA).length);
+                  // Кластер «Консультация перед АА (+проведена)» — стадии
+                  // «Термин АА» в воронке больше нет (убрана ~2026-03).
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && aaOnStage.has(l.status_id)).length);
                   break;
                 }
                 case "beraterReview": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.BERATER_REVIEW).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.beraterReview.has(l.status_id)).length);
                   break;
                 }
                 case "delayedStart": {
-                  // Matches team-level FUNNEL_STATUS_MAP.delayedStart which
-                  // covers BOTH pipelines' "Отложенный старт" statuses.
+                  // Matches team-level funnel map delayedStart which covers
+                  // BOTH pipelines' "Отложенный старт" statuses.
                   fact = String(mgrActiveLeads.filter((l) =>
-                    (l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.DELAYED_START)
-                    || (l.pipeline_id === firstLinePipeline && l.status_id === FIRST_LINE_STATUSES.DELAYED_START),
+                    (brPipes.has(l.pipeline_id) && brStatus.delayedStart.has(l.status_id))
+                    || (flPipes.has(l.pipeline_id) && flStatus.delayedStart.has(l.status_id)),
                   ).length);
                   break;
                 }
                 case "appeal": {
-                  fact = String(mgrActiveLeads.filter((l) => l.pipeline_id === beraterPipeline && l.status_id === BERATER_STATUSES.APPEAL).length);
+                  fact = String(mgrActiveLeads.filter((l) => brPipes.has(l.pipeline_id) && brStatus.appeal.has(l.status_id)).length);
                   break;
                 }
               }
@@ -2027,12 +2066,17 @@ function getFunnelFact(
   termAATransferredCount?: number,
   hasSnapshotData = true,
   reconstructedActiveDeals?: number | null,
-  firstLinePipeline?: number,
-  beraterPipeline?: number,
+  firstLinePipes?: Set<number>,
+  beraterPipes?: Set<number>,
   dateStr?: string,
+  fl?: ReturnType<typeof getFirstLineStatusSets>,
+  br?: ReturnType<typeof getBeraterStatusSets>,
 ): string | null {
-  const flPipeline = firstLinePipeline ?? 10935879;
-  const brPipeline = beraterPipeline ?? 12154099;
+  // Vertical-aware наборы; дефолты = буховые (legacy).
+  const flPipes = firstLinePipes ?? new Set([10935879]);
+  const brPipes = beraterPipes ?? new Set([12154099]);
+  const flS = fl ?? getFirstLineStatusSets();
+  const brS = br ?? getBeraterStatusSets();
   // For historical dates without stored snapshots, snapshot-only metrics are unavailable
   if (!hasSnapshotData && SNAPSHOT_ONLY_METRICS.has(key)) {
     return null;
@@ -2059,14 +2103,14 @@ function getFunnelFact(
     case "totalLeads": {
       // All leads from first line created in period, excluding Неразобранное
       // and База — those are mailbox/staging stages, not real leads.
-      const excludeFromTotal = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
+      const excludeFromTotal = new Set<number>([...flS.unsorted, ...flS.base]);
       const allNew = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !excludeFromTotal.has(l.status_id));
       return String(allNew.length);
     }
     case "qualLeads": {
       // Квал = есть буква в Category (CFV 866934). Per user spec 2026-04-24.
       // Не-квал = category NULL/empty — лид закрыт как "Неквал лид" или не оценен.
-      const excludeS = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
+      const excludeS = new Set<number>([...flS.unsorted, ...flS.base]);
       const qualCount = (newLeadsInPeriod || []).filter((l) => {
         if (l.is_deleted || excludeS.has(l.status_id)) return false;
         return hasCategoryLetter(l);
@@ -2082,44 +2126,41 @@ function getFunnelFact(
     case "avgPortfolio": {
       // Portfolio excludes won/lost + База + Отложенный старт (staging).
       const excludeStatuses = new Set<number>([
-        FIRST_LINE_STATUSES.WON,
-        FIRST_LINE_STATUSES.LOST,
-        FIRST_LINE_STATUSES.BASE,
-        FIRST_LINE_STATUSES.DELAYED_START,
+        142,
+        143,
+        ...flS.base,
+        ...flS.delayedStart,
       ]);
-      const pipelineId = flPipeline;
       const portfolioLeads = (snapshotLeads || []).filter(
-        (l) => l.pipeline_id === pipelineId && !l.is_deleted && !excludeStatuses.has(l.status_id)
+        (l) => flPipes.has(l.pipeline_id) && !l.is_deleted && !excludeStatuses.has(l.status_id)
       );
       const divisor = line1ManagerCount || managersOnLine || 1;
       return String(Math.round(portfolioLeads.length / divisor));
     }
     case "awaitTermTotal": {
       const awaitStatuses = new Set<number>([
-        BERATER_STATUSES.RECEIVED_FROM_FIRST,
-        BERATER_STATUSES.DOVEDENIE,
-        BERATER_STATUSES.CONSULT_BEFORE_DC,
-        BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+        ...brS.receivedFromFirst,
+        ...brS.dovedenie,
+        ...brS.consultBeforeDC,
+        ...brS.consultBeforeDCDone,
       ]);
-      const beraterPipeline = brPipeline;
       const awaiting = (snapshotLeads || []).filter(
-        (l) => l.pipeline_id === beraterPipeline && !l.is_deleted && !l.closed_at && awaitStatuses.has(l.status_id)
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && awaitStatuses.has(l.status_id)
       );
       return String(awaiting.length);
     }
     case "awaitTermNew": {
       // Awaiting term + created in current month
       const awaitStatusesNew = new Set<number>([
-        BERATER_STATUSES.RECEIVED_FROM_FIRST,
-        BERATER_STATUSES.DOVEDENIE,
-        BERATER_STATUSES.CONSULT_BEFORE_DC,
-        BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+        ...brS.receivedFromFirst,
+        ...brS.dovedenie,
+        ...brS.consultBeforeDC,
+        ...brS.consultBeforeDCDone,
       ]);
-      const beraterPipelineNew = brPipeline;
       const { start: mStartNew, end: mEndNew } = monthBoundsSec(dateStr ?? "2026-01-01");
       const awaitingNew = (snapshotLeads || []).filter(
         (l) =>
-          l.pipeline_id === beraterPipelineNew &&
+          brPipes.has(l.pipeline_id) &&
           !l.is_deleted &&
           !l.closed_at &&
           awaitStatusesNew.has(l.status_id) &&
@@ -2129,7 +2170,7 @@ function getFunnelFact(
       return String(awaitingNew.length);
     }
     case "qualLeadsPercent": {
-      const exS = new Set<number>([FIRST_LINE_STATUSES.UNSORTED, FIRST_LINE_STATUSES.BASE]);
+      const exS = new Set<number>([...flS.unsorted, ...flS.base]);
       const allNewP = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !exS.has(l.status_id));
       const qualP = allNewP.filter(hasCategoryLetter).length;
       return allNewP.length > 0 ? String(Math.round((qualP / allNewP.length) * 100)) : "0";
@@ -2137,12 +2178,12 @@ function getFunnelFact(
     // ─── Berater pipeline snapshot metrics ───
     case "termDCCancelled": {
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_DC_CANCELLED
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.termDCCancelled.has(l.status_id)
       ).length);
     }
     case "termDCDone": {
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_DC_DONE
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.termDCDone.has(l.status_id)
       ).length);
     }
     case "termAATransferred": {
@@ -2151,29 +2192,35 @@ function getFunnelFact(
     }
     case "termAACancelled": {
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.TERM_AA_CANCELLED
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.termAACancelled.has(l.status_id)
       ).length);
     }
     case "termAACount": {
       // Both CONSULT_BEFORE_AA stages count as "Термин АА (на этапе)".
-      const aaStatuses = new Set<number>([BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]);
+      const aaStatuses = new Set<number>([...brS.consultBeforeAA, ...brS.consultBeforeAADone]);
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && aaStatuses.has(l.status_id)
       ).length);
     }
     case "beraterReview": {
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.BERATER_REVIEW
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.beraterReview.has(l.status_id)
       ).length);
     }
     case "delayedStart": {
+      // Обе воронки — как в per-manager ветке и FUNNEL_STATUS_MAP (code-review
+      // 2026-07-06: раньше team-счёт брал только Бератер и был меньше суммы
+      // по менеджерам).
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.DELAYED_START
+        (l) =>
+          !l.is_deleted && !l.closed_at &&
+          ((brPipes.has(l.pipeline_id) && brS.delayedStart.has(l.status_id))
+            || (flPipes.has(l.pipeline_id) && flS.delayedStart.has(l.status_id)))
       ).length);
     }
     case "appeal": {
       return String((snapshotLeads || []).filter(
-        (l) => l.pipeline_id === brPipeline && !l.is_deleted && !l.closed_at && l.status_id === BERATER_STATUSES.APPEAL
+        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.appeal.has(l.status_id)
       ).length);
     }
     case "gutscheinPlanDone":

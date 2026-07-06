@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeCohorts, parseLangBuckets } from "@/lib/funnel/compute";
 import type { MaturityFilter } from "@/lib/funnel/types";
+import type { Vertical } from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховая (legacy). */
+function parseVerticalParam(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 export const runtime = "nodejs";
 // Не кешируем — данные читаются прямо из аналитики каждый раз.
@@ -50,6 +56,7 @@ export async function GET(req: NextRequest) {
       source,
       responsibleUserId,
       lang: parseLangBuckets(params.get("lang")),
+      vertical: parseVerticalParam(params.get("vertical")),
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

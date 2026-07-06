@@ -15,7 +15,13 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db/index";
 import { unwrapRows, languageBucketSql } from "./compute";
-import { B2G_PIPELINES, BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import {
+  BERATER_STATUSES,
+  MED_BERATER_STATUSES,
+  getBeraterPipelineIds,
+  getBeraterStatusSets,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
 import { getRoleplaysForLeads } from "./roleplays";
 import { getBotRoleplaysForLeads, getRegisteredBotLeads } from "./bot-roleplays";
 import { getOkkByLead } from "./okk-by-lead";
@@ -26,11 +32,11 @@ import {
   type ScoreFactor,
 } from "./score";
 
-const BERATER = B2G_PIPELINES.BERATER;
 const KOMMO_BASE = "https://sternmeister.kommo.com/leads/detail";
 
 // «Стадия CRM» (ТЗ §7): позиция статуса Бератера по пути к Гутшайну → 0..100.
 // Немапленные статусы (LOST и пр.) → фактор исключается из скоринга.
+// Мед Бератер — структурное зеркало (те же позиции, свои id, spec 21).
 const STAGE_SCORE: Record<number, number> = {
   [BERATER_STATUSES.RECEIVED_FROM_FIRST]: 15,
   [BERATER_STATUSES.DELAYED_START]: 18,
@@ -46,6 +52,19 @@ const STAGE_SCORE: Record<number, number> = {
   [BERATER_STATUSES.BERATER_REVIEW]: 90,
   [BERATER_STATUSES.APPEAL]: 55,
   [BERATER_STATUSES.WON]: 100,
+  // Мед Бератер (14001515)
+  [MED_BERATER_STATUSES.RECEIVED_FROM_FIRST]: 15,
+  [MED_BERATER_STATUSES.DELAYED_START]: 18,
+  [MED_BERATER_STATUSES.DOVEDENIE]: 22,
+  [MED_BERATER_STATUSES.CONSULT_BEFORE_DC]: 35,
+  [MED_BERATER_STATUSES.TERM_DC_CANCELLED]: 40,
+  [MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE]: 50,
+  [MED_BERATER_STATUSES.TERM_DC_DONE]: 60,
+  [MED_BERATER_STATUSES.CONSULT_BEFORE_AA]: 70,
+  [MED_BERATER_STATUSES.TERM_AA_CANCELLED]: 65,
+  [MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]: 85,
+  [MED_BERATER_STATUSES.BERATER_REVIEW]: 90,
+  [MED_BERATER_STATUSES.APPEAL]: 55,
 };
 
 /**
@@ -58,6 +77,8 @@ export interface ClientsParams {
   terminTo: string | null;
   /** Фильтр по уровням языка (мультивыбор). Пусто/undefined = без фильтра. */
   lang?: LanguageBucket[] | null;
+  /** Вертикаль b2g (Бух/Мед/Все, spec 21). Без неё — Бух Бератер (legacy). */
+  vertical?: Vertical;
 }
 
 export interface ClientSideReadiness {
@@ -115,6 +136,7 @@ export interface ClientsResult {
 
 type BaseRow = {
   leadId: string | number;
+  pipelineId: string | number;
   statusId: string | number;
   status: string | null;
   languageLevel: string | null;
@@ -151,7 +173,9 @@ export async function computeClients(
   params: ClientsParams,
   limit = 300
 ): Promise<ClientsResult> {
-  const { terminFrom, terminTo, lang } = params;
+  const { terminFrom, terminTo, lang, vertical } = params;
+  const beraterIds = getBeraterPipelineIds(vertical);
+  const brStatus = getBeraterStatusSets(vertical);
   // Одна дата (terminTo == null) = «с этого числа и дальше» (>=); период = диапазон.
   const dcCond = terminTo
     ? sql`(termin_date::date >= ${terminFrom}::date AND termin_date::date <= ${terminTo}::date)`
@@ -163,6 +187,7 @@ export async function computeClients(
     await analyticsDb.execute(sql`
       SELECT
         lead_id             AS "leadId",
+        pipeline_id         AS "pipelineId",
         status_id           AS "statusId",
         status              AS "status",
         language_level      AS "languageLevel",
@@ -172,12 +197,12 @@ export async function computeClients(
         ${dcCond} AS "dcInRange",
         ${aaCond} AS "aaInRange"
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${BERATER}
+      WHERE pipeline_id IN (${sql.join(beraterIds.map((id) => sql`${id}`), sql`, `)})
         AND is_deleted = FALSE
         AND exclude_from_analytics = FALSE
-        AND status_id <> ${BERATER_STATUSES.LOST}
+        AND status_id <> 143
         AND (
-          status_id = ${BERATER_STATUSES.WON}
+          status_id = 142
           OR ${dcCond}
           OR ${aaCond}
         )
@@ -197,13 +222,19 @@ export async function computeClients(
       getRegisteredBotLeads(ids), // кто зарегистрирован в боте (analytics.bot_users)
       fetchManagerNames(),
       fetchCurrentStageEntered(ids),
-      fetchConsultationCounts(ids),
+      fetchConsultationCounts(ids, [
+        ...brStatus.consultBeforeDCDone,
+        ...brStatus.consultBeforeAADone,
+      ]),
       getOkkByLead(ids), // ОКК-агрегаты из D2
     ]);
 
   const nowMs = Date.now();
   // Без BERATER_BOT_DATABASE_URL бот-фактор не штрафует, а исключается (null).
   const botConfigured = !!process.env.BERATER_BOT_DATABASE_URL;
+  // Бот ролевок — БУХОВЫЙ (у мед будет свой, решение юзера 2026-07-06):
+  // мед-клиентам бот-факторы не даём вовсе (null → «нет данных», не штраф).
+  const medBeraterIds = new Set(getBeraterPipelineIds("med"));
   const activeScored: ScoredLead[] = [];
   const wonScored: ScoredLead[] = [];
 
@@ -211,6 +242,9 @@ export async function computeClients(
     const leadId = Number(r.leadId);
     const isWon = Number(r.statusId) === BERATER_STATUSES.WON;
     const dcInRange = r.dcInRange === true;
+    // Мед-клиент → буховый бот к нему неприменим (свой бот будет позже).
+    const isMedLead = medBeraterIds.has(Number(r.pipelineId));
+    const botApplies = botConfigured && !isMedLead;
 
     const bucket = normalizeBucket(r.languageLevel);
     // A1 = «не квал по языку» — в аналитику не идёт (как и в когортах).
@@ -252,8 +286,8 @@ export async function computeClients(
       activeAvg,
       hasManagerRoleplay: dc.avg !== null || aa.avg !== null,
       daysSinceLastTouch: days,
-      botRoleplayCount: botConfigured ? botCount : null,
-      botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
+      botRoleplayCount: botApplies ? botCount : null,
+      botReadiness: botApplies ? bot?.latestReadiness ?? null : null,
       consultationDone: consultations > 0,
       dealOkk: okk?.dealOkk ?? null,
       crmStageScore,
@@ -417,17 +451,20 @@ async function fetchCurrentStageEntered(leadIds: number[]): Promise<Map<number, 
   return out;
 }
 
-// Проведённых консультаций: входы в статусы ДЦ/АА «проведена».
-async function fetchConsultationCounts(leadIds: number[]): Promise<Map<number, number>> {
+// Проведённых консультаций: входы в статусы ДЦ/АА «проведена» (vertical-aware).
+async function fetchConsultationCounts(
+  leadIds: number[],
+  consultStatusIds: number[]
+): Promise<Map<number, number>> {
   const out = new Map<number, number>();
-  if (leadIds.length === 0) return out;
+  if (leadIds.length === 0 || consultStatusIds.length === 0) return out;
   const idsIn = leadIds.join(",");
   const rows = unwrapRows<{ leadId: string | number; c: string | number }>(
     await analyticsDb.execute(sql`
       SELECT lead_id AS "leadId", count(*) AS "c"
       FROM analytics.lead_status_changes
       WHERE lead_id IN (${sql.raw(idsIn)})
-        AND status_id IN (${BERATER_STATUSES.CONSULT_BEFORE_DC_DONE}, ${BERATER_STATUSES.CONSULT_BEFORE_AA_DONE})
+        AND status_id IN (${sql.raw(consultStatusIds.join(","))})
       GROUP BY lead_id
     `)
   );

@@ -28,9 +28,19 @@ export const B2G_PIPELINES = {
   FIRST_LINE: 10935879,
   /** Бух Бератер — second line (berater/consultation) */
   BERATER: 12154099,
-  /** Medical Admin Gov */
+  /** Мед Гос — medical qualifier (Praxisempfang), зеркало FIRST_LINE */
   MEDICAL_GOV: 13209991,
+  /** Мед Бератер — medical 2я/3я линия, зеркало BERATER */
+  MED_BERATER: 14001515,
 } as const;
+
+/**
+ * Вертикаль бизнеса внутри отдела. Осмысленна только для b2g:
+ *   buh = Бух Гос + Бух Бератер, med = Мед Гос + Мед Бератер, all = все четыре.
+ * Для b2b пока игнорируется (медицина там уже слита в общий b2b-агрегат).
+ * См. dev_docs/specs/21-МЕД-АДМИН-В-B2G.md.
+ */
+export type Vertical = "buh" | "med" | "all";
 
 // ==================== STATUS IDS — БУХ КОММ (Коммерсы / B2B) ====================
 
@@ -93,6 +103,14 @@ export const FIRST_LINE_STATUSES = {
 } as const;
 
 // ==================== STATUS IDS — BERATER ====================
+// Kommo-сверка 2026-07-05: в воронке 4 стадий больше НЕТ — «Взято в работу»,
+// «Недозвон», «Контакт установлен», «Термин АА» (on-stage). Убраны при
+// перестройке воронки ~2026-03-02 (последние события по всем четырём — в этот
+// день, дальше ноль). Бух Бератер структурно идентичен Мед Бератер (15
+// статусов). Константы убранных стадий СОХРАНЕНЫ (⚠ removed) — по ним есть
+// история в analytics.lead_status_changes (2025-11..2026-03); использовать их
+// можно ТОЛЬКО в history-запросах, не в снапшотах текущего состояния и не в
+// фильтрах Kommo API.
 
 export const BERATER_STATUSES = {
   UNSORTED: 93860327,                // Неразобранное
@@ -100,18 +118,65 @@ export const BERATER_STATUSES = {
   DOVEDENIE: 102183931,              // Доведение
   CONSULT_BEFORE_DC: 102183935,      // Консультация перед термином ДЦ
   CONSULT_BEFORE_DC_DONE: 102183939, // Консультация перед термином ДЦ проведена
-  IN_PROGRESS: 93860335,             // Взято в работу
-  NO_ANSWER: 93860339,               // Недозвон
-  CONTACT_MADE: 93860863,            // Контакт установлен
+  IN_PROGRESS: 93860335,             // ⚠ removed из воронки ~2026-03 — Взято в работу (history-only)
+  NO_ANSWER: 93860339,               // ⚠ removed из воронки ~2026-03 — Недозвон (history-only)
+  CONTACT_MADE: 93860863,            // ⚠ removed из воронки ~2026-03 — Контакт установлен (history-only)
   TERM_DC_CANCELLED: 93860875,       // Термин ДЦ отменен/перенесен
   TERM_DC_DONE: 93886075,            // Термин ДЦ состоялся
-  TERM_AA: 93860879,                 // Термин АА (на этапе)
+  TERM_AA: 93860879,                 // ⚠ removed из воронки ~2026-03 — Термин АА на этапе (history-only)
   TERM_AA_CANCELLED: 93860883,       // Термин АА отменен/перенесен
   CONSULT_BEFORE_AA: 102183943,      // Консультация перед термином АА
   CONSULT_BEFORE_AA_DONE: 102183947, // Консультация перед термином АА проведена
   BERATER_REVIEW: 93860887,          // На рассмотрении бератера
   DELAYED_START: 95515895,           // Отложенный старт
   APPEAL: 93860891,                  // Апелляция
+  WON: 142,                          // Гутшайн одобрен
+  LOST: 143,                         // Закрыто и не реализовано
+} as const;
+
+// ==================== STATUS IDS — МЕД ГОС (Medical qualifier) ====================
+// Мед Гос (pipeline 13209991) — зеркало Бух Гос 1-й линии для медицинской воронки.
+// Собственный диапазон status_id (не пересекается с Бух Гос). ID перенесены из
+// OKK/src/config/constants.ts (d2_med_qualifier). ⚠ Это статусы рабочей воронки,
+// на которых ОКК оценивает звонки; пред-стадии (Неразобранное/База/Документы в ДЦ)
+// в ОКК-наборе отсутствуют — при необходимости добрать из Kommo API
+// /api/v4/leads/pipelines/13209991. См. spec 21 §6.
+
+export const MED_GOV_STATUSES = {
+  UNSORTED: 101858051,        // Неразобранное
+  BASE: 101858055,            // База
+  NEW_LEAD: 101858059,        // Новый лид
+  IN_PROGRESS: 101858063,     // Взято в работу
+  NO_ANSWER: 101858423,       // Недозвон
+  CONTACT_MADE: 101858427,    // Контакт установлен
+  DECISION_MAKING: 108064559, // Принимает решение
+  CONSULT_DONE: 101858431,    // Консультация проведена
+  DOCS_SENT_DC: 108064563,    // Документы отправлены в ДЦ
+  DELAYED_START: 101858435,   // Отложенный старт
+  WON: 142,                   // Успешно реализовано
+  LOST: 143,                  // Закрыто и не реализовано
+} as const;
+
+// ==================== STATUS IDS — МЕД БЕРАТЕР ====================
+// Мед Бератер (pipeline 14001515) — зеркало Бух Бератер для медицины.
+// Kommo-сверка 2026-07-05: воронки теперь СТРУКТУРНО ИДЕНТИЧНЫ (по 15 статусов) —
+// из Бух Бератер удалили 4 лишние стадии. «Термин АА отменён» = 108322459
+// (НЕ 108066263 из OKK-констант); дублей 108066255/259 в воронке нет.
+
+export const MED_BERATER_STATUSES = {
+  UNSORTED: 108064607,               // Неразобранное
+  RECEIVED_FROM_FIRST: 108064611,    // Принято от первой линии
+  DOVEDENIE: 108064615,              // Доведение
+  CONSULT_BEFORE_DC: 108064619,      // Консультация перед термином ДЦ
+  CONSULT_BEFORE_DC_DONE: 108066243, // Консультация перед термином ДЦ проведена
+  TERM_DC_DONE: 108066251,           // Термин ДЦ состоялся
+  TERM_DC_CANCELLED: 108066247,      // Термин ДЦ отменён/перенесён
+  CONSULT_BEFORE_AA: 108066267,      // Консультация перед термином АА
+  CONSULT_BEFORE_AA_DONE: 108066271, // Консультация перед термином АА проведена
+  TERM_AA_CANCELLED: 108322459,      // Термин АА отменён/перенесён (Kommo-сверено)
+  BERATER_REVIEW: 108066275,         // На рассмотрении бератера
+  DELAYED_START: 108066279,          // Отложенный старт
+  APPEAL: 108066283,                 // Апелляция
   WON: 142,                          // Гутшайн одобрен
   LOST: 143,                         // Закрыто и не реализовано
 } as const;
@@ -149,8 +214,6 @@ export const B2_PLUS_STATUSES: Set<number> = new Set([
   BERATER_STATUSES.DOVEDENIE,
   BERATER_STATUSES.CONSULT_BEFORE_DC,
   BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
-  BERATER_STATUSES.IN_PROGRESS,
-  BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
   BERATER_STATUSES.TERM_AA_CANCELLED,
@@ -172,6 +235,58 @@ export const QUALIFIED_STATUSES: Set<number> = new Set([
   FIRST_LINE_STATUSES.WON,
   BERATER_STATUSES.WON,
 ]);
+
+// ==================== МЕД QUALIFICATION STAGES ====================
+// Зеркало A2/B1/B2+ по мед-воронкам (та же семантика стадий, мед-ID).
+
+/** Мед-статусы уровня A2 (контакт установлен, консультации ещё нет) */
+export const MED_A2_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.CONTACT_MADE,
+]);
+
+/** Мед-статусы уровня B1 (консультация проведена, документы не отправлены) */
+export const MED_B1_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.CONSULT_DONE,
+]);
+
+/** Мед-статусы уровня B2+ (документы отправлены и дальше, вкл. активный Мед Бератер) */
+export const MED_B2_PLUS_STATUSES: Set<number> = new Set([
+  MED_GOV_STATUSES.DECISION_MAKING,
+  MED_GOV_STATUSES.DOCS_SENT_DC,
+  MED_GOV_STATUSES.DELAYED_START,
+  // Активные стадии Мед Бератер (передан от первой линии)
+  MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  MED_BERATER_STATUSES.DOVEDENIE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+  MED_BERATER_STATUSES.TERM_DC_DONE,
+  MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
+  MED_BERATER_STATUSES.BERATER_REVIEW,
+  MED_BERATER_STATUSES.DELAYED_START,
+  MED_BERATER_STATUSES.APPEAL,
+]);
+
+/** Квал-уровни A2/B1/B2+ по вертикали. Без vertical → буховые (legacy). */
+export function getQualTierStatuses(vertical?: Vertical): {
+  a2: Set<number>;
+  b1: Set<number>;
+  b2plus: Set<number>;
+} {
+  if (vertical === "med") {
+    return { a2: MED_A2_STATUSES, b1: MED_B1_STATUSES, b2plus: MED_B2_PLUS_STATUSES };
+  }
+  if (vertical === "all") {
+    return {
+      a2: new Set([...A2_STATUSES, ...MED_A2_STATUSES]),
+      b1: new Set([...B1_STATUSES, ...MED_B1_STATUSES]),
+      b2plus: new Set([...B2_PLUS_STATUSES, ...MED_B2_PLUS_STATUSES]),
+    };
+  }
+  return { a2: A2_STATUSES, b1: B1_STATUSES, b2plus: B2_PLUS_STATUSES };
+}
 
 // ==================== QUAL FILTER FOR DASHBOARD CHARTS ====================
 // Frozen 2026-05-07 from a Kommo filter URL provided by ROP. Allow-list
@@ -198,6 +313,54 @@ export const QUAL_FIRST_LINE_STATUS_IDS: readonly number[] = [
   FIRST_LINE_STATUSES.WON,             // 142 Термин ДЦ
   FIRST_LINE_STATUSES.LOST,            // 143 Закрыто и не реализовано
 ];
+
+/** Мед-зеркало QUAL_FIRST_LINE_STATUS_IDS — те же стадии-аналоги Мед Гос
+ *  (подтверждено 2026-07-06: «в мед всё аналогично бух, квалы те же»).
+ *  Исключены Неразобранное (101858051) и База (101858055). */
+export const MED_QUAL_FIRST_LINE_STATUS_IDS: readonly number[] = [
+  MED_GOV_STATUSES.NEW_LEAD,        // 101858059 Новый лид
+  MED_GOV_STATUSES.IN_PROGRESS,     // 101858063 Взято в работу
+  MED_GOV_STATUSES.NO_ANSWER,       // 101858423 Недозвон
+  MED_GOV_STATUSES.CONTACT_MADE,    // 101858427 Контакт установлен
+  MED_GOV_STATUSES.CONSULT_DONE,    // 101858431 Консультация проведена
+  MED_GOV_STATUSES.DECISION_MAKING, // 108064559 Принимает решение
+  MED_GOV_STATUSES.DOCS_SENT_DC,    // 108064563 Документы отправлены в ДЦ
+  MED_GOV_STATUSES.DELAYED_START,   // 101858435 Отложенный старт
+  MED_GOV_STATUSES.WON,             // 142 Успешно реализовано
+  MED_GOV_STATUSES.LOST,            // 143 Закрыто и не реализовано
+];
+
+/** Квал-статусы первой линии по вертикали (для Термина: qual-leads-docs +
+ *  termin-funnel Stage 2). Reason-enum'ы (QUAL_REASON_ENUM_IDS) общие — поле
+ *  «Причина закрытия госники» (cf 879824) одно на обе воронки. */
+export function getQualFirstLineStatusIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [...MED_QUAL_FIRST_LINE_STATUS_IDS];
+  if (vertical === "all") return [...QUAL_FIRST_LINE_STATUS_IDS, ...MED_QUAL_FIRST_LINE_STATUS_IDS];
+  return [...QUAL_FIRST_LINE_STATUS_IDS]; // buh / undefined (legacy)
+}
+
+/** Milestone-статусы «Документы отправлены в ДЦ» по вертикали (qual-leads-docs).
+ *  WON(142) общий и добавляется вызывающей стороной отдельно. */
+export function getDocsSentStatusIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [MED_GOV_STATUSES.DOCS_SENT_DC];
+  if (vertical === "all") return [FIRST_LINE_STATUSES.DOCS_SENT_DC, MED_GOV_STATUSES.DOCS_SENT_DC];
+  return [FIRST_LINE_STATUSES.DOCS_SENT_DC]; // buh / undefined (legacy)
+}
+
+/** status_id(ы) «вход в АА-фазу» для termin-funnel Stage 1 по вертикали.
+ *  Живой кластер (решение юзера 2026-07-06): вход = первый переход в
+ *  «Консультацию перед термином АА». Для бух дополнительно учитывается
+ *  исторический on-stage «Термин АА» (93860879, убран из воронки ~2026-03-02;
+ *  без него окна до марта-2026 обнулились бы) — MIN(event_at) по кластеру
+ *  берёт хронологически первый вход. У Мед Бератер стадии «Термин АА» не
+ *  было никогда. */
+export function getTerminAAEntryStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.CONSULT_BEFORE_AA, BERATER_STATUSES.TERM_AA];
+  const med = [MED_BERATER_STATUSES.CONSULT_BEFORE_AA];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
 
 /** "Причина закрытия госники" (cf 879824) enum values that count as qual.
  *  Frozen from ROP-provided Kommo URL — list of reasons that DON'T disqualify
@@ -229,15 +392,12 @@ export const ALL_ACTIVE_STATUS_IDS: number[] = [
   FIRST_LINE_STATUSES.DECISION_MAKING,
   FIRST_LINE_STATUSES.DOCS_SENT_DC,
   FIRST_LINE_STATUSES.DELAYED_START,
-  // Berater
+  // Berater (без стадий, убранных из воронки ~2026-03 — см. BERATER_STATUSES)
   BERATER_STATUSES.UNSORTED,
   BERATER_STATUSES.RECEIVED_FROM_FIRST,
   BERATER_STATUSES.DOVEDENIE,
   BERATER_STATUSES.CONSULT_BEFORE_DC,
   BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
-  BERATER_STATUSES.IN_PROGRESS,
-  BERATER_STATUSES.NO_ANSWER,
-  BERATER_STATUSES.CONTACT_MADE,
   BERATER_STATUSES.TERM_DC_CANCELLED,
   BERATER_STATUSES.TERM_DC_DONE,
   BERATER_STATUSES.TERM_AA_CANCELLED,
@@ -298,7 +458,10 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     statusIds: new Set([BERATER_STATUSES.BERATER_REVIEW]),
   },
   delayedStart: {
-    pipelineIds: [B2G_PIPELINES.BERATER],
+    // Обе воронки: «Отложенный старт» есть и на 1-й линии, и у Бератера.
+    // (code-review 2026-07-06: раньше pipelineIds был [BERATER] — first-line
+    // часть статусов была мертва, team-счёт < суммы per-manager.)
+    pipelineIds: [B2G_PIPELINES.BERATER, B2G_PIPELINES.FIRST_LINE],
     statusIds: new Set([
       BERATER_STATUSES.DELAYED_START,
       FIRST_LINE_STATUSES.DELAYED_START,
@@ -328,9 +491,6 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     pipelineIds: [B2G_PIPELINES.BERATER],
     statusIds: new Set([
       BERATER_STATUSES.RECEIVED_FROM_FIRST,
-      BERATER_STATUSES.IN_PROGRESS,
-      BERATER_STATUSES.NO_ANSWER,
-      BERATER_STATUSES.CONTACT_MADE,
       BERATER_STATUSES.TERM_DC_CANCELLED,
       BERATER_STATUSES.TERM_DC_DONE,
       BERATER_STATUSES.CONSULT_BEFORE_AA,
@@ -352,6 +512,123 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     ]),
   },
 };
+
+// ==================== МЕД FUNNEL METRICS STATUS MAPPING ====================
+// Зеркало FUNNEL_STATUS_MAP по мед-воронкам (Мед Гос 13209991 + Мед Бератер
+// 14001515) — те же metric-ключи, мед-ID. Питает Дейли в режиме Мед/Все.
+// Структуры воронок идентичны буховым (Kommo-сверка 2026-07-05), поэтому
+// маппинг 1:1. См. dev_docs/specs/21 §5.
+
+export const MED_FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> = {
+  tasksTotal: {
+    pipelineIds: [B2G_PIPELINES.MEDICAL_GOV],
+    statusIds: new Set([MED_GOV_STATUSES.DOCS_SENT_DC]),
+  },
+  consultTotal: {
+    pipelineIds: [B2G_PIPELINES.MEDICAL_GOV],
+    statusIds: new Set([MED_GOV_STATUSES.CONSULT_DONE]),
+  },
+  termDCCancelled: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_DC_CANCELLED]),
+  },
+  termDCDone: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_DC_DONE]),
+  },
+  termAA: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.CONSULT_BEFORE_AA]),
+  },
+  termAACancelled: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.TERM_AA_CANCELLED]),
+  },
+  termAADone: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.BERATER_REVIEW,
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_BERATER_STATUSES.APPEAL,
+      MED_BERATER_STATUSES.WON,
+    ]),
+  },
+  beraterReview: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.BERATER_REVIEW]),
+  },
+  delayedStart: {
+    // Обе мед-воронки (см. буховый аналог — фикс code-review 2026-07-06).
+    pipelineIds: [B2G_PIPELINES.MED_BERATER, B2G_PIPELINES.MEDICAL_GOV],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_GOV_STATUSES.DELAYED_START,
+    ]),
+  },
+  appeal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.APPEAL]),
+  },
+  gutscheinsApproved: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.WON]),
+  },
+  beraterReject: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.LOST]),
+  },
+  appealsSubmitted: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([MED_BERATER_STATUSES.APPEAL]),
+  },
+  termsTotal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+      MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+      MED_BERATER_STATUSES.TERM_DC_DONE,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+      MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+      MED_BERATER_STATUSES.BERATER_REVIEW,
+      MED_BERATER_STATUSES.DELAYED_START,
+      MED_BERATER_STATUSES.APPEAL,
+    ]),
+  },
+  awaitTermTotal: {
+    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    statusIds: new Set([
+      MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+      MED_BERATER_STATUSES.DOVEDENIE,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+      MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+    ]),
+  },
+};
+
+// Слитая карта Бух+Мед для vertical='all' — union pipelineIds + statusIds по
+// каждому ключу. Диапазоны status_id воронок не пересекаются (кроме общих
+// 142/143, которые дизамбигуируются через pipelineIds), поэтому union безопасен.
+const ALL_FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> =
+  Object.fromEntries(
+    Object.keys(FUNNEL_STATUS_MAP).map((key) => {
+      const buh = FUNNEL_STATUS_MAP[key];
+      const med = MED_FUNNEL_STATUS_MAP[key];
+      if (!med) return [key, buh];
+      return [key, {
+        pipelineIds: [...(buh.pipelineIds ?? []), ...(med.pipelineIds ?? [])],
+        statusIds: new Set([...buh.statusIds, ...med.statusIds]),
+      }];
+    }),
+  );
+
+/** Карта воронковых метрик Дейли по вертикали. Без vertical → буховая (legacy). */
+export function getFunnelStatusMap(
+  vertical?: Vertical,
+): Record<string, { pipelineIds?: number[]; statusIds: Set<number> }> {
+  if (vertical === "med") return MED_FUNNEL_STATUS_MAP;
+  if (vertical === "all") return ALL_FUNNEL_STATUS_MAP;
+  return FUNNEL_STATUS_MAP;
+}
 
 // ==================== NEW VARIANT MAPPING ====================
 // "New" metric keys → same status sets as "Total" but only leads created in period
@@ -444,7 +721,63 @@ export const B2B_QUALIFIED_STATUSES: Set<number> = new Set([
 
 // ==================== PIPELINE IDS for filtering ====================
 
-/** All pipeline IDs relevant for B2G daily metrics */
+// ==================== МЕД ACTIVE STATUS IDS ====================
+// Active (non-closed) статусы мед-воронок — для фетча активных лидов из Kommo при
+// vertical='med'/'all'. WON(142)/LOST(143) исключены (закрытые тянутся отдельно).
+
+/** Мед Гос active statuses */
+export const MED_GOV_ALL_ACTIVE_STATUS_IDS: number[] = [
+  MED_GOV_STATUSES.NEW_LEAD,
+  MED_GOV_STATUSES.IN_PROGRESS,
+  MED_GOV_STATUSES.NO_ANSWER,
+  MED_GOV_STATUSES.CONTACT_MADE,
+  MED_GOV_STATUSES.DECISION_MAKING,
+  MED_GOV_STATUSES.CONSULT_DONE,
+  MED_GOV_STATUSES.DELAYED_START,
+];
+
+/** Мед Бератер active statuses (Kommo-сверено) */
+export const MED_BERATER_ALL_ACTIVE_STATUS_IDS: number[] = [
+  MED_BERATER_STATUSES.RECEIVED_FROM_FIRST,
+  MED_BERATER_STATUSES.DOVEDENIE,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_DONE,
+  MED_BERATER_STATUSES.TERM_DC_CANCELLED,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA,
+  MED_BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
+  MED_BERATER_STATUSES.TERM_AA_CANCELLED,
+  MED_BERATER_STATUSES.BERATER_REVIEW,
+  MED_BERATER_STATUSES.DELAYED_START,
+  MED_BERATER_STATUSES.APPEAL,
+];
+
+/** Union — все активные статусы мед-вертикали b2g */
+export const B2G_MED_ALL_ACTIVE_STATUS_IDS: number[] = [
+  ...MED_GOV_ALL_ACTIVE_STATUS_IDS,
+  ...MED_BERATER_ALL_ACTIVE_STATUS_IDS,
+];
+
+// ==================== PIPELINE IDS по вертикали ====================
+
+/** Бух-вертикаль b2g: Бух Гос + Бух Бератер */
+export const B2G_BUH_PIPELINE_IDS = [
+  B2G_PIPELINES.FIRST_LINE,
+  B2G_PIPELINES.BERATER,
+];
+
+/** Мед-вертикаль b2g: Мед Гос + Мед Бератер */
+export const B2G_MED_PIPELINE_IDS = [
+  B2G_PIPELINES.MEDICAL_GOV,
+  B2G_PIPELINES.MED_BERATER,
+];
+
+/**
+ * All pipeline IDs relevant for B2G daily metrics.
+ * ⚠ Legacy-набор (Бух + Мед Гос, БЕЗ Мед Бератер) — сохранён как есть для обратной
+ * совместимости вызовов getPipelineIds без vertical. Новую полную мед-вертикаль
+ * (обе воронки) даёт vertical='all'/'med'. Не менять без ревизии всех вызовов.
+ */
 export const B2G_ALL_PIPELINE_IDS = [
   B2G_PIPELINES.FIRST_LINE,
   B2G_PIPELINES.BERATER,
@@ -457,16 +790,131 @@ export const B2B_ALL_PIPELINE_IDS = [
   B2B_PIPELINES.MEDICAL_COMM,
 ];
 
-/** Get pipeline IDs by department */
-export function getPipelineIds(department: string): number[] {
-  if (department === "b2b") return B2B_ALL_PIPELINE_IDS;
-  return B2G_ALL_PIPELINE_IDS; // default: b2g
+/**
+ * Berater-воронка(и) для вкладки Термин по вертикали:
+ *   buh → Бух Бератер, med → Мед Бератер, all → обе.
+ * Без vertical → буховый набор (legacy — сохраняет прежнее поведение Термина).
+ */
+export function getBeraterPipelineIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [B2G_PIPELINES.MED_BERATER];
+  if (vertical === "all") return [B2G_PIPELINES.BERATER, B2G_PIPELINES.MED_BERATER];
+  return [B2G_PIPELINES.BERATER]; // buh / undefined (legacy)
 }
 
-/** Get active status IDs by department */
-export function getActiveStatusIds(department: string): number[] {
+/** Первая линия (квалификатор) по вертикали: buh → Бух Гос, med → Мед Гос, all → обе. */
+export function getFirstLinePipelineIds(vertical?: Vertical): number[] {
+  if (vertical === "med") return [B2G_PIPELINES.MEDICAL_GOV];
+  if (vertical === "all") return [B2G_PIPELINES.FIRST_LINE, B2G_PIPELINES.MEDICAL_GOV];
+  return [B2G_PIPELINES.FIRST_LINE]; // buh / undefined (legacy)
+}
+
+// ==================== STATUS-СЕТЫ ПО ВЕРТИКАЛИ (для Дейли) ====================
+// Одноимённые стадии бух- и мед-воронок объединяются в Set по вертикали:
+// buh → только буховый id, med → только мед, all → оба. Диапазоны id воронок
+// не пересекаются, поэтому union-проверки membership безопасны.
+
+function pickIds(buhId: number, medId: number, vertical?: Vertical): Set<number> {
+  if (vertical === "med") return new Set([medId]);
+  if (vertical === "all") return new Set([buhId, medId]);
+  return new Set([buhId]); // buh / undefined (legacy)
+}
+
+/** Стадии первой линии (Бух Гос / Мед Гос) по вертикали. */
+export function getFirstLineStatusSets(vertical?: Vertical) {
+  const F = FIRST_LINE_STATUSES;
+  const M = MED_GOV_STATUSES;
+  return {
+    unsorted: pickIds(F.UNSORTED, M.UNSORTED, vertical),
+    base: pickIds(F.BASE, M.BASE, vertical),
+    newLead: pickIds(F.NEW_LEAD, M.NEW_LEAD, vertical),
+    inProgress: pickIds(F.IN_PROGRESS, M.IN_PROGRESS, vertical),
+    noAnswer: pickIds(F.NO_ANSWER, M.NO_ANSWER, vertical),
+    contactMade: pickIds(F.CONTACT_MADE, M.CONTACT_MADE, vertical),
+    decisionMaking: pickIds(F.DECISION_MAKING, M.DECISION_MAKING, vertical),
+    consultDone: pickIds(F.CONSULT_DONE, M.CONSULT_DONE, vertical),
+    docsSentDC: pickIds(F.DOCS_SENT_DC, M.DOCS_SENT_DC, vertical),
+    delayedStart: pickIds(F.DELAYED_START, M.DELAYED_START, vertical),
+  };
+}
+
+/** Стадии Бератера (Бух Бератер / Мед Бератер) по вертикали.
+ *  ⚠ Только живые стадии — убранные из воронки (~2026-03) буховые
+ *  «Взято в работу»/«Недозвон»/«Контакт»/«Термин АА» сюда не входят. */
+export function getBeraterStatusSets(vertical?: Vertical) {
+  const B = BERATER_STATUSES;
+  const M = MED_BERATER_STATUSES;
+  return {
+    receivedFromFirst: pickIds(B.RECEIVED_FROM_FIRST, M.RECEIVED_FROM_FIRST, vertical),
+    dovedenie: pickIds(B.DOVEDENIE, M.DOVEDENIE, vertical),
+    consultBeforeDC: pickIds(B.CONSULT_BEFORE_DC, M.CONSULT_BEFORE_DC, vertical),
+    consultBeforeDCDone: pickIds(B.CONSULT_BEFORE_DC_DONE, M.CONSULT_BEFORE_DC_DONE, vertical),
+    termDCCancelled: pickIds(B.TERM_DC_CANCELLED, M.TERM_DC_CANCELLED, vertical),
+    termDCDone: pickIds(B.TERM_DC_DONE, M.TERM_DC_DONE, vertical),
+    termAACancelled: pickIds(B.TERM_AA_CANCELLED, M.TERM_AA_CANCELLED, vertical),
+    consultBeforeAA: pickIds(B.CONSULT_BEFORE_AA, M.CONSULT_BEFORE_AA, vertical),
+    consultBeforeAADone: pickIds(B.CONSULT_BEFORE_AA_DONE, M.CONSULT_BEFORE_AA_DONE, vertical),
+    beraterReview: pickIds(B.BERATER_REVIEW, M.BERATER_REVIEW, vertical),
+    delayedStart: pickIds(B.DELAYED_START, M.DELAYED_START, vertical),
+    appeal: pickIds(B.APPEAL, M.APPEAL, vertical),
+  };
+}
+
+/**
+ * status_id(ы) «Термин ДЦ отменён/перенесён» по вертикали — для когортного
+ * подсчёта отмен/переносов. Мед-бератер задваивает стадию в Kommo → оба id.
+ * Без vertical → буховый (legacy).
+ */
+export function getTerminCancelledStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.TERM_DC_CANCELLED];
+  const med = [MED_BERATER_STATUSES.TERM_DC_CANCELLED];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
+
+/** status_id(ы) «На рассмотрении бератера» по вертикали (Термин: AA-исключение). */
+export function getTerminBeraterReviewStatusIds(vertical?: Vertical): number[] {
+  const buh = [BERATER_STATUSES.BERATER_REVIEW];
+  const med = [MED_BERATER_STATUSES.BERATER_REVIEW];
+  if (vertical === "med") return med;
+  if (vertical === "all") return [...buh, ...med];
+  return buh; // buh / undefined (legacy)
+}
+
+/**
+ * Get pipeline IDs by department + (optional) vertical.
+ *
+ * Без `vertical` → legacy-поведение (byte-identical сегодняшнему): для b2g это
+ * B2G_ALL_PIPELINE_IDS (Бух + Мед Гос). С `vertical` — новая семантика Бух/Мед/Все.
+ * Vertical применяется только к b2g; для b2b он игнорируется.
+ */
+export function getPipelineIds(department: string, vertical?: Vertical): number[] {
+  if (department === "b2b") return B2B_ALL_PIPELINE_IDS;
+  // b2g
+  if (vertical === "buh") return B2G_BUH_PIPELINE_IDS;
+  if (vertical === "med") return B2G_MED_PIPELINE_IDS;
+  if (vertical === "all") return [...B2G_BUH_PIPELINE_IDS, ...B2G_MED_PIPELINE_IDS];
+  return B2G_ALL_PIPELINE_IDS; // legacy default
+}
+
+/**
+ * Get active status IDs by department + (optional) vertical.
+ *
+ * Без `vertical` → legacy-поведение (для b2g — Бух-только ALL_ACTIVE_STATUS_IDS,
+ * как сегодня). С `vertical` — Бух / Мед / объединение.
+ */
+export function getActiveStatusIds(department: string, vertical?: Vertical): number[] {
   if (department === "b2b") return B2B_ALL_ACTIVE_STATUS_IDS;
-  return ALL_ACTIVE_STATUS_IDS; // default: b2g
+  // b2g
+  if (vertical === "buh") return ALL_ACTIVE_STATUS_IDS;
+  if (vertical === "med") return B2G_MED_ALL_ACTIVE_STATUS_IDS;
+  if (vertical === "all") return [...ALL_ACTIVE_STATUS_IDS, ...B2G_MED_ALL_ACTIVE_STATUS_IDS];
+  return ALL_ACTIVE_STATUS_IDS; // legacy default (Бух-только)
+}
+
+/** Нормализовать произвольную строку из query в Vertical (b2g). Дефолт — 'all'. */
+export function parseVertical(raw: string | null | undefined): Vertical {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : "all";
 }
 
 // ==================== B2B CUSTOM FIELDS (Kommo lead) ====================

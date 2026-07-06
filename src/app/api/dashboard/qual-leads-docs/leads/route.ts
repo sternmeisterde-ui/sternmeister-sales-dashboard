@@ -26,14 +26,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
-  FIRST_LINE_STATUSES,
-  QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
+  getDocsSentStatusIds,
+  getFirstLinePipelineIds,
+  getQualFirstLineStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { formatDaysDuration } from "@/lib/utils/duration";
 
 const HARD_CAP = 500;
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
+
+const inList = (ids: number[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
 
 interface RawRow {
   lead_id: string | number;
@@ -76,9 +84,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const firstLineId = B2G_PIPELINES.FIRST_LINE;
-  const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
-  const wonStatusId = FIRST_LINE_STATUSES.WON;
+  // Vertical-aware (spec 21 §11): buh → Бух Гос, med → Мед Гос, all → обе.
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const firstLineIds = getFirstLinePipelineIds(vertical);
+  const docsSentStatusIds = getDocsSentStatusIds(vertical);
+  const qualStatusIds = getQualFirstLineStatusIds(vertical);
+  const wonStatusId = 142; // WON общий для обеих воронок первой линии
 
   const berlinCreated = sql`((lc.created_at) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'`;
   const bucketMatch: SQL = isBucket
@@ -127,8 +138,8 @@ export async function GET(req: NextRequest) {
           ELSE 'docs'
         END AS milestone_type
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${firstLineId}
-        AND status_id IN (${docsSentStatusId}, ${wonStatusId})
+      WHERE pipeline_id IN (${inList(firstLineIds)})
+        AND status_id IN (${inList([...docsSentStatusIds, wonStatusId])})
       ORDER BY lead_id, event_at ASC
     )
     SELECT
@@ -147,18 +158,12 @@ export async function GET(req: NextRequest) {
       COUNT(*) OVER ()::bigint AS total_count
     FROM analytics.leads_cohort lc
     ${docsJoin}
-    WHERE lc.pipeline_id = ${firstLineId}
+    WHERE lc.pipeline_id IN (${inList(firstLineIds)})
       AND ${bucketMatch}
-      AND lc.status_id IN (${sql.join(
-        QUAL_FIRST_LINE_STATUS_IDS.map((id) => sql`${id}`),
-        sql`, `,
-      )})
+      AND lc.status_id IN (${inList(qualStatusIds)})
       AND (
         lc.non_qual_enum_id IS NULL
-        OR lc.non_qual_enum_id IN (${sql.join(
-          QUAL_REASON_ENUM_IDS.map((id) => sql`${id}`),
-          sql`, `,
-        )})
+        OR lc.non_qual_enum_id IN (${inList([...QUAL_REASON_ENUM_IDS])})
       )
       ${docsExtra}
     ORDER BY ${orderBy}

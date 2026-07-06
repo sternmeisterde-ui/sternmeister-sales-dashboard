@@ -207,19 +207,24 @@ function QualLeadsChartTooltip({
 
 // ── Tab root ────────────────────────────────────────
 
-export default function TerminTab() {
+export default function TerminTab({ vertical }: { vertical?: "buh" | "med" | "all" }) {
   // One fetch of the Kommo status list, shared by both Termin-cohort charts.
-  const statusRegistry = useBeraterStatuses();
+  // Vertical-aware: статусы бератер-воронки выбранной вертикали.
+  const statusRegistry = useBeraterStatuses(vertical);
+  // Ярлык вертикали в заголовке верхних графиков (когортное «среднее до термина»).
+  // Все секции vertical-aware (spec 21 §11; квал-фильтр мед = зеркало бух, 2026-07-06).
+  const verticalTitle = vertical === "med" ? "Мед Бератер" : vertical === "all" ? "Бух + Мед Бератер" : "Бух Бератер";
   return (
     <div className="flex flex-col gap-8 fade-in">
       <TerminDashboardSection
         bucketBy="created_at"
-        chartTitle="Среднее время до термина (Бух Бератер)"
+        chartTitle={`Среднее время до термина (${verticalTitle})`}
         xAxisHint={{
           day: "дата создания сделки",
           week: "неделя создания (с понедельника)",
         }}
         statusRegistry={statusRegistry}
+        vertical={vertical}
       />
       <TerminDashboardSection
         bucketBy="termin_date"
@@ -229,11 +234,12 @@ export default function TerminTab() {
           week: "неделя термина (с понедельника)",
         }}
         statusRegistry={statusRegistry}
+        vertical={vertical}
       />
-      <QualLeadsDocsSection />
-      <FunnelTimingSection />
-      <UpcomingTerminsSection />
-      <PreTerminSection />
+      <QualLeadsDocsSection vertical={vertical} />
+      <FunnelTimingSection vertical={vertical} />
+      <UpcomingTerminsSection vertical={vertical} />
+      <PreTerminSection vertical={vertical} />
     </div>
   );
 }
@@ -258,12 +264,12 @@ export default function TerminTab() {
 type StatusGroup = "pre_dc" | "post_dc" | "closed" | "other";
 
 const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
+  // ── Бух Бератер (12154099). Kommo-сверка 2026-07-05: стадии «Взято в
+  // работу»/«Недозвон»/«Контакт установлен»/«Термин АА» удалены из воронки —
+  // текущих лидов на них не бывает, из карты убраны.
   // Pre-ДЦ
   93860331: "pre_dc", // RECEIVED_FROM_FIRST
   102183931: "pre_dc", // DOVEDENIE
-  93860335: "pre_dc", // IN_PROGRESS
-  93860339: "pre_dc", // NO_ANSWER
-  93860863: "pre_dc", // CONTACT_MADE
   102183935: "pre_dc", // CONSULT_BEFORE_DC
   102183939: "pre_dc", // CONSULT_BEFORE_DC_DONE
   93860875: "pre_dc", // TERM_DC_CANCELLED
@@ -272,7 +278,6 @@ const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
   102183943: "post_dc", // CONSULT_BEFORE_AA
   102183947: "post_dc", // CONSULT_BEFORE_AA_DONE
   93860883: "post_dc", // TERM_AA_CANCELLED
-  93860879: "post_dc", // TERM_AA
   // Closed / прочие
   93860887: "closed", // BERATER_REVIEW
   95515895: "closed", // DELAYED_START
@@ -280,13 +285,31 @@ const STATUS_GROUP_BY_ID: Record<number, Exclude<StatusGroup, "other">> = {
   142: "closed", // WON
   143: "closed", // LOST
   93860327: "closed", // UNSORTED
+  // ── Мед Бератер (14001515) — структурное зеркало Бух Бератер.
+  // Pre-ДЦ
+  108064611: "pre_dc", // RECEIVED_FROM_FIRST
+  108064615: "pre_dc", // DOVEDENIE
+  108064619: "pre_dc", // CONSULT_BEFORE_DC
+  108066243: "pre_dc", // CONSULT_BEFORE_DC_DONE
+  108066247: "pre_dc", // TERM_DC_CANCELLED
+  // Post-ДЦ
+  108066251: "post_dc", // TERM_DC_DONE
+  108066267: "post_dc", // CONSULT_BEFORE_AA
+  108066271: "post_dc", // CONSULT_BEFORE_AA_DONE
+  108322459: "post_dc", // TERM_AA_CANCELLED
+  // Closed / прочие
+  108066275: "closed", // BERATER_REVIEW
+  108066279: "closed", // DELAYED_START
+  108066283: "closed", // APPEAL
+  108064607: "closed", // UNSORTED
 };
 
 // Default-deselected on first load. Mirrors the prior implicit
 // `<> TERM_DC_CANCELLED` cohort filter so chart values don't shift for
 // existing users.
 const DEFAULT_EXCLUDED_FROM_SELECTION: ReadonlySet<number> = new Set([
-  93860875, // TERM_DC_CANCELLED
+  93860875, // TERM_DC_CANCELLED (Бух Бератер)
+  108066247, // TERM_DC_CANCELLED (Мед Бератер)
 ]);
 
 const GROUP_LABELS: Record<StatusGroup, string> = {
@@ -510,12 +533,13 @@ function BeraterStatusMultiselect({
 
 /** Loads the BERATER status list once per Termin-tab mount and shares it
  *  across the two TerminDashboardSection instances. */
-function useBeraterStatuses(): { statuses: StatusMeta[]; loading: boolean } {
+function useBeraterStatuses(vertical?: "buh" | "med" | "all"): { statuses: StatusMeta[]; loading: boolean } {
   const [statuses, setStatuses] = useState<StatusMeta[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     const ac = new AbortController();
-    fetch("/api/dashboard/berater-statuses", { signal: ac.signal })
+    const qs = vertical ? `?vertical=${vertical}` : "";
+    fetch(`/api/dashboard/berater-statuses${qs}`, { signal: ac.signal })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<BeraterStatusesResponse>;
@@ -532,7 +556,7 @@ function useBeraterStatuses(): { statuses: StatusMeta[]; loading: boolean } {
         setLoading(false);
       });
     return () => ac.abort();
-  }, []);
+  }, [vertical]);
   return { statuses, loading };
 }
 
@@ -543,11 +567,13 @@ function TerminDashboardSection({
   chartTitle,
   xAxisHint,
   statusRegistry,
+  vertical,
 }: {
   bucketBy: BucketBy;
   chartTitle: string;
   xAxisHint: Record<Granularity, string>;
   statusRegistry: { statuses: StatusMeta[]; loading: boolean };
+  vertical?: "buh" | "med" | "all";
 }) {
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     defaultRangeLast30Days(),
@@ -561,21 +587,33 @@ function TerminDashboardSection({
   // statusIds is null until the Kommo registry resolves: we don't want to
   // fire /termins with stale localStorage IDs before we can validate them
   // against the current Kommo status set.
-  const storageKey = `termin-section-status-filter-${bucketBy}`;
+  // Ключ хранилища — ПО ВЕРТИКАЛИ: буховый и медовый выбор не смешиваются.
+  const verticalKey = vertical ?? "buh";
+  const storageKey = `termin-section-status-filter-${bucketBy}-${verticalKey}`;
   const [statusIds, setStatusIds] = useState<number[] | null>(null);
   const { statuses: statusOptions, loading: statusesLoading } = statusRegistry;
+  // Дрилл-параметры секции — вертикаль обязана ехать вместе со statusIds,
+  // иначе drill-роут скоупит буховыми воронками при медовых статусах → «0 лидов».
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
 
-  // Initial seed: once the registry resolves, reconcile localStorage against
-  // it (drop unknown IDs) or fall back to the default (everything except
-  // CANCELLED). Only runs once per registry-load.
-  const initRef = useRef(false);
+  // Seed: once the registry resolves, reconcile localStorage against it (drop
+  // unknown IDs) or fall back to the default. Runs once per VERTICAL: смена
+  // тоггла грузит другой реестр, и старые statusIds к нему неприменимы.
+  const seededForRef = useRef<string | null>(null);
+  if (seededForRef.current !== null && seededForRef.current !== verticalKey) {
+    // Вертикаль сменилась: render-time сброс (паттерн ClientsView-пагинации,
+    // НЕ setState-в-эффекте) — statusIds=null блокирует фетч со старыми ID
+    // до пере-сида против нового реестра.
+    seededForRef.current = null;
+    setStatusIds(null);
+  }
   useEffect(() => {
     // Не инициализируемся, пока реестр статусов не пришёл НЕПУСТЫМ. Иначе при
     // сетевом сбое (berater-statuses вернул []) мы бы выставили пустой выбор и
     // записали его в localStorage — и «залипли» на «Не выбрано» даже после
     // восстановления БД (баг: пустой сохранённый выбор не откатывался к дефолту).
-    if (statusesLoading || initRef.current || statusOptions.length === 0) return;
-    initRef.current = true;
+    if (statusesLoading || seededForRef.current === verticalKey || statusOptions.length === 0) return;
+    seededForRef.current = verticalKey;
     const validIds = new Set(statusOptions.map((s) => s.id));
     const stored = loadStoredStatusFilter(storageKey);
     const reconciled = stored ? stored.filter((id) => validIds.has(id)) : [];
@@ -584,7 +622,7 @@ function TerminDashboardSection({
     setStatusIds(
       reconciled.length === 0 ? defaultStatusIds(statusOptions) : reconciled,
     );
-  }, [statusOptions, statusesLoading, storageKey]);
+  }, [statusOptions, statusesLoading, storageKey, verticalKey]);
 
   useEffect(() => {
     if (typeof window === "undefined" || statusIds === null) return;
@@ -616,8 +654,9 @@ function TerminDashboardSection({
         const useFirstParam = useFirst ? "1" : "0";
         // `statusIds` is always sent (empty value means "all deselected → return
         // empty"). Lets the user observe the empty-state intentionally.
+        const verticalParam = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}&statusIds=${encodeURIComponent(statusIdsParam)}`,
+          `/api/dashboard/termins?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}&bucketBy=${bucketBy}&useFirst=${useFirstParam}&statusIds=${encodeURIComponent(statusIdsParam)}${verticalParam}`,
           { signal },
         );
         if (!res.ok) {
@@ -643,6 +682,7 @@ function TerminDashboardSection({
       useFirst,
       statusIdsParam,
       statusIds,
+      vertical,
     ],
   );
 
@@ -833,6 +873,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Когорта · ${dateDisplay}`,
                     subtitle: `${stats.totalDeals} лидов · сверху — с большим числом переносов`,
@@ -862,6 +903,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Термин ДЦ · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.dcOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -891,6 +933,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Термин АА · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.aaOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -925,6 +968,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Перенесено · ${dateDisplay}`,
                     subtitle: `${stats.rescheduledTotal} лидов с переносами · сверху — больше всего переносов`,
@@ -1005,6 +1049,7 @@ function TerminDashboardSection({
                           granularity,
                           useFirst: useFirst ? "1" : "0",
                           statusIds: statusIdsParam,
+                          ...drillVertical,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин ДЦ`,
                         subtitle: `Ср. ${row.dcAvgDays?.toFixed(1) ?? "—"} дн · ${row.dcCount} лидов · сверху — самые долгие`,
@@ -1039,6 +1084,7 @@ function TerminDashboardSection({
                           granularity,
                           useFirst: useFirst ? "1" : "0",
                           statusIds: statusIdsParam,
+                          ...drillVertical,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин АА`,
                         subtitle: `Ср. ${row.aaAvgDays?.toFixed(1) ?? "—"} дн · ${row.aaCount} лидов · сверху — самые долгие`,
@@ -1068,7 +1114,8 @@ function TerminDashboardSection({
 
 // ── Qual-leads → Документы отправлены в ДЦ section ───
 
-function QualLeadsDocsSection() {
+function QualLeadsDocsSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [range, setRange] = useState<{ start: Date; end: Date }>(() =>
     defaultRangeLast30Days(),
   );
@@ -1086,8 +1133,9 @@ function QualLeadsDocsSection() {
       try {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/qual-leads-docs?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}`,
+          `/api/dashboard/qual-leads-docs?dateFrom=${dateFrom}&dateTo=${dateTo}&granularity=${granularity}${vqs}`,
           { signal },
         );
         if (!res.ok) {
@@ -1105,7 +1153,7 @@ function QualLeadsDocsSection() {
         setLoading(false);
       }
     },
-    [range.start, range.end, granularity],
+    [range.start, range.end, granularity, vertical],
   );
 
   useEffect(() => {
@@ -1246,7 +1294,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "cohort" },
+                    params: { dateFrom, dateTo, mode: "cohort", ...drillVertical },
                     title: `Квал-когорта · ${dateDisplay}`,
                     subtitle: `${stats.qualTotal} лидов · сверху — без перехода в «Док. в ДЦ»`,
                   });
@@ -1265,7 +1313,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "docs" },
+                    params: { dateFrom, dateTo, mode: "docs", ...drillVertical },
                     title: `Дошли до Док. / прямого Termin · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} лидов · сверху — самые долгие переходы`,
                   });
@@ -1288,7 +1336,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "docs" },
+                    params: { dateFrom, dateTo, mode: "docs", ...drillVertical },
                     title: `Ср. дней до Док. в ДЦ · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} лидов · ср. ${(stats.avgOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
                   });
@@ -1311,7 +1359,7 @@ function QualLeadsDocsSection() {
                   const dateTo = formatDate(range.end);
                   setDrill({
                     url: "/api/dashboard/qual-leads-docs/leads",
-                    params: { dateFrom, dateTo, mode: "cohort" },
+                    params: { dateFrom, dateTo, mode: "cohort", ...drillVertical },
                     title: `Конверсия в «Док. в ДЦ» · ${dateDisplay}`,
                     subtitle: `${stats.docsTotal} из ${stats.qualTotal} (${stats.conversionOverall?.toFixed(1) ?? "—"}%) · сверху — кто не дошёл`,
                   });
@@ -1388,7 +1436,7 @@ function QualLeadsDocsSection() {
                       if (!row || row.docsCount === 0) return;
                       setDrill({
                         url: "/api/dashboard/qual-leads-docs/leads",
-                        params: { date: row.date, granularity },
+                        params: { date: row.date, granularity, ...drillVertical },
                         title: formatBucketLabel(row.date, granularity),
                         subtitle: `${row.docsCount} лидов с переходом в «Док. в ДЦ» (из ${row.qualCount} квал-когорты) · ср. ${row.avgDays?.toFixed(1) ?? "—"} дн · самые долгие сверху`,
                       });
@@ -1426,7 +1474,8 @@ interface FunnelStageRow {
   avgDays: number | null;
 }
 
-function FunnelTimingSection() {
+function FunnelTimingSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   // 90d default: stage transitions take 20+ days each, so the 30d default used
   // by the cohort sections leaves the funnel mostly empty (most leads in the
   // window haven't completed the next transition yet). 90d shows mature data.
@@ -1449,8 +1498,9 @@ function FunnelTimingSection() {
       try {
         const dateFrom = formatDate(range.start);
         const dateTo = formatDate(range.end);
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const res = await fetch(
-          `/api/dashboard/termin-funnel?dateFrom=${dateFrom}&dateTo=${dateTo}`,
+          `/api/dashboard/termin-funnel?dateFrom=${dateFrom}&dateTo=${dateTo}${vqs}`,
           { signal },
         );
         if (!res.ok) {
@@ -1468,7 +1518,7 @@ function FunnelTimingSection() {
         setLoading(false);
       }
     },
-    [range.start, range.end],
+    [range.start, range.end, vertical],
   );
 
   useEffect(() => {
@@ -1580,6 +1630,7 @@ function FunnelTimingSection() {
                           stage: String(stage),
                           dateFrom,
                           dateTo,
+                          ...drillVertical,
                         },
                         title: `${s.fromName} → ${s.toName}`,
                         subtitle: `${s.count} переходов · ср. ${s.avgDays?.toFixed(1) ?? "—"} дн · сверху — самые долгие · окно ${dateDisplay}`,
@@ -1642,6 +1693,7 @@ function FunnelTimingSection() {
                         stage: String(row.stage),
                         dateFrom,
                         dateTo,
+                        ...drillVertical,
                       },
                       title: `${row.fromName} → ${row.toName}`,
                       subtitle: `${row.count} переходов · самые долгие сверху · окно ${formatRu(range.start)} — ${formatRu(range.end)}`,
@@ -1719,7 +1771,8 @@ interface UpcomingRow {
   totalCount: number;
 }
 
-function UpcomingTerminsSection() {
+function UpcomingTerminsSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [days, setDays] = useState<number>(30);
   // Произвольный диапазон с календаря. Если задан (start+end) — переопределяет
   // пресеты days и запрашивается через from/to.
@@ -1754,10 +1807,11 @@ function UpcomingTerminsSection() {
       if (!hasDataRef.current) setLoading(true);
       setError(null);
       try {
+        const vqs = vertical ? `&vertical=${vertical}` : "";
         const qs =
-          customRange?.start && customRange?.end
+          (customRange?.start && customRange?.end
             ? `from=${formatDate(customRange.start)}&to=${formatDate(customRange.end)}`
-            : `days=${days}`;
+            : `days=${days}`) + vqs;
         const res = await fetch(`/api/dashboard/termins-upcoming?${qs}`, {
           signal,
           // Polling-driven refreshes must hit the server. Without no-store the
@@ -1780,7 +1834,7 @@ function UpcomingTerminsSection() {
         setLoading(false);
       }
     },
-    [days, customRange],
+    [days, customRange, vertical],
   );
 
   useEffect(() => {
@@ -1903,7 +1957,7 @@ function UpcomingTerminsSection() {
                   const dateTo = data[data.length - 1].date;
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
-                    params: { dateFrom, dateTo, leg: "dc" },
+                    params: { dateFrom, dateTo, leg: "dc", ...drillVertical },
                     title: `Термин ДЦ · ${periodLabel}`,
                     subtitle: `${stats.totalDc} лидов · по времени слота`,
                   });
@@ -1922,7 +1976,7 @@ function UpcomingTerminsSection() {
                   const dateTo = data[data.length - 1].date;
                   setDrill({
                     url: "/api/dashboard/termins-upcoming/leads",
-                    params: { dateFrom, dateTo, leg: "aa" },
+                    params: { dateFrom, dateTo, leg: "aa", ...drillVertical },
                     title: `Термин АА · ${periodLabel}`,
                     subtitle: `${stats.totalAa} лидов · по времени слота`,
                   });
@@ -1949,6 +2003,7 @@ function UpcomingTerminsSection() {
                       dateFrom: peakDate,
                       dateTo: peakDate,
                       leg: "both",
+                      ...drillVertical,
                     },
                     title: `Пиковый день · ${formatRu(new Date(peakDate))}`,
                     subtitle: `${stats.peakDay!.n} слотов (ДЦ + АА) · по времени`,
@@ -2041,7 +2096,7 @@ function UpcomingTerminsSection() {
                     if (!row || row.dcCount === 0) return;
                     setDrill({
                       url: "/api/dashboard/termins-upcoming/leads",
-                      params: { date: row.date, leg: "dc" },
+                      params: { date: row.date, leg: "dc", ...drillVertical },
                       title: `${formatBucketLabel(row.date, "day")} · Термин ДЦ`,
                       subtitle: `${row.dcCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
                     });
@@ -2059,7 +2114,7 @@ function UpcomingTerminsSection() {
                     if (!row || row.aaCount === 0) return;
                     setDrill({
                       url: "/api/dashboard/termins-upcoming/leads",
-                      params: { date: row.date, leg: "aa" },
+                      params: { date: row.date, leg: "aa", ...drillVertical },
                       title: `${formatBucketLabel(row.date, "day")} · Термин АА`,
                       subtitle: `${row.aaCount} лидов в этот день — кликни «Сделка #...» чтобы открыть в Kommo`,
                     });
@@ -2108,7 +2163,8 @@ const BUCKET_META: Record<
   },
 };
 
-function PreTerminSection() {
+function PreTerminSection({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
   const [data, setData] = useState<PreTerminApiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -2119,7 +2175,8 @@ function PreTerminSection() {
     if (!hasDataRef.current) setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/dashboard/pre-termin`, { signal });
+      const vqs = vertical ? `?vertical=${vertical}` : "";
+      const res = await fetch(`/api/dashboard/pre-termin${vqs}`, { signal });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`API error ${res.status}: ${text}`);
@@ -2134,7 +2191,7 @@ function PreTerminSection() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [vertical]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -2233,7 +2290,7 @@ function PreTerminSection() {
                     if (!row || row.count === 0) return;
                     setDrill({
                       url: "/api/dashboard/pre-termin/leads",
-                      params: { statusId: String(row.statusId) },
+                      params: { statusId: String(row.statusId), ...drillVertical },
                       title: row.statusName,
                       subtitle: `${row.count} лидов · отсортировано по самым «застрявшим» (выше — дольше в статусе)`,
                     });

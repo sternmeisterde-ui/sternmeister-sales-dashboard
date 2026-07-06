@@ -86,8 +86,11 @@ interface RealCohortRow {
 
 export default function FunnelTab({
   department: _department,
+  vertical,
 }: {
   department: Department;
+  /** Вертикаль b2g (Бух/Мед/Все) из глобального тоггла. Без неё — бух (legacy). */
+  vertical?: "buh" | "med" | "all";
 }) {
   const defaultFilters = useMemo(() => buildDefaultFilters(), []);
   const [filters, setFilters] = useState<FunnelFiltersState>(defaultFilters);
@@ -161,6 +164,7 @@ export default function FunnelTab({
       if (state.responsibleUserId)
         params.set("responsible_user_id", state.responsibleUserId);
       if (state.lang) params.set("lang", state.lang);
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/funnel/cohorts?${params}`, {
         signal: ctrl.signal,
       });
@@ -207,7 +211,7 @@ export default function FunnelTab({
         setLoading(false);
       }
     }
-  }, []);
+  }, [vertical]);
 
   // Фетч обзора (KPI + воронка) — те же фильтры, без maturity.
   const fetchOverview = useCallback(async (state: FunnelFiltersState) => {
@@ -225,6 +229,7 @@ export default function FunnelTab({
       if (state.responsibleUserId)
         params.set("responsible_user_id", state.responsibleUserId);
       if (state.lang) params.set("lang", state.lang);
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/funnel/overview?${params}`, {
         signal: ctrl.signal,
       });
@@ -240,7 +245,7 @@ export default function FunnelTab({
         setOverviewLoading(false);
       }
     }
-  }, []);
+  }, [vertical]);
 
   // Debounce — 250ms после смены фильтров. НЕ зависит от viewMode: переключение
   // Когорты⇄Клиенты не перезапрашивает данные — когорты остаются в state и
@@ -264,6 +269,7 @@ export default function FunnelTab({
           from: fmtLocalDate(start),
           to: fmtLocalDate(end),
         });
+        if (vertical) params.set("vertical", vertical);
         const res = await fetch(`/api/funnel/filter-options?${params}`, {
           signal: ctrl.signal,
         });
@@ -298,7 +304,7 @@ export default function FunnelTab({
         if ((e as Error).name === "AbortError") return;
       }
     },
-    []
+    [vertical]
   );
 
   useEffect(() => {
@@ -455,8 +461,9 @@ export default function FunnelTab({
     if (filters.responsibleUserId)
       p.set("responsible_user_id", filters.responsibleUserId);
     if (filters.lang) p.set("lang", filters.lang);
+    if (vertical) p.set("vertical", vertical);
     return p;
-  }, [filters]);
+  }, [filters, vertical]);
 
   const activeBundle = conversionBundles[activeId];
 
@@ -490,18 +497,23 @@ export default function FunnelTab({
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
       </div>
 
-      {viewMode === "clients" && <ClientsView filters={filters} />}
+      {viewMode === "clients" && <ClientsView filters={filters} vertical={vertical} />}
 
-      {viewMode === "managers" && <ManagersView filters={filters} />}
+      {viewMode === "managers" && <ManagersView filters={filters} vertical={vertical} />}
 
       {viewMode === "cohorts" && (
         <>
       <div className="flex flex-col lg:flex-row gap-3 items-stretch">
-        <div className="flex-1 min-w-0">
-          <UnifiedFunnel
-            stages={overview?.funnel ?? []}
-            loading={overviewLoading && !overview}
-          />
+        {/* Высоту ряда задаёт колонка KPI-карточек справа: на lg+ воронка
+            absolute внутри своей колонки (не растягивает ряд), список этапов
+            скроллится внутри. На мобиле — обычный поток с max-h в компоненте. */}
+        <div className="flex-1 min-w-0 relative">
+          <div className="lg:absolute lg:inset-0">
+            <UnifiedFunnel
+              stages={overview?.funnel ?? []}
+              loading={overviewLoading && !overview}
+            />
+          </div>
         </div>
         <div className="lg:w-60 shrink-0">
           <KpiBar

@@ -11,7 +11,7 @@ import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc } from "dr
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
-import { getLines, KOMMO, type DepartmentId } from "@/lib/config/tenant";
+import { getLines, verticalPromptTypes, KOMMO, type DepartmentId } from "@/lib/config/tenant";
 import { parseDateBoundary, addDaysCivil, todayCivil, APP_TZ } from "@/lib/utils/date";
 
 const CACHE_TTL = 2 * 60 * 1000;
@@ -212,10 +212,22 @@ function buildPeriodRange(fromCivil: string, toCivil: string, groupBy: string): 
 // showed dashes. Fix belongs in OKK (re-eval those calls under
 // d2_dovedenie), not here.
 
-function getOkkPromptTypes(department: string, line: string): string[] | null {
+function getOkkPromptTypes(
+  department: string,
+  line: string,
+  vertical?: "buh" | "med" | "all",
+): string[] | null {
   if (department !== "b2g" && department !== "b2b") return null;
-  if (line === "all" || !line) return null;
-  const lines = getLines(department as DepartmentId);
+  // «Все» внутри вертикали (b2g) → скоуп на промпты этой вертикали (Бух/Мед),
+  // а не «без фильтра». Иначе мед-оценки протекали бы в бух-«Все» и наоборот.
+  // vertical='all' → без скоупа (все воронки Бух+Мед).
+  if (line === "all" || !line) {
+    return vertical && vertical !== "all"
+      ? verticalPromptTypes(department as DepartmentId, vertical)
+      : null;
+  }
+  // Конкретная линия: ищем среди ВСЕХ линий (вкл. мед), не только бух-дефолт.
+  const lines = getLines(department as DepartmentId, "all");
   const exact = lines.find((l) => l.id === line);
   if (exact) return [exact.promptType];
   const inGroup = lines.filter((l) => l.group === line).map((l) => l.promptType);
@@ -231,7 +243,8 @@ function getOkkPromptTypes(department: string, line: string): string[] | null {
 
 function funnelLabelForOkk(department: DepartmentId, promptType: string | null): string {
   if (!promptType) return "Без воронки";
-  const line = getLines(department).find((l) => l.promptType === promptType);
+  // Ищем среди всех линий (вкл. мед), иначе мед-промпт → сырой ярлык "d2_med_*".
+  const line = getLines(department, "all").find((l) => l.promptType === promptType);
   return line ? (line.shortLabel ?? line.label) : promptType;
 }
 
@@ -246,8 +259,10 @@ function funnelLabelForRoleplay(department: DepartmentId, callType: string | nul
   }
 }
 
-function funnelOrderForOkk(department: DepartmentId): string[] {
-  return getLines(department).map((l) => l.shortLabel ?? l.label);
+function funnelOrderForOkk(department: DepartmentId, vertical?: "buh" | "med" | "all"): string[] {
+  // Ряды-воронки режима «Все» — линии выбранной вертикали (b2g). vertical='all'
+  // → все линии (Бух+Мед). Без vertical (b2b) — все линии отдела, как раньше.
+  return getLines(department, vertical).map((l) => l.shortLabel ?? l.label);
 }
 
 function funnelOrderForRoleplay(department: DepartmentId): string[] {
@@ -722,9 +737,10 @@ async function fetchOkkData(
   wantTree: boolean,
   excludedCallIds: Set<string>,
   minDurSec: number,
+  vertical?: "buh" | "med" | "all",
 ): Promise<AnalyticsResponse> {
   const db = getOkkDbForDepartment(department);
-  const promptTypes = getOkkPromptTypes(department, line);
+  const promptTypes = getOkkPromptTypes(department, line, vertical);
   // Коммерсы (r2_commercial / r2_med_commercial) → таблицы критериев в
   // раскладке Spellit (перегруппировка блоков). Применяется только в режиме
   // конкретной линии (не «все воронки»), т.е. внутри ветки !isAllFunnels.
@@ -957,7 +973,7 @@ async function fetchOkkData(
   // prompt_type(s).
   let canonical: CanonicalCriteria;
   if (isAllFunnels) {
-    const funnels = funnelOrderForOkk(department);
+    const funnels = funnelOrderForOkk(department, vertical);
     canonical = {
       blockOrder: funnels,
       blockCriteria: new Map(funnels.map((n) => [n, [] as string[]])),
@@ -1418,6 +1434,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const department = (sp.get("department") === "b2b" ? "b2b" : "b2g") as "b2g" | "b2b";
     const source = sp.get("source") === "roleplay" ? "roleplay" : "okk";
     const line = sp.get("line") ?? "all";
+    // Вертикаль Бух/Мед — только b2g + OKK (мед-ролевки пока не подключены).
+    // Иначе undefined → поведение как раньше (никакого мед-скоупа).
+    const rawVertical = sp.get("vertical");
+    const vertical: "buh" | "med" | "all" | undefined =
+      department === "b2g" && source === "okk" &&
+      (rawVertical === "buh" || rawVertical === "med" || rawVertical === "all")
+        ? rawVertical
+        : undefined;
     const groupBy = sp.get("groupBy") ?? "day";
     const managerIdsParam = sp.get("managerIds");
     const managerIds = managerIdsParam ? managerIdsParam.split(",").filter(Boolean) : [];
@@ -1453,12 +1477,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const excludedCallIds = await loadExcludedCallIds(department, source);
     const excludedSig = [...excludedCallIds].sort().join(",");
 
-    const cacheKey = `analytics:${department}:${source}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}:minDur=${minDurSec}:excl=${excludedSig}`;
+    const cacheKey = `analytics:${department}:${source}:${vertical ?? "-"}:${line}:${groupBy}:${fromCivil}:${toCivil}:${managerIds.join(",")}:tree=${wantTree}:minDur=${minDurSec}:excl=${excludedSig}`;
 
     const data = await cached(cacheKey, CACHE_TTL, () =>
       source === "roleplay"
         ? fetchRoleplayData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds)
-        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds, minDurSec),
+        : fetchOkkData(department, line, from, to, fromCivil, toCivil, groupBy, managerIds, wantTree, excludedCallIds, minDurSec, vertical),
     );
 
     return NextResponse.json({ success: true, data });

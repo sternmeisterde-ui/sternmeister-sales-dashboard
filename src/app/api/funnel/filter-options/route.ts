@@ -2,14 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import {
+  getBeraterPipelineIds,
+  getFirstLinePipelineIds,
+  type Vertical,
+} from "@/lib/kommo/pipeline-config";
 import { unwrapRows } from "@/lib/funnel/compute";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const BUH_GOS = B2G_PIPELINES.FIRST_LINE;
-const BERATER = B2G_PIPELINES.BERATER;
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховая (legacy). */
+function parseVerticalParam(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 export async function GET(req: NextRequest) {
   const session = await getSession();
@@ -31,11 +37,16 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const vertical = parseVerticalParam(sp.get("vertical"));
+    const firstLineIds = getFirstLinePipelineIds(vertical);
+    const beraterIds = getBeraterPipelineIds(vertical);
+    const inList = (ids: number[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
+
     // Источники (UTM-каналы), реально присутствующие в выборке.
     const sourcesRows = await analyticsDb.execute(sql`
       SELECT DISTINCT utm_source AS "value"
       FROM analytics.leads_cohort
-      WHERE pipeline_id = ${BUH_GOS}
+      WHERE pipeline_id IN (${inList(firstLineIds)})
         AND created_at >= ${from.toISOString()}
         AND created_at <  ${to.toISOString()}
         AND utm_source IS NOT NULL
@@ -56,7 +67,7 @@ export async function GET(req: NextRequest) {
         responsible_user_id AS "responsibleUserId",
         manager             AS "manager"
       FROM analytics.leads_cohort
-      WHERE pipeline_id IN (${BUH_GOS}, ${BERATER})
+      WHERE pipeline_id IN (${inList([...firstLineIds, ...beraterIds])})
         AND created_at >= ${from.toISOString()}
         AND created_at <  ${to.toISOString()}
         AND responsible_user_id IS NOT NULL

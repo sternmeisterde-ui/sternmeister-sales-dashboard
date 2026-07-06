@@ -653,7 +653,13 @@ function SummaryTimeTable({
 
 // ====================== MAIN COMPONENT ======================
 
-export default function DailyTab({ department }: { department: "b2g" | "b2b" }) {
+export default function DailyTab({ department, vertical }: { department: "b2g" | "b2b"; vertical?: "buh" | "med" | "all" }) {
+  // Вертикаль Бух/Мед/Все (b2g, spec 21) — приходит из глобального тоггла
+  // в шапке (page.tsx). Для b2b всегда undefined → legacy-поведение.
+  const vParam = department === "b2g" && vertical ? `&vertical=${vertical}` : "";
+  // Редактирование планов — только в конкретной вертикали: в «Все» план =
+  // сумма Бух+Мед, писать её некуда (решение 2026-07-06).
+  const plansEditable = department === "b2b" || vertical !== "all";
   const [mode, setMode] = useState<"days" | "weeks" | "months">("days");
   // Berlin civil "today" — `new Date()` browser-local picked the wrong month
   // for users east of Berlin in the first hours after their midnight.
@@ -679,7 +685,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
     let abort = false;
     (async () => {
       try {
-        const res = await fetch(`/api/daily/range?department=${department}&mode=months&year=${berlinCivilComponents(selectedMonth).y}`);
+        const res = await fetch(`/api/daily/range?department=${department}&mode=months&year=${berlinCivilComponents(selectedMonth).y}${vParam}`);
         const json = await res.json();
         if (!abort) setMonthsOfYear(json);
       } catch (e) {
@@ -687,7 +693,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
       }
     })();
     return () => { abort = true; };
-  }, [department, selectedMonth]);
+  }, [department, selectedMonth, vParam]);
 
   // Tracks whether we've ever loaded data — used to decide between the
   // full-screen loader (first load) and the silent background-refresh
@@ -707,12 +713,12 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         const sel = berlinCivilComponents(selectedMonth);
         const monthStr = `${sel.y}-${String(sel.m).padStart(2, "0")}`;
         if (mode === "days") {
-          url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}`;
+          url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}${vParam}`;
         } else if (mode === "weeks") {
           // Weeks-of-selected-month (4–5 Mon-Sun weeks that touch the month)
-          url = `/api/daily/range?department=${department}&mode=weeks&month=${monthStr}`;
+          url = `/api/daily/range?department=${department}&mode=weeks&month=${monthStr}${vParam}`;
         } else {
-          url = `/api/daily/range?department=${department}&mode=months&year=${sel.y}`;
+          url = `/api/daily/range?department=${department}&mode=months&year=${sel.y}${vParam}`;
         }
 
         const res = await fetch(url, { signal });
@@ -742,7 +748,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
         setLoading(false);
       }
     },
-    [department, mode, selectedMonth]
+    [department, mode, selectedMonth, vParam]
   );
 
   useEffect(() => {
@@ -1014,7 +1020,7 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
             selectedCol={selectedDayIdx}
             onSelectCol={setSelectedDayIdx}
             monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
-            onPlanSave={async (dbLine, metricKey, value, periodType, periodDate) => {
+            onPlanSave={!plansEditable ? undefined : async (dbLine, metricKey, value, periodType, periodDate) => {
               // Optimistic UI — flip the edited metric's plan value in place
               // across every snapshot (monthly save affects all days), then
               // fire the PUT. Refetch runs in the background for derived
@@ -1052,6 +1058,11 @@ export default function DailyTab({ department }: { department: "b2g" | "b2b" }) 
                     planValue: value,
                     periodType,
                     periodDate,
+                    // b2g: план пишется в текущую вертикаль (buh/med);
+                    // в «Все» редактирование выключено, b2b — без вертикали.
+                    ...(department === "b2g" && (vertical === "buh" || vertical === "med")
+                      ? { vertical }
+                      : {}),
                   }),
                 });
                 if (!res.ok) {

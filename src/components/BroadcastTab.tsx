@@ -23,7 +23,7 @@ import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import DrillModal from "@/components/DrillModal";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import { getMessageContent, campaignLabel } from "@/lib/broadcast/campaign-content";
+import { getMessageContent, campaignLabel, messageHasRoleplayButton } from "@/lib/broadcast/campaign-content";
 import { kommoLeadUrl } from "@/components/TerminLeadDrillModal";
 
 // Форма ответа /api/broadcast (зеркалит src/lib/broadcast/stats.ts).
@@ -450,7 +450,7 @@ export default function BroadcastTab({ department: _department }: { department: 
                   <tr className="border-b border-white/10 bg-slate-900/60 text-left text-xs text-slate-400">
                     <th className="px-3 py-2 font-medium">Этап / сообщение</th>
                     <th className="px-3 py-2 text-right font-medium">Отправлено</th>
-                    <th className="px-3 py-2 text-right font-medium">Клик «ролевка»</th>
+                    <th className="px-3 py-2 text-right font-medium">Пошли в ролевку</th>
                     <th className="px-3 py-2 text-right font-medium">Завершили</th>
                     <th className="px-3 py-2 text-right font-medium">Клик по ссылке</th>
                   </tr>
@@ -465,6 +465,12 @@ export default function BroadcastTab({ department: _department }: { department: 
                   ) : (
                     stats.stages.map((m) => {
                       const content = getMessageContent(stats.campaignId, m.messageId);
+                      // ЕДИНОЕ правило с сервером (messageHasRoleplayButton):
+                      // без кнопки колонки ролевок = «—», с кнопкой — числа.
+                      const hasRpButton = messageHasRoleplayButton(
+                        stats.campaignId,
+                        m.messageId,
+                      );
                       return (
                         <StageRow
                           key={m.messageId}
@@ -472,6 +478,7 @@ export default function BroadcastTab({ department: _department }: { department: 
                           title={content?.title ?? null}
                           dayLabel={dayLabelFor(stats.campaignId, m.messageId)}
                           mediaCount={content?.mediaCount ?? 0}
+                          hasRpButton={hasRpButton}
                           onOpen={() => setSelectedStage(m.messageId)}
                         />
                       );
@@ -481,9 +488,12 @@ export default function BroadcastTab({ department: _department }: { department: 
               </table>
             </div>
             <p className="mt-2 text-[11px] text-slate-500">
-              Клики — по уникальным пользователям; проценты считаются от отправок (клик) и от
-              кликов (завершили). Telegram не отдаёт ботам «прочитано» и просмотры видео.
-              Тестовые прогоны (<code>/campaign_test*</code>) в статистику не входят.
+              Все счётчики — по уникальным пользователям; проценты — от отправок (пошли в
+              ролевку) и от пошедших (завершили). «Пошли в ролевку» = прямой клик по кнопке
+              ИЛИ тренировка с ботом в день доставки сообщения с кнопкой (атрибуция к
+              рассылке); «Завершили» — завершённая ролевка в тот же день. Telegram не отдаёт
+              ботам «прочитано» и просмотры видео. Тестовые прогоны
+              (<code>/campaign_test*</code>) в статистику не входят.
             </p>
           </section>
 
@@ -636,12 +646,15 @@ function StageRow({
   title,
   dayLabel,
   mediaCount,
+  hasRpButton,
   onOpen,
 }: {
   m: StageRow;
   title: string | null;
   dayLabel: string | null;
   mediaCount: number;
+  /** У сообщения есть кнопка ролевки: 0 — честный ноль; нет кнопки — «—». */
+  hasRpButton: boolean;
   onOpen: () => void;
 }) {
   return (
@@ -665,14 +678,14 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right">{m.sent || "—"}</td>
       <td className="px-3 py-2 text-right">
-        {m.rpClick || "—"}
-        {m.rpClick > 0 && m.sent > 0 && (
+        {hasRpButton ? m.rpClick : "—"}
+        {hasRpButton && m.rpClick > 0 && m.sent > 0 && (
           <span className="ml-1 text-[10px] text-slate-500">{pct(m.rpClick, m.sent)}</span>
         )}
       </td>
       <td className="px-3 py-2 text-right">
-        {m.rpDone || "—"}
-        {m.rpDone > 0 && m.rpClick > 0 && (
+        {hasRpButton ? m.rpDone : "—"}
+        {hasRpButton && m.rpDone > 0 && m.rpClick > 0 && (
           <span className="ml-1 text-[10px] text-slate-500">{pct(m.rpDone, m.rpClick)}</span>
         )}
       </td>
@@ -715,7 +728,7 @@ function StageContentModal({
           {stage && (
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
               <span>отправлено {stage.sent}</span>
-              {stage.rpClick > 0 && <span>клик «ролевка» {stage.rpClick}</span>}
+              {stage.rpClick > 0 && <span>пошли в ролевку {stage.rpClick}</span>}
               {stage.rpDone > 0 && <span>завершили {stage.rpDone}</span>}
               {stage.link > 0 && <span>клик по ссылке {stage.link}</span>}
             </div>

@@ -18,7 +18,11 @@ export const dynamic = "force-dynamic";
  * Только analytics-БД (+ D2 для «balls ОКК» через getOkkByLead).
  */
 
-const BERATER = 12154099;
+// Вертикаль (мед-админ, spec 21): панель корреляции работает по решённым
+// сделкам Бератер-воронок выбранной вертикали. Кампания бота — буховая, но
+// связка идёт по lead_id и для мед просто даст «мало данных» (честно).
+import { getBeraterPipelineIds, type Vertical } from "@/lib/kommo/pipeline-config";
+
 const WON = 142;
 const LOST = 143;
 const TIME_WINDOW = 30; // дней — окно скользящего win-rate
@@ -58,12 +62,16 @@ function pearson(xs: number[], ys: number[]): number | null {
   return Math.round((sxy / Math.sqrt(sxx * syy)) * 100) / 100;
 }
 
-// ── Подзапрос даты закрытия (последнее событие WON/LOST) ─────────────────────
-const RES_AT_JOIN = sql`
+// ── Vertical-хелперы: воронки Бератера выбранной вертикали ──────────────────
+const beraterIn = (vertical?: Vertical) =>
+  sql.join(getBeraterPipelineIds(vertical).map((id) => sql`${id}`), sql`, `);
+
+// Подзапрос даты закрытия (последнее событие WON/LOST)
+const resAtJoin = (vertical?: Vertical) => sql`
   LEFT JOIN (
     SELECT lead_id, max(event_at) AS res_at
     FROM analytics.lead_status_changes
-    WHERE pipeline_id = ${BERATER} AND status_id IN (${WON}, ${LOST})
+    WHERE pipeline_id IN (${beraterIn(vertical)}) AND status_id IN (${WON}, ${LOST})
     GROUP BY lead_id
   ) res ON res.lead_id = lc.lead_id`;
 
@@ -76,7 +84,7 @@ function botBucket(rp: number): string {
   return "5+";
 }
 
-async function botData(): Promise<FactorData> {
+async function botData(vertical?: Vertical): Promise<FactorData> {
   // Старт бот-эры = первая зафиксированная ролевка (раньше бота не было, и лиды
   // тех дат нельзя считать «не тренировался» — у них не было возможности).
   const startRow = unwrapRows<{ s: string | null }>(
@@ -93,8 +101,8 @@ async function botData(): Promise<FactorData> {
              COALESCE(bot.cnt, 0) AS rp
       FROM analytics.leads_cohort lc
       LEFT JOIN bot ON bot.lead_id = lc.lead_id
-      ${RES_AT_JOIN}
-      WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
+      ${resAtJoin(vertical)}
+      WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
         AND lc.status_id IN (${WON}, ${LOST})
         -- тренировавшихся берём всех; «не тренировался» — только после старта бота
         -- (у них была возможность). Иначе дотбот-лиды раздувают «не тренировался».
@@ -117,7 +125,7 @@ async function botData(): Promise<FactorData> {
   };
 }
 
-async function languageData(): Promise<FactorData> {
+async function languageData(vertical?: Vertical): Promise<FactorData> {
   const raw = unwrapRows<{ won: number | string; res_date: string | null; lang: string }>(
     await analyticsDb.execute(sql`
       SELECT (lc.status_id = ${WON})::int AS won,
@@ -129,8 +137,8 @@ async function languageData(): Promise<FactorData> {
                WHEN TRIM(lc.language_level) ILIKE 'C1%' OR TRIM(lc.language_level) ILIKE 'C2%' THEN 'c1'
                ELSE 'a2' END AS lang
       FROM analytics.leads_cohort lc
-      ${RES_AT_JOIN}
-      WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
+      ${resAtJoin(vertical)}
+      WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
         AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const rank: Record<string, number> = { a2: 0, b1: 1, b2: 2, c1: 3 };
@@ -158,14 +166,14 @@ function okkBucket(s: number): string {
   return "90+";
 }
 
-async function okkData(): Promise<FactorData> {
+async function okkData(vertical?: Vertical): Promise<FactorData> {
   const raw = unwrapRows<{ won: number | string; res_date: string | null; lead: number | string }>(
     await analyticsDb.execute(sql`
       SELECT (lc.status_id = ${WON})::int AS won,
              to_char(res.res_at, 'YYYY-MM-DD') AS res_date, lc.lead_id AS lead
       FROM analytics.leads_cohort lc
-      ${RES_AT_JOIN}
-      WHERE lc.pipeline_id = ${BERATER} AND lc.is_deleted = FALSE
+      ${resAtJoin(vertical)}
+      WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
         AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const leads = raw
@@ -189,10 +197,10 @@ async function okkData(): Promise<FactorData> {
   };
 }
 
-async function loadFactor(factor: string): Promise<FactorData> {
-  if (factor === "language") return languageData();
-  if (factor === "okk") return okkData();
-  return botData();
+async function loadFactor(factor: string, vertical?: Vertical): Promise<FactorData> {
+  if (factor === "language") return languageData(vertical);
+  if (factor === "okk") return okkData(vertical);
+  return botData(vertical);
 }
 
 // ── Вид «По сегментам» (столбики) ────────────────────────────────────────────
@@ -269,10 +277,23 @@ export async function GET(req: NextRequest) {
   if (session.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
   const factor = req.nextUrl.searchParams.get("factor") ?? "bot";
+  const rawVertical = req.nextUrl.searchParams.get("vertical");
+  const vertical: Vertical | undefined =
+    rawVertical === "buh" || rawVertical === "med" || rawVertical === "all"
+      ? rawVertical
+      : undefined;
   try {
-    const fd = await loadFactor(factor);
+    const fd = await loadFactor(factor, vertical);
+    // Пояснение к «слабому» коэффициенту при заметной разнице линий: Пирсон
+    // считается ПО ОТДЕЛЬНЫМ сделкам (исход 0/1), и когда одна из групп мала,
+    // даже двукратная разница win-rate даёт невысокое значение — это норма.
+    const aN = fd.rows.filter((r) => r.macro === "a").length;
+    const caveat =
+      `${fd.caveat} Коэффициент считается по каждой сделке (исход 0/1): ` +
+      `группа «${fd.macro.aLabel}» — ${aN} из ${fd.rows.length} решённых, ` +
+      `при малой группе даже большая разница win-rate даёт невысокое значение.`;
     const payload = {
-      factor: fd.factor, label: fd.label, population: fd.population, caveat: fd.caveat,
+      factor: fd.factor, label: fd.label, population: fd.population, caveat,
       windowDays: TIME_WINDOW,
       ...buildSegments(fd),
       ...buildTime(fd),

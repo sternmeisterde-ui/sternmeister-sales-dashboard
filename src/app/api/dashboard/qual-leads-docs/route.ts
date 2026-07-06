@@ -37,12 +37,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
-  FIRST_LINE_STATUSES,
-  QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
+  getDocsSentStatusIds,
+  getFirstLinePipelineIds,
+  getQualFirstLineStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { addDaysCivil, parseDateBoundary, todayCivil } from "@/lib/utils/date";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховый (legacy). */
+function parseTerminVertical(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
+
+const inList = (ids: number[]) => sql.join(ids.map((id) => sql`${id}`), sql`, `);
 
 interface QualLeadsRow {
   date: string;
@@ -87,12 +95,14 @@ export async function GET(req: NextRequest) {
   // conversion down without reflecting any real flow. Ever-in-FIRST_LINE via
   // status_changes (option C) is the marginally cleaner alternative if/when
   // it matters (gives 8.4% vs 8.5% — same in practice).
-  const firstLineId = B2G_PIPELINES.FIRST_LINE;
+  // Vertical-aware (spec 21 §11): buh → Бух Гос, med → Мед Гос, all → обе.
+  const vertical = parseTerminVertical(url.searchParams.get("vertical"));
+  const firstLineIds = getFirstLinePipelineIds(vertical);
   // Milestone = first time the lead enters either "Документы отправлены в
   // ДЦ" OR "Термин ДЦ" (status 142 = WON in FIRST_LINE). MIN(event_at) over
   // the union gives the chronologically first qualifying event.
-  const docsSentStatusId = FIRST_LINE_STATUSES.DOCS_SENT_DC;
-  const wonStatusId = FIRST_LINE_STATUSES.WON;
+  const milestoneStatusIds = [...getDocsSentStatusIds(vertical), 142];
+  const qualStatusIds = getQualFirstLineStatusIds(vertical);
 
   // Double TZ conversion: created_at is stored as `timestamp without time
   // zone` carrying UTC; single `AT TIME ZONE 'Europe/Berlin'` would treat
@@ -122,8 +132,8 @@ export async function GET(req: NextRequest) {
       -- readability — semantically this is a "first-milestone" timestamp.
       SELECT lead_id, MIN(event_at) AS docs_sent_at
       FROM analytics.lead_status_changes
-      WHERE pipeline_id = ${firstLineId}
-        AND status_id IN (${docsSentStatusId}, ${wonStatusId})
+      WHERE pipeline_id IN (${inList(firstLineIds)})
+        AND status_id IN (${inList(milestoneStatusIds)})
       GROUP BY lead_id
     ),
     qual_leads AS (
@@ -134,19 +144,13 @@ export async function GET(req: NextRequest) {
         ds.docs_sent_at
       FROM analytics.leads_cohort lc
       LEFT JOIN docs_sent ds ON ds.lead_id = lc.lead_id
-      WHERE lc.pipeline_id = ${firstLineId}
+      WHERE lc.pipeline_id IN (${inList(firstLineIds)})
         AND lc.created_at >= ${fromDate}
         AND lc.created_at <= ${toDateEnd}
-        AND lc.status_id IN (${sql.join(
-          QUAL_FIRST_LINE_STATUS_IDS.map((id) => sql`${id}`),
-          sql`, `,
-        )})
+        AND lc.status_id IN (${inList(qualStatusIds)})
         AND (
           lc.non_qual_enum_id IS NULL
-          OR lc.non_qual_enum_id IN (${sql.join(
-            QUAL_REASON_ENUM_IDS.map((id) => sql`${id}`),
-            sql`, `,
-          )})
+          OR lc.non_qual_enum_id IN (${inList([...QUAL_REASON_ENUM_IDS])})
         )
     )
     SELECT

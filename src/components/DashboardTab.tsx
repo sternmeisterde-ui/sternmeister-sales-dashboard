@@ -185,7 +185,14 @@ const LINE_COLOR_CLASS: Record<Exclude<LineFilter, "all">, string> = {
 
 // ==================== Component ====================
 
-export default function DashboardTab({ department }: { department: string }) {
+export default function DashboardTab({
+  department,
+  vertical,
+}: {
+  department: string;
+  /** Вертикаль b2g (buh/med/all). undefined на b2b — параметр не шлём. */
+  vertical?: "buh" | "med" | "all";
+}) {
   const [range, setRange] = useState<{ start: Date; end: Date }>(() => {
     // Berlin-midnight Date so picker label and the date string sent to the API
     // agree regardless of browser TZ (e.g. Moscow browser would otherwise pick
@@ -236,8 +243,9 @@ export default function DashboardTab({ department }: { department: string }) {
     try {
       const fromStr = formatDate(range.start);
       const toStr = formatDate(range.end);
+      const verticalParam = vertical ? `&vertical=${vertical}` : "";
       const res = await fetch(
-        `/api/dashboard?department=${department}&from=${fromStr}&to=${toStr}`,
+        `/api/dashboard?department=${department}&from=${fromStr}&to=${toStr}${verticalParam}`,
         { signal },
       );
       if (!res.ok) {
@@ -255,7 +263,7 @@ export default function DashboardTab({ department }: { department: string }) {
     } finally {
       setLoading(false);
     }
-  }, [department, range.start, range.end]);
+  }, [department, vertical, range.start, range.end]);
 
   useEffect(() => {
     const ac = new AbortController();
