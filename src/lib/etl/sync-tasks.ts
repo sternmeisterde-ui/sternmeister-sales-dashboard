@@ -37,7 +37,18 @@ export async function syncTasks(
       closedFlg,
       leadManager: lead?.manager ?? null,
       taskCreatedAt: new Date(t.createdAt * 1000),
-      completedAt: t.result?.createdAt ? new Date(t.result.createdAt * 1000) : null,
+      // Kommo /api/v4/tasks НЕ отдаёт момент завершения отдельным полем:
+      // result = {text} без created_at, поэтому старый маппинг
+      // t.result?.createdAt всегда давал NULL (все 68k строк были без
+      // completed_at). Для завершённой задачи берём updated_at — последнее
+      // изменение закрытой задачи и есть момент её закрытия в подавляющем
+      // большинстве случаев. Нужен вкладке «Регламент» (Задачи: «Завершено»
+      // по дням).
+      completedAt: t.result?.createdAt
+        ? new Date(t.result.createdAt * 1000)
+        : t.isCompleted
+          ? new Date(t.updatedAt * 1000)
+          : null,
       isCompleted: t.isCompleted ? 1 : 0,
       deadline: t.completeTill ? new Date(t.completeTill * 1000) : null,
       taskManager: lookups.users.get(t.responsibleUserId) ?? null,

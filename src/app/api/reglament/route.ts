@@ -35,6 +35,7 @@ const VALID_VIEWS = new Set([
   "stage_time",
   "tlt_gap",
   "touches",
+  "tasks",
 ]);
 
 /** Терминальные статусы: пребывание в них не является «этапом работы» —
@@ -115,6 +116,108 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const fromLit = utcLiteral(period.fromUtc);
     const toLit = utcLiteral(period.toUtc);
     const terminalList = TERMINAL_STATUSES.map((s) => `'${esc(s)}'`).join(", ");
+
+    // ── Задачи: день × менеджер (формулы из справочника 23a §5) ──────
+    // Всего на день = задачи с дедлайном сегодня + висящие просроченные;
+    // Просроченные = Всего − Запланировано; Показатель = Завершено/Всего×100.
+    // Момент завершения = completed_at (заполняется sync-tasks из updated_at
+    // Kommo; исторические строки без него не попадают в «Завершено»).
+    if (view === "tasks") {
+      const managerParam = sp.get("manager");
+      const managerCond = managerParam ? `AND t.task_manager = '${esc(managerParam)}'` : "";
+      // Кандидаты: дедлайн ≤ конца периода (не старше полугода до начала —
+      // более старые хвосты просрочки отсекаем осознанно) ЛИБО завершение в
+      // периоде. Дни считаем в JS по берлинским датам.
+      const horizonLit = utcLiteral(new Date(period.fromUtc.getTime() - 183 * 86_400_000));
+      const query = `
+        SELECT
+          t.task_manager,
+          lc.pipeline,
+          to_char(t.deadline AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS deadline_day,
+          to_char(t.completed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS completed_day,
+          t.is_completed
+        FROM analytics.tasks t
+        JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
+        WHERE lc.pipeline IN (${pipelines})
+          AND COALESCE(lc.is_deleted, FALSE) = FALSE
+          AND t.deadline IS NOT NULL
+          AND t.task_manager IS NOT NULL
+          AND (
+            (t.deadline >= '${horizonLit}' AND t.deadline <= '${toLit}')
+            OR (t.completed_at >= '${fromLit}' AND t.completed_at <= '${toLit}')
+          )
+          ${managerCond}
+      `;
+      const res = await analyticsDb.execute<{
+        task_manager: string;
+        pipeline: string;
+        deadline_day: string | null;
+        completed_day: string | null;
+        is_completed: number;
+      }>(sql.raw(query));
+
+      // Дни периода (civil, Berlin)
+      const days: string[] = [];
+      const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
+      const toCivil = sp.get("to") ?? todayCivil();
+      for (let d = fromCivil; d <= toCivil; d = addDaysCivil(d, 1)) days.push(d);
+
+      interface Agg {
+        planned: number;
+        overdue: number;
+        completed: number;
+      }
+      const agg = new Map<string, Agg>(); // key: day|funnel|manager
+      const bump = (day: string, funnel: FunnelKey, manager: string, k: keyof Agg) => {
+        const key = `${day}|${funnel}|${manager}`;
+        const a = agg.get(key) ?? { planned: 0, overdue: 0, completed: 0 };
+        a[k]++;
+        agg.set(key, a);
+      };
+      for (const r of res.rows) {
+        const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
+        const m = r.task_manager;
+        for (const day of days) {
+          if (r.deadline_day === day) bump(day, funnel, m, "planned");
+          else if (
+            r.deadline_day != null &&
+            r.deadline_day < day &&
+            (!r.is_completed || (r.completed_day != null && r.completed_day >= day))
+          ) {
+            bump(day, funnel, m, "overdue");
+          }
+          if (r.completed_day === day) bump(day, funnel, m, "completed");
+        }
+      }
+      const rows = [...agg.entries()]
+        .map(([key, a]) => {
+          const [day, funnel, manager] = key.split("|");
+          const total = a.planned + a.overdue;
+          return {
+            day,
+            funnel: funnel as FunnelKey,
+            manager,
+            total,
+            planned: a.planned,
+            overdue: a.overdue,
+            completed: a.completed,
+            notCompleted: Math.max(0, total - a.completed),
+            score: total > 0 ? Math.round((a.completed / total) * 10000) / 100 : 0,
+          };
+        })
+        .filter((r) => r.total > 0 || r.completed > 0)
+        .sort((a, b) => (a.day === b.day ? a.manager.localeCompare(b.manager, "ru") : b.day.localeCompare(a.day)));
+
+      // Свежесть данных задач (наш ETL задач может отставать)
+      const [fresh] = (
+        await analyticsDb.execute<{ max_created: string | null }>(
+          sql.raw(
+            `SELECT to_char(MAX(task_created_at) AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS max_created FROM analytics.tasks`,
+          ),
+        )
+      ).rows;
+      return NextResponse.json({ view, rows, dataUpTo: fresh?.max_created ?? null });
+    }
 
     // ── Регламентные детальные view (интервалы этапов + касания) ─────
     if (view === "stage_time" || view === "tlt_gap" || view === "touches") {

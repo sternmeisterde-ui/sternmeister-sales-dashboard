@@ -736,6 +736,135 @@ function TouchesView({ range }: { range: DateRange }) {
   );
 }
 
+// ─── Задачи ─────────────────────────────────────────────────────────
+
+interface TaskApiRow {
+  day: string;
+  funnel: FunnelKey;
+  manager: string;
+  total: number;
+  planned: number;
+  overdue: number;
+  completed: number;
+  notCompleted: number;
+  score: number;
+}
+
+function TasksTable({ rows, title }: { rows: TaskApiRow[]; title: string }) {
+  return (
+    <section>
+      <h3 className="mb-2 text-xs uppercase tracking-wider text-slate-500">{title}</h3>
+      <div className="max-h-[60vh] overflow-auto rounded-lg border border-white/10">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 z-10" style={theadStyle}>
+            <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+              <th className={thCls}>Дата</th>
+              <th className={thCls}>Менеджер</th>
+              <th className={`${thCls} text-right`}>Всего на день</th>
+              <th className={`${thCls} text-right`}>Запланировано</th>
+              <th className={`${thCls} text-right`}>Просроченные</th>
+              <th className={`${thCls} text-right`}>Завершено</th>
+              <th className={`${thCls} text-right`}>Не завершены</th>
+              <th className={`${thCls} text-right`}>Показатель</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-3 py-6 text-center text-xs text-slate-500">
+                  Нет задач за период.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r, i) => (
+                <tr key={`${r.day}-${r.manager}-${i}`} className="border-b border-white/5 bg-slate-900/30 last:border-0">
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
+                    {`${r.day.slice(8, 10)}.${r.day.slice(5, 7)}.${r.day.slice(0, 4)}`}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.manager}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.total}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.planned}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums ${r.overdue > 0 ? "text-red-300" : "text-slate-300"}`}>
+                    {r.overdue}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.completed}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.notCompleted}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-200">
+                    {r.score.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function TasksView({ range }: { range: DateRange }) {
+  const [data, setData] = useState<{ rows: TaskApiRow[]; dataUpTo: string | null } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const d = await fetchView<{ rows: TaskApiRow[]; dataUpTo: string | null }>("tasks", {
+          from: fmtLocalDate(range.start ?? todayBerlinDate()),
+          to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+        });
+        if (!cancelled) setData(d);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [range]);
+
+  const stale = useMemo(() => {
+    if (!data?.dataUpTo) return null;
+    const to = fmtLocalDate(range.end ?? todayBerlinDate());
+    return data.dataUpTo < to ? data.dataUpTo : null;
+  }, [data, range]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <DinoLoader />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+        Ошибка загрузки: {error}
+      </div>
+    );
+  }
+  if (!data) return null;
+  return (
+    <div className="flex flex-col gap-4">
+      {stale && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
+          Задачи в аналитической базе синхронизированы по {`${stale.slice(8, 10)}.${stale.slice(5, 7)}.${stale.slice(0, 4)}`} —
+          свежие дни могут быть пустыми (syncTasks выполняется только при полном бэкфилле).
+        </div>
+      )}
+      <TasksTable rows={data.rows.filter((r) => r.funnel === "gos")} title="Задачи — Госники" />
+      <TasksTable rows={data.rows.filter((r) => r.funnel === "berater")} title="Задачи — Бератер" />
+    </div>
+  );
+}
+
 // ─── Среднее время на этапах ────────────────────────────────────────
 
 function AvgPivot({ rows, funnel }: { rows: AvgSummaryRow[]; funnel: FunnelKey }) {
@@ -1093,6 +1222,8 @@ export default function ReglamentTab({ department: _department }: { department: 
           <TltGapView range={range} />
         ) : sub === "touches" ? (
           <TouchesView range={range} />
+        ) : sub === "tasks" ? (
+          <TasksView range={range} />
         ) : (
           <Placeholder label={SUB_VIEWS.find((v) => v.id === sub)?.label ?? sub} />
         )}
