@@ -11,8 +11,9 @@ import {
   YAxis,
 } from "recharts";
 import { HeartPulse, Loader2, RefreshCw, X } from "lucide-react";
+import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
-import { addDaysCivil, fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
+import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // Форма ответа /api/enps (используем только weeks + responses; остальные
 // агрегаты бэк отдаёт, но упрощённая вкладка их не показывает).
@@ -35,19 +36,11 @@ interface EnpsStats {
   responses: ResponseItem[];
 }
 
-// Пресеты периода. Формы заполняются ~раз в неделю, календарь с точностью до
-// дня здесь избыточен — три пресета покрывают все реальные вопросы.
-type RangePreset = "12w" | "26w" | "all";
-const PRESETS: ReadonlyArray<{ id: RangePreset; label: string }> = [
-  { id: "12w", label: "12 недель" },
-  { id: "26w", label: "26 недель" },
-  { id: "all", label: "Всё время" },
-];
-
-function presetFrom(preset: RangePreset): string | null {
-  if (preset === "all") return null;
-  const weeks = preset === "12w" ? 12 : 26;
-  return addDaysCivil(fmtLocalDate(todayBerlinDate()), -7 * weeks);
+/** Дефолтный период — последние полгода. */
+function defaultRange(): DateRange {
+  const end = todayBerlinDate();
+  const start = new Date(end.getTime() - 182 * 86_400_000);
+  return { start, end };
 }
 
 /** "YYYY-MM-DD" → "DD.MM" без таймзонных сюрпризов (чистая строка). */
@@ -77,19 +70,21 @@ export default function EnpsTab({ department: _department }: { department: "b2g"
   const [stats, setStats] = useState<EnpsStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [preset, setPreset] = useState<RangePreset>("all");
+  const [range, setRange] = useState<DateRange>(defaultRange);
   const [selectedWeek, setSelectedWeek] = useState<string | null>(null);
 
-  const load = useCallback(async (p: RangePreset) => {
+  const load = useCallback(async (r: DateRange) => {
+    const start = r.start ?? todayBerlinDate();
+    const end = r.end ?? start;
     setLoading(true);
     setError(null);
     setSelectedWeek(null);
     try {
-      const params = new URLSearchParams();
-      const from = presetFrom(p);
-      if (from) params.set("from", from);
-      const qs = params.toString();
-      const res = await fetch(`/api/enps${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+      const params = new URLSearchParams({
+        from: fmtLocalDate(start),
+        to: fmtLocalDate(end),
+      });
+      const res = await fetch(`/api/enps?${params}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStats((await res.json()) as EnpsStats);
     } catch (e) {
@@ -100,13 +95,13 @@ export default function EnpsTab({ department: _department }: { department: "b2g"
   }, []);
 
   useEffect(() => {
-    load(preset);
+    load(range);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onPreset = (p: RangePreset) => {
-    setPreset(p);
-    load(p);
+  const onRangeChange = (r: DateRange) => {
+    setRange(r);
+    if (r.start && r.end) load(r);
   };
 
   const responses = useMemo(() => {
@@ -133,21 +128,13 @@ export default function EnpsTab({ department: _department }: { department: "b2g"
           <span className="text-base font-semibold">eNPS</span>
         </div>
 
-        <div className="flex rounded-lg border border-white/10 bg-slate-900/60 p-0.5">
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => onPreset(p.id)}
-              className={`rounded-md px-3 py-1 text-xs transition-colors ${
-                preset === p.id
-                  ? "bg-blue-500/20 text-blue-300"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        <CalendarPicker
+          mode="range"
+          value={range}
+          onChange={onRangeChange}
+          onClear={() => onRangeChange(defaultRange())}
+          maxDate={todayBerlinDate()}
+        />
 
         {stats && !stats.syncConfigured && (
           <span className="text-[11px] text-amber-300/80">
@@ -156,7 +143,7 @@ export default function EnpsTab({ department: _department }: { department: "b2g"
         )}
 
         <button
-          onClick={() => load(preset)}
+          onClick={() => load(range)}
           disabled={loading}
           className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-300 hover:border-white/20 disabled:opacity-50"
         >
@@ -266,10 +253,16 @@ export default function EnpsTab({ department: _department }: { department: "b2g"
                 анонимно · {responses.length} отв.
               </span>
             </div>
-            <div className="overflow-x-auto rounded-lg border border-white/10">
+            {/* Высота ~экран, дальше скролл внутри контейнера; шапка прилипает.
+                Паттерн из DailyTab: sticky на thead + НЕпрозрачный инлайн-bg
+                и тень (полупрозрачный bg просвечивает строки при скролле). */}
+            <div className="max-h-[75vh] overflow-y-auto overflow-x-auto rounded-lg border border-white/10">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-white/10 bg-slate-900/60 text-left text-xs text-slate-400">
+                <thead
+                  className="sticky top-0 z-10"
+                  style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}
+                >
+                  <tr className="border-b border-white/10 text-left text-xs text-slate-400">
                     <th className="px-3 py-2 font-medium">Дата</th>
                     <th className="px-3 py-2 font-medium">Балл</th>
                     <th className="px-3 py-2 font-medium">Что поддерживает</th>
