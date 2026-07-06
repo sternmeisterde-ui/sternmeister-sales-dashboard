@@ -37,6 +37,10 @@ export async function GET(request: NextRequest) {
     if (!isValidDepartment(department)) {
       return NextResponse.json({ error: "Invalid department" }, { status: 400 });
     }
+    // Не-админы читают только скрипты своего отдела.
+    if (session.role !== "admin" && department !== session.department) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
     if (!isValidLine(department, line)) {
       return NextResponse.json({ error: "Invalid line for department" }, { status: 400 });
     }

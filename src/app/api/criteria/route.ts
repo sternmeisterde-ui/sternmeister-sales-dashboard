@@ -4,26 +4,19 @@
 // FS files (src/criteria/*.json) are kept as a deploy-image backup so
 // the OKK evaluator can fall back if the DB is unreachable.
 //
-// GET: returns criteria for a single prompt_type (admin only).
+// GET: returns criteria for a single prompt_type. Admins read everything;
+//   managers read only their own department's configs (they get here via the
+//   b2b «Артефакты» tab and must not see the other department's criteria).
 //   - DB first; FS fallback on DB error.
-// POST: writes criteria for a single prompt_type (admin only).
-//   - Validates structural shape (stages: non-empty array).
-//   - Writes DB (UPSERT) + FS backup so the next Docker build still ships
-//     a working copy.
-//   - Clears the Dashboard Analytics cache so dashboards reflect new
-//     scoring on next refresh.
-//
-// Concurrency: the table has a PK on prompt_type — concurrent POSTs are
-// serialized by Postgres. Last-writer-wins (no row locking — admin-only
-// UI, contention is negligible). Add updated_by/source so audit logs
-// can identify the writer.
+// POST: 405 — criteria are edited in the OKK repo (src/criteria/*.json) and
+//   synced to the D2 `criteria_configs` table on deploy.
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { d2OkkDb } from "@/lib/db/okk";
-import { ALL_PROMPT_TYPES, isValidPromptType as isValidPT } from "@/lib/config/tenant";
+import { ALL_PROMPT_TYPES, getLines, isValidPromptType as isValidPT } from "@/lib/config/tenant";
 function isValidPromptType(value: unknown): value is string {
   return typeof value === "string" && isValidPT(value);
 }
@@ -51,8 +44,8 @@ async function readFromFs(promptType: string): Promise<unknown> {
 export async function GET(request: NextRequest) {
   try {
     const session = await getSession();
-    if (!session || session.role !== "admin") {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    if (!session) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const promptType = request.nextUrl.searchParams.get("prompt_type");
@@ -61,6 +54,14 @@ export async function GET(request: NextRequest) {
         { error: `Invalid prompt_type. Must be one of: ${ALL_PROMPT_TYPES.join(", ")}` },
         { status: 400 },
       );
+    }
+
+    // Не-админы читают только конфиги своего отдела.
+    if (
+      session.role !== "admin" &&
+      !getLines(session.department, "all").some((l) => l.promptType === promptType)
+    ) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     // DB-first.
