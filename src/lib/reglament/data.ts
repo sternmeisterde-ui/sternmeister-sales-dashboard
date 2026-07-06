@@ -10,18 +10,34 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
 import { FUNNEL_PIPELINES, type FunnelKey } from "@/lib/reglament/norms";
 
-function esc(s: string): string {
+/** Экранирование строки для raw-SQL литерала (одинарные кавычки). */
+export function esc(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-function utcLiteral(d: Date): string {
-  return d.toISOString().slice(0, 19).replace("T", " ");
+/** Date → naive-UTC литерал (с миллисекундами: границы берлинских суток
+ *  приходят как 23:59:59.999 — усечение до секунд теряло последнюю секунду). */
+export function utcLiteral(d: Date): string {
+  return d.toISOString().slice(0, 23).replace("T", " ");
 }
 
 /** Naive-UTC строка из БД → epoch ms. Драйвер отдаёт raw-строки без TZ. */
-function naiveUtcToMs(s: string): number {
+export function naiveUtcToMs(s: string): number {
   return new Date(s.replace(" ", "T") + "Z").getTime();
 }
+
+/** Epoch ms → строка "YYYY-MM-DD HH:MM:SS" в Berlin (контракт fmtBerlin в UI). */
+export function berlinStr(ms: number): string {
+  const d = new Date(ms);
+  const date = d.toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" });
+  const time = d.toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin", hour12: false });
+  return `${date} ${time}`;
+}
+
+/** Kommo-инвариант: status_id 142 = won, 143 = lost — терминальные слоты
+ *  любой воронки (в Бух Гос won называется «Термин ДЦ», в Бух Бератер —
+ *  «Гутшайн одобрен»). Фильтруем по id, а не по переименовываемым именам. */
+export const TERMINAL_STATUS_IDS = [142, 143] as const;
 
 export interface StageInterval {
   leadId: number;
@@ -41,8 +57,6 @@ export interface FetchIntervalsOpts {
   toUtc: Date;
   /** Якорь периода: exit — по дате выхода (умолч.), enter — по дате входа. */
   anchor?: "exit" | "enter";
-  /** Только эти статусы (напр. этапы с нормативами). */
-  statuses?: readonly string[];
   /** Только закрытые интервалы (переходы) — для «Касаний». */
   closedOnly?: boolean;
   manager?: string | null;
@@ -65,12 +79,10 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
       ? `sc.event_at >= '${fromLit}' AND sc.event_at <= '${toLit}'`
       : `COALESCE(sc.next_event_at, NOW() AT TIME ZONE 'UTC') >= '${fromLit}'
          AND COALESCE(sc.next_event_at, NOW() AT TIME ZONE 'UTC') <= '${toLit}'`;
-  const statusCond = opts.statuses?.length
-    ? `AND sc.status IN (${opts.statuses.map((s) => `'${esc(s)}'`).join(", ")})`
-    : "";
   const closedCond = opts.closedOnly ? "AND sc.next_event_at IS NOT NULL" : "";
   const managerCond = opts.manager ? `AND lc.manager = '${esc(opts.manager)}'` : "";
   const leadCond = opts.leadId ? `AND sc.lead_id = ${Math.floor(opts.leadId)}` : "";
+  const terminalIds = TERMINAL_STATUS_IDS.join(", ");
 
   const query = `
     SELECT
@@ -80,10 +92,13 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
       to_char(sc.event_at, 'YYYY-MM-DD HH24:MI:SS') AS enter_utc,
       to_char(sc.next_event_at, 'YYYY-MM-DD HH24:MI:SS') AS exit_utc,
       -- Этап-приёмник: строка со временем входа = времени нашего выхода.
-      -- next_status_id есть, но имени нет — берём по стыку событий.
+      -- Матчим и по next_status_id (когда он есть): при двух сменах статуса
+      -- в одну секунду голый стык по event_at недетерминирован (LIMIT 1
+      -- вернул бы произвольную из двух строк и чужое правило касаний).
       (
         SELECT sc2.status FROM analytics.lead_status_changes sc2
         WHERE sc2.lead_id = sc.lead_id AND sc2.event_at = sc.next_event_at
+          AND (sc.next_status_id IS NULL OR sc2.status_id = sc.next_status_id)
         LIMIT 1
       ) AS next_status,
       COALESCE(lc.manager, '—') AS responsible
@@ -92,7 +107,11 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
     WHERE sc.pipeline IN (${pipelines})
       AND ${anchorCond}
       AND COALESCE(lc.is_deleted, FALSE) = FALSE
-      ${statusCond}
+      -- Пребывания В терминальных статусах (won/lost) — не «этапы работы»:
+      -- без этого переоткрытая сделка давала бы ложный переход из «Закрыто»
+      -- с правилом ≥1 звонок. Переходы В терминальные остаются видимыми
+      -- (next_status берётся независимо).
+      AND (sc.status_id IS NULL OR sc.status_id NOT IN (${terminalIds}))
       ${closedCond}
       ${managerCond}
       ${leadCond}
@@ -143,16 +162,26 @@ export async function fetchTouches(
   const CHUNK = 5000;
   for (let i = 0; i < leadIds.length; i += CHUNK) {
     const ids = leadIds.slice(i, i + CHUNK).join(", ");
+    // Дедуп Pattern A fanout по communication_id внутри лида. NULL-ключи
+    // (легаси-строки без comm_id) подменяем меткой времени, иначе DISTINCT ON
+    // склеил бы ВСЕ NULL-строки лида в одно касание за период.
     const query = `
-      SELECT DISTINCT ON (communication_id, lead_id)
+      SELECT DISTINCT ON (lead_id, dedup_key)
         lead_id,
         communication_type,
-        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS at_utc
-      FROM analytics.communications
-      WHERE lead_id IN (${ids})
-        AND communication_type IN (${typeList})
-        AND created_at >= '${fromLit}' AND created_at <= '${toLit}'
-      ORDER BY communication_id, lead_id
+        at_utc
+      FROM (
+        SELECT
+          lead_id,
+          communication_type,
+          to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS at_utc,
+          COALESCE(communication_id, 'nc:' || to_char(created_at, 'YYYYMMDDHH24MISS')) AS dedup_key
+        FROM analytics.communications
+        WHERE lead_id IN (${ids})
+          AND communication_type IN (${typeList})
+          AND created_at >= '${fromLit}' AND created_at <= '${toLit}'
+      ) src
+      ORDER BY lead_id, dedup_key
     `;
     const res = await analyticsDb.execute<{
       lead_id: string;

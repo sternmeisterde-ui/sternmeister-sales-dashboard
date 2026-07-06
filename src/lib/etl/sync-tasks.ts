@@ -20,6 +20,27 @@ export async function syncTasks(
   console.log(`[ETL] sync-tasks: ${rawTasks.length} tasks for ${leadIds.length} leads`);
   if (rawTasks.length === 0) return 0;
 
+  // Write-once для completed_at: значение аппроксимируется updated_at Kommo
+  // (см. ниже), а updated_at бампается любой правкой уже закрытой задачи —
+  // без фиксации «дата завершения» дрейфовала бы между ресинками (DELETE
+  // ниже стирает строку, ON CONFLICT не спасает). Паттерн тот же, что у
+  // termin_date_first в sync-leads: читаем существующие значения и
+  // сохраняем первое увиденное.
+  const existingCompleted = new Map<number, Date>();
+  const EXIST_CHUNK = 10_000;
+  for (let i = 0; i < leadIds.length; i += EXIST_CHUNK) {
+    const res = await analyticsDb.execute<{ task_id: string; completed_at: string }>(
+      sql.raw(
+        `SELECT task_id, completed_at FROM analytics.tasks
+         WHERE lead_id IN (${leadIds.slice(i, i + EXIST_CHUNK).join(",")})
+           AND completed_at IS NOT NULL`,
+      ),
+    );
+    for (const r of res.rows) {
+      existingCompleted.set(Number(r.task_id), new Date(String(r.completed_at).replace(" ", "T") + "Z"));
+    }
+  }
+
   type TaskRow = typeof tasks.$inferInsert;
   const rows: TaskRow[] = [];
 
@@ -41,14 +62,15 @@ export async function syncTasks(
       // result = {text} без created_at, поэтому старый маппинг
       // t.result?.createdAt всегда давал NULL (все 68k строк были без
       // completed_at). Для завершённой задачи берём updated_at — последнее
-      // изменение закрытой задачи и есть момент её закрытия в подавляющем
-      // большинстве случаев. Нужен вкладке «Регламент» (Задачи: «Завершено»
-      // по дням).
-      completedAt: t.result?.createdAt
-        ? new Date(t.result.createdAt * 1000)
-        : t.isCompleted
-          ? new Date(t.updatedAt * 1000)
-          : null,
+      // изменение закрытой задачи ≈ момент её закрытия, — но фиксируем
+      // ПЕРВОЕ увиденное значение (existingCompleted), чтобы последующие
+      // правки закрытой задачи не переносили её «Завершено» на другой день.
+      // Переоткрытая задача (isCompleted=false) сбрасывается в NULL.
+      // Нужен вкладке «Регламент» (Задачи: «Завершено» по дням).
+      completedAt: !t.isCompleted
+        ? null
+        : (existingCompleted.get(t.id) ??
+          (t.result?.createdAt ? new Date(t.result.createdAt * 1000) : new Date(t.updatedAt * 1000))),
       isCompleted: t.isCompleted ? 1 : 0,
       deadline: t.completeTill ? new Date(t.completeTill * 1000) : null,
       taskManager: lookups.users.get(t.responsibleUserId) ?? null,

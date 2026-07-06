@@ -22,7 +22,16 @@ import {
   TLT_GAP_NORMS,
   type FunnelKey,
 } from "@/lib/reglament/norms";
-import { fetchStageIntervals, fetchTouches, type StageInterval } from "@/lib/reglament/data";
+import {
+  berlinStr,
+  esc,
+  fetchStageIntervals,
+  fetchTouches,
+  naiveUtcToMs,
+  TERMINAL_STATUS_IDS,
+  utcLiteral,
+  type StageInterval,
+} from "@/lib/reglament/data";
 import {
   collapseAll,
   computeStageTime,
@@ -44,29 +53,6 @@ const VALID_VIEWS = new Set([
   "summary",
   "missed",
 ]);
-
-/** Терминальные статусы: пребывание в них не является «этапом работы» —
- *  исключаем из среднего времени (в Looker-пивоте их тоже нет). */
-const TERMINAL_STATUSES = [
-  "Успешно реализовано",
-  "Закрыто и не реализовано",
-  "Игнор",
-  "Рассрочка",
-  "Счет выставлен",
-  // Терминальные «успехи» воронок B2G: Бух Гос завершается статусом
-  // «Термин ДЦ» (sort 10000 = won-слот Kommo), Бух Бератер — «Гутшайн одобрен».
-  "Термин ДЦ",
-  "Гутшайн одобрен",
-];
-
-function esc(s: string): string {
-  return s.replace(/'/g, "''");
-}
-
-/** Naive-UTC литерал для сравнения с timestamp-колонками analytics.*. */
-function utcLiteral(d: Date): string {
-  return d.toISOString().slice(0, 19).replace("T", " ");
-}
 
 function clampInt(value: string | null, def: number, max: number): number {
   if (!value) return def;
@@ -90,6 +76,18 @@ function parseFunnels(sp: URLSearchParams): FunnelKey[] {
   const f = sp.get("funnel");
   if (f === "gos" || f === "berater") return [f];
   return ["gos", "berater"];
+}
+
+/** Min/max по числам циклом — spread на десятках тысяч интервалов (годовой
+ *  период) превышает лимит аргументов V8 и роняет view с RangeError. */
+function minMax(values: Iterable<number>): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return min === Infinity ? null : { min, max };
 }
 
 /** WHERE-фрагменты общих фильтров детальных view (менеджер, id сделки). */
@@ -161,9 +159,6 @@ async function aggregateTasks(opts: {
     is_completed: number;
   }>(sql.raw(query));
 
-  const days: string[] = [];
-  for (let d = opts.fromCivil; d <= opts.toCivil; d = addDaysCivil(d, 1)) days.push(d);
-
   interface Agg {
     planned: number;
     overdue: number;
@@ -176,18 +171,30 @@ async function aggregateTasks(opts: {
     a[k]++;
     agg.set(key, a);
   };
+  // planned/completed попадают ровно в один день — прямые лукапы; перебор
+  // дней остаётся только для просрочки, и то ограниченный её реальным
+  // диапазоном (дедлайн+1 … день завершения / конец периода) — иначе на
+  // полугодовом периоде выходил O(строки × дни).
+  const inPeriod = (d: string | null): d is string =>
+    d != null && d >= opts.fromCivil && d <= opts.toCivil;
   for (const r of res.rows) {
     const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
-    for (const day of days) {
-      if (r.deadline_day === day) bump(day, funnel, r.task_manager, "planned");
-      else if (
-        r.deadline_day != null &&
-        r.deadline_day < day &&
-        (!r.is_completed || (r.completed_day != null && r.completed_day >= day))
-      ) {
-        bump(day, funnel, r.task_manager, "overdue");
-      }
-      if (r.completed_day === day) bump(day, funnel, r.task_manager, "completed");
+    if (inPeriod(r.deadline_day)) bump(r.deadline_day, funnel, r.task_manager, "planned");
+    if (inPeriod(r.completed_day)) bump(r.completed_day, funnel, r.task_manager, "completed");
+    if (r.deadline_day == null) continue;
+    // День d просрочен: deadline < d И (не завершена ИЛИ завершена в d или позже).
+    // Легаси-строки (is_completed=1, completed_day=NULL) просрочкой не считаются.
+    const overdueFrom =
+      addDaysCivil(r.deadline_day, 1) > opts.fromCivil ? addDaysCivil(r.deadline_day, 1) : opts.fromCivil;
+    const overdueTo = r.is_completed
+      ? r.completed_day != null && r.completed_day < opts.toCivil
+        ? r.completed_day
+        : r.completed_day != null
+          ? opts.toCivil
+          : "" // завершена без даты — не в просрочке
+      : opts.toCivil;
+    for (let d = overdueFrom; d && d <= overdueTo; d = addDaysCivil(d, 1)) {
+      bump(d, funnel, r.task_manager, "overdue");
     }
   }
   return [...agg.entries()]
@@ -230,7 +237,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const pipelines = funnels.map((f) => `'${esc(FUNNEL_PIPELINES[f])}'`).join(", ");
     const fromLit = utcLiteral(period.fromUtc);
     const toLit = utcLiteral(period.toUtc);
-    const terminalList = TERMINAL_STATUSES.map((s) => `'${esc(s)}'`).join(", ");
 
     // ── Сводка «Показатели соблюдения регламента» ─────────────────────
     // Каждая метрика = доля ok-проверок менеджера за период; «Регламент, %»
@@ -238,12 +244,45 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // простое среднее процентов опровергнуто). SLA-порог — предварительный.
     if (view === "summary") {
       const nowMs = Date.now();
-      const intervals = await fetchStageIntervals({
-        funnels: ["gos", "berater"],
-        fromUtc: period.fromUtc,
-        toUtc: period.toUtc,
-        anchor: "exit",
-      });
+      const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
+      const toCivil = sp.get("to") ?? todayCivil();
+      // SLA (только Гос): доля лидов с первым звонком ≤ порога от начала
+      // смены. Лиды без звонка (pending) не участвуют. Три источника ниже
+      // независимы — грузим параллельно, последовательным остаётся только
+      // fetchTouches (ему нужны интервалы).
+      const [intervals, slaRes, taskRows] = await Promise.all([
+        fetchStageIntervals({
+          funnels: ["gos", "berater"],
+          fromUtc: period.fromUtc,
+          toUtc: period.toUtc,
+          anchor: "exit",
+        }),
+        analyticsDb.execute<{ manager: string | null; n: string; ok: string }>(
+          sql.raw(`
+            SELECT s.manager,
+              COUNT(*)::int AS n,
+              COUNT(*) FILTER (
+                WHERE COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) <= ${SLA_TARGET_SECONDS}
+              )::int AS ok
+            FROM analytics.sla s
+            LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+            WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
+              AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
+              AND COALESCE(lc.is_deleted, FALSE) = FALSE
+              AND COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) IS NOT NULL
+            GROUP BY s.manager
+          `),
+        ),
+        aggregateTasks({
+          pipelines,
+          fromUtc: period.fromUtc,
+          fromLit,
+          toLit,
+          fromCivil,
+          toCivil,
+          manager: null,
+        }),
+      ]);
       const merged = collapseAll(intervals);
       const stageRows = merged
         .map((iv) => computeStageTime(iv, nowMs))
@@ -253,53 +292,27 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         (iv) => iv.exitMs != null && iv.nextStatus != null,
       );
       const allLeadIds = [...new Set([...tltIv, ...touchIv].map((iv) => iv.leadId))];
-      const allMs = [...tltIv, ...touchIv].flatMap((iv) => [iv.enterMs, iv.exitMs ?? nowMs]);
-      const touches = await fetchTouches(
-        allLeadIds,
-        allMs.length ? Math.min(...allMs) : 0,
-        allMs.length ? Math.max(...allMs) : 0,
+      const range = minMax(
+        (function* () {
+          for (const iv of tltIv) {
+            yield iv.enterMs;
+            yield iv.exitMs ?? nowMs;
+          }
+          for (const iv of touchIv) {
+            yield iv.enterMs;
+            yield iv.exitMs ?? nowMs;
+          }
+        })(),
       );
+      const touches = range
+        ? await fetchTouches(allLeadIds, range.min, range.max)
+        : new Map<number, never[]>();
       const tltRows = tltIv
         .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
         .filter((r): r is NonNullable<typeof r> => r !== null);
       const touchRows = touchIv
         .map((iv) => computeTouches(iv, touches.get(iv.leadId)))
         .filter((r): r is NonNullable<typeof r> => r !== null);
-
-      // SLA (только Гос): доля лидов с первым звонком ≤ порога от начала
-      // смены. Лиды без звонка (pending) не участвуют.
-      const slaRes = await analyticsDb.execute<{
-        manager: string | null;
-        n: string;
-        ok: string;
-      }>(
-        sql.raw(`
-          SELECT s.manager,
-            COUNT(*)::int AS n,
-            COUNT(*) FILTER (
-              WHERE COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) <= ${SLA_TARGET_SECONDS}
-            )::int AS ok
-          FROM analytics.sla s
-          LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
-          WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
-            AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
-            AND COALESCE(lc.is_deleted, FALSE) = FALSE
-            AND COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) IS NOT NULL
-          GROUP BY s.manager
-        `),
-      );
-
-      const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
-      const toCivil = sp.get("to") ?? todayCivil();
-      const taskRows = await aggregateTasks({
-        pipelines,
-        fromUtc: period.fromUtc,
-        fromLit,
-        toLit,
-        fromCivil,
-        toCivil,
-        manager: null,
-      });
 
       // Σ по (funnel, manager, metric)
       type Cell = { ok: number; n: number };
@@ -390,7 +403,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const norm = (p: string) => p.replace(/\D/g, "").slice(-9);
       const legs = legsRes.rows
         .map((r) => ({
-          ms: new Date(r.at_utc.replace(" ", "T") + "Z").getTime(),
+          ms: naiveUtcToMs(r.at_utc),
           answered:
             r.call_status === 4 &&
             (r.manager !== "Call forwarding" || Number(r.duration ?? 0) >= FORWARD_MIN_TALK_SECONDS),
@@ -428,6 +441,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       >();
       if (phones.length > 0) {
         const values = phones.map((p) => `('${esc(p)}')`).join(", ");
+        // Нормализуем телефоны контактов ОДНИМ проходом (основной + phones_all
+        // через unnest) и джойним по равенству — hash join вместо O(P×C)
+        // вычислений regexp в OR/EXISTS-условии на каждую пару.
         const contactsRes = await analyticsDb.execute<{
           p: string;
           contact_id: string;
@@ -435,14 +451,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           responsible_user_id: string | null;
         }>(
           sql.raw(`
-            SELECT v.p, c.contact_id, c.name, c.responsible_user_id
+            WITH contact_phones AS (
+              SELECT contact_id, name, responsible_user_id,
+                right(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 9) AS p9
+              FROM analytics.contacts
+              UNION ALL
+              SELECT c.contact_id, c.name, c.responsible_user_id,
+                right(regexp_replace(ph, '\\D', '', 'g'), 9) AS p9
+              FROM analytics.contacts c,
+                jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) ph
+            )
+            SELECT DISTINCT ON (v.p) v.p, cp.contact_id, cp.name, cp.responsible_user_id
             FROM (VALUES ${values}) AS v(p)
-            JOIN analytics.contacts c
-              ON right(regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g'), 9) = v.p
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) ph
-                WHERE right(regexp_replace(ph, '\\D', '', 'g'), 9) = v.p
-              )
+            JOIN contact_phones cp ON cp.p9 = v.p
+            ORDER BY v.p, cp.contact_id
           `),
         );
         for (const r of contactsRes.rows) {
@@ -466,10 +488,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
       const nameByUid = new Map(userNames.rows.map((r) => [Number(r.uid), r.manager]));
 
-      const berlinStr = (ms: number): string => {
-        const d = new Date(ms);
-        return `${d.toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" })} ${d.toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin", hour12: false })}`;
-      };
       return NextResponse.json({
         view,
         rows: missed.map((c) => {
@@ -514,6 +532,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     // ── Регламентные детальные view (интервалы этапов + касания) ─────
+    // ВАЖНО: все три считают по тем же склейкам, что и сводка (summary),
+    // иначе детальная страница противоречила бы колонке сводной таблицы:
+    // stage_time/tlt_gap — collapseAll (re-entry «X → X» = одно пребывание),
+    // touches — collapseAll({intake:true}) (внутренний переход Гос-группы
+    // «Новый лид / Взято в работу» — не переход). Открытые интервалы
+    // фетчатся и для touches: без них хвост Гос-группы не склеился бы.
     if (view === "stage_time" || view === "tlt_gap" || view === "touches") {
       const limit = clampInt(sp.get("limit"), 100, 500);
       const offset = clampInt(sp.get("offset"), 0, 1_000_000);
@@ -522,38 +546,34 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const leadId = leadParam && /^\d{1,12}$/.test(leadParam) ? Number(leadParam) : null;
       const nowMs = Date.now();
 
-      let intervals = await fetchStageIntervals({
+      const intervals = await fetchStageIntervals({
         funnels,
         fromUtc: period.fromUtc,
         toUtc: period.toUtc,
         anchor: "exit",
-        closedOnly: view === "touches",
         manager: managerParam,
         leadId,
       });
 
-      const berlinStr = (ms: number): string => {
-        const d = new Date(ms);
-        const date = d.toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" });
-        const time = d.toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin", hour12: false });
-        return `${date} ${time}`;
-      };
-      const paginate = <T,>(rows: T[]) => ({
+      const paginate = <T extends { ok: boolean }>(rows: T[]) => ({
         total: rows.length,
-        okCount: 0,
+        okCount: rows.reduce((a, r) => a + (r.ok ? 1 : 0), 0),
+        managers: [...new Set(rows.map((r) => (r as unknown as { interval: StageInterval }).interval.responsible))].sort(
+          (a, b) => a.localeCompare(b, "ru"),
+        ),
         page: rows.slice(offset, offset + limit),
       });
 
       if (view === "stage_time") {
-        const rows = intervals
+        const rows = collapseAll(intervals)
           .map((iv) => computeStageTime(iv, nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null);
-        const okCount = rows.filter((r) => r.ok).length;
-        const { total, page } = paginate(rows);
+        const { total, okCount, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
           total,
           okCount,
+          managers,
           rows: page.map((r) => ({
             leadId: r.interval.leadId,
             funnel: r.interval.funnel,
@@ -571,20 +591,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
       if (view === "tlt_gap") {
         // Только этапы с TLT-нормативом — сузим перед выборкой касаний.
-        intervals = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
-        const leadIds = [...new Set(intervals.map((iv) => iv.leadId))];
-        const minMs = Math.min(...intervals.map((iv) => iv.enterMs), nowMs);
-        const maxMs = Math.max(...intervals.map((iv) => iv.exitMs ?? nowMs), 0);
-        const touches = await fetchTouches(leadIds, minMs, maxMs);
-        const rows = intervals
+        const tltIv = collapseAll(intervals).filter(
+          (iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null,
+        );
+        const leadIds = [...new Set(tltIv.map((iv) => iv.leadId))];
+        const range = minMax(tltIv.flatMap((iv) => [iv.enterMs, iv.exitMs ?? nowMs]));
+        const touches = range
+          ? await fetchTouches(leadIds, range.min, range.max)
+          : new Map<number, never[]>();
+        const rows = tltIv
           .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null);
-        const okCount = rows.filter((r) => r.ok).length;
-        const { total, page } = paginate(rows);
+        const { total, okCount, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
           total,
           okCount,
+          managers,
           rows: page.map((r) => ({
             leadId: r.interval.leadId,
             funnel: r.interval.funnel,
@@ -599,26 +622,26 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         });
       }
 
-      // touches — переходы между этапами (Гос-группа «Новый лид / Взят в
-      // работу» схлопывается: внутренний переход не считается переходом).
-      const collapsed = collapseAll(intervals).filter(
+      // touches — переходы между этапами
+      const collapsed = collapseAll(intervals, { intake: true }).filter(
         (iv): iv is StageInterval & { exitMs: number } => iv.exitMs != null && iv.nextStatus != null,
       );
       const leadIds = [...new Set(collapsed.map((iv) => iv.leadId))];
-      const minMs = collapsed.length ? Math.min(...collapsed.map((iv) => iv.enterMs)) : 0;
-      const maxMs = collapsed.length ? Math.max(...collapsed.map((iv) => iv.exitMs)) : 0;
-      const touches = await fetchTouches(leadIds, minMs, maxMs);
+      const range = minMax(collapsed.flatMap((iv) => [iv.enterMs, iv.exitMs]));
+      const touches = range
+        ? await fetchTouches(leadIds, range.min, range.max)
+        : new Map<number, never[]>();
       const rows = collapsed
         .map((iv) => computeTouches(iv, touches.get(iv.leadId)))
         .filter((r): r is NonNullable<typeof r> => r !== null);
       // свежие переходы сверху
       rows.sort((a, b) => (b.interval.exitMs ?? 0) - (a.interval.exitMs ?? 0));
-      const okCount = rows.filter((r) => r.ok).length;
-      const { total, page } = paginate(rows);
+      const { total, okCount, managers, page } = paginate(rows);
       return NextResponse.json({
         view,
         total,
         okCount,
+        managers,
         rows: page.map((r) => ({
           leadId: r.interval.leadId,
           funnel: r.interval.funnel,
@@ -674,19 +697,35 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         ORDER BY sort_key DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
-      const res = await analyticsDb.execute<{
-        lead_id: string;
-        manager: string | null;
-        enter_berlin: string;
-        call_berlin: string | null;
-        sla_seconds: string | null;
-        total: number;
-        avg_seconds: string | null;
-      }>(sql.raw(query));
+      // Полный список менеджеров периода — для дропдауна фильтра (страница
+      // выдачи содержит лишь часть имён).
+      const managersQuery = `
+        SELECT DISTINCT s.manager
+        FROM analytics.sla s
+        LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+        WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
+          AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
+          AND COALESCE(lc.is_deleted, FALSE) = FALSE
+          AND s.manager IS NOT NULL
+        ORDER BY s.manager
+      `;
+      const [res, managersRes] = await Promise.all([
+        analyticsDb.execute<{
+          lead_id: string;
+          manager: string | null;
+          enter_berlin: string;
+          call_berlin: string | null;
+          sla_seconds: string | null;
+          total: number;
+          avg_seconds: string | null;
+        }>(sql.raw(query)),
+        analyticsDb.execute<{ manager: string }>(sql.raw(managersQuery)),
+      ]);
       return NextResponse.json({
         view,
         total: res.rows.length > 0 ? Number(res.rows[0].total) : 0,
         avgSeconds: res.rows.length > 0 && res.rows[0].avg_seconds != null ? Number(res.rows[0].avg_seconds) : null,
+        managers: managersRes.rows.map((r) => r.manager),
         rows: res.rows.map((r) => ({
           leadId: Number(r.lead_id),
           manager: r.manager ?? "—",
@@ -714,7 +753,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         FROM analytics.lead_status_changes sc
         LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = sc.lead_id
         WHERE sc.pipeline IN (${pipelines})
-          AND sc.status NOT IN (${terminalList})
+          -- Won/lost (Kommo-инвариант 142/143) — не «этапы работы»; фильтр
+          -- по id, а не по переименовываемым именам статусов.
+          AND (sc.status_id IS NULL OR sc.status_id NOT IN (${TERMINAL_STATUS_IDS.join(", ")}))
           AND sc.event_at >= '${fromLit}' AND sc.event_at <= '${toLit}'
           AND COALESCE(lc.is_deleted, FALSE) = FALSE
           ${detailFilters(sp)}

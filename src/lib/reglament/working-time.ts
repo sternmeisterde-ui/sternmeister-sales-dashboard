@@ -48,17 +48,10 @@ export function workDaysTouched(start: Date, end: Date): number {
   return total - sundaysInRange(a, b);
 }
 
-/** Календарные дни: разница берлинских civil-дней (день выхода − день входа). */
-export function calendarDaysBetween(start: Date, end: Date): number {
-  if (end.getTime() < start.getTime()) return 0;
-  return berlinDayNumber(end) - berlinDayNumber(start);
-}
-
-/** Часы: прошедшее время в целых часах (floor). Для норматива «Часы». */
-export function hoursBetween(start: Date, end: Date): number {
-  if (end.getTime() < start.getTime()) return 0;
-  return Math.floor((end.getTime() - start.getTime()) / 3_600_000);
-}
+// Календарные дни и часы для «Время на этапах» считаются дробным elapsed'ом
+// прямо в compute.ts (формула, совпадающая с интегратором) — целочисленных
+// хелперов здесь намеренно нет, чтобы никто не взял «похожую» функцию с
+// другой семантикой.
 
 /**
  * Разрыв между касаниями (TLT-GAP) в рабочих днях: как workDaysTouched, но
