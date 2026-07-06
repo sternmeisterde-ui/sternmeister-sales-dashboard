@@ -16,7 +16,12 @@ import { getSession } from "@/lib/auth";
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
 import { parseDateBoundary, todayCivil, addDaysCivil } from "@/lib/utils/date";
-import { FUNNEL_PIPELINES, TLT_GAP_NORMS, type FunnelKey } from "@/lib/reglament/norms";
+import {
+  FUNNEL_PIPELINES,
+  SLA_TARGET_SECONDS,
+  TLT_GAP_NORMS,
+  type FunnelKey,
+} from "@/lib/reglament/norms";
 import { fetchStageIntervals, fetchTouches, type StageInterval } from "@/lib/reglament/data";
 import {
   collapseAll,
@@ -36,6 +41,8 @@ const VALID_VIEWS = new Set([
   "tlt_gap",
   "touches",
   "tasks",
+  "summary",
+  "missed",
 ]);
 
 /** Терминальные статусы: пребывание в них не является «этапом работы» —
@@ -95,6 +102,114 @@ function detailFilters(sp: URLSearchParams): string {
   return parts.join("\n");
 }
 
+interface TaskDayRow {
+  day: string;
+  funnel: FunnelKey;
+  manager: string;
+  total: number;
+  planned: number;
+  overdue: number;
+  completed: number;
+  notCompleted: number;
+  score: number;
+}
+
+/**
+ * Задачи: день × менеджер × воронка (формулы справочника 23a §5).
+ * Всего на день = задачи с дедлайном сегодня + висящие просроченные;
+ * Просроченные = Всего − Запланировано; Показатель = Завершено/Всего×100
+ * (может быть > 100). Момент завершения — completed_at (заполняется
+ * sync-tasks из updated_at Kommo; исторические строки без него не попадают
+ * в «Завершено»). Хвосты просрочки старше полугода до начала периода
+ * отсекаются осознанно.
+ */
+async function aggregateTasks(opts: {
+  pipelines: string;
+  fromUtc: Date;
+  fromLit: string;
+  toLit: string;
+  fromCivil: string;
+  toCivil: string;
+  manager: string | null;
+}): Promise<TaskDayRow[]> {
+  const managerCond = opts.manager ? `AND t.task_manager = '${esc(opts.manager)}'` : "";
+  const horizonLit = utcLiteral(new Date(opts.fromUtc.getTime() - 183 * 86_400_000));
+  const query = `
+    SELECT
+      t.task_manager,
+      lc.pipeline,
+      to_char(t.deadline AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS deadline_day,
+      to_char(t.completed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS completed_day,
+      t.is_completed
+    FROM analytics.tasks t
+    JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
+    WHERE lc.pipeline IN (${opts.pipelines})
+      AND COALESCE(lc.is_deleted, FALSE) = FALSE
+      AND t.deadline IS NOT NULL
+      AND t.task_manager IS NOT NULL
+      AND (
+        (t.deadline >= '${horizonLit}' AND t.deadline <= '${opts.toLit}')
+        OR (t.completed_at >= '${opts.fromLit}' AND t.completed_at <= '${opts.toLit}')
+      )
+      ${managerCond}
+  `;
+  const res = await analyticsDb.execute<{
+    task_manager: string;
+    pipeline: string;
+    deadline_day: string | null;
+    completed_day: string | null;
+    is_completed: number;
+  }>(sql.raw(query));
+
+  const days: string[] = [];
+  for (let d = opts.fromCivil; d <= opts.toCivil; d = addDaysCivil(d, 1)) days.push(d);
+
+  interface Agg {
+    planned: number;
+    overdue: number;
+    completed: number;
+  }
+  const agg = new Map<string, Agg>(); // key: day|funnel|manager
+  const bump = (day: string, funnel: FunnelKey, manager: string, k: keyof Agg) => {
+    const key = `${day}|${funnel}|${manager}`;
+    const a = agg.get(key) ?? { planned: 0, overdue: 0, completed: 0 };
+    a[k]++;
+    agg.set(key, a);
+  };
+  for (const r of res.rows) {
+    const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
+    for (const day of days) {
+      if (r.deadline_day === day) bump(day, funnel, r.task_manager, "planned");
+      else if (
+        r.deadline_day != null &&
+        r.deadline_day < day &&
+        (!r.is_completed || (r.completed_day != null && r.completed_day >= day))
+      ) {
+        bump(day, funnel, r.task_manager, "overdue");
+      }
+      if (r.completed_day === day) bump(day, funnel, r.task_manager, "completed");
+    }
+  }
+  return [...agg.entries()]
+    .map(([key, a]) => {
+      const [day, funnel, manager] = key.split("|");
+      const total = a.planned + a.overdue;
+      return {
+        day,
+        funnel: funnel as FunnelKey,
+        manager,
+        total,
+        planned: a.planned,
+        overdue: a.overdue,
+        completed: a.completed,
+        notCompleted: Math.max(0, total - a.completed),
+        score: total > 0 ? Math.round((a.completed / total) * 10000) / 100 : 0,
+      };
+    })
+    .filter((r) => r.total > 0 || r.completed > 0)
+    .sort((a, b) => (a.day === b.day ? a.manager.localeCompare(b.manager, "ru") : b.day.localeCompare(a.day)));
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const session = await getSession();
@@ -117,97 +232,276 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const toLit = utcLiteral(period.toUtc);
     const terminalList = TERMINAL_STATUSES.map((s) => `'${esc(s)}'`).join(", ");
 
-    // ── Задачи: день × менеджер (формулы из справочника 23a §5) ──────
-    // Всего на день = задачи с дедлайном сегодня + висящие просроченные;
-    // Просроченные = Всего − Запланировано; Показатель = Завершено/Всего×100.
-    // Момент завершения = completed_at (заполняется sync-tasks из updated_at
-    // Kommo; исторические строки без него не попадают в «Завершено»).
-    if (view === "tasks") {
-      const managerParam = sp.get("manager");
-      const managerCond = managerParam ? `AND t.task_manager = '${esc(managerParam)}'` : "";
-      // Кандидаты: дедлайн ≤ конца периода (не старше полугода до начала —
-      // более старые хвосты просрочки отсекаем осознанно) ЛИБО завершение в
-      // периоде. Дни считаем в JS по берлинским датам.
-      const horizonLit = utcLiteral(new Date(period.fromUtc.getTime() - 183 * 86_400_000));
-      const query = `
-        SELECT
-          t.task_manager,
-          lc.pipeline,
-          to_char(t.deadline AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS deadline_day,
-          to_char(t.completed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS completed_day,
-          t.is_completed
-        FROM analytics.tasks t
-        JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
-        WHERE lc.pipeline IN (${pipelines})
-          AND COALESCE(lc.is_deleted, FALSE) = FALSE
-          AND t.deadline IS NOT NULL
-          AND t.task_manager IS NOT NULL
-          AND (
-            (t.deadline >= '${horizonLit}' AND t.deadline <= '${toLit}')
-            OR (t.completed_at >= '${fromLit}' AND t.completed_at <= '${toLit}')
-          )
-          ${managerCond}
-      `;
-      const res = await analyticsDb.execute<{
-        task_manager: string;
-        pipeline: string;
-        deadline_day: string | null;
-        completed_day: string | null;
-        is_completed: number;
-      }>(sql.raw(query));
+    // ── Сводка «Показатели соблюдения регламента» ─────────────────────
+    // Каждая метрика = доля ok-проверок менеджера за период; «Регламент, %»
+    // = микро-среднее Σok/Σпроверок по всем метрикам (гипотеза 23a §6,
+    // простое среднее процентов опровергнуто). SLA-порог — предварительный.
+    if (view === "summary") {
+      const nowMs = Date.now();
+      const intervals = await fetchStageIntervals({
+        funnels: ["gos", "berater"],
+        fromUtc: period.fromUtc,
+        toUtc: period.toUtc,
+        anchor: "exit",
+      });
+      const merged = collapseAll(intervals);
+      const stageRows = merged
+        .map((iv) => computeStageTime(iv, nowMs))
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      const tltIv = merged.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
+      const touchIv = collapseAll(intervals, { intake: true }).filter(
+        (iv) => iv.exitMs != null && iv.nextStatus != null,
+      );
+      const allLeadIds = [...new Set([...tltIv, ...touchIv].map((iv) => iv.leadId))];
+      const allMs = [...tltIv, ...touchIv].flatMap((iv) => [iv.enterMs, iv.exitMs ?? nowMs]);
+      const touches = await fetchTouches(
+        allLeadIds,
+        allMs.length ? Math.min(...allMs) : 0,
+        allMs.length ? Math.max(...allMs) : 0,
+      );
+      const tltRows = tltIv
+        .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      const touchRows = touchIv
+        .map((iv) => computeTouches(iv, touches.get(iv.leadId)))
+        .filter((r): r is NonNullable<typeof r> => r !== null);
 
-      // Дни периода (civil, Berlin)
-      const days: string[] = [];
+      // SLA (только Гос): доля лидов с первым звонком ≤ порога от начала
+      // смены. Лиды без звонка (pending) не участвуют.
+      const slaRes = await analyticsDb.execute<{
+        manager: string | null;
+        n: string;
+        ok: string;
+      }>(
+        sql.raw(`
+          SELECT s.manager,
+            COUNT(*)::int AS n,
+            COUNT(*) FILTER (
+              WHERE COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) <= ${SLA_TARGET_SECONDS}
+            )::int AS ok
+          FROM analytics.sla s
+          LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+          WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
+            AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
+            AND COALESCE(lc.is_deleted, FALSE) = FALSE
+            AND COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) IS NOT NULL
+          GROUP BY s.manager
+        `),
+      );
+
       const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
       const toCivil = sp.get("to") ?? todayCivil();
-      for (let d = fromCivil; d <= toCivil; d = addDaysCivil(d, 1)) days.push(d);
+      const taskRows = await aggregateTasks({
+        pipelines,
+        fromUtc: period.fromUtc,
+        fromLit,
+        toLit,
+        fromCivil,
+        toCivil,
+        manager: null,
+      });
 
-      interface Agg {
-        planned: number;
-        overdue: number;
-        completed: number;
-      }
-      const agg = new Map<string, Agg>(); // key: day|funnel|manager
-      const bump = (day: string, funnel: FunnelKey, manager: string, k: keyof Agg) => {
-        const key = `${day}|${funnel}|${manager}`;
-        const a = agg.get(key) ?? { planned: 0, overdue: 0, completed: 0 };
-        a[k]++;
-        agg.set(key, a);
+      // Σ по (funnel, manager, metric)
+      type Cell = { ok: number; n: number };
+      const cells = new Map<string, Cell>(); // funnel|manager|metric
+      const add = (funnel: FunnelKey, manager: string, metric: string, ok: number, n: number) => {
+        const key = `${funnel}|${manager}|${metric}`;
+        const c = cells.get(key) ?? { ok: 0, n: 0 };
+        c.ok += ok;
+        c.n += n;
+        cells.set(key, c);
       };
-      for (const r of res.rows) {
-        const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
-        const m = r.task_manager;
-        for (const day of days) {
-          if (r.deadline_day === day) bump(day, funnel, m, "planned");
-          else if (
-            r.deadline_day != null &&
-            r.deadline_day < day &&
-            (!r.is_completed || (r.completed_day != null && r.completed_day >= day))
-          ) {
-            bump(day, funnel, m, "overdue");
-          }
-          if (r.completed_day === day) bump(day, funnel, m, "completed");
+      for (const r of stageRows) add(r.interval.funnel, r.interval.responsible, "stage", r.ok ? 1 : 0, 1);
+      for (const r of tltRows) add(r.interval.funnel, r.interval.responsible, "tlt", r.ok ? 1 : 0, 1);
+      for (const r of touchRows) add(r.interval.funnel, r.interval.responsible, "touches", r.ok ? 1 : 0, 1);
+      for (const r of slaRes.rows) {
+        if (r.manager) add("gos", r.manager, "sla", Number(r.ok), Number(r.n));
+      }
+      for (const r of taskRows) add(r.funnel, r.manager, "tasks", Math.min(r.completed, r.total), r.total);
+
+      const managersByFunnel: Record<FunnelKey, Set<string>> = { gos: new Set(), berater: new Set() };
+      for (const key of cells.keys()) {
+        const [funnel, manager] = key.split("|");
+        managersByFunnel[funnel as FunnelKey].add(manager);
+      }
+      const METRICS = ["sla", "tlt", "stage", "touches", "tasks"] as const;
+      const build = (funnel: FunnelKey) =>
+        [...managersByFunnel[funnel]]
+          .sort((a, b) => a.localeCompare(b, "ru"))
+          .map((manager) => {
+            const metrics: Record<string, { pct: number; ok: number; n: number } | null> = {};
+            let sumOk = 0;
+            let sumN = 0;
+            for (const m of METRICS) {
+              if (funnel === "berater" && m === "sla") continue;
+              const c = cells.get(`${funnel}|${manager}|${m}`);
+              if (c && c.n > 0) {
+                metrics[m] = { pct: Math.round((c.ok / c.n) * 100), ok: c.ok, n: c.n };
+                sumOk += c.ok;
+                sumN += c.n;
+              } else {
+                metrics[m] = null;
+              }
+            }
+            return {
+              manager,
+              metrics,
+              reglament: sumN > 0 ? Math.round((sumOk / sumN) * 100) : null,
+            };
+          })
+          .filter((r) => r.reglament !== null);
+      return NextResponse.json({ view, gos: build("gos"), berater: build("berater") });
+    }
+
+    // ── Пропущенные звонки (определение из ТЗ 23 §4.1) ────────────────
+    // Только CallGear; звонок = кластер cg-легов (телефон + разрыв ≤3 мин);
+    // пропущен = ни один агент не ответил. Входящие CG идут через
+    // переадресацию («Call forwarding»): короткое соединение (< порога) —
+    // гудки/сброс, т.е. НЕ ответ; длинное — разговор с менеджером по
+    // мобильному. Порог 🟡 подобран по эталону (T=7с — ближайший счёт).
+    // Менеджер = ответственный контакта. Ограничение: звонки без агентских
+    // легов (вне рабочего времени) в communications отсутствуют.
+    if (view === "missed") {
+      const FORWARD_MIN_TALK_SECONDS = 7;
+      const legsRes = await analyticsDb.execute<{
+        communication_id: string;
+        at_utc: string;
+        call_status: number | null;
+        manager: string | null;
+        phone: string | null;
+        duration: number | null;
+      }>(
+        sql.raw(`
+          SELECT DISTINCT ON (communication_id)
+            communication_id,
+            to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS at_utc,
+            call_status,
+            manager,
+            phone,
+            duration
+          FROM analytics.communications
+          WHERE communication_type = 'call_in'
+            AND communication_id LIKE 'cg-leg%'
+            AND phone IS NOT NULL
+            AND created_at >= '${fromLit}' AND created_at <= '${toLit}'
+          ORDER BY communication_id
+        `),
+      );
+      const norm = (p: string) => p.replace(/\D/g, "").slice(-9);
+      const legs = legsRes.rows
+        .map((r) => ({
+          ms: new Date(r.at_utc.replace(" ", "T") + "Z").getTime(),
+          answered:
+            r.call_status === 4 &&
+            (r.manager !== "Call forwarding" || Number(r.duration ?? 0) >= FORWARD_MIN_TALK_SECONDS),
+          phone: norm(r.phone ?? ""),
+        }))
+        .filter((l) => l.phone.length >= 7)
+        .sort((a, b) => a.ms - b.ms);
+      // Кластеризация легов в звонки
+      interface Cluster {
+        phone: string;
+        startMs: number;
+        lastMs: number;
+        answered: boolean;
+      }
+      const clusters: Cluster[] = [];
+      const lastByPhone = new Map<string, Cluster>();
+      for (const l of legs) {
+        const prev = lastByPhone.get(l.phone);
+        if (prev && l.ms - prev.lastMs <= 180_000) {
+          prev.lastMs = l.ms;
+          prev.answered = prev.answered || l.answered;
+        } else {
+          const c: Cluster = { phone: l.phone, startMs: l.ms, lastMs: l.ms, answered: l.answered };
+          clusters.push(c);
+          lastByPhone.set(l.phone, c);
         }
       }
-      const rows = [...agg.entries()]
-        .map(([key, a]) => {
-          const [day, funnel, manager] = key.split("|");
-          const total = a.planned + a.overdue;
-          return {
-            day,
-            funnel: funnel as FunnelKey,
-            manager,
-            total,
-            planned: a.planned,
-            overdue: a.overdue,
-            completed: a.completed,
-            notCompleted: Math.max(0, total - a.completed),
-            score: total > 0 ? Math.round((a.completed / total) * 10000) / 100 : 0,
-          };
-        })
-        .filter((r) => r.total > 0 || r.completed > 0)
-        .sort((a, b) => (a.day === b.day ? a.manager.localeCompare(b.manager, "ru") : b.day.localeCompare(a.day)));
+      const missed = clusters.filter((c) => !c.answered).sort((a, b) => b.startMs - a.startMs);
 
+      // Контакты по номерам (основной телефон или phones_all)
+      const phones = [...new Set(missed.map((c) => c.phone))];
+      const contactsByPhone = new Map<
+        string,
+        { contactId: number; name: string | null; responsibleUserId: number | null }
+      >();
+      if (phones.length > 0) {
+        const values = phones.map((p) => `('${esc(p)}')`).join(", ");
+        const contactsRes = await analyticsDb.execute<{
+          p: string;
+          contact_id: string;
+          name: string | null;
+          responsible_user_id: string | null;
+        }>(
+          sql.raw(`
+            SELECT v.p, c.contact_id, c.name, c.responsible_user_id
+            FROM (VALUES ${values}) AS v(p)
+            JOIN analytics.contacts c
+              ON right(regexp_replace(COALESCE(c.phone, ''), '\\D', '', 'g'), 9) = v.p
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE(c.phones_all, '[]'::jsonb)) ph
+                WHERE right(regexp_replace(ph, '\\D', '', 'g'), 9) = v.p
+              )
+          `),
+        );
+        for (const r of contactsRes.rows) {
+          if (!contactsByPhone.has(r.p)) {
+            contactsByPhone.set(r.p, {
+              contactId: Number(r.contact_id),
+              name: r.name,
+              responsibleUserId: r.responsible_user_id != null ? Number(r.responsible_user_id) : null,
+            });
+          }
+        }
+      }
+      // Имена ответственных по kommo user id
+      const userNames = await analyticsDb.execute<{ uid: string; manager: string }>(
+        sql.raw(`
+          SELECT DISTINCT ON (responsible_user_id) responsible_user_id AS uid, manager
+          FROM analytics.leads_cohort
+          WHERE responsible_user_id IS NOT NULL AND manager IS NOT NULL
+          ORDER BY responsible_user_id, created_at DESC
+        `),
+      );
+      const nameByUid = new Map(userNames.rows.map((r) => [Number(r.uid), r.manager]));
+
+      const berlinStr = (ms: number): string => {
+        const d = new Date(ms);
+        return `${d.toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" })} ${d.toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin", hour12: false })}`;
+      };
+      return NextResponse.json({
+        view,
+        rows: missed.map((c) => {
+          const contact = contactsByPhone.get(c.phone);
+          return {
+            at: berlinStr(c.startMs),
+            phone: c.phone,
+            contactId: contact?.contactId ?? null,
+            contactName: contact?.name ?? null,
+            manager:
+              contact?.responsibleUserId != null
+                ? (nameByUid.get(contact.responsibleUserId) ?? "—")
+                : "—",
+          };
+        }),
+      });
+    }
+
+    // ── Задачи: день × менеджер (формулы из справочника 23a §5) ──────
+    if (view === "tasks") {
+      const managerParam = sp.get("manager") || null;
+      const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
+      const toCivil = sp.get("to") ?? todayCivil();
+      const rows = await aggregateTasks({
+        pipelines,
+        fromUtc: period.fromUtc,
+        fromLit,
+        toLit,
+        fromCivil,
+        toCivil,
+        manager: managerParam,
+      });
       // Свежесть данных задач (наш ETL задач может отставать)
       const [fresh] = (
         await analyticsDb.execute<{ max_created: string | null }>(

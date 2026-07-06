@@ -11,7 +11,14 @@ import { RefreshCw, ShieldCheck } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import { berlinCivilDate, fmtLocalDate, todayBerlinDate, todayCivil } from "@/lib/utils/date";
-import { FUNNEL_PIPELINES, orderStages, type FunnelKey } from "@/lib/reglament/norms";
+import {
+  FUNNEL_PIPELINES,
+  metricColor,
+  NAME_RED_BELOW,
+  orderStages,
+  type FunnelKey,
+  type MetricColor,
+} from "@/lib/reglament/norms";
 
 // ─── Типы ответов API ───────────────────────────────────────────────
 
@@ -736,6 +743,234 @@ function TouchesView({ range }: { range: DateRange }) {
   );
 }
 
+// ─── Сводка ─────────────────────────────────────────────────────────
+
+interface SummaryMetric {
+  pct: number;
+  ok: number;
+  n: number;
+}
+interface SummaryRow {
+  manager: string;
+  metrics: Record<string, SummaryMetric | null>;
+  reglament: number | null;
+}
+interface MissedRow {
+  at: string;
+  phone: string;
+  contactId: number | null;
+  contactName: string | null;
+  manager: string;
+}
+
+const METRIC_COLUMNS: { key: string; label: string; gosOnly?: boolean }[] = [
+  { key: "sla", label: "SLA, %", gosOnly: true },
+  { key: "tlt", label: "TLT, %" },
+  { key: "stage", label: "Время на этапе, %" },
+  { key: "touches", label: "Мин.касаний, %" },
+  { key: "tasks", label: "Задачи, %" },
+];
+
+const CELL_BG: Record<MetricColor, string> = {
+  red: "bg-red-500/20 text-red-200",
+  yellow: "bg-amber-500/20 text-amber-100",
+  green: "bg-emerald-500/20 text-emerald-100",
+};
+
+function MetricCell({ m }: { m: SummaryMetric | null }) {
+  if (!m) {
+    return <td className="px-3 py-2 text-right text-slate-500">–</td>;
+  }
+  return (
+    <td
+      className={`px-3 py-2 text-right tabular-nums ${CELL_BG[metricColor(m.pct)]}`}
+      title={`${m.ok}/${m.n} проверок в нормативе`}
+    >
+      {m.pct}
+    </td>
+  );
+}
+
+function SummaryTable({ rows, funnel }: { rows: SummaryRow[]; funnel: FunnelKey }) {
+  const cols = METRIC_COLUMNS.filter((c) => !c.gosOnly || funnel === "gos");
+  return (
+    <section>
+      <h3 className="mb-2 text-center text-sm font-semibold text-slate-200">
+        Показатели соблюдения регламента — {funnel === "gos" ? "ГОСНИКИ" : "БЕРАТЕР"}
+      </h3>
+      <div className="overflow-x-auto rounded-lg border border-white/10">
+        <table className="w-full text-sm">
+          <thead style={theadStyle}>
+            <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+              <th className={thCls}>Менеджер</th>
+              {cols.map((c) => (
+                <th key={c.key} className={`${thCls} text-right`}>
+                  {c.label}
+                </th>
+              ))}
+              <th className={`${thCls} text-right`}>Регламент, %</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={cols.length + 2} className="px-3 py-6 text-center text-xs text-slate-500">
+                  Нет данных за период.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r) => (
+                <tr key={r.manager} className="border-b border-white/5 last:border-0">
+                  <td
+                    className={`whitespace-nowrap px-3 py-2 ${
+                      r.reglament != null && r.reglament < NAME_RED_BELOW
+                        ? "bg-red-500/25 text-red-100"
+                        : "text-slate-200"
+                    }`}
+                  >
+                    {r.manager}
+                  </td>
+                  {cols.map((c) => (
+                    <MetricCell key={c.key} m={r.metrics[c.key] ?? null} />
+                  ))}
+                  {r.reglament != null ? (
+                    <td className={`px-3 py-2 text-right font-semibold tabular-nums ${CELL_BG[metricColor(r.reglament)]}`}>
+                      {r.reglament}
+                    </td>
+                  ) : (
+                    <td className="px-3 py-2 text-right text-slate-500">–</td>
+                  )}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function MissedCallsTable({ rows }: { rows: MissedRow[] }) {
+  return (
+    <section>
+      <h3 className="mb-2 text-xs uppercase tracking-wider text-slate-500">Пропущенные звонки</h3>
+      <div className="max-h-[50vh] overflow-auto rounded-lg border border-white/10">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 z-10" style={theadStyle}>
+            <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+              <th className={thCls}>Дата и время звонка</th>
+              <th className={thCls}>Менеджер</th>
+              <th className={thCls}>Контакт</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={3} className="px-3 py-6 text-center text-xs text-slate-500">
+                  Пропущенных звонков за период нет.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r, i) => (
+                <tr key={`${r.at}-${i}`} className="border-b border-white/5 bg-slate-900/30 last:border-0">
+                  <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.at)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.manager}</td>
+                  <td className="px-3 py-2 text-xs">
+                    {r.contactId != null ? (
+                      <a
+                        href={`https://sternmeister.kommo.com/contacts/detail/${r.contactId}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-blue-300 hover:underline"
+                      >
+                        {r.contactName || `контакт ${r.contactId}`}
+                      </a>
+                    ) : (
+                      <span className="text-slate-400">…{r.phone.slice(-4)} (контакт не найден)</span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-1 text-[11px] text-slate-500">
+        Только CallGear; звонки, упавшие до дозвона агентам (вне рабочего времени), в базе
+        отсутствуют. Менеджер — ответственный контакта в Kommo.
+      </p>
+    </section>
+  );
+}
+
+function SummaryView({ range }: { range: DateRange }) {
+  const [summary, setSummary] = useState<{ gos: SummaryRow[]; berater: SummaryRow[] } | null>(null);
+  const [missed, setMissed] = useState<MissedRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      const params = {
+        from: fmtLocalDate(range.start ?? todayBerlinDate()),
+        to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+      };
+      try {
+        const [s, m] = await Promise.all([
+          fetchView<{ gos: SummaryRow[]; berater: SummaryRow[] }>("summary", params),
+          fetchView<{ rows: MissedRow[] }>("missed", params),
+        ]);
+        if (!cancelled) {
+          setSummary(s);
+          setMissed(m.rows);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [range]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <DinoLoader />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+        Ошибка загрузки: {error}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-6">
+      {summary && (
+        <>
+          <SummaryTable rows={summary.gos} funnel="gos" />
+          <SummaryTable rows={summary.berater} funnel="berater" />
+          <p className="-mt-3 text-[11px] text-slate-500">
+            Метрика = доля проверок в нормативе за период (наведите на ячейку — счёт).
+            «Регламент, %» — сводный: Σ ok / Σ проверок по всем метрикам. Порог SLA
+            (10 мин от начала смены) — предварительный. Цвета: ≤70 красный, 71–80 жёлтый, ≥81 зелёный.
+          </p>
+        </>
+      )}
+      {missed && <MissedCallsTable rows={missed} />}
+    </div>
+  );
+}
+
 // ─── Задачи ─────────────────────────────────────────────────────────
 
 interface TaskApiRow {
@@ -1212,7 +1447,9 @@ export default function ReglamentTab({ department: _department }: { department: 
       </div>
 
       <div key={`${sub}-${reloadKey}`}>
-        {sub === "avg" ? (
+        {sub === "summary" ? (
+          <SummaryView range={range} />
+        ) : sub === "avg" ? (
           <AvgView range={range} />
         ) : sub === "sla" ? (
           <SlaView range={range} />
