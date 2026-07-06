@@ -4,6 +4,7 @@ import {
   FUNNEL_STATUS_MAP,
   NEW_VARIANTS_MAP,
   B2G_PIPELINES,
+  MED_QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_FIRST_LINE_STATUS_IDS,
   QUAL_REASON_ENUM_IDS,
   getFunnelStatusMap,
@@ -43,10 +44,21 @@ export const SYNTH_LOSS_REASON_FIELD_ID = 999001;
 const FIRST_LINE_REASON_FIELD_ID = 879824;
 
 export function isQualLead(lead: KommoLead): boolean {
-  if (lead.pipeline_id === B2G_PIPELINES.FIRST_LINE) {
+  // Первая линия ОБЕИХ вертикалей (Бух Гос / Мед Гос) — строгий allow-list.
+  // Мед — зеркало бух («квалы те же», 2026-07-06): статусы-аналоги Мед Гос,
+  // reason-enum'ы общие (одно поле cf 879824 на обе воронки). Без этого
+  // мед-лиды падали в мягкую deny-ветку и «квалом» считался любой незакрытый.
+  if (
+    lead.pipeline_id === B2G_PIPELINES.FIRST_LINE ||
+    lead.pipeline_id === B2G_PIPELINES.MEDICAL_GOV
+  ) {
+    const qualIds =
+      lead.pipeline_id === B2G_PIPELINES.FIRST_LINE
+        ? QUAL_FIRST_LINE_STATUS_IDS
+        : MED_QUAL_FIRST_LINE_STATUS_IDS;
     // URL allow-list: status must be allow-listed; reason must be NULL or
     // allow-listed.
-    if (!QUAL_FIRST_LINE_STATUS_IDS.includes(lead.status_id)) return false;
+    if (!qualIds.includes(lead.status_id)) return false;
     const fields = lead.custom_fields_values || [];
     const reasonCf = fields.find((f) => f.field_id === FIRST_LINE_REASON_FIELD_ID);
     if (reasonCf) {

@@ -2208,8 +2208,14 @@ function getFunnelFact(
       ).length);
     }
     case "delayedStart": {
+      // Обе воронки — как в per-manager ветке и FUNNEL_STATUS_MAP (code-review
+      // 2026-07-06: раньше team-счёт брал только Бератер и был меньше суммы
+      // по менеджерам).
       return String((snapshotLeads || []).filter(
-        (l) => brPipes.has(l.pipeline_id) && !l.is_deleted && !l.closed_at && brS.delayedStart.has(l.status_id)
+        (l) =>
+          !l.is_deleted && !l.closed_at &&
+          ((brPipes.has(l.pipeline_id) && brS.delayedStart.has(l.status_id))
+            || (flPipes.has(l.pipeline_id) && flS.delayedStart.has(l.status_id)))
       ).length);
     }
     case "appeal": {

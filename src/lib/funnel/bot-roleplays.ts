@@ -27,6 +27,13 @@ export interface BotRoleplaySummary {
 const LEVEL2 = "('level_2','mittel','schwer','medium','hard')";
 const LEVEL1 = "('level_1','leicht','easy')";
 
+/** ISO-дата + N дней (UTC-арифметика по календарю, без TZ-сюрпризов). */
+function shiftIsoDay(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 export interface BotDailyPoint {
   day: string; // YYYY-MM-DD
   total: number; // всего завершённых сессий за день
@@ -50,11 +57,14 @@ export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient
     // День — БЕРЛИНСКАЯ дата (CLAUDE.md #1). finished_at — text ISO с +00:00;
     // substring давал UTC-день: вечерние тренировки (после 22:00 Berlin летом)
     // падали на соседний день и drill расходился с графиком.
+    // Грубый sargable-диапазон возвращает индекс (см. getBotDailyStats).
     const rows = unwrapRows<{ lead_id: string | number | null; cnt: string | number }>(
       await analyticsDb.execute(sql`
         SELECT lead_id, count(*) AS cnt
         FROM analytics.bot_roleplays
-        WHERE to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') = ${dayIso}
+        WHERE finished_at >= ${shiftIsoDay(dayIso, -1)}
+          AND finished_at < ${shiftIsoDay(dayIso, 1)}
+          AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') = ${dayIso}
           AND lead_id IS NOT NULL
         GROUP BY lead_id
         ORDER BY cnt DESC
@@ -77,6 +87,12 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
   try {
     // День — БЕРЛИНСКАЯ дата (CLAUDE.md #1), не UTC-substring: иначе вечерние
     // тренировки после 22:00 Berlin (лето) уезжали на соседний день.
+    // Грубый sargable-диапазон (текст ISO, ±1 день на TZ) возвращает индекс
+    // idx_bot_roleplays_finished (code-review 2026-07-06: to_char по колонке
+    // в WHERE давал full scan); точная берлинская граница — вторым условием.
+    // Берлинский день D начинается в D−1T22:00Z (лето) → нижняя граница −1 день.
+    const coarseLo = shiftIsoDay(fromIso, -1);
+    const coarseHi = shiftIsoDay(toIso, 1);
     const rows = unwrapRows<{ day: string; total: string | number; users: string | number; lvl1: string | number; lvl2: string | number }>(
       await analyticsDb.execute(sql`
         SELECT to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
@@ -85,7 +101,9 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
                count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
                count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
         FROM analytics.bot_roleplays
-        WHERE to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') >= ${fromIso}
+        WHERE finished_at >= ${coarseLo}
+          AND finished_at < ${coarseHi}
+          AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') >= ${fromIso}
           AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') <= ${toIso}
         GROUP BY 1 ORDER BY 1
       `),

@@ -276,9 +276,12 @@ function computeLeadStages(
   at.qual = lead.anchorAt; // anchor = created_at (упрощение, как у когорт)
 
   // Главные вехи — то же drill-правило, что в lead-list/карточках: цель засчитана,
-  // если достигнута ДО дисквала (или лид не дисквалифицирован). Поэтому счётчики
-  //   Документы = C1 target, Термин ДЦ = C2 target, Гутшайн = C5 target
-  // СОВПАДАЮТ с суммами target карточек/таблицы.
+  // если достигнута ДО дисквала (или лид не дисквалифицирован).
+  // ⚠ Счётчики лестницы НЕ обязаны совпадать с суммами target карточек C1/C2/C5:
+  // (а) в лестнице дисквалы исключены целиком (chainStages), карточки же считают
+  // цели, достигнутые до дисквала; (б) инференс глубины помечает ранние ступени
+  // от более глубоких свидетельств (в т.ч. Бератер-событий без Гос-события).
+  // Это осознанная семантика «полного пути» (2026-07-06).
   const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext, scope);
   const c2 = processLeadForConversion("C2", lead, targetEvents, beraterContext, scope);
   const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext, scope);
@@ -342,10 +345,11 @@ function computeLeadStages(
   for (const bl of berater) {
     if (bl.createdAt.getTime() < lead.anchorAt.getTime()) continue; // сделка прошлого цикла
     if (lead.disqualifiedAt !== null && bl.createdAt > lead.disqualifiedAt) continue;
-    if (!reached.received || (at.received !== null && bl.createdAt < at.received)) {
-      reached.received = true;
-      if (at.received === null || bl.createdAt < at.received) at.received = bl.createdAt;
-    }
+    // Всегда помечаем и берём МИНИМАЛЬНУЮ дату. (code-review 2026-07-06:
+    // прежний внешний guard блокировал запись даты, когда reached уже стоял
+    // от snapshot-ветки с at=null — лид выпадал из средних времён перехода.)
+    reached.received = true;
+    if (at.received === null || bl.createdAt < at.received) at.received = bl.createdAt;
   }
 
   // Инференс глубины: воронка кумулятивная («дошёл до этапа»), статусы

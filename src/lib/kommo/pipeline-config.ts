@@ -458,7 +458,10 @@ export const FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; statusI
     statusIds: new Set([BERATER_STATUSES.BERATER_REVIEW]),
   },
   delayedStart: {
-    pipelineIds: [B2G_PIPELINES.BERATER],
+    // Обе воронки: «Отложенный старт» есть и на 1-й линии, и у Бератера.
+    // (code-review 2026-07-06: раньше pipelineIds был [BERATER] — first-line
+    // часть статусов была мертва, team-счёт < суммы per-manager.)
+    pipelineIds: [B2G_PIPELINES.BERATER, B2G_PIPELINES.FIRST_LINE],
     statusIds: new Set([
       BERATER_STATUSES.DELAYED_START,
       FIRST_LINE_STATUSES.DELAYED_START,
@@ -555,7 +558,8 @@ export const MED_FUNNEL_STATUS_MAP: Record<string, { pipelineIds?: number[]; sta
     statusIds: new Set([MED_BERATER_STATUSES.BERATER_REVIEW]),
   },
   delayedStart: {
-    pipelineIds: [B2G_PIPELINES.MED_BERATER],
+    // Обе мед-воронки (см. буховый аналог — фикс code-review 2026-07-06).
+    pipelineIds: [B2G_PIPELINES.MED_BERATER, B2G_PIPELINES.MEDICAL_GOV],
     statusIds: new Set([
       MED_BERATER_STATUSES.DELAYED_START,
       MED_GOV_STATUSES.DELAYED_START,

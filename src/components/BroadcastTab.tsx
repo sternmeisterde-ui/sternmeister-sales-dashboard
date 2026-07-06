@@ -23,7 +23,7 @@ import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import DrillModal from "@/components/DrillModal";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import { getMessageContent, campaignLabel } from "@/lib/broadcast/campaign-content";
+import { getMessageContent, campaignLabel, messageHasRoleplayButton } from "@/lib/broadcast/campaign-content";
 import { kommoLeadUrl } from "@/components/TerminLeadDrillModal";
 
 // Форма ответа /api/broadcast (зеркалит src/lib/broadcast/stats.ts).
@@ -465,11 +465,12 @@ export default function BroadcastTab({ department: _department }: { department: 
                   ) : (
                     stats.stages.map((m) => {
                       const content = getMessageContent(stats.campaignId, m.messageId);
-                      // Кнопка ролевки есть? (нет копии контента → считаем что есть,
-                      // как в инференсе stats.ts). Без кнопки колонки ролевок = «—».
-                      const hasRpButton = content
-                        ? content.buttons.some((b) => b.type === "roleplay")
-                        : true;
+                      // ЕДИНОЕ правило с сервером (messageHasRoleplayButton):
+                      // без кнопки колонки ролевок = «—», с кнопкой — числа.
+                      const hasRpButton = messageHasRoleplayButton(
+                        stats.campaignId,
+                        m.messageId,
+                      );
                       return (
                         <StageRow
                           key={m.messageId}

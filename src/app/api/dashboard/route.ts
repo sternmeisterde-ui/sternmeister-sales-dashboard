@@ -649,7 +649,7 @@ async function buildDashboardResponse(
         (l) => l.updated_at >= from && l.updated_at <= to,
       );
       const flowLeads = [...flowActive, ...wonLeads, ...lostLeads];
-      const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to);
+      const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to, department, vertical);
       funnel = {
         activeDeals: fc.activeDeals,
         qualLeads: fc.qualLeads,

@@ -587,21 +587,33 @@ function TerminDashboardSection({
   // statusIds is null until the Kommo registry resolves: we don't want to
   // fire /termins with stale localStorage IDs before we can validate them
   // against the current Kommo status set.
-  const storageKey = `termin-section-status-filter-${bucketBy}`;
+  // Ключ хранилища — ПО ВЕРТИКАЛИ: буховый и медовый выбор не смешиваются.
+  const verticalKey = vertical ?? "buh";
+  const storageKey = `termin-section-status-filter-${bucketBy}-${verticalKey}`;
   const [statusIds, setStatusIds] = useState<number[] | null>(null);
   const { statuses: statusOptions, loading: statusesLoading } = statusRegistry;
+  // Дрилл-параметры секции — вертикаль обязана ехать вместе со statusIds,
+  // иначе drill-роут скоупит буховыми воронками при медовых статусах → «0 лидов».
+  const drillVertical: Record<string, string> = vertical ? { vertical } : {};
 
-  // Initial seed: once the registry resolves, reconcile localStorage against
-  // it (drop unknown IDs) or fall back to the default (everything except
-  // CANCELLED). Only runs once per registry-load.
-  const initRef = useRef(false);
+  // Seed: once the registry resolves, reconcile localStorage against it (drop
+  // unknown IDs) or fall back to the default. Runs once per VERTICAL: смена
+  // тоггла грузит другой реестр, и старые statusIds к нему неприменимы.
+  const seededForRef = useRef<string | null>(null);
+  if (seededForRef.current !== null && seededForRef.current !== verticalKey) {
+    // Вертикаль сменилась: render-time сброс (паттерн ClientsView-пагинации,
+    // НЕ setState-в-эффекте) — statusIds=null блокирует фетч со старыми ID
+    // до пере-сида против нового реестра.
+    seededForRef.current = null;
+    setStatusIds(null);
+  }
   useEffect(() => {
     // Не инициализируемся, пока реестр статусов не пришёл НЕПУСТЫМ. Иначе при
     // сетевом сбое (berater-statuses вернул []) мы бы выставили пустой выбор и
     // записали его в localStorage — и «залипли» на «Не выбрано» даже после
     // восстановления БД (баг: пустой сохранённый выбор не откатывался к дефолту).
-    if (statusesLoading || initRef.current || statusOptions.length === 0) return;
-    initRef.current = true;
+    if (statusesLoading || seededForRef.current === verticalKey || statusOptions.length === 0) return;
+    seededForRef.current = verticalKey;
     const validIds = new Set(statusOptions.map((s) => s.id));
     const stored = loadStoredStatusFilter(storageKey);
     const reconciled = stored ? stored.filter((id) => validIds.has(id)) : [];
@@ -610,7 +622,7 @@ function TerminDashboardSection({
     setStatusIds(
       reconciled.length === 0 ? defaultStatusIds(statusOptions) : reconciled,
     );
-  }, [statusOptions, statusesLoading, storageKey]);
+  }, [statusOptions, statusesLoading, storageKey, verticalKey]);
 
   useEffect(() => {
     if (typeof window === "undefined" || statusIds === null) return;
@@ -861,6 +873,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Когорта · ${dateDisplay}`,
                     subtitle: `${stats.totalDeals} лидов · сверху — с большим числом переносов`,
@@ -890,6 +903,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Термин ДЦ · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.dcOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -919,6 +933,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Термин АА · ${dateDisplay}`,
                     subtitle: `Ср. ${(stats.aaOverall ?? 0).toFixed(1)} дн · сверху — самые долгие`,
@@ -953,6 +968,7 @@ function TerminDashboardSection({
                       granularity,
                       useFirst: useFirst ? "1" : "0",
                       statusIds: statusIdsParam,
+                      ...drillVertical,
                     },
                     title: `Перенесено · ${dateDisplay}`,
                     subtitle: `${stats.rescheduledTotal} лидов с переносами · сверху — больше всего переносов`,
@@ -1033,6 +1049,7 @@ function TerminDashboardSection({
                           granularity,
                           useFirst: useFirst ? "1" : "0",
                           statusIds: statusIdsParam,
+                          ...drillVertical,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин ДЦ`,
                         subtitle: `Ср. ${row.dcAvgDays?.toFixed(1) ?? "—"} дн · ${row.dcCount} лидов · сверху — самые долгие`,
@@ -1067,6 +1084,7 @@ function TerminDashboardSection({
                           granularity,
                           useFirst: useFirst ? "1" : "0",
                           statusIds: statusIdsParam,
+                          ...drillVertical,
                         },
                         title: `${formatBucketLabel(row.date, granularity)} · Термин АА`,
                         subtitle: `Ср. ${row.aaAvgDays?.toFixed(1) ?? "—"} дн · ${row.aaCount} лидов · сверху — самые долгие`,

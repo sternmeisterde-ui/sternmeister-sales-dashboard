@@ -20,6 +20,14 @@ import { getPipelineIds, B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeli
  * такие строки НЕЛЬЗЯ отнести к вертикали, поэтому исключаем. В legacy (vertical
  * не задан) и в «Все» — включаем, чтобы сохранить полный агрегат b2g (ловушка #2,
  * spec 21 §4). NB: для b2b pipeline-фильтр обычно не применяется вовсе.
+ *
+ * ⚠ НАМЕРЕННО (code-review 2026-07-06): звонок, чей Pattern-A fanout зацепил
+ * лиды И бух-, И мед-воронок (общий контакт), считается В ОБЕИХ вертикалях —
+ * он честно относится к каждой. Поэтому callsTotal(Бух)+callsTotal(Мед) может
+ * слегка превышать callsTotal(Все) (в «Все» dedup схлопывает его в один) —
+ * тот же принцип, что задокументированный double-count per-pipeline плиток
+ * (CLAUDE.md, паттерн #4). Не «чинить» произвольной атрибуцией к одной
+ * вертикали.
  */
 function includeNullPipeline(vertical?: Vertical): boolean {
   return vertical !== "buh" && vertical !== "med";

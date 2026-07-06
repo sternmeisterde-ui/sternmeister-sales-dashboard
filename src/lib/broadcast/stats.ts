@@ -19,7 +19,7 @@
 import { sql } from "drizzle-orm";
 import { getBeraterBotDb } from "@/lib/db/berater-bot";
 import { analyticsDb } from "@/lib/db/analytics";
-import { getMessageContent, hasCampaignContent } from "./campaign-content";
+import { roleplayMessageIds } from "./campaign-content";
 
 /** Локальный распаковщик результата neon-http (массив либо {rows:[]}). */
 function rows<T>(result: unknown): T[] {
@@ -256,6 +256,24 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
     const exclTg = (col: string) =>
       testTgIds.length ? sql` AND ${sql.raw(col)} NOT IN (${idList(testTgIds)})` : sql``;
 
+    // Сообщения кампании С КНОПКОЙ РОЛЕВКИ — для инференс-атрибуции (запрос №7).
+    // null (нет копии контента) → без фильтра; пустой список → атрибуции нет.
+    const rpIds = roleplayMessageIds(selected);
+    const rpMsgFilter =
+      rpIds === null
+        ? sql``
+        : rpIds.length
+          ? sql` AND d.message_id IN (${sql.join(rpIds.map((id) => sql`${id}`), sql`, `)})`
+          : sql` AND FALSE`;
+    // Границы сессий для инференса: [from−1д, to+2д) в тексте ISO (запас на TZ).
+    const shiftDay = (iso: string, days: number): string => {
+      const d = new Date(iso + "T00:00:00Z");
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+    const sessLo = shiftDay(from, -1);
+    const sessHi = shiftDay(to, 2);
+
     // 6 запросов выше зависят только от testUserIds/testTgIds (уже посчитаны), друг от
     // друга — нет. Гоним их одним Promise.all: бот-Neon открывает соединение на запрос,
     // параллель безопасна и схлопывает ~6 round-trip'ов холодной БД в один (см. #5 ревью).
@@ -328,11 +346,16 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
         `),
         // 7. ВОССТАНОВЛЕННЫЕ клики/прохождения (правило юзера 2026-07-06):
         // сессия бота, начатая в тот же берлинский день, что и доставка
-        // сообщения этому пользователю, приписывается рассылке (клики по
-        // кнопке исторически не логировались — баг maxsplit, фикс 63ad832).
-        // Одному дню — одна доставка (drip = 1 сообщение/день; при дублях
-        // берём последнюю за день). finished = была ли в тот день ЗАВЕРШЁННАЯ
-        // сессия (→ rpDone).
+        // сообщения С КНОПКОЙ РОЛЕВКИ этому пользователю, приписывается
+        // рассылке (клики по кнопке исторически не логировались — баг
+        // maxsplit, фикс 63ad832 в боте).
+        // ⚠ Кампания МОЖЕТ слать 2 сообщения в день (v2: msg_01+msg_02 в
+        // день 1) — поэтому доставки СНАЧАЛА фильтруются по сообщениям с
+        // кнопкой (rpMsgFilter), и только потом берётся последняя кнопочная
+        // доставка дня (code-review 2026-07-06: раньше DISTINCT ON выбирал
+        // последнюю ЛЮБУЮ доставку, и день с текстовым вечерним сообщением
+        // терял атрибуцию целиком). finished = была ли в тот день
+        // ЗАВЕРШЁННАЯ сессия (→ rpDone).
         bot.execute(sql`
           WITH sent AS (
             SELECT DISTINCT ON (d.user_id, (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date)
@@ -341,14 +364,21 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
                    (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date AS day
             FROM broadcast_deliveries d
             WHERE d.campaign_id = ${selected} AND d.status = 'sent'
-              AND ${inBerlin("d.sent_at")}${exclUser("d.user_id")}
+              AND ${inBerlin("d.sent_at")}${exclUser("d.user_id")}${rpMsgFilter}
             ORDER BY d.user_id, (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date, d.sent_at::timestamptz DESC
           ),
           sess AS (
+            -- Только сессии получателей кампании и только вокруг периода
+            -- рассылки: sessions — вечно растущая таблица, полная группировка
+            -- на каждый запрос не нужна (code-review 2026-07-06). Границы
+            -- по тексту ISO (единый формат) с запасом ±1 день на TZ.
             SELECT s.user_id,
                    (s.started_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date AS day,
                    bool_or(s.finished_at IS NOT NULL) AS finished
             FROM sessions s
+            WHERE s.user_id IN (SELECT user_id FROM sent)
+              AND s.started_at >= ${sessLo}
+              AND s.started_at < ${sessHi}
             GROUP BY 1, 2
           )
           SELECT sent.message_id, sent.user_id::text AS uid, sess.finished
@@ -415,22 +445,19 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
       const msg = String(r.message_id);
       ensure(msg);
       if (r.action === "roleplay_click") addTo(rpClickUsers, msg, r.uid);
-      else if (r.action === "roleplay_completed") addTo(rpDoneUsers, msg, r.uid);
-      else if (r.action === "link_click") addTo(linkUsers, msg, r.uid);
+      else if (r.action === "roleplay_completed") {
+        addTo(rpDoneUsers, msg, r.uid);
+        // Завершивший — по определению «пошёл в ролевку»: без этого прямой
+        // completed без залогированного клика давал rpDone > rpClick и
+        // конверсию >100% (code-review 2026-07-06).
+        addTo(rpClickUsers, msg, r.uid);
+      } else if (r.action === "link_click") addTo(linkUsers, msg, r.uid);
     }
-    // Восстановленные — только для сообщений, у которых по контенту ЕСТЬ кнопка
-    // ролевки (иначе тренировка в день «текстового» сообщения — совпадение).
-    // Для кампаний без копии контента применяем ко всем (лучше пере-, чем недо-).
-    const contentKnown = hasCampaignContent(selected);
-    const hasRpButton = (msg: string): boolean => {
-      if (!contentKnown) return true;
-      const c = getMessageContent(selected, msg);
-      return !!c && c.buttons.some((b) => b.type === "roleplay");
-    };
+    // Восстановленные: SQL №7 уже отфильтрован по сообщениям с кнопкой ролевки
+    // (rpMsgFilter, единое правило messageHasRoleplayButton в campaign-content).
     for (const r of inferredRows) {
       if (!r.message_id) continue;
       const msg = String(r.message_id);
-      if (!hasRpButton(msg)) continue;
       ensure(msg);
       addTo(rpClickUsers, msg, r.uid);
       if (r.finished) addTo(rpDoneUsers, msg, r.uid);
