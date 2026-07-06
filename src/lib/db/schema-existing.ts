@@ -62,6 +62,21 @@ export const d1Calls = pgTable("d1_calls", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// Голосовой разбор («работа над ошибками»): менеджер после оценённой ролевки
+// наговаривает voice в Telegram; api-server бота транскрибирует (Scribe) и Grok
+// выносит вердикт adequate (признал ли ошибки). Только D1 — у R1 таблицы нет.
+export const d1VoiceFeedback = pgTable("d1_voice_feedback", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  callId: uuid("call_id").references(() => d1Calls.id),
+  userId: uuid("user_id").references(() => d1Users.id),
+  voiceFileId: text("voice_file_id"),
+  durationSeconds: integer("duration_seconds"),
+  transcript: text("transcript"),
+  aiResponse: text("ai_response"),
+  adequate: boolean("adequate"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 // ==================== R1 TABLES (Коммерсы - B2B) ====================
 
 export const r1Users = pgTable("r1_users", {

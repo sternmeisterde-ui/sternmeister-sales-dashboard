@@ -32,6 +32,17 @@ export interface ManagerCall {
         criteria: { id: number; name: string; score: number; maxScore: number; feedback: string; quote: string }[];
     }[];
     clientScoring?: { urgency: number; solvency?: number; need: number; total: number };
+    /** Голосовой разбор («работа над ошибками») после ролевки — только AI Ролевки b2g.
+     *  null = менеджер разбор не записывал. В списке приходит LIGHT (только adequate);
+     *  transcript/aiResponse подгружаются вместе с деталями звонка. */
+    voiceFeedback?: {
+        /** Вердикт Grok: признал ли менеджер ошибки и описал ли, что изменит. null = не оценён. */
+        adequate: boolean | null;
+        transcript?: string;
+        aiResponse?: string;
+        durationSeconds?: number | null;
+        createdAt?: string | null;
+    } | null;
 }
 
 export interface ManagerStat {

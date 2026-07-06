@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { getDbForDepartment } from "@/lib/db/index";
-import { d1Calls, d1Users, r1Calls, r1Users } from "@/lib/db/schema-existing";
+import { d1Calls, d1Users, d1VoiceFeedback, r1Calls, r1Users } from "@/lib/db/schema-existing";
 import { formatCallDate } from "@/lib/utils/date";
 
 // Тип отдела (повторяем локально, чтобы не зависеть от queries-existing)
@@ -62,6 +62,40 @@ export async function GET(
     }
 
     const call = rows[0];
+
+    // Голосовой разбор («работа над ошибками») — только D1/b2g, у R1 таблицы нет.
+    // Берём самый свежий, если менеджер записывал несколько.
+    let voiceFeedback: {
+      adequate: boolean | null;
+      transcript: string;
+      aiResponse: string;
+      durationSeconds: number | null;
+      createdAt: string | null;
+    } | null = null;
+    if (department === "b2g") {
+      const fbRows = await db
+        .select({
+          adequate: d1VoiceFeedback.adequate,
+          transcript: d1VoiceFeedback.transcript,
+          aiResponse: d1VoiceFeedback.aiResponse,
+          durationSeconds: d1VoiceFeedback.durationSeconds,
+          createdAt: d1VoiceFeedback.createdAt,
+        })
+        .from(d1VoiceFeedback)
+        .where(eq(d1VoiceFeedback.callId, callId))
+        .orderBy(desc(d1VoiceFeedback.createdAt))
+        .limit(1);
+      if (fbRows.length > 0) {
+        const fb = fbRows[0];
+        voiceFeedback = {
+          adequate: fb.adequate,
+          transcript: fb.transcript || "",
+          aiResponse: fb.aiResponse || "",
+          durationSeconds: fb.durationSeconds,
+          createdAt: fb.createdAt ? new Date(fb.createdAt).toISOString() : null,
+        };
+      }
+    }
 
     // Длительность звонка
     const duration = call.durationSeconds || 0;
@@ -166,6 +200,7 @@ export async function GET(
       summary: mistakesText,
       evalSummary,
       blocks,
+      voiceFeedback,
     };
 
     return NextResponse.json({ success: true, data });
