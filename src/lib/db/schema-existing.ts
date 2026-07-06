@@ -373,3 +373,21 @@ export const analyticsExcludedCalls = pgTable("analytics_excluded_calls", {
 }, (t) => [
   uniqueIndex("analytics_excluded_calls_unique").on(t.department, t.source, t.callId),
 ]);
+
+// ==================== eNPS ====================
+//
+// Еженедельный анонимный пульс-опрос менеджеров (эмоциональное состояние 0–10
+// + два открытых вопроса). Источник: Typeform → Google Sheets (интеграция
+// Typeform пишет в таблицу владельца формы), отсюда зеркалим синком
+// (src/lib/enps/sync.ts). Ответы анонимны by design — привязки к
+// master_managers нет и быть не должно.
+export const enpsResponses = pgTable("enps_responses", {
+  id: serial("id").primaryKey(),
+  department: text("department").notNull().default("b2g"), // пока только b2g; колонка на случай формы для b2b
+  token: text("token").notNull().unique(),      // Typeform response token — natural key апсерта
+  score: integer("score").notNull(),            // 0..10 «эмоциональное состояние на этой неделе»
+  supports: text("supports"),                   // «что поддерживает и помогает в работе»
+  frustrates: text("frustrates"),               // «что расстраивает и мешает в работе»
+  submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull(),
+  syncedAt: timestamp("synced_at", { withTimezone: true }).defaultNow(),
+});
