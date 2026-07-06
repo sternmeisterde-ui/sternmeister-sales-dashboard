@@ -136,6 +136,7 @@ export interface ClientsResult {
 
 type BaseRow = {
   leadId: string | number;
+  pipelineId: string | number;
   statusId: string | number;
   status: string | null;
   languageLevel: string | null;
@@ -186,6 +187,7 @@ export async function computeClients(
     await analyticsDb.execute(sql`
       SELECT
         lead_id             AS "leadId",
+        pipeline_id         AS "pipelineId",
         status_id           AS "statusId",
         status              AS "status",
         language_level      AS "languageLevel",
@@ -230,6 +232,9 @@ export async function computeClients(
   const nowMs = Date.now();
   // Без BERATER_BOT_DATABASE_URL бот-фактор не штрафует, а исключается (null).
   const botConfigured = !!process.env.BERATER_BOT_DATABASE_URL;
+  // Бот ролевок — БУХОВЫЙ (у мед будет свой, решение юзера 2026-07-06):
+  // мед-клиентам бот-факторы не даём вовсе (null → «нет данных», не штраф).
+  const medBeraterIds = new Set(getBeraterPipelineIds("med"));
   const activeScored: ScoredLead[] = [];
   const wonScored: ScoredLead[] = [];
 
@@ -237,6 +242,9 @@ export async function computeClients(
     const leadId = Number(r.leadId);
     const isWon = Number(r.statusId) === BERATER_STATUSES.WON;
     const dcInRange = r.dcInRange === true;
+    // Мед-клиент → буховый бот к нему неприменим (свой бот будет позже).
+    const isMedLead = medBeraterIds.has(Number(r.pipelineId));
+    const botApplies = botConfigured && !isMedLead;
 
     const bucket = normalizeBucket(r.languageLevel);
     // A1 = «не квал по языку» — в аналитику не идёт (как и в когортах).
@@ -278,8 +286,8 @@ export async function computeClients(
       activeAvg,
       hasManagerRoleplay: dc.avg !== null || aa.avg !== null,
       daysSinceLastTouch: days,
-      botRoleplayCount: botConfigured ? botCount : null,
-      botReadiness: botConfigured ? bot?.latestReadiness ?? null : null,
+      botRoleplayCount: botApplies ? botCount : null,
+      botReadiness: botApplies ? bot?.latestReadiness ?? null : null,
       consultationDone: consultations > 0,
       dealOkk: okk?.dealOkk ?? null,
       crmStageScore,

@@ -344,8 +344,21 @@ function clientToDrillRow(c: ClientRow): DrillRow {
   };
 }
 
-function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDrill: DrillFn }) {
+// Заглушка бот-панелей в режиме Мед: у мед-направления будет СВОЙ бот ролевок
+// (решение юзера 2026-07-06); буховый бот к мед-клиентам неприменим, поэтому
+// графики показываем пустыми, а не с ложными «0 тренировок».
+function MedBotPlaceholder() {
+  return (
+    <div className="h-52 flex flex-col items-center justify-center text-center text-xs text-slate-500 gap-1">
+      <span>Мед-бот ролевок ещё не подключён.</span>
+      <span>График заполнится после запуска бота для мед-направления.</span>
+    </div>
+  );
+}
+
+function RoleplayDistribution({ clients, onDrill, vertical }: { clients: ClientRow[]; onDrill: DrillFn; vertical?: "buh" | "med" | "all" }) {
   const all = clients;
+  const isMed = vertical === "med";
   // Graceful: пока данных о регистрациях нет (таблица bot_users пуста/не
   // наполнена), не делим «0» — показываем единый сегмент «0 ролевок». Как только
   // регистрации появятся (есть хоть один botRegistered) — авто-разбивка на два.
@@ -368,7 +381,19 @@ function RoleplayDistribution({ clients, onDrill }: { clients: ClientRow[]; onDr
     [all, buckets],
   );
   const total = dist.reduce((s, d) => s + d.value, 0);
-  if (total === 0) return null;
+  if (!isMed && total === 0) return null;
+
+  if (isMed) {
+    return (
+      <div className="glass-panel rounded-2xl border border-white/5 p-4">
+        <div className="flex items-center gap-2">
+          <ChartPie className="w-4 h-4 text-blue-400" />
+          <span className="text-sm font-medium text-slate-200">Тренировки с ботом: распределение клиентов</span>
+        </div>
+        <MedBotPlaceholder />
+      </div>
+    );
+  }
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -502,8 +527,9 @@ function TrainingTooltip({ active, payload, label }: {
 // Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
 // это активность практики, а не сделки). Сам грузит свой endpoint. Клик по дню →
 // список «кто сколько прошёл» в этот день.
-function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
+function TrainingChart({ onDrill, vertical }: { onDrill: DrillFn; vertical?: "buh" | "med" | "all" }) {
   const [points, setPoints] = useState<BotDailyPoint[] | null>(null);
+  const isMed = vertical === "med";
 
   const onDayClick = (s: { activeLabel?: string | number }) => {
     const day = s?.activeLabel != null ? String(s.activeLabel) : "";
@@ -522,6 +548,7 @@ function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
       .catch(() => {});
   };
   useEffect(() => {
+    if (isMed) return; // мед-бот ещё не существует — не дёргаем бух-статистику
     let cancelled = false;
     const to = todayBerlinDate();
     const from = new Date(to);
@@ -538,18 +565,22 @@ function TrainingChart({ onDrill }: { onDrill: DrillFn }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isMed]);
 
-  if (points !== null && points.length === 0) return null; // нет данных бота / env off
+  if (!isMed && points !== null && points.length === 0) return null; // нет данных бота / env off
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
       <div className="flex items-center gap-2 mb-1">
         <Users className="w-4 h-4 text-blue-400" />
         <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
-        <span className="text-xs text-slate-500">только завершённые ролевки · 8 недель · клик по дню — кто тренировался</span>
+        {!isMed && (
+          <span className="text-xs text-slate-500">только завершённые ролевки · 8 недель · клик по дню — кто тренировался</span>
+        )}
       </div>
       <div className="h-56">
-        {points === null ? (
+        {isMed ? (
+          <MedBotPlaceholder />
+        ) : points === null ? (
           <div className="flex items-center justify-center h-full text-sm text-slate-500">
             <Loader2 className="w-4 h-4 animate-spin mr-2" /> загрузка…
           </div>
@@ -712,7 +743,12 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
   const [factor, setFactor] = useState<string>("bot");
   const [data, setData] = useState<CorrPayload | null>(null);
 
+  // Мед + фактор «бот»: у мед будет СВОЙ бот (ещё не подключён) — данные
+  // бухового бота не применимы, показываем заглушку и не дёргаем API.
+  const medBotStub = vertical === "med" && factor === "bot";
+
   useEffect(() => {
+    if (medBotStub) return;
     let alive = true;
     const err = (caveat: string): CorrPayload =>
       ({ factor, label: "", population: "", caveat, segments: [], overallPct: 0, corr: null, topline: null, series: [], points: [] });
@@ -722,10 +758,10 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
       .then((d) => { if (alive) setData(d?.factor ? (d as CorrPayload) : err("Нет данных")); })
       .catch(() => { if (alive) setData(err("Не удалось загрузить")); });
     return () => { alive = false; };
-  }, [factor, vertical]);
+  }, [factor, vertical, medBotStub]);
 
   // «Грузится» — данных ещё нет или они под прошлый фактор (без sync setState в эффекте).
-  const loading = !data || data.factor !== factor;
+  const loading = !medBotStub && (!data || data.factor !== factor);
   const hasSeg = !loading && data!.segments.length > 0;
   // линия по времени осмысленна только если есть хоть одна непустая точка
   const hasTime = !loading && data!.points.some((p) => p.a != null || p.b != null);
@@ -748,11 +784,18 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
         ))}
       </div>
 
+      {medBotStub && (
+        <div className="py-8 flex flex-col items-center justify-center text-center text-xs text-slate-500 gap-1">
+          <span>Мед-бот ролевок ещё не подключён.</span>
+          <span>Корреляция появится после запуска бота для мед-направления.</span>
+        </div>
+      )}
+
       {loading && (
         <div className="py-10 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-slate-500" /></div>
       )}
 
-      {!loading && data && (hasSeg || hasTime) && (
+      {!medBotStub && !loading && data && (hasSeg || hasTime) && (
         <>
           <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Слева — линия по времени */}
@@ -839,7 +882,7 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
         </>
       )}
 
-      {!loading && data && !hasSeg && !hasTime && (
+      {!medBotStub && !loading && data && !hasSeg && !hasTime && (
         <div className="py-6 text-center text-xs text-slate-500">{data.caveat || "Нет данных"}</div>
       )}
     </div>
@@ -1009,14 +1052,16 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
               В выборке: <b className="text-slate-200 tabular-nums">{chartClients.length}</b>
             </span>
             <span>
-              Прошли ролевки с ботом: <b className="text-slate-200 tabular-nums">{uniqueBotUsers}</b> уник.
+              Прошли ролевки с ботом:{" "}
+              <b className="text-slate-200 tabular-nums">{vertical === "med" ? "—" : uniqueBotUsers}</b>
+              {vertical === "med" ? " (мед-бот не подключён)" : " уник."}
             </span>
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
+            <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
             <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
-          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
+          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
           <CorrelationPanel vertical={vertical} />
           <ClientTable
             group={filterGroupByManager(data.active, manager)}
