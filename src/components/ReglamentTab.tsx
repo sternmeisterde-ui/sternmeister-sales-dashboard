@@ -102,6 +102,177 @@ function Placeholder({ label }: { label: string }) {
   );
 }
 
+// ─── Общий хук детальных view (пагинация + фильтры) ─────────────────
+
+interface DetailState<R> {
+  data: { total: number; okCount?: number; avgSeconds?: number | null; rows: R[] } | null;
+  loading: boolean;
+  error: string | null;
+  page: number;
+  setPage: (fn: (p: number) => number) => void;
+  manager: string;
+  setManager: (m: string) => void;
+  leadId: string;
+  setLeadId: (v: string) => void;
+  funnelFilter: "" | FunnelKey;
+  setFunnelFilter: (f: "" | FunnelKey) => void;
+}
+
+const PAGE_SIZE = 100;
+
+function useDetailData<R>(view: string, range: DateRange, opts?: { funnelAware?: boolean }): DetailState<R> {
+  const [data, setData] = useState<DetailState<R>["data"]>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [page, setPageRaw] = useState(0);
+  const [manager, setManagerRaw] = useState("");
+  const [leadId, setLeadIdRaw] = useState("");
+  const [funnelFilter, setFunnelFilterRaw] = useState<"" | FunnelKey>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      const params: Record<string, string> = {
+        from: fmtLocalDate(range.start ?? todayBerlinDate()),
+        to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+        limit: String(PAGE_SIZE),
+        offset: String(page * PAGE_SIZE),
+      };
+      if (manager) params.manager = manager;
+      if (/^\d+$/.test(leadId.trim())) params.leadId = leadId.trim();
+      if (opts?.funnelAware && funnelFilter) params.funnel = funnelFilter;
+      try {
+        const d = await fetchView<NonNullable<DetailState<R>["data"]>>(view, params);
+        if (!cancelled) setData(d);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, range, page, manager, leadId, funnelFilter]);
+
+  return {
+    data,
+    loading,
+    error,
+    page,
+    setPage: (fn) => setPageRaw(fn),
+    manager,
+    setManager: (m) => {
+      setManagerRaw(m);
+      setPageRaw(0);
+    },
+    leadId,
+    setLeadId: (v) => {
+      setLeadIdRaw(v);
+      setPageRaw(0);
+    },
+    funnelFilter,
+    setFunnelFilter: (f) => {
+      setFunnelFilterRaw(f);
+      setPageRaw(0);
+    },
+  };
+}
+
+/** Панель фильтров/пагинации детальных view. */
+function DetailToolbar<R>({
+  st,
+  managers,
+  funnelAware,
+  hint,
+}: {
+  st: DetailState<R>;
+  managers: string[];
+  funnelAware?: boolean;
+  hint?: string;
+}) {
+  const total = st.data?.total ?? 0;
+  const okCount = st.data?.okCount;
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {funnelAware && (
+        <select
+          value={st.funnelFilter}
+          onChange={(e) => st.setFunnelFilter(e.target.value as "" | FunnelKey)}
+          className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+        >
+          <option value="">Обе воронки</option>
+          <option value="gos">{FUNNEL_PIPELINES.gos}</option>
+          <option value="berater">{FUNNEL_PIPELINES.berater}</option>
+        </select>
+      )}
+      <select
+        value={st.manager}
+        onChange={(e) => st.setManager(e.target.value)}
+        className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+      >
+        <option value="">Все менеджеры</option>
+        {st.manager && !managers.includes(st.manager) && <option value={st.manager}>{st.manager}</option>}
+        {managers.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+      <input
+        value={st.leadId}
+        onChange={(e) => st.setLeadId(e.target.value)}
+        placeholder="id сделки"
+        className="w-28 rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300 placeholder:text-slate-600"
+      />
+      {hint && <span className="text-[11px] text-slate-500">{hint}</span>}
+      {okCount != null && total > 0 && (
+        <span className="rounded bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-300">
+          в нормативе {Math.round((okCount / total) * 100)}% ({okCount}/{total})
+        </span>
+      )}
+      <span className="ml-auto text-[11px] text-slate-500">
+        {total > 0
+          ? `${st.page * PAGE_SIZE + 1}–${Math.min((st.page + 1) * PAGE_SIZE, total)} / ${total}`
+          : "0"}
+      </span>
+      <button
+        disabled={st.page === 0}
+        onClick={() => st.setPage((p) => Math.max(0, p - 1))}
+        className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400 disabled:opacity-40"
+      >
+        ←
+      </button>
+      <button
+        disabled={(st.page + 1) * PAGE_SIZE >= total}
+        onClick={() => st.setPage((p) => p + 1)}
+        className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400 disabled:opacity-40"
+      >
+        →
+      </button>
+    </div>
+  );
+}
+
+const okRowCls = (ok: boolean) => (ok ? "bg-emerald-500/10" : "bg-red-500/10");
+
+function LeadLink({ id }: { id: number }) {
+  return (
+    <a
+      href={`https://sternmeister.kommo.com/leads/detail/${id}`}
+      target="_blank"
+      rel="noreferrer"
+      className="text-blue-300 hover:underline"
+    >
+      {id}
+    </a>
+  );
+}
+
 /** Секунды → "X ч YY мин" (формат SLA-страницы Looker). */
 function fmtHoursMin(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
@@ -127,26 +298,30 @@ function SlaView({ range }: { range: DateRange }) {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    const params: Record<string, string> = {
-      from: fmtLocalDate(range.start ?? todayBerlinDate()),
-      to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
-      limit: String(PAGE),
-      offset: String(page * PAGE),
-    };
-    if (manager) params.manager = manager;
-    if (/^\d+$/.test(leadId.trim())) params.leadId = leadId.trim();
-    fetchView<{ total: number; avgSeconds: number | null; rows: SlaRow[] }>("sla", params)
-      .then((d) => {
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      const params: Record<string, string> = {
+        from: fmtLocalDate(range.start ?? todayBerlinDate()),
+        to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+        limit: String(PAGE),
+        offset: String(page * PAGE),
+      };
+      if (manager) params.manager = manager;
+      if (/^\d+$/.test(leadId.trim())) params.leadId = leadId.trim();
+      try {
+        const d = await fetchView<{ total: number; avgSeconds: number | null; rows: SlaRow[] }>(
+          "sla",
+          params,
+        );
         if (!cancelled) setData(d);
-      })
-      .catch((e) => {
+      } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    };
+    run();
     return () => {
       cancelled = true;
     };
@@ -303,6 +478,264 @@ function SlaView({ range }: { range: DateRange }) {
   );
 }
 
+// ─── Время на этапах / TLT-GAP / Касания ────────────────────────────
+
+interface StageTimeApiRow {
+  leadId: number;
+  funnel: FunnelKey;
+  status: string;
+  enterAt: string;
+  exitAt: string | null;
+  unit: "work_days" | "calendar_days" | "hours";
+  limit: number;
+  fact: number;
+  ok: boolean;
+  responsible: string;
+}
+interface TltGapApiRow {
+  leadId: number;
+  funnel: FunnelKey;
+  status: string;
+  enterAt: string;
+  exitAt: string | null;
+  limit: number;
+  gapFact: number;
+  ok: boolean;
+  responsible: string;
+}
+interface TouchesApiRow {
+  leadId: number;
+  funnel: FunnelKey;
+  fromStatus: string;
+  toStatus: string;
+  exitAt: string;
+  calls: number;
+  messages: number;
+  minCalls: number;
+  minMessages: number;
+  ok: boolean;
+  responsible: string;
+}
+
+const UNIT_SHORT: Record<StageTimeApiRow["unit"], string> = {
+  work_days: "Рабочие дни",
+  calendar_days: "Календарные дни",
+  hours: "Часы",
+};
+
+function managersOf(rows: { responsible: string }[] | undefined): string[] {
+  return [...new Set((rows ?? []).map((r) => r.responsible))].sort((a, b) => a.localeCompare(b, "ru"));
+}
+
+function StageTimeView({ range }: { range: DateRange }) {
+  const st = useDetailData<StageTimeApiRow>("stage_time", range, { funnelAware: true });
+  return (
+    <div className="flex flex-col gap-3">
+      <DetailToolbar
+        st={st}
+        managers={managersOf(st.data?.rows)}
+        funnelAware
+        hint="факт — наш расчёт (elapsed); ok = факт ≤ норматив"
+      />
+      {st.error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Ошибка загрузки: {st.error}
+        </div>
+      )}
+      {st.loading ? (
+        <div className="flex items-center justify-center py-16">
+          <DinoLoader />
+        </div>
+      ) : st.data ? (
+        <div className="max-h-[70vh] overflow-auto rounded-lg border border-white/10">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10" style={theadStyle}>
+              <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+                <th className={thCls}>Сделка</th>
+                <th className={thCls}>Этап</th>
+                <th className={thCls}>Менеджер</th>
+                <th className={thCls}>Дата входа</th>
+                <th className={thCls}>Дата выхода</th>
+                <th className={thCls}>Ед. измерения</th>
+                <th className={`${thCls} text-right`}>По регламенту</th>
+                <th className={`${thCls} text-right`}>Факт</th>
+                <th className={thCls}>Регламент ок</th>
+              </tr>
+            </thead>
+            <tbody>
+              {st.data.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-3 py-6 text-center text-xs text-slate-500">
+                    Нет пребываний за период.
+                  </td>
+                </tr>
+              ) : (
+                st.data.rows.map((r, i) => (
+                  <tr key={`${r.leadId}-${r.enterAt}-${i}`} className={`border-b border-white/5 last:border-0 ${okRowCls(r.ok)}`}>
+                    <td className="px-3 py-2 text-xs">
+                      <LeadLink id={r.leadId} />
+                    </td>
+                    <td className="px-3 py-2 text-slate-200">{r.status}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.responsible}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.enterAt)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
+                      {r.exitAt ? fmtBerlin(r.exitAt) : <span className="text-amber-300/80">ещё в этапе</span>}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-400">{UNIT_SHORT[r.unit]}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.limit}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-200">
+                      {r.unit === "work_days" ? Math.round(r.fact) : r.fact.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TltGapView({ range }: { range: DateRange }) {
+  const st = useDetailData<TltGapApiRow>("tlt_gap", range, { funnelAware: true });
+  return (
+    <div className="flex flex-col gap-3">
+      <DetailToolbar
+        st={st}
+        managers={managersOf(st.data?.rows)}
+        funnelAware
+        hint="GAP — макс. разрыв между касаниями на этапе, рабочие дни (Пн–Сб)"
+      />
+      {st.error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Ошибка загрузки: {st.error}
+        </div>
+      )}
+      {st.loading ? (
+        <div className="flex items-center justify-center py-16">
+          <DinoLoader />
+        </div>
+      ) : st.data ? (
+        <div className="max-h-[70vh] overflow-auto rounded-lg border border-white/10">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10" style={theadStyle}>
+              <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+                <th className={thCls}>Менеджер</th>
+                <th className={thCls}>Сделка</th>
+                <th className={thCls}>Этап</th>
+                <th className={thCls}>Дата входа</th>
+                <th className={thCls}>Дата выхода</th>
+                <th className={`${thCls} text-right`}>GAP Регламент</th>
+                <th className={`${thCls} text-right`}>GAP Факт</th>
+                <th className={thCls}>Регламент ок</th>
+              </tr>
+            </thead>
+            <tbody>
+              {st.data.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-3 py-6 text-center text-xs text-slate-500">
+                    Нет данных за период.
+                  </td>
+                </tr>
+              ) : (
+                st.data.rows.map((r, i) => (
+                  <tr key={`${r.leadId}-${r.enterAt}-${i}`} className={`border-b border-white/5 last:border-0 ${okRowCls(r.ok)}`}>
+                    <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.responsible}</td>
+                    <td className="px-3 py-2 text-xs">
+                      <LeadLink id={r.leadId} />
+                    </td>
+                    <td className="px-3 py-2 text-slate-200">{r.status}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.enterAt)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
+                      {r.exitAt ? fmtBerlin(r.exitAt) : <span className="text-amber-300/80">ещё в этапе</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.limit}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-200">{r.gapFact}</td>
+                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TouchesView({ range }: { range: DateRange }) {
+  const st = useDetailData<TouchesApiRow>("touches", range, { funnelAware: true });
+  return (
+    <div className="flex flex-col gap-3">
+      <DetailToolbar
+        st={st}
+        managers={managersOf(st.data?.rows)}
+        funnelAware
+        hint="касания за пребывание на этапе «Из» до перехода; минимум — по правилам 23a"
+      />
+      {st.error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Ошибка загрузки: {st.error}
+        </div>
+      )}
+      {st.loading ? (
+        <div className="flex items-center justify-center py-16">
+          <DinoLoader />
+        </div>
+      ) : st.data ? (
+        <div className="max-h-[70vh] overflow-auto rounded-lg border border-white/10">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10" style={theadStyle}>
+              <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+                <th className={thCls}>Менеджер</th>
+                <th className={thCls}>Сделка</th>
+                <th className={thCls}>Дата выхода</th>
+                <th className={thCls}>Из этапа</th>
+                <th className={thCls}>В этап</th>
+                <th className={`${thCls} text-right`}>Звонки</th>
+                <th className={`${thCls} text-right`}>Сообщения</th>
+                <th className={`${thCls} text-right`}>Минимум</th>
+                <th className={thCls}>Регламент ок</th>
+              </tr>
+            </thead>
+            <tbody>
+              {st.data.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-3 py-6 text-center text-xs text-slate-500">
+                    Нет переходов за период.
+                  </td>
+                </tr>
+              ) : (
+                st.data.rows.map((r, i) => (
+                  <tr key={`${r.leadId}-${r.exitAt}-${i}`} className={`border-b border-white/5 last:border-0 ${okRowCls(r.ok)}`}>
+                    <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.responsible}</td>
+                    <td className="px-3 py-2 text-xs">
+                      <LeadLink id={r.leadId} />
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.exitAt)}</td>
+                    <td className="px-3 py-2 text-slate-200">{r.fromStatus}</td>
+                    <td className="px-3 py-2 text-slate-200">{r.toStatus}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-200">{r.calls}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-200">
+                      {r.funnel === "berater" ? "—" : r.messages}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right text-xs text-slate-400">
+                      {r.minCalls} зв{r.minMessages > 0 ? ` + ${r.minMessages} сообщ` : ""}
+                    </td>
+                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // ─── Среднее время на этапах ────────────────────────────────────────
 
 function AvgPivot({ rows, funnel }: { rows: AvgSummaryRow[]; funnel: FunnelKey }) {
@@ -423,9 +856,9 @@ function AvgView({ range }: { range: DateRange }) {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     const run = async () => {
+      setLoading(true);
+      setError(null);
       try {
         if (mode === "summary") {
           const data = await fetchView<{ rows: AvgSummaryRow[] }>("avg_summary", params);
@@ -654,6 +1087,12 @@ export default function ReglamentTab({ department: _department }: { department: 
           <AvgView range={range} />
         ) : sub === "sla" ? (
           <SlaView range={range} />
+        ) : sub === "stages" ? (
+          <StageTimeView range={range} />
+        ) : sub === "tlt" ? (
+          <TltGapView range={range} />
+        ) : sub === "touches" ? (
+          <TouchesView range={range} />
         ) : (
           <Placeholder label={SUB_VIEWS.find((v) => v.id === sub)?.label ?? sub} />
         )}

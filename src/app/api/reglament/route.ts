@@ -16,11 +16,26 @@ import { getSession } from "@/lib/auth";
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
 import { parseDateBoundary, todayCivil, addDaysCivil } from "@/lib/utils/date";
-import { FUNNEL_PIPELINES, type FunnelKey } from "@/lib/reglament/norms";
+import { FUNNEL_PIPELINES, TLT_GAP_NORMS, type FunnelKey } from "@/lib/reglament/norms";
+import { fetchStageIntervals, fetchTouches, type StageInterval } from "@/lib/reglament/data";
+import {
+  collapseAll,
+  computeStageTime,
+  computeTltGap,
+  computeTouches,
+  displayStageLabel,
+} from "@/lib/reglament/compute";
 
 export const dynamic = "force-dynamic";
 
-const VALID_VIEWS = new Set(["avg_summary", "avg_detail", "sla"]);
+const VALID_VIEWS = new Set([
+  "avg_summary",
+  "avg_detail",
+  "sla",
+  "stage_time",
+  "tlt_gap",
+  "touches",
+]);
 
 /** Терминальные статусы: пребывание в них не является «этапом работы» —
  *  исключаем из среднего времени (в Looker-пивоте их тоже нет). */
@@ -30,6 +45,10 @@ const TERMINAL_STATUSES = [
   "Игнор",
   "Рассрочка",
   "Счет выставлен",
+  // Терминальные «успехи» воронок B2G: Бух Гос завершается статусом
+  // «Термин ДЦ» (sort 10000 = won-слот Kommo), Бух Бератер — «Гутшайн одобрен».
+  "Термин ДЦ",
+  "Гутшайн одобрен",
 ];
 
 function esc(s: string): string {
@@ -96,6 +115,128 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const fromLit = utcLiteral(period.fromUtc);
     const toLit = utcLiteral(period.toUtc);
     const terminalList = TERMINAL_STATUSES.map((s) => `'${esc(s)}'`).join(", ");
+
+    // ── Регламентные детальные view (интервалы этапов + касания) ─────
+    if (view === "stage_time" || view === "tlt_gap" || view === "touches") {
+      const limit = clampInt(sp.get("limit"), 100, 500);
+      const offset = clampInt(sp.get("offset"), 0, 1_000_000);
+      const managerParam = sp.get("manager") || null;
+      const leadParam = sp.get("leadId");
+      const leadId = leadParam && /^\d{1,12}$/.test(leadParam) ? Number(leadParam) : null;
+      const nowMs = Date.now();
+
+      let intervals = await fetchStageIntervals({
+        funnels,
+        fromUtc: period.fromUtc,
+        toUtc: period.toUtc,
+        anchor: "exit",
+        closedOnly: view === "touches",
+        manager: managerParam,
+        leadId,
+      });
+
+      const berlinStr = (ms: number): string => {
+        const d = new Date(ms);
+        const date = d.toLocaleDateString("en-CA", { timeZone: "Europe/Berlin" });
+        const time = d.toLocaleTimeString("en-GB", { timeZone: "Europe/Berlin", hour12: false });
+        return `${date} ${time}`;
+      };
+      const paginate = <T,>(rows: T[]) => ({
+        total: rows.length,
+        okCount: 0,
+        page: rows.slice(offset, offset + limit),
+      });
+
+      if (view === "stage_time") {
+        const rows = intervals
+          .map((iv) => computeStageTime(iv, nowMs))
+          .filter((r): r is NonNullable<typeof r> => r !== null);
+        const okCount = rows.filter((r) => r.ok).length;
+        const { total, page } = paginate(rows);
+        return NextResponse.json({
+          view,
+          total,
+          okCount,
+          rows: page.map((r) => ({
+            leadId: r.interval.leadId,
+            funnel: r.interval.funnel,
+            status: r.interval.status,
+            enterAt: berlinStr(r.interval.enterMs),
+            exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
+            unit: r.unit,
+            limit: r.limit,
+            fact: Math.round(r.fact * 100) / 100,
+            ok: r.ok,
+            responsible: r.interval.responsible,
+          })),
+        });
+      }
+
+      if (view === "tlt_gap") {
+        // Только этапы с TLT-нормативом — сузим перед выборкой касаний.
+        intervals = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
+        const leadIds = [...new Set(intervals.map((iv) => iv.leadId))];
+        const minMs = Math.min(...intervals.map((iv) => iv.enterMs), nowMs);
+        const maxMs = Math.max(...intervals.map((iv) => iv.exitMs ?? nowMs), 0);
+        const touches = await fetchTouches(leadIds, minMs, maxMs);
+        const rows = intervals
+          .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
+          .filter((r): r is NonNullable<typeof r> => r !== null);
+        const okCount = rows.filter((r) => r.ok).length;
+        const { total, page } = paginate(rows);
+        return NextResponse.json({
+          view,
+          total,
+          okCount,
+          rows: page.map((r) => ({
+            leadId: r.interval.leadId,
+            funnel: r.interval.funnel,
+            status: r.interval.status,
+            enterAt: berlinStr(r.interval.enterMs),
+            exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
+            limit: r.limit,
+            gapFact: r.gapFact,
+            ok: r.ok,
+            responsible: r.interval.responsible,
+          })),
+        });
+      }
+
+      // touches — переходы между этапами (Гос-группа «Новый лид / Взят в
+      // работу» схлопывается: внутренний переход не считается переходом).
+      const collapsed = collapseAll(intervals).filter(
+        (iv): iv is StageInterval & { exitMs: number } => iv.exitMs != null && iv.nextStatus != null,
+      );
+      const leadIds = [...new Set(collapsed.map((iv) => iv.leadId))];
+      const minMs = collapsed.length ? Math.min(...collapsed.map((iv) => iv.enterMs)) : 0;
+      const maxMs = collapsed.length ? Math.max(...collapsed.map((iv) => iv.exitMs)) : 0;
+      const touches = await fetchTouches(leadIds, minMs, maxMs);
+      const rows = collapsed
+        .map((iv) => computeTouches(iv, touches.get(iv.leadId)))
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      // свежие переходы сверху
+      rows.sort((a, b) => (b.interval.exitMs ?? 0) - (a.interval.exitMs ?? 0));
+      const okCount = rows.filter((r) => r.ok).length;
+      const { total, page } = paginate(rows);
+      return NextResponse.json({
+        view,
+        total,
+        okCount,
+        rows: page.map((r) => ({
+          leadId: r.interval.leadId,
+          funnel: r.interval.funnel,
+          fromStatus: displayStageLabel(r.interval.funnel, r.interval.status),
+          toStatus: displayStageLabel(r.interval.funnel, r.interval.nextStatus ?? "—"),
+          exitAt: berlinStr(r.interval.exitMs ?? 0),
+          calls: r.calls,
+          messages: r.messages,
+          minCalls: r.minCalls,
+          minMessages: r.minMessages,
+          ok: r.ok,
+          responsible: r.interval.responsible,
+        })),
+      });
+    }
 
     // ── SLA первого звонка (только Бух Гос) ──────────────────────────
     // Семантика подтверждена сверкой с Looker (ТЗ 23 §4.2): «Время до

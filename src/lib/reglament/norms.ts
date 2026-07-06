@@ -41,7 +41,9 @@ export interface StageNorm {
  */
 export const STAGE_TIME_NORMS: Record<FunnelKey, Record<string, StageNorm>> = {
   gos: {
-    "Взят в работу": { limit: 3, unit: "hours" },
+    // Реальное имя статуса в Бух Гос — «Взято в работу» (sort 30);
+    // статуса «Взят в работу» в этой воронке нет.
+    "Взято в работу": { limit: 3, unit: "hours" },
     "Недозвон": { limit: 3, unit: "work_days" },
     "Контакт установлен": { limit: 3, unit: "work_days" },
     "Консультация проведена": { limit: 5, unit: "work_days" },
@@ -51,7 +53,8 @@ export const STAGE_TIME_NORMS: Record<FunnelKey, Record<string, StageNorm>> = {
   berater: {
     "Принято от первой линии": { limit: 28, unit: "calendar_days" },
     "На рассмотрении бератера": { limit: 28, unit: "calendar_days" },
-    "Взят в работу": { limit: 28, unit: "calendar_days" },
+    // Исторический этап (в текущей воронке отсутствует, есть в старых данных).
+    "Взято в работу": { limit: 28, unit: "calendar_days" },
     "Недозвон": { limit: 3, unit: "work_days" },
     "Контакт установлен": { limit: 5, unit: "work_days" },
     "Консультация перед термином АА": { limit: 28, unit: "calendar_days" },
@@ -105,6 +108,24 @@ export const TOUCH_STAGES_REQUIRING_MESSAGE: Record<FunnelKey, ReadonlySet<strin
 export const TOUCH_IGNORE_STATUS = "Игнор";
 export const TOUCH_IGNORE_MIN_CALLS = 20; // 🟡 гипотеза, граница в [19..25]
 
+/**
+ * «Мин.касания» проверяются только для переходов ИЗ «рабочих» этапов
+ * (где менеджер обязан коснуться клиента). В эталоне интегратора нет
+ * переходов из База / Принимает решение / Консультация проведена /
+ * терминальных. У Бератера ограничения нет (все нетерминальные).
+ */
+export const TOUCH_FROM_WHITELIST: Record<FunnelKey, ReadonlySet<string> | null> = {
+  gos: new Set([
+    "Новый лид",
+    "Взято в работу",
+    "Недозвон",
+    "Контакт установлен",
+    "Документы отправлены в ДЦ",
+    "Отложенный старт",
+  ]),
+  berater: null,
+};
+
 export function touchRule(funnel: FunnelKey, fromStatus: string, toStatus: string): {
   minCalls: number;
   minMessages: number;
@@ -125,7 +146,7 @@ export const STAGE_ORDER: Record<FunnelKey, readonly string[]> = {
   gos: [
     "База",
     "Новый лид",
-    "Взят в работу",
+    "Взято в работу",
     "Недозвон",
     "Контакт установлен",
     "Принимает решение",
@@ -136,7 +157,7 @@ export const STAGE_ORDER: Record<FunnelKey, readonly string[]> = {
   berater: [
     "Принято от первой линии",
     "На рассмотрении бератера",
-    "Взят в работу",
+    "Взято в работу",
     "Недозвон",
     "Контакт установлен",
     "Консультация перед термином АА",
