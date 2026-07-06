@@ -19,6 +19,7 @@
 import { sql } from "drizzle-orm";
 import { getBeraterBotDb } from "@/lib/db/berater-bot";
 import { analyticsDb } from "@/lib/db/analytics";
+import { getMessageContent, hasCampaignContent } from "./campaign-content";
 
 /** Локальный распаковщик результата neon-http (массив либо {rows:[]}). */
 function rows<T>(result: unknown): T[] {
@@ -36,8 +37,15 @@ const RECIPIENTS_CAP = 2000;
 export interface BroadcastStageRow {
   messageId: string; // msg_01 … msg_NN
   sent: number; // доставлено в периоде (broadcast_deliveries.status='sent')
-  rpClick: number; // уник. пользователей, нажавших «ролевка»
-  rpDone: number; // уник. пользователей, завершивших ролевку после клика
+  /** Уник. пользователей «пошёл в ролевку»: прямые клики по кнопке ∪
+   *  ВОССТАНОВЛЕННЫЕ (правило юзера 2026-07-06: сессия бота, начатая в
+   *  берлинский день доставки сообщения с кнопкой ролевки, приписывается
+   *  рассылке). До деплоя фикса кликов в боте (63ad832) прямых кликов не
+   *  было вовсе — инференс закрывает и историю, и будущее. */
+  rpClick: number;
+  /** Уник. пользователей, завершивших ролевку: прямые ∪ восстановленные
+   *  (завершённая сессия в день доставки). */
+  rpDone: number;
   link: number; // уник. пользователей, кликнувших по ссылке
 }
 
@@ -251,7 +259,7 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
     // 6 запросов выше зависят только от testUserIds/testTgIds (уже посчитаны), друг от
     // друга — нет. Гоним их одним Promise.all: бот-Neon открывает соединение на запрос,
     // параллель безопасна и схлопывает ~6 round-trip'ов холодной БД в один (см. #5 ревью).
-    const [sentRaw, interRaw, dailyRaw, recipientRaw, subRaw, subscriberRaw, healthRaw] =
+    const [sentRaw, interRaw, dailyRaw, recipientRaw, subRaw, subscriberRaw, healthRaw, inferredRaw] =
       await Promise.all([
         // 1. sent по сообщению (в периоде)
         bot.execute(sql`
@@ -261,13 +269,16 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
             AND ${inBerlin("sent_at")}${exclUser("user_id")}
           GROUP BY message_id
         `),
-        // 2. реакции по (сообщение, действие) — уникальные пользователи (как в отчёте бота)
+        // 2. реакции по (сообщение, действие, пользователь). telegram_id → user_id
+        // через users (для объединения с восстановленными без задвоения);
+        // без users-строки — синтетический uid по telegram_id.
         bot.execute(sql`
-          SELECT message_id, action, count(DISTINCT telegram_id) AS users
-          FROM broadcast_interactions
-          WHERE campaign_id = ${selected}
-            AND ${inBerlin("created_at")}${exclTg("telegram_id")}
-          GROUP BY message_id, action
+          SELECT DISTINCT bi.message_id, bi.action,
+                 COALESCE(u.id::text, 'tg:' || bi.telegram_id::text) AS uid
+          FROM broadcast_interactions bi
+          LEFT JOIN users u ON u.telegram_id = bi.telegram_id
+          WHERE bi.campaign_id = ${selected}
+            AND ${inBerlin("bi.created_at")}${exclTg("bi.telegram_id")}
         `),
         // 3. отправки по дням (в периоде) — день = берлинская дата sent_at
         bot.execute(sql`
@@ -315,11 +326,43 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
           WHERE campaign_id = ${selected}${exclUser("user_id")}
           GROUP BY status
         `),
+        // 7. ВОССТАНОВЛЕННЫЕ клики/прохождения (правило юзера 2026-07-06):
+        // сессия бота, начатая в тот же берлинский день, что и доставка
+        // сообщения этому пользователю, приписывается рассылке (клики по
+        // кнопке исторически не логировались — баг maxsplit, фикс 63ad832).
+        // Одному дню — одна доставка (drip = 1 сообщение/день; при дублях
+        // берём последнюю за день). finished = была ли в тот день ЗАВЕРШЁННАЯ
+        // сессия (→ rpDone).
+        bot.execute(sql`
+          WITH sent AS (
+            SELECT DISTINCT ON (d.user_id, (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date)
+                   d.user_id,
+                   d.message_id,
+                   (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date AS day
+            FROM broadcast_deliveries d
+            WHERE d.campaign_id = ${selected} AND d.status = 'sent'
+              AND ${inBerlin("d.sent_at")}${exclUser("d.user_id")}
+            ORDER BY d.user_id, (d.sent_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date, d.sent_at::timestamptz DESC
+          ),
+          sess AS (
+            SELECT s.user_id,
+                   (s.started_at::timestamptz AT TIME ZONE 'Europe/Berlin')::date AS day,
+                   bool_or(s.finished_at IS NOT NULL) AS finished
+            FROM sessions s
+            GROUP BY 1, 2
+          )
+          SELECT sent.message_id, sent.user_id::text AS uid, sess.finished
+          FROM sent
+          JOIN sess ON sess.user_id = sent.user_id AND sess.day = sent.day
+        `),
       ]);
 
     const sentRows = rows<{ message_id: string; cnt: string | number }>(sentRaw);
-    const interRows = rows<{ message_id: string | null; action: string; users: string | number }>(
+    const interRows = rows<{ message_id: string | null; action: string; uid: string }>(
       interRaw,
+    );
+    const inferredRows = rows<{ message_id: string | null; uid: string; finished: boolean | null }>(
+      inferredRaw,
     );
     const dailyRows = rows<{ day: string; cnt: string | number }>(dailyRaw);
     const recipientRows = rows<{
@@ -341,8 +384,21 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
     }>(subscriberRaw);
     const healthRows = rows<{ status: string; cnt: string | number }>(healthRaw);
 
-    // --- этапы (union ключей deliveries + interactions) ---
+    // --- этапы (union ключей deliveries + interactions + inferred) ---
+    // Прямые клики и восстановленные объединяются ПО ПОЛЬЗОВАТЕЛЮ (Set uid):
+    // юзер, который и кликнул, и тренировался в день доставки, считается один раз.
     const byMsg = new Map<string, BroadcastStageRow>();
+    const rpClickUsers = new Map<string, Set<string>>();
+    const rpDoneUsers = new Map<string, Set<string>>();
+    const linkUsers = new Map<string, Set<string>>();
+    const addTo = (map: Map<string, Set<string>>, msg: string, uid: string) => {
+      let s = map.get(msg);
+      if (!s) {
+        s = new Set<string>();
+        map.set(msg, s);
+      }
+      s.add(uid);
+    };
     const ensure = (id: string): BroadcastStageRow => {
       let m = byMsg.get(id);
       if (!m) {
@@ -356,11 +412,33 @@ export async function getBroadcastStats(args: GetBroadcastStatsArgs): Promise<Br
     }
     for (const r of interRows) {
       if (!r.message_id) continue;
-      const m = ensure(String(r.message_id));
-      const n = Number(r.users) || 0;
-      if (r.action === "roleplay_click") m.rpClick = n;
-      else if (r.action === "roleplay_completed") m.rpDone = n;
-      else if (r.action === "link_click") m.link = n;
+      const msg = String(r.message_id);
+      ensure(msg);
+      if (r.action === "roleplay_click") addTo(rpClickUsers, msg, r.uid);
+      else if (r.action === "roleplay_completed") addTo(rpDoneUsers, msg, r.uid);
+      else if (r.action === "link_click") addTo(linkUsers, msg, r.uid);
+    }
+    // Восстановленные — только для сообщений, у которых по контенту ЕСТЬ кнопка
+    // ролевки (иначе тренировка в день «текстового» сообщения — совпадение).
+    // Для кампаний без копии контента применяем ко всем (лучше пере-, чем недо-).
+    const contentKnown = hasCampaignContent(selected);
+    const hasRpButton = (msg: string): boolean => {
+      if (!contentKnown) return true;
+      const c = getMessageContent(selected, msg);
+      return !!c && c.buttons.some((b) => b.type === "roleplay");
+    };
+    for (const r of inferredRows) {
+      if (!r.message_id) continue;
+      const msg = String(r.message_id);
+      if (!hasRpButton(msg)) continue;
+      ensure(msg);
+      addTo(rpClickUsers, msg, r.uid);
+      if (r.finished) addTo(rpDoneUsers, msg, r.uid);
+    }
+    for (const [msg, m] of byMsg) {
+      m.rpClick = rpClickUsers.get(msg)?.size ?? 0;
+      m.rpDone = rpDoneUsers.get(msg)?.size ?? 0;
+      m.link = linkUsers.get(msg)?.size ?? 0;
     }
     const stages = Array.from(byMsg.values()).sort((a, b) =>
       a.messageId.localeCompare(b.messageId),

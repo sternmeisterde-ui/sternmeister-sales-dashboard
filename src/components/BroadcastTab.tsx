@@ -450,7 +450,7 @@ export default function BroadcastTab({ department: _department }: { department: 
                   <tr className="border-b border-white/10 bg-slate-900/60 text-left text-xs text-slate-400">
                     <th className="px-3 py-2 font-medium">Этап / сообщение</th>
                     <th className="px-3 py-2 text-right font-medium">Отправлено</th>
-                    <th className="px-3 py-2 text-right font-medium">Клик «ролевка»</th>
+                    <th className="px-3 py-2 text-right font-medium">Пошли в ролевку</th>
                     <th className="px-3 py-2 text-right font-medium">Завершили</th>
                     <th className="px-3 py-2 text-right font-medium">Клик по ссылке</th>
                   </tr>
@@ -481,9 +481,12 @@ export default function BroadcastTab({ department: _department }: { department: 
               </table>
             </div>
             <p className="mt-2 text-[11px] text-slate-500">
-              Клики — по уникальным пользователям; проценты считаются от отправок (клик) и от
-              кликов (завершили). Telegram не отдаёт ботам «прочитано» и просмотры видео.
-              Тестовые прогоны (<code>/campaign_test*</code>) в статистику не входят.
+              Все счётчики — по уникальным пользователям; проценты — от отправок (пошли в
+              ролевку) и от пошедших (завершили). «Пошли в ролевку» = прямой клик по кнопке
+              ИЛИ тренировка с ботом в день доставки сообщения с кнопкой (атрибуция к
+              рассылке); «Завершили» — завершённая ролевка в тот же день. Telegram не отдаёт
+              ботам «прочитано» и просмотры видео. Тестовые прогоны
+              (<code>/campaign_test*</code>) в статистику не входят.
             </p>
           </section>
 
@@ -715,7 +718,7 @@ function StageContentModal({
           {stage && (
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500">
               <span>отправлено {stage.sent}</span>
-              {stage.rpClick > 0 && <span>клик «ролевка» {stage.rpClick}</span>}
+              {stage.rpClick > 0 && <span>пошли в ролевку {stage.rpClick}</span>}
               {stage.rpDone > 0 && <span>завершили {stage.rpDone}</span>}
               {stage.link > 0 && <span>клик по ссылке {stage.link}</span>}
             </div>
