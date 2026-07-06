@@ -1,6 +1,6 @@
 import { eq, and, desc, gte, lte, sql, inArray } from "drizzle-orm";
 import { getDbForDepartment } from "./index";
-import { d1Calls, d1Users, r1Calls, r1Users } from "./schema-existing";
+import { d1Calls, d1Users, d1VoiceFeedback, r1Calls, r1Users } from "./schema-existing";
 import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
 
 // Тип отдела
@@ -62,6 +62,27 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
     .orderBy(desc(calls.startedAt))
     .limit(200);
 
+  // Голосовые разборы («работа над ошибками») — только D1/b2g, у R1 таблицы нет.
+  // LIGHT: берём только вердикт adequate последнего разбора; транскрипт и ответ
+  // Grok подгружаются on-demand через /api/calls/[callId].
+  const feedbackByCall = new Map<string, { adequate: boolean | null }>();
+  if (departmentType === "b2g" && result.length > 0) {
+    const fbRows = await db
+      .select({
+        callId: d1VoiceFeedback.callId,
+        adequate: d1VoiceFeedback.adequate,
+      })
+      .from(d1VoiceFeedback)
+      .where(inArray(d1VoiceFeedback.callId, result.map((r) => r.id)))
+      .orderBy(desc(d1VoiceFeedback.createdAt));
+    for (const row of fbRows) {
+      // Первая строка на call_id = самый свежий разбор (сортировка DESC)
+      if (row.callId && !feedbackByCall.has(row.callId)) {
+        feedbackByCall.set(row.callId, { adequate: row.adequate });
+      }
+    }
+  }
+
   // Преобразовать в формат для фронтенда (LIGHT — без transcript/criteria)
   return result.map((call) => {
     const duration = call.durationSeconds || 0;
@@ -98,6 +119,8 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
       summary: "",
       evalSummary: "",
       blocks,
+      // Разбор ОС: null = менеджер не записывал; adequate = вердикт Grok
+      voiceFeedback: feedbackByCall.get(call.id) ?? null,
     };
   });
 }

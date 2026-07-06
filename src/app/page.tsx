@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone,
+  CalendarClock, Workflow, Package, Megaphone, Mic,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -381,7 +381,7 @@ export default function Dashboard() {
 
   const [selectedCall, setSelectedCall] = useState<ManagerCall | null>(null);
   const [callDetailLoading, setCallDetailLoading] = useState(false);
-  const [callModalType, setCallModalType] = useState<"transcript" | "scoring" | "report">("transcript");
+  const [callModalType, setCallModalType] = useState<"transcript" | "scoring" | "report" | "feedback">("transcript");
   const [reportMessage, setReportMessage] = useState("");
   const [reportSending, setReportSending] = useState(false);
   const [reportSent, setReportSent] = useState(false);
@@ -804,7 +804,7 @@ export default function Dashboard() {
   }, [selectedCall]);
 
   // ── Lazy-load call details on click (transcript, blocks, criteria) ──
-  const handleSelectCall = useCallback(async (call: ManagerCall, modalType: "transcript" | "scoring") => {
+  const handleSelectCall = useCallback(async (call: ManagerCall, modalType: "transcript" | "scoring" | "feedback") => {
     setCallModalType(modalType);
 
     // If full data already loaded (transcript non-empty), show immediately
@@ -1741,6 +1741,9 @@ export default function Dashboard() {
                         <th className="px-5 py-3 font-semibold text-center">CRM</th>
                       )}
                       <th className="px-5 py-3 font-semibold text-center">AI Оценка</th>
+                      {activeTab === "ai_calls" && (
+                        <th className="px-5 py-3 font-semibold text-center">Разбор ОС</th>
+                      )}
                       {activeTab === "real_calls" && (
                         <th className="px-5 py-3 font-semibold text-center">Скоринг клиента</th>
                       )}
@@ -1749,7 +1752,7 @@ export default function Dashboard() {
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
                     {isLoadingCalls ? (
-                      <tr><td colSpan={activeTab === "real_calls" ? 8 : 6} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
+                      <tr><td colSpan={activeTab === "real_calls" ? 8 : 7} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">
@@ -1802,6 +1805,34 @@ export default function Dashboard() {
                             </button>
                           </div>
                         </td>
+                        {activeTab === "ai_calls" && (
+                          <td className="px-5 py-3 text-center">
+                            {call.voiceFeedback ? (
+                              <button
+                                onClick={() => handleSelectCall(call, "feedback")}
+                                title={
+                                  call.voiceFeedback.adequate === true
+                                    ? "Разбор записан — ошибки признаны"
+                                    : call.voiceFeedback.adequate === false
+                                    ? "Разбор записан — формальный, ошибки не разобраны"
+                                    : "Разбор записан — без оценки"
+                                }
+                                className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold transition-all hover:scale-105 ${
+                                  call.voiceFeedback.adequate === true
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                                    : call.voiceFeedback.adequate === false
+                                    ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                                    : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                                }`}
+                              >
+                                <Mic className="w-3 h-3 shrink-0" />
+                                {call.voiceFeedback.adequate === true ? "Зачтён" : call.voiceFeedback.adequate === false ? "Не зачтён" : "Есть"}
+                              </button>
+                            ) : (
+                              <span className="text-slate-600 text-[10px]" title="Менеджер не записал разбор">—</span>
+                            )}
+                          </td>
+                        )}
                         {activeTab === "real_calls" && (
                           <td className="px-5 py-3 text-center">
                             {call.clientScoring ? (() => {
@@ -1928,6 +1959,14 @@ export default function Dashboard() {
               >
                 AI Анализ (Скоринг)
               </button>
+              {activeTab === "ai_calls" && selectedCall.voiceFeedback && (
+                <button
+                  onClick={() => setCallModalType("feedback")}
+                  className={`text-sm font-bold uppercase tracking-wider px-4 py-2 rounded-lg transition-colors ${callModalType === "feedback" ? "bg-emerald-500/20 text-emerald-400" : "text-slate-500 hover:text-slate-300"}`}
+                >
+                  Разбор ОС
+                </button>
+              )}
               <button
                 onClick={() => { setCallModalType("report"); setReportSent(false); setReportMessage(""); }}
                 className={`text-sm font-bold uppercase tracking-wider px-4 py-2 rounded-lg transition-colors ${callModalType === "report" ? "bg-red-500/20 text-red-400" : "text-slate-500 hover:text-slate-300"}`}
@@ -1995,6 +2034,64 @@ export default function Dashboard() {
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
                 <span className="ml-3 text-slate-400 text-sm">Загрузка данных...</span>
+              </div>
+            ) : callModalType === "feedback" ? (
+              <div className="flex flex-col gap-4 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                {!selectedCall.voiceFeedback ? (
+                  <div className="text-center py-12 text-slate-500 text-sm">Менеджер ещё не записал разбор этой ролевки.</div>
+                ) : (
+                  <>
+                    {/* Вердикт + мета голосового */}
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold ${
+                        selectedCall.voiceFeedback.adequate === true
+                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                          : selectedCall.voiceFeedback.adequate === false
+                          ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                          : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                      }`}>
+                        <Mic className="w-3.5 h-3.5" />
+                        {selectedCall.voiceFeedback.adequate === true
+                          ? "Разбор зачтён: ошибки признаны, план изменений есть"
+                          : selectedCall.voiceFeedback.adequate === false
+                          ? "Разбор не зачтён: формальный, ошибки не разобраны"
+                          : "Разбор записан, оценка не выставлена"}
+                      </span>
+                      {selectedCall.voiceFeedback.durationSeconds != null && (
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          Голосовое: {Math.floor(selectedCall.voiceFeedback.durationSeconds / 60)}:{String(selectedCall.voiceFeedback.durationSeconds % 60).padStart(2, "0")}
+                        </span>
+                      )}
+                      {selectedCall.voiceFeedback.createdAt && (
+                        <span className="text-[11px] text-slate-500">
+                          {new Date(selectedCall.voiceFeedback.createdAt).toLocaleString("ru-RU", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Транскрипция разбора менеджера */}
+                    <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 shadow-inner flex flex-col gap-3">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                        <Mic className="w-4 h-4 text-blue-400" /> Разбор менеджера (транскрипция)
+                      </h4>
+                      <p className="text-sm leading-relaxed text-slate-100 whitespace-pre-wrap max-h-[350px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent pr-2">
+                        {selectedCall.voiceFeedback.transcript || "Транскрипция недоступна."}
+                      </p>
+                    </div>
+
+                    {/* Ответ AI-коуча (Grok) */}
+                    {selectedCall.voiceFeedback.aiResponse && (
+                      <div className="bg-slate-900/50 rounded-2xl p-5 border border-purple-500/20 shadow-inner flex flex-col gap-3">
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                          <Bot className="w-4 h-4 text-purple-400" /> Ответ AI-коуча
+                        </h4>
+                        <p className="text-sm leading-relaxed text-slate-200 whitespace-pre-wrap max-h-[300px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent pr-2">
+                          {selectedCall.voiceFeedback.aiResponse}
+                        </p>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             ) : callModalType === "transcript" ? (
               <div className="flex flex-col gap-6 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
