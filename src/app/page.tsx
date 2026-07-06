@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone, Mic,
+  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -23,6 +23,7 @@ import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
 import BroadcastTab from "@/components/BroadcastTab";
+import EnpsTab from "@/components/EnpsTab";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -101,7 +102,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts";
+type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -135,6 +136,9 @@ const NAV_ITEMS: NavItem[] = [
   { id: "looker", icon: Database, label: "Looker", adminOnly: true },
   { id: "funnel", icon: Workflow, label: "Воронка", adminOnly: true, departments: ["b2g"] },
   { id: "broadcast", icon: Megaphone, label: "Рассылка", adminOnly: true, departments: ["b2g"] },
+  // Анонимный пульс-опрос менеджеров (Typeform → Google Sheets → D1). Только Гос:
+  // форма заведена на «Гос ОП»; для Коммерсов формы нет.
+  { id: "enps", icon: HeartPulse, label: "eNPS", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   // Только Госники: у Коммерсов ролевки разбираются внутри «Оценки критериев»
   // (toggle OKK/Ролевки в analytics), отдельная вкладка не нужна — убрана 2026-06-19.
@@ -1182,6 +1186,10 @@ export default function Dashboard() {
 
         {activeTab === "broadcast" && tabAllowedInDept("broadcast", activeDepartment) && (
           <BroadcastTab department={activeDepartment} />
+        )}
+
+        {activeTab === "enps" && tabAllowedInDept("enps", activeDepartment) && (
+          <EnpsTab department={activeDepartment} />
         )}
 
         {activeTab === "termins" && tabAllowedInDept("termins", activeDepartment) && (

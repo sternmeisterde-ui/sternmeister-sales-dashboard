@@ -14,6 +14,7 @@ Last updated: 2026-04-30
 | `tracking` | Активность | admin | `TrackingTab.tsx` | [`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) |
 | `termins` | Термин | admin | `TerminTab.tsx` | [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) |
 | `broadcast` | Рассылка | admin (b2g) | `BroadcastTab.tsx` | [`DASHBOARD-RASSYLKA.md`](./DASHBOARD-RASSYLKA.md) |
+| `enps` | eNPS | admin (b2g) | `EnpsTab.tsx` | [`DASHBOARD-ENPS.md`](./DASHBOARD-ENPS.md) |
 | `looker` | Looker | admin | `LookerTab.tsx` | [`DASHBOARD-LOOKER.md`](./DASHBOARD-LOOKER.md) |
 | `real_calls` | ОКК | manager + admin | inline в `page.tsx` | [`DASHBOARD-OKK.md`](./DASHBOARD-OKK.md) |
 | `ai_calls` | AI Ролевки | manager + admin | inline в `page.tsx` | [`DASHBOARD-AI-ROLEVKI.md`](./DASHBOARD-AI-ROLEVKI.md) |

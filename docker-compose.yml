@@ -91,6 +91,15 @@ services:
       # всю историю won-сделок. Меняй без передеплоя кода.
       - EXPORT_SINCE_DAYS=${EXPORT_SINCE_DAYS:-5}
 
+      # eNPS — анонимный пульс-опрос (Typeform → Google Sheets → синк в D1).
+      # GOOGLE_OAUTH_JSON = полный JSON ключа СЕРВИС-АККАУНТА (Sheets read-only,
+      # не путать с OAuth-тройкой выше); таблица должна быть расшарена на его
+      # client_email. Без переменных синк молчит (graceful), вкладка живёт на
+      # последнем импорте. ENPS_SHEET_RANGE опционален (дефолт в коде).
+      - GOOGLE_OAUTH_JSON=${GOOGLE_OAUTH_JSON}
+      - ENPS_SPREADSHEET_ID=${ENPS_SPREADSHEET_ID}
+      - ENPS_SHEET_RANGE=${ENPS_SHEET_RANGE}
+
       # Telegram — MTProto for username→id resolution in manager sync,
       # plus Bot API tokens for /login resolution (at least one required).
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
