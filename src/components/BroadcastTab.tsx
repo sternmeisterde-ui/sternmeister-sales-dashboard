@@ -465,6 +465,11 @@ export default function BroadcastTab({ department: _department }: { department: 
                   ) : (
                     stats.stages.map((m) => {
                       const content = getMessageContent(stats.campaignId, m.messageId);
+                      // Кнопка ролевки есть? (нет копии контента → считаем что есть,
+                      // как в инференсе stats.ts). Без кнопки колонки ролевок = «—».
+                      const hasRpButton = content
+                        ? content.buttons.some((b) => b.type === "roleplay")
+                        : true;
                       return (
                         <StageRow
                           key={m.messageId}
@@ -472,6 +477,7 @@ export default function BroadcastTab({ department: _department }: { department: 
                           title={content?.title ?? null}
                           dayLabel={dayLabelFor(stats.campaignId, m.messageId)}
                           mediaCount={content?.mediaCount ?? 0}
+                          hasRpButton={hasRpButton}
                           onOpen={() => setSelectedStage(m.messageId)}
                         />
                       );
@@ -639,12 +645,15 @@ function StageRow({
   title,
   dayLabel,
   mediaCount,
+  hasRpButton,
   onOpen,
 }: {
   m: StageRow;
   title: string | null;
   dayLabel: string | null;
   mediaCount: number;
+  /** У сообщения есть кнопка ролевки: 0 — честный ноль; нет кнопки — «—». */
+  hasRpButton: boolean;
   onOpen: () => void;
 }) {
   return (
@@ -668,14 +677,14 @@ function StageRow({
       </td>
       <td className="px-3 py-2 text-right">{m.sent || "—"}</td>
       <td className="px-3 py-2 text-right">
-        {m.rpClick || "—"}
-        {m.rpClick > 0 && m.sent > 0 && (
+        {hasRpButton ? m.rpClick : "—"}
+        {hasRpButton && m.rpClick > 0 && m.sent > 0 && (
           <span className="ml-1 text-[10px] text-slate-500">{pct(m.rpClick, m.sent)}</span>
         )}
       </td>
       <td className="px-3 py-2 text-right">
-        {m.rpDone || "—"}
-        {m.rpDone > 0 && m.rpClick > 0 && (
+        {hasRpButton ? m.rpDone : "—"}
+        {hasRpButton && m.rpDone > 0 && m.rpClick > 0 && (
           <span className="ml-1 text-[10px] text-slate-500">{pct(m.rpDone, m.rpClick)}</span>
         )}
       </td>
