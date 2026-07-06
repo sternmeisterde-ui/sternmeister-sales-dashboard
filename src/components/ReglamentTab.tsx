@@ -32,6 +32,14 @@ interface AvgDetailRow {
   responsible: string;
 }
 
+interface SlaRow {
+  leadId: number;
+  manager: string;
+  enterAt: string;
+  callAt: string | null;
+  slaSeconds: number | null;
+}
+
 type SubView = "summary" | "sla" | "stages" | "tlt" | "touches" | "tasks" | "avg";
 
 const SUB_VIEWS: { id: SubView; label: string }[] = [
@@ -90,6 +98,207 @@ function Placeholder({ label }: { label: string }) {
   return (
     <div className="rounded-lg border border-white/10 bg-slate-900/60 px-4 py-10 text-center text-sm text-slate-400">
       Раздел «{label}» в разработке.
+    </div>
+  );
+}
+
+/** Секунды → "X ч YY мин" (формат SLA-страницы Looker). */
+function fmtHoursMin(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  return `${h} ч ${m.toString().padStart(2, "0")} мин`;
+}
+
+// ─── SLA первого звонка (Бух Гос) ───────────────────────────────────
+
+/** Порог подсветки превышения — ПРЕДВАРИТЕЛЬНЫЙ (норматив SLA не восстановлен,
+ *  справочник 23a §4); 30 мин = верхний бакет вкладки Looker. */
+const SLA_HIGHLIGHT_SECONDS = 1800;
+
+function SlaView({ range }: { range: DateRange }) {
+  const [data, setData] = useState<{ total: number; avgSeconds: number | null; rows: SlaRow[] } | null>(null);
+  const [page, setPage] = useState(0);
+  const [manager, setManager] = useState("");
+  const [leadId, setLeadId] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const PAGE = 100;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const params: Record<string, string> = {
+      from: fmtLocalDate(range.start ?? todayBerlinDate()),
+      to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+      limit: String(PAGE),
+      offset: String(page * PAGE),
+    };
+    if (manager) params.manager = manager;
+    if (/^\d+$/.test(leadId.trim())) params.leadId = leadId.trim();
+    fetchView<{ total: number; avgSeconds: number | null; rows: SlaRow[] }>("sla", params)
+      .then((d) => {
+        if (!cancelled) setData(d);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [range, page, manager, leadId]);
+
+  const managers = useMemo(
+    () => [...new Set((data?.rows ?? []).map((r) => r.manager))].sort((a, b) => a.localeCompare(b, "ru")),
+    [data],
+  );
+  const barMax = useMemo(
+    () => Math.max(SLA_HIGHLIGHT_SECONDS, ...(data?.rows ?? []).map((r) => r.slaSeconds ?? 0)),
+    [data],
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={manager}
+          onChange={(e) => {
+            setManager(e.target.value);
+            setPage(0);
+          }}
+          className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+        >
+          <option value="">Все менеджеры</option>
+          {manager && !managers.includes(manager) && <option value={manager}>{manager}</option>}
+          {managers.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <input
+          value={leadId}
+          onChange={(e) => {
+            setLeadId(e.target.value);
+            setPage(0);
+          }}
+          placeholder="id сделки"
+          className="w-28 rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300 placeholder:text-slate-600"
+        />
+        <span className="text-[11px] text-slate-500">
+          воронка {FUNNEL_PIPELINES.gos} · SLA от начала смены менеджера
+        </span>
+        <span className="ml-auto text-[11px] text-slate-500">
+          {data && data.total > 0
+            ? `${page * PAGE + 1}–${Math.min((page + 1) * PAGE, data.total)} / ${data.total}`
+            : "0"}
+        </span>
+        <button
+          disabled={page === 0}
+          onClick={() => setPage((p) => Math.max(0, p - 1))}
+          className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400 disabled:opacity-40"
+        >
+          ←
+        </button>
+        <button
+          disabled={!data || (page + 1) * PAGE >= data.total}
+          onClick={() => setPage((p) => p + 1)}
+          className="rounded border border-white/10 px-2 py-0.5 text-xs text-slate-400 disabled:opacity-40"
+        >
+          →
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Ошибка загрузки: {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <DinoLoader />
+        </div>
+      ) : data ? (
+        <div className="max-h-[70vh] overflow-auto rounded-lg border border-white/10">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10" style={theadStyle}>
+              <tr className="border-b border-white/10 text-left text-xs text-slate-400">
+                <th className={thCls}>Менеджер</th>
+                <th className={thCls}>Сделка</th>
+                <th className={thCls}>Дата вхождения</th>
+                <th className={thCls}>Дата звонка</th>
+                <th className={`${thCls} text-right`}>Время до 1-го звонка</th>
+                <th className={`${thCls} w-[26%]`}>SLA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-3 py-6 text-center text-xs text-slate-500">
+                    Нет лидов за период.
+                  </td>
+                </tr>
+              ) : (
+                data.rows.map((r, i) => {
+                  const over = r.slaSeconds != null && r.slaSeconds > SLA_HIGHLIGHT_SECONDS;
+                  const pending = r.callAt == null;
+                  return (
+                    <tr
+                      key={`${r.leadId}-${i}`}
+                      className={`border-b border-white/5 last:border-0 ${
+                        pending ? "bg-amber-500/10" : over ? "bg-red-500/10" : "bg-slate-900/30"
+                      }`}
+                    >
+                      <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.manager}</td>
+                      <td className="px-3 py-2 text-xs">
+                        <a
+                          href={`https://sternmeister.kommo.com/leads/detail/${r.leadId}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-300 hover:underline"
+                        >
+                          {r.leadId}
+                        </a>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.enterAt)}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
+                        {pending ? <span className="text-amber-300/90">ещё не позвонили</span> : fmtBerlin(r.callAt)}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-slate-300">
+                        {r.slaSeconds != null ? fmtHoursMin(r.slaSeconds) : "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        {r.slaSeconds != null && r.slaSeconds > 0 && (
+                          <div
+                            className={`h-2 rounded ${over ? "bg-red-400/70" : "bg-blue-400/70"}`}
+                            style={{ width: `${Math.max(2, Math.min(100, (r.slaSeconds / barMax) * 100))}%` }}
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-white/10 bg-slate-900/60">
+                <td colSpan={4} className="px-3 py-2 text-right text-xs text-slate-400">
+                  Общий итог (среднее по лидам со звонком)
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums text-slate-200">
+                  {data.avgSeconds != null ? fmtDuration(data.avgSeconds) : "—"}
+                </td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -443,6 +652,8 @@ export default function ReglamentTab({ department: _department }: { department: 
       <div key={`${sub}-${reloadKey}`}>
         {sub === "avg" ? (
           <AvgView range={range} />
+        ) : sub === "sla" ? (
+          <SlaView range={range} />
         ) : (
           <Placeholder label={SUB_VIEWS.find((v) => v.id === sub)?.label ?? sub} />
         )}

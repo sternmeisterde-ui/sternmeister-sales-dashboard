@@ -20,7 +20,7 @@ import { FUNNEL_PIPELINES, type FunnelKey } from "@/lib/reglament/norms";
 
 export const dynamic = "force-dynamic";
 
-const VALID_VIEWS = new Set(["avg_summary", "avg_detail"]);
+const VALID_VIEWS = new Set(["avg_summary", "avg_detail", "sla"]);
 
 /** Терминальные статусы: пребывание в них не является «этапом работы» —
  *  исключаем из среднего времени (в Looker-пивоте их тоже нет). */
@@ -96,6 +96,68 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const fromLit = utcLiteral(period.fromUtc);
     const toLit = utcLiteral(period.toUtc);
     const terminalList = TERMINAL_STATUSES.map((s) => `'${esc(s)}'`).join(", ");
+
+    // ── SLA первого звонка (только Бух Гос) ──────────────────────────
+    // Семантика подтверждена сверкой с Looker (ТЗ 23 §4.2): «Время до
+    // 1-го звонка» = от начала СМЕНЫ менеджера (sla_first_call_from_shift_seconds).
+    // Лид без звонка — «ещё не позвонили» (в Looker там артефакт с датой
+    // обновления отчёта; мы показываем честный статус).
+    if (view === "sla") {
+      const limit = clampInt(sp.get("limit"), 100, 500);
+      const offset = clampInt(sp.get("offset"), 0, 1_000_000);
+      const managerParam = sp.get("manager");
+      const managerCond = managerParam ? `AND s.manager = '${esc(managerParam)}'` : "";
+      const leadParam = sp.get("leadId");
+      const leadCond =
+        leadParam && /^\d{1,12}$/.test(leadParam) ? `AND s.lead_id = ${Number(leadParam)}` : "";
+      const query = `
+        WITH rows AS (
+          SELECT
+            s.lead_id,
+            s.manager,
+            to_char(s.sla_start AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD HH24:MI:SS') AS enter_berlin,
+            CASE WHEN s.first_call_out_at IS NULL THEN NULL
+                 ELSE to_char(s.first_call_out_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD HH24:MI:SS')
+            END AS call_berlin,
+            COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) AS sla_seconds,
+            s.sla_start AS sort_key
+          FROM analytics.sla s
+          LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+          WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
+            AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
+            AND COALESCE(lc.is_deleted, FALSE) = FALSE
+            ${managerCond}
+            ${leadCond}
+        )
+        SELECT *,
+          COUNT(*) OVER ()::int AS total,
+          AVG(sla_seconds) FILTER (WHERE sla_seconds IS NOT NULL) OVER ()::bigint AS avg_seconds
+        FROM rows
+        ORDER BY sort_key DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      const res = await analyticsDb.execute<{
+        lead_id: string;
+        manager: string | null;
+        enter_berlin: string;
+        call_berlin: string | null;
+        sla_seconds: string | null;
+        total: number;
+        avg_seconds: string | null;
+      }>(sql.raw(query));
+      return NextResponse.json({
+        view,
+        total: res.rows.length > 0 ? Number(res.rows[0].total) : 0,
+        avgSeconds: res.rows.length > 0 && res.rows[0].avg_seconds != null ? Number(res.rows[0].avg_seconds) : null,
+        rows: res.rows.map((r) => ({
+          leadId: Number(r.lead_id),
+          manager: r.manager ?? "—",
+          enterAt: r.enter_berlin,
+          callAt: r.call_berlin,
+          slaSeconds: r.sla_seconds != null ? Number(r.sla_seconds) : null,
+        })),
+      });
+    }
 
     // Базовый источник пребываний: событие входа в этап + выход (или «сейчас»
     // для открытых). Ответственный — ТЕКУЩИЙ менеджер сделки из leads_cohort
