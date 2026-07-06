@@ -103,6 +103,7 @@ async function botData(vertical?: Vertical): Promise<FactorData> {
       LEFT JOIN bot ON bot.lead_id = lc.lead_id
       ${resAtJoin(vertical)}
       WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
+        AND lc.exclude_from_analytics = FALSE
         AND lc.status_id IN (${WON}, ${LOST})
         -- тренировавшихся берём всех; «не тренировался» — только после старта бота
         -- (у них была возможность). Иначе дотбот-лиды раздувают «не тренировался».
@@ -139,6 +140,7 @@ async function languageData(vertical?: Vertical): Promise<FactorData> {
       FROM analytics.leads_cohort lc
       ${resAtJoin(vertical)}
       WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
+        AND lc.exclude_from_analytics = FALSE
         AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const rank: Record<string, number> = { a2: 0, b1: 1, b2: 2, c1: 3 };
@@ -174,6 +176,7 @@ async function okkData(vertical?: Vertical): Promise<FactorData> {
       FROM analytics.leads_cohort lc
       ${resAtJoin(vertical)}
       WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
+        AND lc.exclude_from_analytics = FALSE
         AND lc.status_id IN (${WON}, ${LOST})`),
   );
   const leads = raw
