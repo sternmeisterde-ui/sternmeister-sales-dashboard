@@ -48,8 +48,8 @@ Last updated: 2026-04-30
 
 ## API
 
-- `GET /api/criteria?prompt_type=<id>` — admin-only. Возвращает текущий JSON.
-- `POST /api/criteria` — admin-only. Body `{ prompt_type, config }`. Перезаписывает файл целиком, инвалидирует кеш аналитики.
+- `GET /api/criteria?prompt_type=<id>` — любая сессия; не-админ читает только prompt_type'ы своего отдела (403 на чужие). Возвращает текущий JSON.
+- `POST /api/criteria` — 405. Критерии редактируются в OKK-репо (`src/criteria/*.json`) и синкаются в D2 `criteria_configs` на деплое (см. `scripts/migrate-criteria-to-db.ts`).
 
 ## Edge cases / gotchas
 

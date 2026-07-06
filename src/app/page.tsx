@@ -144,7 +144,9 @@ const NAV_ITEMS: NavItem[] = [
   // У Коммерсов Критерии/Скрипты — не отдельные вкладки, а переключатель внутри
   // вкладки «Артефакты» (departments:["b2b"]). У Госников — прежние отдельные
   // вкладки Критерии/Скрипты (departments:["b2g"]).
-  { id: "artifacts", icon: Package, label: "Артефакты", adminOnly: true, departments: ["b2b"] },
+  // Менеджерам b2b открыта на чтение (adminOnlyByDept.b2b=false): CriteriaTab —
+  // read-only viewer, ScriptsTab прячет редактирование через isAdmin.
+  { id: "artifacts", icon: Package, label: "Артефакты", adminOnly: true, adminOnlyByDept: { b2b: false }, departments: ["b2b"] },
   { id: "criteria", icon: ListChecks, label: "Критерии", adminOnly: true, departments: ["b2g"] },
   { id: "scripts", icon: BookText, label: "Скрипты", adminOnly: true, departments: ["b2g"] },
 ];
