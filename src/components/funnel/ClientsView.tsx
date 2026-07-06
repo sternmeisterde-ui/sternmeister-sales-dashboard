@@ -29,6 +29,8 @@ const FETCH_LIMIT = 1000;
 
 interface Props {
   filters: FunnelFiltersState;
+  /** Вертикаль b2g (Бух/Мед/Все) из глобального тоггла. Без неё — бух (legacy). */
+  vertical?: "buh" | "med" | "all";
 }
 
 const CATEGORY = {
@@ -706,7 +708,7 @@ function TimeTooltip({ active, payload, label, series }: {
   );
 }
 
-function CorrelationPanel() {
+function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
   const [factor, setFactor] = useState<string>("bot");
   const [data, setData] = useState<CorrPayload | null>(null);
 
@@ -714,12 +716,13 @@ function CorrelationPanel() {
     let alive = true;
     const err = (caveat: string): CorrPayload =>
       ({ factor, label: "", population: "", caveat, segments: [], overallPct: 0, corr: null, topline: null, series: [], points: [] });
-    fetch(`/api/funnel/correlation?factor=${factor}`)
+    const vqs = vertical ? `&vertical=${vertical}` : "";
+    fetch(`/api/funnel/correlation?factor=${factor}${vqs}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((d) => { if (alive) setData(d?.factor ? (d as CorrPayload) : err("Нет данных")); })
       .catch(() => { if (alive) setData(err("Не удалось загрузить")); });
     return () => { alive = false; };
-  }, [factor]);
+  }, [factor, vertical]);
 
   // «Грузится» — данных ещё нет или они под прошлый фактор (без sync setState в эффекте).
   const loading = !data || data.factor !== factor;
@@ -843,7 +846,7 @@ function CorrelationPanel() {
   );
 }
 
-export default function ClientsView({ filters: _filters }: Props) {
+export default function ClientsView({ filters: _filters, vertical }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -902,7 +905,7 @@ export default function ClientsView({ filters: _filters }: Props) {
   const terminFrom = fmtLocalDate(start);
   const terminTo = hasRange ? fmtLocalDate(termin.end as Date) : null;
   const lang = _filters.lang;
-  const key = `${terminFrom}|${terminTo ?? "open"}|${lang}`;
+  const key = `${terminFrom}|${terminTo ?? "open"}|${lang}|${vertical ?? "-"}`;
 
   const load = useCallback(
     async (k: string, tFrom: string, tTo: string | null, langBucket: string) => {
@@ -921,6 +924,7 @@ export default function ClientsView({ filters: _filters }: Props) {
       const params = new URLSearchParams({ termin_from: tFrom, limit: String(FETCH_LIMIT) });
       if (tTo) params.set("termin_to", tTo);
       if (langBucket) params.set("lang", langBucket);
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/funnel/clients?${params}`, { signal: ctrl.signal });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => "")}`);
@@ -937,7 +941,7 @@ export default function ClientsView({ filters: _filters }: Props) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [vertical]);
 
   useEffect(() => {
     const id = setTimeout(() => load(key, terminFrom, terminTo, lang), 250);
@@ -1013,7 +1017,7 @@ export default function ClientsView({ filters: _filters }: Props) {
             <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} />
-          <CorrelationPanel />
+          <CorrelationPanel vertical={vertical} />
           <ClientTable
             group={filterGroupByManager(data.active, manager)}
             title="Клиенты в работе"

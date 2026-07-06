@@ -9,6 +9,7 @@ import {
   classifyDcToAaDetailed,
   fetchBeraterContext,
   fetchQualifiedBaseLeads,
+  getVerticalScope,
   type ComputeOpts,
 } from "./compute";
 import { hydrateLeadDetails } from "./lead-list";
@@ -25,10 +26,11 @@ const DRILL_LIMIT = 25;
 export async function computeDcBreakdown(
   opts: ComputeOpts
 ): Promise<DcBreakdownResponse> {
+  const scope = getVerticalScope(opts.vertical);
   const base = await fetchQualifiedBaseLeads(opts);
   const leadIds = base.map((l) => l.leadId);
   const ctx = leadIds.length
-    ? await fetchBeraterContext(leadIds)
+    ? await fetchBeraterContext(leadIds, scope)
     : new Map();
 
   // Раскладываем по вёдрам (detailed). «none» (нет явного Термина ДЦ) — вне разбора.
@@ -40,7 +42,7 @@ export async function computeDcBreakdown(
   };
   let total = 0;
   for (const lead of base) {
-    const d = classifyDcToAaDetailed(lead, ctx);
+    const d = classifyDcToAaDetailed(lead, ctx, scope);
     if (d === "none") continue;
     total += 1;
     idsByBucket[d].push(lead.leadId);

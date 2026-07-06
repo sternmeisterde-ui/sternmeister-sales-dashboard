@@ -42,6 +42,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const rawVertical = sp.get("vertical");
     const payload = await computeDcBreakdown({
       from,
       to,
@@ -49,6 +50,10 @@ export async function GET(req: NextRequest) {
       source,
       responsibleUserId,
       lang: parseLangBuckets(sp.get("lang")),
+      vertical:
+        rawVertical === "buh" || rawVertical === "med" || rawVertical === "all"
+          ? rawVertical
+          : undefined,
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

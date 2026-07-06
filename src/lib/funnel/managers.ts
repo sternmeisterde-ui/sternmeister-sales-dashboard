@@ -24,23 +24,25 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db/index";
 import { d2OkkDb } from "@/lib/db/okk";
-import { BERATER_STATUSES } from "@/lib/kommo/pipeline-config";
+import { getBeraterStatusSets, type Vertical } from "@/lib/kommo/pipeline-config";
 import {
   enrichDisqualifiedAt,
   fetchBeraterContext,
   fetchCloseReasonHistory,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
+  getVerticalScope,
   processLeadForConversion,
   unwrapRows,
   type BeraterLead,
   type ComputeOpts,
 } from "./compute";
 
-const CONSULT_DONE_STATUSES = [
-  BERATER_STATUSES.CONSULT_BEFORE_DC_DONE, // 102183939
-  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, // 102183947
-];
+/** Статусы «консультация проведена» (ДЦ/АА) по вертикали. */
+function consultDoneStatuses(vertical?: Vertical): number[] {
+  const br = getBeraterStatusSets(vertical);
+  return [...br.consultBeforeDCDone, ...br.consultBeforeAADone];
+}
 
 export type ManagerRoleKey = "qualifier" | "berater" | "dovedenie";
 
@@ -69,13 +71,24 @@ export const ROLE_CONVERSION: Record<ManagerRoleKey, "C2" | "C3" | "C4"> = {
   dovedenie: "C4",
 };
 
-/** prompt_type ОКК-звонка → роль (см. 02 §3.8). */
-const PROMPT_TYPE_ROLE: Record<string, ManagerRoleKey> = {
+/** prompt_type ОКК-звонка → роль (см. 02 §3.8). Мед-линии — зеркало (spec 21). */
+const PROMPT_TYPE_ROLE_BUH: Record<string, ManagerRoleKey> = {
   d2_qualifier: "qualifier",
   d2_berater: "berater",
   d2_berater2: "berater",
   d2_dovedenie: "dovedenie",
 };
+const PROMPT_TYPE_ROLE_MED: Record<string, ManagerRoleKey> = {
+  d2_med_qualifier: "qualifier",
+  d2_med_berater: "berater",
+  d2_med_berater2: "berater",
+  d2_med_dovedenie: "dovedenie",
+};
+function promptTypeRoleMap(vertical?: Vertical): Record<string, ManagerRoleKey> {
+  if (vertical === "med") return PROMPT_TYPE_ROLE_MED;
+  if (vertical === "all") return { ...PROMPT_TYPE_ROLE_BUH, ...PROMPT_TYPE_ROLE_MED };
+  return PROMPT_TYPE_ROLE_BUH; // buh / undefined (legacy)
+}
 
 export interface ManagerRow {
   userId: number | null;
@@ -130,7 +143,9 @@ interface Accum {
 type OkkAgg = Record<ManagerRoleKey, { sum: number; n: number }>;
 
 export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult> {
-  // 1. Квал-база Бух Гос (та же, что у когорт; уважает period/source).
+  const scope = getVerticalScope(opts.vertical);
+  const consultStatuses = consultDoneStatuses(opts.vertical);
+  // 1. Квал-база первой линии (та же, что у когорт; уважает period/source).
   const baseLeadsRaw = await fetchQualifiedBaseLeads(opts);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
 
@@ -144,8 +159,8 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
     roster,
   ] = await Promise.all([
     leadIds.length ? fetchCloseReasonHistory(leadIds) : Promise.resolve(new Map()),
-    leadIds.length ? fetchTargetEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
-    leadIds.length ? fetchBeraterContext(leadIds) : Promise.resolve(new Map()),
+    leadIds.length ? fetchTargetEvents(leadIds, scope) : Promise.resolve(new Map<string, Date>()),
+    leadIds.length ? fetchBeraterContext(leadIds, scope) : Promise.resolve(new Map()),
     leadIds.length ? fetchTouchesByLead(leadIds, opts) : Promise.resolve(new Map<number, LeadTouches>()),
     fetchOkkAllRoles(opts),
     fetchManagerRoster(),
@@ -182,17 +197,17 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
     const touchInfo = touchesByLead.get(lead.leadId);
     const touches = touchInfo?.total ?? 0;
     const touchDays = touchInfo?.days ?? [];
-    const consult = countConsultations(beraters);
+    const consult = countConsultations(beraters, consultStatuses);
 
     // Результаты конверсий по лиду. C2/C3/C4 нужны и для общего пути, и как
     // профильные конверсии ролей (см. ROLE_CONVERSION).
-    const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext);
+    const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext, scope);
     const byConv = {
-      C2: processLeadForConversion("C2", lead, targetEvents, beraterContext),
-      C3: processLeadForConversion("C3", lead, targetEvents, beraterContext),
-      C4: processLeadForConversion("C4", lead, targetEvents, beraterContext),
+      C2: processLeadForConversion("C2", lead, targetEvents, beraterContext, scope),
+      C3: processLeadForConversion("C3", lead, targetEvents, beraterContext, scope),
+      C4: processLeadForConversion("C4", lead, targetEvents, beraterContext, scope),
     };
-    const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext);
+    const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext, scope);
     const reachedDocs = c1.included && c1.targetAt !== null;
     const reachedTermDc = byConv.C2.included && byConv.C2.targetAt !== null;
     const reachedGutschein = c5.included && c5.targetAt !== null;
@@ -282,17 +297,17 @@ function creditBeraterResponsible(
     const uid = b.responsibleUserId;
     if (uid === null || !isB2gManager(uid)) continue;
     if (roster.get(uid)!.line !== expectedLine) continue;
-    if (b.events.has(BERATER_STATUSES.WON)) return uid; // достиг Гутшайна → кредит ему
+    if (b.events.has(142)) return uid; // достиг Гутшайна (WON общий для бух/мед) → кредит ему
     if (firstMatch === null) firstMatch = uid;
   }
   return firstMatch;
 }
 
 // ── Консультации: +1 за каждую проведённую (ДЦ/АА) среди Бератер-сделок клиента ─
-function countConsultations(beraters: BeraterLead[]): number {
+function countConsultations(beraters: BeraterLead[], statuses: number[]): number {
   let n = 0;
   for (const b of beraters) {
-    for (const s of CONSULT_DONE_STATUSES) if (b.events.has(s)) n += 1;
+    for (const s of statuses) if (b.events.has(s)) n += 1;
   }
   return n;
 }
@@ -375,9 +390,10 @@ async function fetchOkkAllRoles(opts: ComputeOpts): Promise<Map<number, OkkAgg>>
       GROUP BY m.kommo_user_id, e.prompt_type
     `)
   );
+  const roleMap = promptTypeRoleMap(opts.vertical);
   for (const r of rows) {
     if (r.kommoUserId === null || r.promptType === null) continue;
-    const role = PROMPT_TYPE_ROLE[r.promptType];
+    const role = roleMap[r.promptType];
     if (!role) continue;
     const uid = Number(r.kommoUserId);
     let agg = out.get(uid);

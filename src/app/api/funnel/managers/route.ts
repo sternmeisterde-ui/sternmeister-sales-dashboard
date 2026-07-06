@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeManagers } from "@/lib/funnel/managers";
 import { parseLangBuckets } from "@/lib/funnel/compute";
+import type { Vertical } from "@/lib/kommo/pipeline-config";
+
+/** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховая (legacy). */
+function parseVerticalParam(raw: string | null): Vertical | undefined {
+  return raw === "buh" || raw === "med" || raw === "all" ? raw : undefined;
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +41,7 @@ export async function GET(req: NextRequest) {
       source,
       responsibleUserId: null,
       lang: parseLangBuckets(params.get("lang")),
+      vertical: parseVerticalParam(params.get("vertical")),
     });
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "no-store" },

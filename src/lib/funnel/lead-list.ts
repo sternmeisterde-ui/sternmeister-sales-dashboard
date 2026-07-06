@@ -7,6 +7,7 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
   classifyDcToAa,
+  getVerticalScope,
   excludesIgnor,
   fetchBeraterContext,
   fetchQualifiedBaseLeads,
@@ -70,6 +71,7 @@ export async function computeCohortLeads(
   const hi = weekHi < opts.to ? weekHi : opts.to; // min(weekHi, to)
   const narrowedOpts = { ...opts, from: lo, to: hi };
 
+  const scope = getVerticalScope(opts.vertical);
   const fetched = await fetchQualifiedBaseLeads(narrowedOpts);
   // Точная принадлежность к запрошенной Berlin ISO-неделе — как группировка в
   // computeCohorts; отсекает «соседние» недели, попавшие в окно ±1 день.
@@ -79,7 +81,7 @@ export async function computeCohortLeads(
 
   const leadIds = baseLeads.map((l) => l.leadId);
   const targetEvents = leadIds.length
-    ? await fetchTargetEvents(leadIds)
+    ? await fetchTargetEvents(leadIds, scope)
     : new Map<string, Date>();
   // Бератер-контекст нужен только cross-pipeline конверсиям.
   const needsBerater =
@@ -89,7 +91,7 @@ export async function computeCohortLeads(
     opts.conversionId === "C5";
   const beraterContext =
     leadIds.length && needsBerater
-      ? await fetchBeraterContext(leadIds)
+      ? await fetchBeraterContext(leadIds, scope)
       : new Map();
 
   // Точно повторяем per-metric логику computeCohorts:
@@ -106,7 +108,7 @@ export async function computeCohortLeads(
     //  • metric "base"   = все с ДЦ (success | failure)
     //  • metric "target" = только success (продвинулись)
     if (opts.conversionId === "C3.1") {
-      const state = classifyDcToAa(lead, beraterContext);
+      const state = classifyDcToAa(lead, beraterContext, scope);
       if (opts.metric === "target") {
         if (state !== "success") continue;
       } else {
@@ -120,7 +122,8 @@ export async function computeCohortLeads(
       opts.conversionId,
       lead,
       targetEvents,
-      beraterContext
+      beraterContext,
+      scope
     );
 
     if (opts.metric === "target") {

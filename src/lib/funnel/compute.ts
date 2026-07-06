@@ -27,9 +27,13 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
   B2G_PIPELINES,
-  FIRST_LINE_STATUSES,
   BERATER_STATUSES,
-  QUAL_FIRST_LINE_STATUS_IDS,
+  getBeraterPipelineIds,
+  getBeraterStatusSets,
+  getDocsSentStatusIds,
+  getFirstLinePipelineIds,
+  getQualFirstLineStatusIds,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import type { CohortsApiCohort, CohortsApiResponse } from "./api-types";
 import type { ConversionId, MaturityFilter } from "./types";
@@ -44,8 +48,86 @@ import {
 } from "./cohort-math";
 import type { LanguageBucket } from "./score";
 
-const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
 const BERATER = B2G_PIPELINES.BERATER; // 12154099
+
+// ── Vertical-scope (мед-админ, spec 21): все воронко/статус-наборы одного
+// расчёта в одном объекте. Без vertical → буховые наборы (legacy, byte-identical).
+// Диапазоны status_id бух- и мед-воронок не пересекаются (кроме общих 142/143,
+// которые дизамбигуируются pipeline-фильтром выборок) — union-сеты безопасны.
+
+export interface VerticalScope {
+  vertical?: Vertical;
+  firstLineIds: number[];
+  beraterIds: number[];
+  qualStatusIds: number[];
+  c1TargetIds: number[];
+  c2TargetIds: number[];
+  c3BaseIds: number[];
+  c3TargetIds: number[];
+  c4BaseIds: number[];
+  c4TargetIds: number[];
+  c5TargetIds: number[];
+  dcDoneIds: number[];
+  c31ForwardIds: number[];
+  c31ClosedIds: number[];
+  c31AaCancelledIds: number[];
+  /** Все статусы Бератера, чьи события тянет fetchBeraterContext. */
+  beraterRelevantIds: number[];
+}
+
+export function getVerticalScope(vertical?: Vertical): VerticalScope {
+  const br = getBeraterStatusSets(vertical);
+  const dcDoneIds = [...br.termDCDone];
+  const c31ForwardIds = [
+    ...br.consultBeforeAA,
+    ...br.consultBeforeAADone,
+    ...br.beraterReview,
+    ...br.delayedStart,
+    ...br.appeal,
+    142,
+  ];
+  const c3BaseIds = [...br.consultBeforeDC, ...br.consultBeforeDCDone];
+  const c3TargetIds = [...dcDoneIds, ...br.consultBeforeAA, ...br.consultBeforeAADone, 142];
+  const c4BaseIds = [...br.consultBeforeAA, ...br.consultBeforeAADone, 142];
+  const c31AaCancelledIds = [...br.termAACancelled];
+  return {
+    vertical,
+    firstLineIds: getFirstLinePipelineIds(vertical),
+    beraterIds: getBeraterPipelineIds(vertical),
+    qualStatusIds: getQualFirstLineStatusIds(vertical),
+    c1TargetIds: [...getDocsSentStatusIds(vertical), 142],
+    c2TargetIds: [142],
+    c3BaseIds,
+    c3TargetIds,
+    c4BaseIds,
+    c4TargetIds: [142],
+    c5TargetIds: [142],
+    dcDoneIds,
+    c31ForwardIds,
+    c31ClosedIds: [143],
+    c31AaCancelledIds,
+    beraterRelevantIds: [
+      ...new Set([
+        ...c3BaseIds,
+        ...c3TargetIds,
+        ...c4BaseIds,
+        ...dcDoneIds,
+        ...c31ForwardIds,
+        ...c31AaCancelledIds,
+        142,
+        143,
+        // Ранние Бератер-этапы (лестница «Объединённой воронки», overview.ts)
+        ...br.receivedFromFirst,
+        ...br.dovedenie,
+        // Исторический on-stage «Термин АА» (убран из воронки ~2026-03; только бух)
+        ...(vertical === "med" ? [] : [BERATER_STATUSES.TERM_AA]),
+      ]),
+    ],
+  };
+}
+
+/** Legacy-scope (бух) — для вызовов без vertical; вычислен один раз. */
+export const DEFAULT_SCOPE: VerticalScope = getVerticalScope(undefined);
 
 /** Парсит query-параметр `lang` (CSV «a2,b1») в массив бакетов. Пусто/невалид → []. */
 export function parseLangBuckets(raw: string | null | undefined): LanguageBucket[] {
@@ -69,7 +151,10 @@ export function parseLangBuckets(raw: string | null | undefined): LanguageBucket
  * Применяется к строкам `analytics.leads_cohort` пайплайна Бух Гос. Пусто, если
  * менеджер не задан.
  */
-export function managerAttributionSql(responsibleUserId: number | null | undefined) {
+export function managerAttributionSql(
+  responsibleUserId: number | null | undefined,
+  beraterIds: number[] = [BERATER],
+) {
   if (responsibleUserId === null || responsibleUserId === undefined) return sql``;
   return sql` AND (
     responsible_user_id = ${responsibleUserId}
@@ -82,7 +167,7 @@ export function managerAttributionSql(responsibleUserId: number | null | undefin
        AND berater_lcl.lead_id <> base_lcl.lead_id
       INNER JOIN analytics.leads_cohort AS berater
         ON berater.lead_id = berater_lcl.lead_id
-       AND berater.pipeline_id = ${BERATER}
+       AND berater.pipeline_id IN (${sql.join(beraterIds.map((id) => sql`${id}`), sql`, `)})
        AND berater.responsible_user_id = ${responsibleUserId}
       WHERE base_lcl.is_active = TRUE
     )
@@ -115,71 +200,13 @@ export function languageBucketSql(buckets: LanguageBucket[] | null | undefined) 
   return sql` AND (${sql.join(buckets.map(langBucketCond), sql` OR `)})`;
 }
 
-// ── Целевые статусы C1/C2 (на Бух Гос) ──
-const C1_TARGET_STATUSES = [
-  FIRST_LINE_STATUSES.DOCS_SENT_DC,
-  FIRST_LINE_STATUSES.WON, // inferred: дошёл до Термин ДЦ → документы были
-];
-const C2_TARGET_STATUSES = [FIRST_LINE_STATUSES.WON];
-
-// ── Статусы на Бератер, которые нас интересуют для C3/C4/C5 ──
-const C3_BASE_STATUSES = [
-  BERATER_STATUSES.CONSULT_BEFORE_DC,
-  BERATER_STATUSES.CONSULT_BEFORE_DC_DONE,
-];
-const C3_TARGET_STATUSES = [
-  BERATER_STATUSES.TERM_DC_DONE, // 93886075 — основной target
-  BERATER_STATUSES.CONSULT_BEFORE_AA, // inferred
-  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
-  BERATER_STATUSES.WON, // inferred: Гутшайн ⇒ Термин ДЦ был
-];
-const C4_BASE_STATUSES = [
-  BERATER_STATUSES.CONSULT_BEFORE_AA,
-  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE,
-  BERATER_STATUSES.WON,
-];
-const C4_TARGET_STATUSES = [BERATER_STATUSES.WON];
-const C5_TARGET_STATUSES = [BERATER_STATUSES.WON];
-
-// ── C3.1 «Термин ДЦ → дошёл до АА» (на Бератере) ──
-// Определение РОПа: база — лиды с явным «Термин ДЦ состоялся»; считаем долю
-// «продвинувшихся дальше».
-//  • forward (продвинулись) = реальный АА-этап. «Термин АА отменён/перенесён»
-//    (93860883) и «Термин АА (на этапе)» (93860879) НЕ считаются продвижением.
-//    «Отложенный старт» (95515895) — считается (РОП отметил его в фильтре).
+// ── Составы целевых/базовых статусов C1–C5 и C3.1 живут в getVerticalScope()
+// (vertical-aware, вверху файла). Семантика C3.1 (определение РОПа):
+//  • forward (продвинулись) = реальный АА-этап: конс. АА (+проведена), на
+//    рассмотрении, отложенный старт (РОП считает продвижением), апелляция, Гутшайн.
+//    «Термин АА отменён/перенесён» — НЕ продвижение.
 //  • потеря = всё, что НЕ forward: застрял на ДЦ / сразу в «Закрыто» (143) /
 //    «Термин АА отменён». Знаменатель = ВСЕ с ДЦ (застрявшие тоже в нём).
-const DC_DONE_STATUS = BERATER_STATUSES.TERM_DC_DONE; // 93886075
-const C31_FORWARD_STATUSES = [
-  BERATER_STATUSES.CONSULT_BEFORE_AA, // 102183943
-  BERATER_STATUSES.CONSULT_BEFORE_AA_DONE, // 102183947
-  BERATER_STATUSES.BERATER_REVIEW, // 93860887 — пост-АА
-  BERATER_STATUSES.DELAYED_START, // 95515895 — РОП считает продвижением
-  BERATER_STATUSES.APPEAL, // 93860891 — апелляция = АА пройден
-  BERATER_STATUSES.WON, // 142 — Гутшайн
-];
-const C31_CLOSED_STATUS = BERATER_STATUSES.LOST; // 143 — «Закрыто и не реализовано»
-const C31_AA_CANCELLED_STATUS = BERATER_STATUSES.TERM_AA_CANCELLED; // 93860883 — НЕ продвижение
-
-const ALL_BERATER_RELEVANT_STATUSES = [
-  ...new Set([
-    ...C3_BASE_STATUSES,
-    ...C3_TARGET_STATUSES,
-    ...C4_BASE_STATUSES,
-    ...C4_TARGET_STATUSES,
-    ...C5_TARGET_STATUSES,
-    // C3.1
-    DC_DONE_STATUS,
-    ...C31_FORWARD_STATUSES,
-    C31_CLOSED_STATUS,
-    C31_AA_CANCELLED_STATUS,
-    // Полная лестница «Объединённой воронки» (overview.ts, 2026-07-06):
-    // ранние Бератер-этапы + исторический «Термин АА» (убран из воронки ~2026-03).
-    BERATER_STATUSES.RECEIVED_FROM_FIRST, // 93860331
-    BERATER_STATUSES.DOVEDENIE, // 102183931
-    BERATER_STATUSES.TERM_AA, // 93860879 (history-only)
-  ]),
-];
 
 export interface ComputeOpts {
   from: Date;
@@ -189,10 +216,14 @@ export interface ComputeOpts {
   responsibleUserId: number | null;
   /** Фильтр по уровням языка (мультивыбор). Пусто/undefined = без фильтра. */
   lang?: LanguageBucket[] | null;
+  /** Вертикаль b2g (Бух/Мед/Все, spec 21). Без неё — буховые наборы (legacy). */
+  vertical?: Vertical;
 }
 
 export interface BaseLead {
   leadId: number;
+  /** Воронка первой линии лида (Бух Гос или Мед Гос) — для ключей событий. */
+  pipelineId: number;
   /** Anchor = lead.created_at (как qualification_at в cohort-conversion). */
   anchorAt: Date;
   responsibleUserId: number | null;
@@ -284,6 +315,7 @@ async function fetchBenchmarks(): Promise<
 export async function computeCohorts(
   opts: ComputeOpts
 ): Promise<CohortsApiResponse> {
+  const scope = getVerticalScope(opts.vertical);
   // ── 1. Квал-лиды + benchmarks параллельно (benchmarks не зависит от leadIds). ──
   const [baseLeadsRaw, benchmarks] = await Promise.all([
     fetchQualifiedBaseLeads(opts),
@@ -296,8 +328,8 @@ export async function computeCohorts(
   const [closeReasonHistory, targetEvents, beraterContext] = leadIds.length
     ? await Promise.all([
         fetchCloseReasonHistory(leadIds),
-        fetchTargetEvents(leadIds),
-        fetchBeraterContext(leadIds),
+        fetchTargetEvents(leadIds, scope),
+        fetchBeraterContext(leadIds, scope),
       ])
     : [
         new Map<number, CloseReasonEvent[]>(),
@@ -333,36 +365,11 @@ export async function computeCohorts(
   // excludesIgnor() фильтре). Раньше processLeadForConversion вызывался
   // 7 раз/лид — теперь 5.
   for (const { lead, weekStart, weekKey } of leadCohortCache) {
-    const r1 = processLeadForConversion(
-      "C1",
-      lead,
-      targetEvents,
-      beraterContext
-    );
-    const r2 = processLeadForConversion(
-      "C2",
-      lead,
-      targetEvents,
-      beraterContext
-    );
-    const r3 = processLeadForConversion(
-      "C3",
-      lead,
-      targetEvents,
-      beraterContext
-    );
-    const r4 = processLeadForConversion(
-      "C4",
-      lead,
-      targetEvents,
-      beraterContext
-    );
-    const r5 = processLeadForConversion(
-      "C5",
-      lead,
-      targetEvents,
-      beraterContext
-    );
+    const r1 = processLeadForConversion("C1", lead, targetEvents, beraterContext, scope);
+    const r2 = processLeadForConversion("C2", lead, targetEvents, beraterContext, scope);
+    const r3 = processLeadForConversion("C3", lead, targetEvents, beraterContext, scope);
+    const r4 = processLeadForConversion("C4", lead, targetEvents, beraterContext, scope);
+    const r5 = processLeadForConversion("C5", lead, targetEvents, beraterContext, scope);
     // C3.1 здесь НЕ участвует — у неё своя 3-состояний логика в цикле ниже
     // (ветка `if (conversionId === "C3.1")` делает continue до этого доступа).
     const resultsByConv: Record<
@@ -404,7 +411,7 @@ export async function computeCohorts(
       // ДЦ). Застрявшие на ДЦ входят в базу как потеря. «Отсев» (=база−факт) =
       // все потери (застрял / закрыто / Термин АА отменён).
       if (conversionId === "C3.1") {
-        const state = classifyDcToAa(lead, beraterContext);
+        const state = classifyDcToAa(lead, beraterContext, scope);
         if (state === "none") continue;
         bucket.base += 1;
         if (lead.languageBucket === "a2") bucket.langA2 += 1;
@@ -514,7 +521,8 @@ export function processLeadForConversion(
   conversionId: ConversionId,
   lead: BaseLead,
   targetEvents: Map<string, Date>,
-  beraterContext: Map<number, BeraterLead[]>
+  beraterContext: Map<number, BeraterLead[]>,
+  scope: VerticalScope = DEFAULT_SCOPE
 ): { included: boolean; targetAt: Date | null } {
   const anchorAt = lead.anchorAt;
 
@@ -523,7 +531,7 @@ export function processLeadForConversion(
     const targetAt = pickEarliestGosTargetAfter(
       lead,
       targetEvents,
-      C1_TARGET_STATUSES,
+      scope.c1TargetIds,
       anchorAt
     );
     return { included: true, targetAt };
@@ -534,7 +542,7 @@ export function processLeadForConversion(
     const targetAt = pickEarliestGosTargetAfter(
       lead,
       targetEvents,
-      C2_TARGET_STATUSES,
+      scope.c2TargetIds,
       anchorAt
     );
     return { included: true, targetAt };
@@ -547,7 +555,7 @@ export function processLeadForConversion(
     const c2TargetAt = pickEarliestGosTargetAfter(
       lead,
       targetEvents,
-      C2_TARGET_STATUSES,
+      scope.c2TargetIds,
       anchorAt
     );
     if (c2TargetAt === null) return { included: false, targetAt: null };
@@ -560,13 +568,13 @@ export function processLeadForConversion(
     // Бератер достиг CONSULT_BEFORE_DC / DONE после C2-target
     const baseRequiredAt = earliestBeraterEventAfter(
       berater,
-      C3_BASE_STATUSES,
+      scope.c3BaseIds,
       c2TargetAt
     );
     if (baseRequiredAt === null) return { included: false, targetAt: null };
     const targetAt = earliestBeraterEventAfter(
       berater,
-      C3_TARGET_STATUSES,
+      scope.c3TargetIds,
       baseRequiredAt
     );
     return { included: true, targetAt };
@@ -576,23 +584,23 @@ export function processLeadForConversion(
     // Бератер достиг CONSULT_BEFORE_AA / DONE / WON после anchor
     const baseRequiredAt = earliestBeraterEventAfter(
       berater,
-      C4_BASE_STATUSES,
+      scope.c4BaseIds,
       anchorAt
     );
     if (baseRequiredAt === null) return { included: false, targetAt: null };
     const targetAt = earliestBeraterEventAfter(
       berater,
-      C4_TARGET_STATUSES,
+      scope.c4TargetIds,
       baseRequiredAt
     );
     return { included: true, targetAt };
   }
 
   if (conversionId === "C5") {
-    // Все квал-лиды Гос, target = earliest Бератер WON после anchor
+    // Все квал-лиды первой линии, target = earliest Бератер WON после anchor
     const targetAt = earliestBeraterEventAfter(
       berater,
-      C5_TARGET_STATUSES,
+      scope.c5TargetIds,
       anchorAt
     );
     return { included: true, targetAt };
@@ -631,23 +639,24 @@ export type DcToAaDetail =
  */
 export function classifyDcToAaDetailed(
   lead: BaseLead,
-  beraterContext: Map<number, BeraterLead[]>
+  beraterContext: Map<number, BeraterLead[]>,
+  scope: VerticalScope = DEFAULT_SCOPE
 ): DcToAaDetail {
   const berater = beraterContext.get(lead.leadId) ?? [];
   const dcAt = earliestBeraterEventAfter(
     berater,
-    [DC_DONE_STATUS],
+    scope.dcDoneIds,
     lead.anchorAt
   );
   if (dcAt === null) return "none";
-  if (earliestBeraterEventAfter(berater, C31_FORWARD_STATUSES, dcAt) !== null) {
+  if (earliestBeraterEventAfter(berater, scope.c31ForwardIds, dcAt) !== null) {
     return "forward";
   }
-  if (earliestBeraterEventAfter(berater, [C31_CLOSED_STATUS], dcAt) !== null) {
+  if (earliestBeraterEventAfter(berater, scope.c31ClosedIds, dcAt) !== null) {
     return "closed";
   }
   if (
-    earliestBeraterEventAfter(berater, [C31_AA_CANCELLED_STATUS], dcAt) !== null
+    earliestBeraterEventAfter(berater, scope.c31AaCancelledIds, dcAt) !== null
   ) {
     return "aa_cancelled";
   }
@@ -662,9 +671,10 @@ export function classifyDcToAaDetailed(
  */
 export function classifyDcToAa(
   lead: BaseLead,
-  beraterContext: Map<number, BeraterLead[]>
+  beraterContext: Map<number, BeraterLead[]>,
+  scope: VerticalScope = DEFAULT_SCOPE
 ): DcToAaState {
-  const d = classifyDcToAaDetailed(lead, beraterContext);
+  const d = classifyDcToAaDetailed(lead, beraterContext, scope);
   if (d === "none") return "none";
   return d === "forward" ? "success" : "failure";
 }
@@ -685,7 +695,8 @@ function pickEarliestGosTargetAfter(
 ): Date | null {
   let earliest: Date | null = null;
   for (const statusId of targetStatuses) {
-    const key = `${lead.leadId}|${BUH_GOS}|${statusId}`;
+    // Ключ по СВОЕЙ воронке лида (Бух Гос или Мед Гос — vertical-aware).
+    const key = `${lead.leadId}|${lead.pipelineId}|${statusId}`;
     const ev = events.get(key);
     if (
       ev !== undefined &&
@@ -737,10 +748,12 @@ function earliestBeraterEventAfter(
 export async function fetchQualifiedBaseLeads(
   opts: ComputeOpts
 ): Promise<BaseLead[]> {
-  // База = лиды Бух Гос со статусом из QUAL_FIRST_LINE (исключая UNSORTED/BASE).
-  // НЕ фильтруем по non_qual_enum_id — дисквалифицированные нужны в знаменателе,
-  // флаг is_disqualified трекаем по snapshot non_qual_enum_id.
-  const qualStatusIn = QUAL_FIRST_LINE_STATUS_IDS.join(",");
+  // База = лиды первой линии (Бух Гос / Мед Гос по вертикали) со статусом из
+  // QUAL-набора (исключая UNSORTED/BASE). НЕ фильтруем по non_qual_enum_id —
+  // дисквалифицированные нужны в знаменателе, флаг is_disqualified — по snapshot.
+  const scope = getVerticalScope(opts.vertical);
+  const qualStatusIn = scope.qualStatusIds.join(",");
+  const pipelineIn = scope.firstLineIds.join(",");
 
   // Anchor = lead.created_at (как у cohort-conversion qualification_at:
   // qualification_at = lead.created_at if is_current_buh_gos_pool ...).
@@ -748,6 +761,7 @@ export async function fetchQualifiedBaseLeads(
   const rows = await analyticsDb.execute(sql`
     SELECT
       lead_id                 AS "leadId",
+      pipeline_id             AS "pipelineId",
       created_at              AS "anchorAt",
       responsible_user_id     AS "responsibleUserId",
       utm_source              AS "utmSource",
@@ -756,19 +770,20 @@ export async function fetchQualifiedBaseLeads(
       language_level          AS "languageLevel",
       updated_at              AS "updatedAt"
     FROM analytics.leads_cohort
-    WHERE pipeline_id = ${BUH_GOS}
+    WHERE pipeline_id IN (${sql.raw(pipelineIn)})
       AND status_id IN (${sql.raw(qualStatusIn)})
       AND exclude_from_analytics = FALSE
       AND is_deleted = FALSE
       AND created_at >= ${opts.from.toISOString()}
       AND created_at <  ${opts.to.toISOString()}
       ${opts.source ? sql`AND utm_source = ${opts.source}` : sql``}
-      ${managerAttributionSql(opts.responsibleUserId)}
+      ${managerAttributionSql(opts.responsibleUserId, scope.beraterIds)}
       ${languageBucketSql(opts.lang)}
   `);
 
   const data = unwrapRows<{
     leadId: string | number;
+    pipelineId: string | number;
     anchorAt: string | Date;
     responsibleUserId: string | number | null;
     utmSource: string | null;
@@ -799,6 +814,7 @@ export async function fetchQualifiedBaseLeads(
           : new Date(r.updatedAt);
     return {
       leadId: Number(r.leadId),
+      pipelineId: Number(r.pipelineId),
       anchorAt,
       responsibleUserId:
         r.responsibleUserId === null ? null : Number(r.responsibleUserId),
@@ -820,10 +836,11 @@ export async function fetchQualifiedBaseLeads(
 // ──────────────────────────────────────────────────────────────────────────
 
 export async function fetchTargetEvents(
-  leadIds: number[]
+  leadIds: number[],
+  scope: VerticalScope = DEFAULT_SCOPE
 ): Promise<Map<string, Date>> {
   const targetStatusIds = [
-    ...new Set([...C1_TARGET_STATUSES, ...C2_TARGET_STATUSES]),
+    ...new Set([...scope.c1TargetIds, ...scope.c2TargetIds]),
   ];
   const leadIdsIn = leadIds.join(",");
   const targetStatusIn = targetStatusIds.join(",");
@@ -835,7 +852,7 @@ export async function fetchTargetEvents(
       MIN(event_at) AS "eventAt"
     FROM analytics.lead_status_changes
     WHERE lead_id IN (${sql.raw(leadIdsIn)})
-      AND pipeline_id = ${BUH_GOS}
+      AND pipeline_id IN (${sql.raw(scope.firstLineIds.join(","))})
       AND status_id IN (${sql.raw(targetStatusIn)})
     GROUP BY lead_id, pipeline_id, status_id
   `);
@@ -863,9 +880,11 @@ export async function fetchTargetEvents(
  * snapshot (current status + created_at) + историю событий по релевантным статусам.
  */
 export async function fetchBeraterContext(
-  baseLeadIds: number[]
+  baseLeadIds: number[],
+  scope: VerticalScope = DEFAULT_SCOPE
 ): Promise<Map<number, BeraterLead[]>> {
   const idsIn = baseLeadIds.join(",");
+  const beraterPipeIn = scope.beraterIds.join(",");
 
   // 1. Линкованные Бератер-лиды (для каждого base — список их snapshot).
   const linkRows = unwrapRows<{
@@ -889,7 +908,7 @@ export async function fetchBeraterContext(
        AND berater_lcl.lead_id <> base_lcl.lead_id
       INNER JOIN analytics.leads_cohort AS berater
         ON berater.lead_id = berater_lcl.lead_id
-       AND berater.pipeline_id = ${BERATER}
+       AND berater.pipeline_id IN (${sql.raw(beraterPipeIn)})
       WHERE base_lcl.lead_id IN (${sql.raw(idsIn)})
         AND base_lcl.is_active = TRUE
       ORDER BY base_lcl.lead_id, berater.lead_id
@@ -903,7 +922,7 @@ export async function fetchBeraterContext(
     new Set(linkRows.map((r) => Number(r.leadId)))
   );
   const beraterIdsIn = beraterLeadIds.join(",");
-  const beraterStatusesIn = ALL_BERATER_RELEVANT_STATUSES.join(",");
+  const beraterStatusesIn = scope.beraterRelevantIds.join(",");
 
   const eventRows = unwrapRows<{
     leadId: string | number;
@@ -917,7 +936,7 @@ export async function fetchBeraterContext(
         MIN(event_at) AS "eventAt"
       FROM analytics.lead_status_changes
       WHERE lead_id IN (${sql.raw(beraterIdsIn)})
-        AND pipeline_id = ${BERATER}
+        AND pipeline_id IN (${sql.raw(beraterPipeIn)})
         AND status_id IN (${sql.raw(beraterStatusesIn)})
       GROUP BY lead_id, status_id
     `)

@@ -817,10 +817,19 @@ function pickIds(buhId: number, medId: number, vertical?: Vertical): Set<number>
 
 /** Стадии первой линии (Бух Гос / Мед Гос) по вертикали. */
 export function getFirstLineStatusSets(vertical?: Vertical) {
+  const F = FIRST_LINE_STATUSES;
+  const M = MED_GOV_STATUSES;
   return {
-    unsorted: pickIds(FIRST_LINE_STATUSES.UNSORTED, MED_GOV_STATUSES.UNSORTED, vertical),
-    base: pickIds(FIRST_LINE_STATUSES.BASE, MED_GOV_STATUSES.BASE, vertical),
-    delayedStart: pickIds(FIRST_LINE_STATUSES.DELAYED_START, MED_GOV_STATUSES.DELAYED_START, vertical),
+    unsorted: pickIds(F.UNSORTED, M.UNSORTED, vertical),
+    base: pickIds(F.BASE, M.BASE, vertical),
+    newLead: pickIds(F.NEW_LEAD, M.NEW_LEAD, vertical),
+    inProgress: pickIds(F.IN_PROGRESS, M.IN_PROGRESS, vertical),
+    noAnswer: pickIds(F.NO_ANSWER, M.NO_ANSWER, vertical),
+    contactMade: pickIds(F.CONTACT_MADE, M.CONTACT_MADE, vertical),
+    decisionMaking: pickIds(F.DECISION_MAKING, M.DECISION_MAKING, vertical),
+    consultDone: pickIds(F.CONSULT_DONE, M.CONSULT_DONE, vertical),
+    docsSentDC: pickIds(F.DOCS_SENT_DC, M.DOCS_SENT_DC, vertical),
+    delayedStart: pickIds(F.DELAYED_START, M.DELAYED_START, vertical),
   };
 }
 

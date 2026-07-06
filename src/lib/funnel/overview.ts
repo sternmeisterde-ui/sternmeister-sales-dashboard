@@ -19,9 +19,10 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import {
-  B2G_PIPELINES,
   BERATER_STATUSES,
-  FIRST_LINE_STATUSES,
+  getBeraterStatusSets,
+  getFirstLineStatusSets,
+  type Vertical,
 } from "@/lib/kommo/pipeline-config";
 import { computeClients } from "./clients";
 import { todayBerlinUTC } from "./cohort-math";
@@ -31,6 +32,7 @@ import {
   fetchCloseReasonHistory,
   fetchQualifiedBaseLeads,
   fetchTargetEvents,
+  getVerticalScope,
   languageBucketSql,
   managerAttributionSql,
   processLeadForConversion,
@@ -39,21 +41,13 @@ import {
   type BeraterLead,
   type CloseReasonEvent,
   type ComputeOpts,
+  type VerticalScope,
 } from "./compute";
 import type {
   OverviewFunnelStage,
   OverviewResponse,
 } from "./api-types";
 
-const BUH_GOS = B2G_PIPELINES.FIRST_LINE; // 10935879
-// «Термин АА» — встреча в АА. Стадия TERM_AA убрана из воронки ~2026-03
-// (history-only), поэтому веху считаем по кластеру «встреча АА назначалась»:
-// исторический on-stage + отменена/перенесена. «На рассмотрении бератера» —
-// теперь отдельная ступень ниже (пост-АА подтверждает АА через инференс глубины).
-const TERM_AA_STATUSES = [
-  BERATER_STATUSES.TERM_AA, // 93860879 на этапе (history-only)
-  BERATER_STATUSES.TERM_AA_CANCELLED, // 93860883 отменён/перенесён (встреча всё равно была назначена)
-];
 const FRESH_CALL_DAYS = 7;
 const CLOSED_STATUSES = new Set([142, 143]); // won/termin + lost
 
@@ -95,26 +89,41 @@ type StageKey = (typeof STAGE_DEFS)[number]["key"];
 // new/qual. Достижение более глубокой ступени помечает все предыдущие.
 const CHAIN_KEYS = STAGE_DEFS.slice(2).map((d) => d.key) as StageKey[];
 
-// Гос-этапы, чьи события подтягиваются дополнительно к C1/C2-целям.
-const EXTRA_GOS_STAGE_STATUSES: ReadonlyArray<[StageKey, number]> = [
-  ["in_progress", FIRST_LINE_STATUSES.IN_PROGRESS], // 90367079
-  ["contact", FIRST_LINE_STATUSES.CONTACT_MADE], // 90367087
-  ["decision", FIRST_LINE_STATUSES.DECISION_MAKING], // 104211575
-  ["consult_gos", FIRST_LINE_STATUSES.CONSULT_DONE], // 95514983
-];
+// Гос- и Бератер-этапы лестницы: ступень → статусы-свидетельства выбранной
+// вертикали (бух / мед / union). Вычисляется на запрос (vertical-aware).
+interface StageStatusSets {
+  gos: ReadonlyArray<[StageKey, readonly number[]]>;
+  berater: ReadonlyArray<[StageKey, readonly number[]]>;
+}
 
-// Бератер-этапы: ступень → статус(ы)-свидетельства (событие или текущий статус).
-const BERATER_STAGE_STATUSES: ReadonlyArray<[StageKey, readonly number[]]> = [
-  ["received", [BERATER_STATUSES.RECEIVED_FROM_FIRST]], // 93860331
-  ["dovedenie", [BERATER_STATUSES.DOVEDENIE]], // 102183931
-  ["consult_dc", [BERATER_STATUSES.CONSULT_BEFORE_DC]], // 102183935
-  ["consult_dc_done", [BERATER_STATUSES.CONSULT_BEFORE_DC_DONE]], // 102183939
-  ["term_dc_done", [BERATER_STATUSES.TERM_DC_DONE]], // 93886075
-  ["consult_aa", [BERATER_STATUSES.CONSULT_BEFORE_AA]], // 102183943
-  ["consult_aa_done", [BERATER_STATUSES.CONSULT_BEFORE_AA_DONE]], // 102183947
-  ["term_aa", TERM_AA_STATUSES],
-  ["berater_review", [BERATER_STATUSES.BERATER_REVIEW]], // 93860887
-];
+function getStageStatusSets(vertical?: Vertical): StageStatusSets {
+  const fl = getFirstLineStatusSets(vertical);
+  const br = getBeraterStatusSets(vertical);
+  return {
+    gos: [
+      ["in_progress", [...fl.inProgress]],
+      ["contact", [...fl.contactMade]],
+      ["decision", [...fl.decisionMaking]],
+      ["consult_gos", [...fl.consultDone]],
+    ],
+    berater: [
+      ["received", [...br.receivedFromFirst]],
+      ["dovedenie", [...br.dovedenie]],
+      ["consult_dc", [...br.consultBeforeDC]],
+      ["consult_dc_done", [...br.consultBeforeDCDone]],
+      ["term_dc_done", [...br.termDCDone]],
+      ["consult_aa", [...br.consultBeforeAA]],
+      ["consult_aa_done", [...br.consultBeforeAADone]],
+      // «Термин АА» — стадия убрана из бух-воронки ~2026-03 (history-only), у мед
+      // её не было никогда: кластер = исторический on-stage (бух) + отменён/перенесён.
+      ["term_aa", [
+        ...br.termAACancelled,
+        ...(vertical === "med" ? [] : [BERATER_STATUSES.TERM_AA]),
+      ]],
+      ["berater_review", [...br.beraterReview]],
+    ],
+  };
+}
 
 /** Достижение этапов + дата каждого этапа (для среднего времени перехода). */
 interface LeadStages {
@@ -126,13 +135,15 @@ interface LeadStages {
 export async function computeOverview(
   opts: ComputeOpts
 ): Promise<OverviewResponse> {
-  // 1. База квал-лидов Бух Гос (как у когорт: уважает period/source/responsible).
+  const scope = getVerticalScope(opts.vertical);
+  const stageSets = getStageStatusSets(opts.vertical);
+  // 1. База квал-лидов первой линии (как у когорт: уважает period/source/responsible).
   //    Обрабатываем ВСЕ (включая дисквал) — вехи воронки считаем тем же
   //    drill-правилом, что карточки, поэтому их числа совпадают.
   // Квал-база + Hot/Warm/Cold (по предстоящим терминам) — независимы, в параллель.
   const [baseLeadsRaw, hotWarmCold] = await Promise.all([
     fetchQualifiedBaseLeads(opts),
-    computeUpcomingReadiness(opts.lang ?? null),
+    computeUpcomingReadiness(opts.lang ?? null, opts.vertical),
   ]);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
 
@@ -140,13 +151,13 @@ export async function computeOverview(
   //    + события промежуточных Гос-этапов (полная лестница воронки).
   const [newLeadCount, closeReasonHistory, targetEvents, beraterContext, extraGosEvents] =
     await Promise.all([
-      fetchNewLeadCount(opts),
+      fetchNewLeadCount(opts, scope.firstLineIds),
       leadIds.length
         ? fetchCloseReasonHistory(leadIds)
         : Promise.resolve(new Map<number, CloseReasonEvent[]>()),
-      leadIds.length ? fetchTargetEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
-      leadIds.length ? fetchBeraterContext(leadIds) : Promise.resolve(new Map<number, BeraterLead[]>()),
-      leadIds.length ? fetchExtraGosEvents(leadIds) : Promise.resolve(new Map<string, Date>()),
+      leadIds.length ? fetchTargetEvents(leadIds, scope) : Promise.resolve(new Map<string, Date>()),
+      leadIds.length ? fetchBeraterContext(leadIds, scope) : Promise.resolve(new Map<number, BeraterLead[]>()),
+      leadIds.length ? fetchExtraGosEvents(leadIds, scope.firstLineIds, stageSets) : Promise.resolve(new Map<string, Date>()),
     ]);
 
   // Точная дата дисквала из истории (как в computeCohorts) → вехи 1-в-1 с карточками.
@@ -156,7 +167,7 @@ export async function computeOverview(
 
   // 3. По каждому лиду — достигнутые этапы (накопительно) + даты.
   const stages = baseLeads.map((lead) =>
-    computeLeadStages(lead, targetEvents, beraterContext, extraGosEvents)
+    computeLeadStages(lead, targetEvents, beraterContext, extraGosEvents, stageSets, scope)
   );
 
   // 4. Квал лид = база минус дисквал (= «Лиды» в когортах, displayLeadCount).
@@ -224,7 +235,8 @@ export async function computeOverview(
 // Готовность — про будущее, поэтому популяция НЕ зависит от фильтра периода
 // воронки (он про дату создания). Реиспользуем computeClients + score.ts.
 async function computeUpcomingReadiness(
-  lang: ComputeOpts["lang"]
+  lang: ComputeOpts["lang"],
+  vertical?: Vertical
 ): Promise<{
   hot: number;
   warm: number;
@@ -234,7 +246,7 @@ async function computeUpcomingReadiness(
   // сегодня), без верхней границы. terminTo=null → «с сегодня и дальше».
   const today = todayBerlinUTC();
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
-  const res = await computeClients({ terminFrom: fmt(today), terminTo: null, lang });
+  const res = await computeClients({ terminFrom: fmt(today), terminTo: null, lang, vertical });
   // Активные клиенты, которых ещё «готовим» (выигравшие гутшайн — не здесь).
   return res.active.categories;
 }
@@ -245,7 +257,9 @@ function computeLeadStages(
   lead: BaseLead,
   targetEvents: Map<string, Date>,
   beraterContext: Map<number, BeraterLead[]>,
-  extraGosEvents: Map<string, Date>
+  extraGosEvents: Map<string, Date>,
+  stageSets: StageStatusSets,
+  scope: VerticalScope
 ): LeadStages {
   const berater = beraterContext.get(lead.leadId) ?? [];
 
@@ -265,9 +279,9 @@ function computeLeadStages(
   // если достигнута ДО дисквала (или лид не дисквалифицирован). Поэтому счётчики
   //   Документы = C1 target, Термин ДЦ = C2 target, Гутшайн = C5 target
   // СОВПАДАЮТ с суммами target карточек/таблицы.
-  const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext);
-  const c2 = processLeadForConversion("C2", lead, targetEvents, beraterContext);
-  const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext);
+  const c1 = processLeadForConversion("C1", lead, targetEvents, beraterContext, scope);
+  const c2 = processLeadForConversion("C2", lead, targetEvents, beraterContext, scope);
+  const c5 = processLeadForConversion("C5", lead, targetEvents, beraterContext, scope);
   const targetCounts = (r: { included: boolean; targetAt: Date | null }) =>
     r.included &&
     r.targetAt !== null &&
@@ -282,8 +296,12 @@ function computeLeadStages(
 
   // Промежуточные Гос-этапы: событие ≥ anchor (и до дисквала) ИЛИ snapshot
   // текущего статуса (дата неизвестна → в средние переходов не попадает).
-  for (const [key, statusId] of EXTRA_GOS_STAGE_STATUSES) {
-    const ev = extraGosEvents.get(`${lead.leadId}|${statusId}`);
+  for (const [key, statusIds] of stageSets.gos) {
+    let ev: Date | undefined;
+    for (const statusId of statusIds) {
+      const e = extraGosEvents.get(`${lead.leadId}|${statusId}`);
+      if (e !== undefined && (ev === undefined || e < ev)) ev = e;
+    }
     if (
       ev !== undefined &&
       ev.getTime() >= lead.anchorAt.getTime() &&
@@ -291,14 +309,14 @@ function computeLeadStages(
     ) {
       reached[key] = true;
       at[key] = ev;
-    } else if (lead.currentStatusId === statusId && !lead.isDisqualified) {
+    } else if (statusIds.includes(lead.currentStatusId) && !lead.isDisqualified) {
       reached[key] = true;
     }
   }
 
   // Бератер-этапы: самое раннее событие (до дисквала) ИЛИ текущий статус
   // линкованного Бератер-лида (snapshot, дата неизвестна).
-  for (const [key, statusIds] of BERATER_STAGE_STATUSES) {
+  for (const [key, statusIds] of stageSets.berater) {
     const ev = earliestBeraterEventAny(berater, statusIds);
     if (
       ev !== null &&
@@ -427,13 +445,17 @@ function buildFunnel(
 // «Контакт установлен» / «Принимает решение» / «Консультация проведена».
 // Ключ карты: `${leadId}|${statusId}` → earliest event_at.
 
-async function fetchExtraGosEvents(leadIds: number[]): Promise<Map<string, Date>> {
-  const statusIds = EXTRA_GOS_STAGE_STATUSES.map(([, id]) => id);
+async function fetchExtraGosEvents(
+  leadIds: number[],
+  firstLineIds: number[],
+  stageSets: StageStatusSets
+): Promise<Map<string, Date>> {
+  const statusIds = stageSets.gos.flatMap(([, ids]) => ids);
   const rows = await analyticsDb.execute(sql`
     SELECT lead_id AS "leadId", status_id AS "statusId", MIN(event_at) AS "eventAt"
     FROM analytics.lead_status_changes
     WHERE lead_id IN (${sql.raw(leadIds.join(","))})
-      AND pipeline_id = ${BUH_GOS}
+      AND pipeline_id IN (${sql.raw(firstLineIds.join(","))})
       AND status_id IN (${sql.raw(statusIds.join(","))})
     GROUP BY lead_id, status_id
   `);
@@ -453,17 +475,18 @@ async function fetchExtraGosEvents(leadIds: number[]): Promise<Map<string, Date>
 
 // ── SQL: «Новый лид» — все Гос-лиды за период (top воронки) ──────────────────
 
-async function fetchNewLeadCount(opts: ComputeOpts): Promise<number> {
+async function fetchNewLeadCount(opts: ComputeOpts, firstLineIds: number[]): Promise<number> {
+  const scope = getVerticalScope(opts.vertical);
   const rows = await analyticsDb.execute(sql`
     SELECT COUNT(*) AS n
     FROM analytics.leads_cohort
-    WHERE pipeline_id = ${BUH_GOS}
+    WHERE pipeline_id IN (${sql.raw(firstLineIds.join(","))})
       AND exclude_from_analytics = FALSE
       AND is_deleted = FALSE
       AND created_at >= ${opts.from.toISOString()}
       AND created_at <  ${opts.to.toISOString()}
       ${opts.source ? sql`AND utm_source = ${opts.source}` : sql``}
-      ${managerAttributionSql(opts.responsibleUserId)}
+      ${managerAttributionSql(opts.responsibleUserId, scope.beraterIds)}
       ${languageBucketSql(opts.lang)}
   `);
   const data = unwrapRows<{ n: string | number }>(rows);
