@@ -182,10 +182,14 @@ export async function GET(
           : [],
         // Derived summary of failed binary criteria for quick display
         // «Пусто» (applicable=false) — не провал: в сводку не включаем.
+        // Унаследованный провал (inherited_from_call_id, OKK с 2026-07-07) —
+        // ошибка ПРОШЛОГО звонка клиента, вошедшая в балл этого: помечаем,
+        // чтобы сводка не приписывала её текущему звонку (полная атрибуция —
+        // в feedback критерия ниже).
         feedback: b.criteria
           ? b.criteria
               .filter((c) => c.score === 0 && c.max_score > 0 && c.applicable !== false)
-              .map((c) => `❌ ${c.name}`)
+              .map((c) => `❌ ${c.name}${c.inherited_from_call_id ? " (унаследовано из прошлого звонка)" : ""}`)
               .join("\n")
           : b.feedback || "",
       }));
