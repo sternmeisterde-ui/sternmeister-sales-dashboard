@@ -97,6 +97,23 @@ function detailFilters(sp: URLSearchParams): string {
   if (manager) parts.push(`AND lc.manager = '${esc(manager)}'`);
   const leadId = sp.get("leadId");
   if (leadId && /^\d{1,12}$/.test(leadId)) parts.push(`AND sc.lead_id = ${Number(leadId)}`);
+  // «Этап воронки» (Детализированно в Looker)
+  const status = sp.get("status");
+  if (status) parts.push(`AND sc.status = '${esc(status)}'`);
+  // «Месяц создания сделки» (когортный фильтр Сводного в Looker):
+  // YYYY-MM → берлинские границы месяца по leads_cohort.created_at.
+  const month = sp.get("createdMonth");
+  if (month && /^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    const start = parseDateBoundary(`${month}-01`, "start");
+    const [y, m] = month.split("-").map(Number);
+    const nextMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+    const end = parseDateBoundary(`${nextMonth}-01`, "start");
+    if (start && end) {
+      parts.push(
+        `AND lc.created_at >= '${utcLiteral(start)}' AND lc.created_at < '${utcLiteral(end)}'`,
+      );
+    }
+  }
   return parts.join("\n");
 }
 
@@ -816,20 +833,42 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ORDER BY event_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
-    const res = await analyticsDb.execute<{
-      lead_id: string;
-      pipeline: string;
-      status: string;
-      enter_berlin: string;
-      exit_berlin: string | null;
-      seconds: string;
-      responsible: string;
-      total: number;
-    }>(sql.raw(query));
+    // Опции фильтров «Этап воронки»/«Ответственный» — по периоду и воронкам,
+    // но БЕЗ самих статус/менеджер-фильтров (иначе выбор одного значения
+    // схлопывал бы список и с него нельзя было бы переключиться).
+    const optionsQuery = `
+      SELECT DISTINCT sc.status, COALESCE(lc.manager, '—') AS responsible
+      FROM analytics.lead_status_changes sc
+      LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = sc.lead_id
+      WHERE sc.pipeline IN (${pipelines})
+        AND (sc.status_id IS NULL OR sc.status_id NOT IN (${TERMINAL_STATUS_IDS.join(", ")}))
+        AND sc.event_at >= '${fromLit}' AND sc.event_at <= '${toLit}'
+        AND COALESCE(lc.is_deleted, FALSE) = FALSE
+      ORDER BY sc.status
+    `;
+    const [res, optionsRes] = await Promise.all([
+      analyticsDb.execute<{
+        lead_id: string;
+        pipeline: string;
+        status: string;
+        enter_berlin: string;
+        exit_berlin: string | null;
+        seconds: string;
+        responsible: string;
+        total: number;
+      }>(sql.raw(query)),
+      analyticsDb.execute<{ status: string; responsible: string }>(sql.raw(optionsQuery)),
+    ]);
     const total = res.rows.length > 0 ? Number(res.rows[0].total) : 0;
+    const statuses = [...new Set(optionsRes.rows.map((r) => r.status))];
+    const managers = [...new Set(optionsRes.rows.map((r) => r.responsible))].sort((a, b) =>
+      a.localeCompare(b, "ru"),
+    );
     return NextResponse.json({
       view,
       total,
+      statuses,
+      managers,
       rows: res.rows.map((r) => ({
         leadId: Number(r.lead_id),
         pipeline: r.pipeline,

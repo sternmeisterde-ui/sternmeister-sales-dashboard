@@ -321,7 +321,10 @@ function SlaView({ range }: { range: DateRange }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <DetailToolbar st={st} hint={`воронка ${FUNNEL_PIPELINES.gos} · SLA от начала смены менеджера`} />
+      <DetailToolbar
+        st={st}
+        hint={`воронка ${FUNNEL_PIPELINES.gos} · SLA от начала смены менеджера · норма ≤ 10 мин (наша)`}
+      />
 
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
@@ -883,8 +886,10 @@ function SummaryView({ range }: { range: DateRange }) {
           <SummaryTable rows={summary.berater} funnel="berater" />
           <p className="-mt-3 text-[11px] text-slate-500">
             Метрика = доля проверок в нормативе за период (наведите на ячейку — счёт).
-            «Регламент, %» — сводный: Σ ok / Σ проверок по всем метрикам. Порог SLA
-            (10 мин от начала смены) — предварительный. Цвета: ≤70 красный, 71–80 жёлтый, ≥81 зелёный.
+            «Регламент, %» — сводный: Σ ok / Σ проверок по всем метрикам. «SLA, %» —
+            наша норма (первый звонок ≤ 10 мин от начала смены): формула Looker
+            противоречива и не воспроизводится, расхождение с ним ожидаемо.
+            Цвета: ≤70 красный, 71–80 жёлтый, ≥81 зелёный.
           </p>
         </>
       )}
@@ -961,6 +966,7 @@ function TasksTable({ rows, title }: { rows: TaskApiRow[]; title: string }) {
 
 function TasksView({ range }: { range: DateRange }) {
   const [data, setData] = useState<{ rows: TaskApiRow[]; dataUpTo: string | null } | null>(null);
+  const [manager, setManager] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -969,11 +975,13 @@ function TasksView({ range }: { range: DateRange }) {
     const run = async () => {
       setLoading(true);
       setError(null);
+      const params: Record<string, string> = {
+        from: fmtLocalDate(range.start ?? todayBerlinDate()),
+        to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
+      };
+      if (manager) params.manager = manager;
       try {
-        const d = await fetchView<{ rows: TaskApiRow[]; dataUpTo: string | null }>("tasks", {
-          from: fmtLocalDate(range.start ?? todayBerlinDate()),
-          to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
-        });
+        const d = await fetchView<{ rows: TaskApiRow[]; dataUpTo: string | null }>("tasks", params);
         if (!cancelled) setData(d);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -985,7 +993,13 @@ function TasksView({ range }: { range: DateRange }) {
     return () => {
       cancelled = true;
     };
-  }, [range]);
+  }, [range, manager]);
+
+  // Задачи не пагинируются — список менеджеров периода собирается из строк.
+  const managerOptions = useMemo(
+    () => [...new Set((data?.rows ?? []).map((r) => r.manager))].sort((a, b) => a.localeCompare(b, "ru")),
+    [data],
+  );
 
   const stale = useMemo(() => {
     if (!data?.dataUpTo) return null;
@@ -1010,6 +1024,21 @@ function TasksView({ range }: { range: DateRange }) {
   if (!data) return null;
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={manager}
+          onChange={(e) => setManager(e.target.value)}
+          className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+        >
+          <option value="">Все менеджеры</option>
+          {manager && !managerOptions.includes(manager) && <option value={manager}>{manager}</option>}
+          {managerOptions.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      </div>
       {stale && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
           Задачи в аналитической базе синхронизированы по {`${stale.slice(8, 10)}.${stale.slice(5, 7)}.${stale.slice(0, 4)}`} —
@@ -1119,28 +1148,64 @@ function AvgPivot({ rows, funnel }: { rows: AvgSummaryRow[]; funnel: FunnelKey }
   );
 }
 
+/** Последние 12 берлинских месяцев для фильтра «Месяц создания сделки». */
+function lastMonths(): { value: string; label: string }[] {
+  const NAMES = [
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+  ];
+  const today = todayCivil();
+  let y = Number(today.slice(0, 4));
+  let m = Number(today.slice(5, 7));
+  const out: { value: string; label: string }[] = [];
+  for (let i = 0; i < 12; i++) {
+    out.push({ value: `${y}-${String(m).padStart(2, "0")}`, label: `${NAMES[m - 1]} ${y}` });
+    m--;
+    if (m === 0) {
+      m = 12;
+      y--;
+    }
+  }
+  return out;
+}
+
 function AvgView({ range }: { range: DateRange }) {
   const [mode, setMode] = useState<"summary" | "detail">("summary");
   const [summaryRows, setSummaryRows] = useState<AvgSummaryRow[] | null>(null);
-  const [detail, setDetail] = useState<{ total: number; rows: AvgDetailRow[] } | null>(null);
+  const [detail, setDetail] = useState<{
+    total: number;
+    statuses?: string[];
+    managers?: string[];
+    rows: AvgDetailRow[];
+  } | null>(null);
   const [page, setPage] = useState(0);
   const [leadId, setLeadId] = useState("");
   const [funnelFilter, setFunnelFilter] = useState<"" | FunnelKey>("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [managerFilter, setManagerFilter] = useState("");
+  const [createdMonth, setCreatedMonth] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const PAGE = 100;
+  const months = useMemo(lastMonths, []);
 
   const params = useMemo(() => {
     const p: Record<string, string> = {
       from: fmtLocalDate(range.start ?? todayBerlinDate()),
       to: fmtLocalDate(range.end ?? range.start ?? todayBerlinDate()),
     };
-    // Фильтры воронки/сделки — только в «Детализированно»: в «Сводном» их
-    // контролов нет, и утёкший funnel невидимо опустошал бы второй пивот.
-    if (mode === "detail" && funnelFilter) p.funnel = funnelFilter;
-    if (mode === "detail" && /^\d+$/.test(leadId.trim())) p.leadId = leadId.trim();
+    // Наборы фильтров — как в Looker: у «Сводного» только когортный «Месяц
+    // создания сделки», у «Детализированно» — воронка/этап/ответственный/id.
+    // Не подмешиваем чужие: утёкший фильтр невидимо опустошал бы таблицы.
+    if (mode === "summary" && createdMonth) p.createdMonth = createdMonth;
+    if (mode === "detail") {
+      if (funnelFilter) p.funnel = funnelFilter;
+      if (statusFilter) p.status = statusFilter;
+      if (managerFilter) p.manager = managerFilter;
+      if (/^\d+$/.test(leadId.trim())) p.leadId = leadId.trim();
+    }
     return p;
-  }, [range, funnelFilter, leadId, mode]);
+  }, [range, funnelFilter, statusFilter, managerFilter, leadId, createdMonth, mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1152,7 +1217,12 @@ function AvgView({ range }: { range: DateRange }) {
           const data = await fetchView<{ rows: AvgSummaryRow[] }>("avg_summary", params);
           if (!cancelled) setSummaryRows(data.rows);
         } else {
-          const data = await fetchView<{ total: number; rows: AvgDetailRow[] }>("avg_detail", {
+          const data = await fetchView<{
+            total: number;
+            statuses?: string[];
+            managers?: string[];
+            rows: AvgDetailRow[];
+          }>("avg_detail", {
             ...params,
             limit: String(PAGE),
             offset: String(page * PAGE),
@@ -1190,6 +1260,21 @@ function AvgView({ range }: { range: DateRange }) {
             {m === "summary" ? "Сводный" : "Детализированно"}
           </button>
         ))}
+        {mode === "summary" && (
+          <select
+            value={createdMonth}
+            onChange={(e) => setCreatedMonth(e.target.value)}
+            className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+            title="Когорта: учитываются только сделки, созданные в выбранном месяце"
+          >
+            <option value="">Месяц создания сделки — все</option>
+            {months.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        )}
         {mode === "detail" && (
           <>
             <select
@@ -1203,6 +1288,42 @@ function AvgView({ range }: { range: DateRange }) {
               <option value="">Обе воронки</option>
               <option value="gos">{FUNNEL_PIPELINES.gos}</option>
               <option value="berater">{FUNNEL_PIPELINES.berater}</option>
+            </select>
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setPage(0);
+              }}
+              className="max-w-56 rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+            >
+              <option value="">Этап воронки — все</option>
+              {statusFilter && !(detail?.statuses ?? []).includes(statusFilter) && (
+                <option value={statusFilter}>{statusFilter}</option>
+              )}
+              {(detail?.statuses ?? []).map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <select
+              value={managerFilter}
+              onChange={(e) => {
+                setManagerFilter(e.target.value);
+                setPage(0);
+              }}
+              className="rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300"
+            >
+              <option value="">Ответственный — все</option>
+              {managerFilter && !(detail?.managers ?? []).includes(managerFilter) && (
+                <option value={managerFilter}>{managerFilter}</option>
+              )}
+              {(detail?.managers ?? []).map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
             </select>
             <input
               value={leadId}
