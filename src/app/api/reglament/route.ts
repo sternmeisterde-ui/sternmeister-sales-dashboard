@@ -345,11 +345,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         }),
       ]);
       const slaRows = computeNewLeadSla(slaIntervals, nowMs);
-      const merged = collapseAll(intervals);
-      const stageRows = merged
+      // Этапы/TLT считаются по СЫРЫМ интервалам, как у интегратора (склейка
+      // re-entry удлиняла пребывания циклических недозвонов и валила
+      // проценты: Дмитриев 78 vs 100 у Looker). Склейка intake остаётся
+      // только в касаниях (там она подтверждена построчной валидацией).
+      const stageRows = intervals
         .map((iv) => computeStageTime(iv, nowMs))
         .filter((r): r is NonNullable<typeof r> => r !== null);
-      const tltIv = merged.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
+      const tltIv = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
       const touchIv = collapseAll(intervals, { intake: true }).filter(
         (iv) => iv.exitMs != null && iv.nextStatus != null,
       );
@@ -688,7 +691,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         closed ? ok : ok ? null : false;
 
       if (view === "stage_time") {
-        const rows = collapseAll(intervals)
+        // Сырые интервалы (без склейки re-entry) — как у интегратора.
+        const rows = intervals
           .map((iv) => computeStageTime(iv, nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
           .filter((r) => oursInterval(r.interval));
@@ -716,10 +720,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
 
       if (view === "tlt_gap") {
-        // Только этапы с TLT-нормативом — сузим перед выборкой касаний.
-        const tltIv = collapseAll(intervals).filter(
-          (iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null,
-        );
+        // Только этапы с TLT-нормативом; сырые интервалы, как у интегратора.
+        const tltIv = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
         const leadIds = [...new Set(tltIv.map((iv) => iv.leadId))];
         const range = minMax(tltIv.flatMap((iv) => [iv.enterMs, iv.exitMs ?? nowMs]));
         const touches = range
