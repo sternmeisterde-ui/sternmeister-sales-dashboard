@@ -27,6 +27,7 @@ import { syncContacts } from "./sync-contacts";
 import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncCloseReasonChanges } from "./sync-close-reason-changes";
+import { syncResponsibleChanges } from "./sync-responsible-changes";
 import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncClientRoleplays } from "./sync-client-roleplays";
 import { syncBotRoleplays, syncBotUsers } from "./sync-bot-roleplays";
@@ -75,7 +76,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -261,6 +262,18 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await runStep(
       "sync-close-reason-changes",
       () => syncCloseReasonChanges(opts.fromDate, opts.toDate),
+      0,
+      stepErrors,
+    );
+  }
+
+  // Смены ответственного — нужны вкладке «Регламент» (периоды ответственности:
+  // Время на этапах/TLT/SLA считаются от передачи лида). Идемпотентный upsert
+  // по event_id; окно то же, что у остальных инкрементальных шагов.
+  if (!skip.has("responsible_changes")) {
+    await runStep(
+      "sync-responsible-changes",
+      () => syncResponsibleChanges(opts.fromDate, opts.toDate),
       0,
       stepErrors,
     );

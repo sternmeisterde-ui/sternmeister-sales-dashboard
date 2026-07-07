@@ -195,6 +195,15 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
       -- с правилом ≥1 звонок. Переходы В терминальные остаются видимыми
       -- (next_status берётся независимо).
       AND (sc.status_id IS NULL OR sc.status_id NOT IN (${terminalIds}))
+      -- Фантомно-«открытые» строки: next_event_at NULL, хотя у лида есть более
+      -- позднее событие (упавший оконный пересчёт ETL, ~329 лидов фев–апр
+      -- 2026). Настоящий открытый интервал — только ПОСЛЕДНЕЕ событие лида;
+      -- фантомы выкидываем, иначе давно пройденные этапы попадают в сводку
+      -- текущего периода как вечно висящие.
+      AND (sc.next_event_at IS NOT NULL OR NOT EXISTS (
+        SELECT 1 FROM analytics.lead_status_changes later
+        WHERE later.lead_id = sc.lead_id AND later.event_at > sc.event_at
+      ))
       ${closedCond}
       ${managerCond}
       ${leadCond}
