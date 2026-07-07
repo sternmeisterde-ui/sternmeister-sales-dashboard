@@ -7,7 +7,10 @@
  */
 
 import { analyticsDb } from "@/lib/db/analytics";
-import { sql } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { masterManagers } from "@/lib/db/schema-existing";
+import { eq, sql } from "drizzle-orm";
+import { NAME_ALIASES } from "@/lib/daily/name-aliases";
 import { FUNNEL_PIPELINES, type FunnelKey } from "@/lib/reglament/norms";
 
 /** Экранирование строки для raw-SQL литерала (одинарные кавычки). */
@@ -38,6 +41,26 @@ export function berlinStr(ms: number): string {
  *  любой воронки (в Бух Гос won называется «Термин ДЦ», в Бух Бератер —
  *  «Гутшайн одобрен»). Фильтруем по id, а не по переименовываемым именам. */
 export const TERMINAL_STATUS_IDS = [142, 143] as const;
+
+/**
+ * Имена менеджеров отдела Коммерсов (b2b) + известные алиасы написания.
+ * Вкладка «Регламент» — b2g-only: b2b-имена просачиваются в гос-воронки
+ * (единичные передачи сделок) и как ответственные контактов в пропущенных —
+ * их скрываем. Бывшие госники, которых в master_managers уже нет, при этом
+ * остаются: показываем всех, у кого есть данные в периоде.
+ */
+export async function fetchB2bManagerNames(): Promise<Set<string>> {
+  const rows = await db
+    .select({ name: masterManagers.name })
+    .from(masterManagers)
+    .where(eq(masterManagers.department, "b2b"));
+  const set = new Set<string>();
+  for (const r of rows) {
+    set.add(r.name);
+    for (const alias of NAME_ALIASES[r.name] ?? []) set.add(alias);
+  }
+  return set;
+}
 
 export interface StageInterval {
   leadId: number;
