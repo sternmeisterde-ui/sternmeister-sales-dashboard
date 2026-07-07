@@ -122,9 +122,10 @@ export const TOUCH_STAGES_REQUIRING_MESSAGE: Record<FunnelKey, ReadonlySet<strin
 };
 export const CLOSED_LOST_STATUS = "Закрыто и не реализовано";
 // ✅ Документ РОПа: минимум 18 звонков (данные интегратора не противоречат:
-// в них зазор 15–26 пуст — все false ≤ 14, все true ≥ 27).
+// в них зазор 15–26 пуст — все false ≤ 14, все true ≥ 27). Правило действует
+// с ЛЮБОГО из-этапа (в CSV «Контакт установлен → Игнор» с 14 звонками —
+// false, хотя обычное правило дало бы true), не только с «Недозвона».
 export const TOUCH_IGNORE_MIN_CALLS = 18;
-export const TOUCH_IGNORE_FROM_STATUS = "Недозвон";
 
 /**
  * «Мин.касания» проверяются только для переходов ИЗ «рабочих» этапов
@@ -137,12 +138,39 @@ export const TOUCH_FROM_WHITELIST: Record<FunnelKey, ReadonlySet<string> | null>
     "Взято в работу",
     "Недозвон",
     "Контакт установлен",
-    "Консультация проведена",
     "Документы отправлены в ДЦ",
-    "Отложенный старт",
   ]),
   berater: null,
 };
+
+/**
+ * «Отложенный старт» проверяется на касания ТОЛЬКО при уходе в «Игнор»
+ * (Закрыто с причиной ~игнор): в таблице интегратора из этого этапа есть
+ * лишь строки «Отложенный старт → Игнор» (11 из 854 за июнь), обычные
+ * уходы не проверяются. «Консультация проведена» из-этапом не бывает
+ * вовсе — хотя документ РОПа требование «1 звонок + 1 сообщение» на неё
+ * содержит, фактическая таблица её не проверяет; следуем данным (1в1).
+ */
+export const TOUCH_IGNORE_ONLY_FROM_STATUS = "Отложенный старт";
+
+/** Уход в «Игнор»: сделка закрыта с причиной ~игнор (виртуальный to-этап
+ *  «Игнор» в таблице интегратора). */
+export function isIgnoreClose(toStatus: string, closeReason?: string | null): boolean {
+  return toStatus === CLOSED_LOST_STATUS && (closeReason ?? "").toLowerCase().includes("игнор");
+}
+
+/**
+ * Терминальные to-этапы, переходы в которые НЕ проверяются на касания у
+ * Бератера: в его таблице интегратора нет ни одной строки «→ Закрыто…» /
+ * «→ Гутшайн одобрен» (322 строки за июнь) — закрытие сделки бератером не
+ * считается «рабочим» переходом. У Гос наоборот: переходы в «Закрыто…»,
+ * «Успешно реализовано» и «Игнор» — основная масса проверок.
+ */
+export const BERATER_TOUCH_EXCLUDED_TO: ReadonlySet<string> = new Set([
+  "Закрыто и не реализовано",
+  "Гутшайн одобрен",
+  "Успешно реализовано",
+]);
 
 export function touchRule(
   funnel: FunnelKey,
@@ -154,12 +182,7 @@ export function touchRule(
   minCalls: number;
   minMessages: number;
 } {
-  if (
-    funnel === "gos" &&
-    fromStatus === TOUCH_IGNORE_FROM_STATUS &&
-    toStatus === CLOSED_LOST_STATUS &&
-    (closeReason ?? "").toLowerCase().includes("игнор")
-  ) {
+  if (funnel === "gos" && isIgnoreClose(toStatus, closeReason)) {
     return { minCalls: TOUCH_IGNORE_MIN_CALLS, minMessages: 0 };
   }
   const needsMessage = TOUCH_STAGES_REQUIRING_MESSAGE[funnel].has(fromStatus);

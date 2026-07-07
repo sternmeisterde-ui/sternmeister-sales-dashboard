@@ -190,6 +190,13 @@ async function aggregateTasks(opts: {
       lc.pipeline,
       to_char(t.deadline AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS deadline_day,
       to_char(t.completed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS completed_day,
+      -- День закрытия сделки: просрочка задачи по закрытой сделке дальше
+      -- этого дня не тянется (интегратор такие задачи не видит вовсе:
+      -- у Михолап 75 «вечных» просроченных по закрытым сделкам против
+      -- «Просроченные: 2» в его снапшоте).
+      CASE WHEN lc.status_id IN (${TERMINAL_STATUS_IDS.join(", ")})
+        THEN to_char(lc.closed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD')
+      END AS lead_closed_day,
       t.is_completed
     FROM analytics.tasks t
     JOIN analytics.leads_cohort lc ON lc.lead_id = t.lead_id
@@ -208,6 +215,7 @@ async function aggregateTasks(opts: {
     pipeline: string;
     deadline_day: string | null;
     completed_day: string | null;
+    lead_closed_day: string | null;
     is_completed: number;
   }>(sql.raw(query));
 
@@ -235,8 +243,29 @@ async function aggregateTasks(opts: {
     d != null && d >= opts.fromCivil && d <= opts.toCivil && !isSunday(d);
   for (const r of res.rows) {
     const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
-    if (inPeriod(r.deadline_day)) bump(r.deadline_day, funnel, r.task_manager, "planned");
-    if (inPeriod(r.completed_day)) bump(r.completed_day, funnel, r.task_manager, "completed");
+    // «Завершено дня X» — из ЗАДАЧ ДНЯ X (запланированные + просрочка),
+    // сколько закрыто к концу X (семантика интегратора: его CSV — дневные
+    // снапшоты, «Завершено» ⊆ «Всего на день»). НЕ «закрыто в день X»:
+    // задача, закрытая заранее, у интегратора завершена в день дедлайна,
+    // а закрытая с опозданием — в день фактического закрытия (до того она
+    // числится незавершённой просрочкой). Легаси-строки без completed_at
+    // (is_completed=1 до бэкфилла) считаем закрытыми вовремя.
+    if (inPeriod(r.deadline_day)) {
+      bump(r.deadline_day, funnel, r.task_manager, "planned");
+      const doneByDeadlineDay =
+        r.is_completed === 1 && (r.completed_day == null || r.completed_day <= r.deadline_day);
+      if (doneByDeadlineDay) bump(r.deadline_day, funnel, r.task_manager, "completed");
+    }
+    // Просроченная задача завершается в день фактического закрытия.
+    if (
+      r.is_completed === 1 &&
+      r.completed_day != null &&
+      r.deadline_day != null &&
+      r.completed_day > r.deadline_day &&
+      inPeriod(r.completed_day)
+    ) {
+      bump(r.completed_day, funnel, r.task_manager, "completed");
+    }
     if (r.deadline_day == null) continue;
     // День d просрочен: deadline < d И (не завершена ИЛИ завершена в d или позже).
     // Легаси-строки (is_completed=1, completed_day=NULL) просрочкой не считаются.
@@ -249,7 +278,10 @@ async function aggregateTasks(opts: {
           ? opts.toCivil
           : "" // завершена без даты — не в просрочке
       : opts.toCivil;
-    for (let d = overdueFrom; d && d <= overdueTo; d = addDaysCivil(d, 1)) {
+    // Сделка закрыта → задача дальше дня закрытия не «висит».
+    const overdueEnd =
+      r.lead_closed_day != null && r.lead_closed_day < overdueTo ? r.lead_closed_day : overdueTo;
+    for (let d = overdueFrom; d && d <= overdueEnd; d = addDaysCivil(d, 1)) {
       if (!isSunday(d)) bump(d, funnel, r.task_manager, "overdue");
     }
   }

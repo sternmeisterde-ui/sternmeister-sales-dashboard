@@ -3,17 +3,19 @@
  *
  * Правила ok — точные (совпали на 100% строк CSV интегратора):
  *   «Время на этапах»: ok = факт ≤ норматив.
- * Формула ФАКТА для «Рабочие дни»/«Часы» у интегратора содержит
- * невосстановленный вычет (вероятно, времени с касаниями) — мы считаем
- * честный elapsed в единицах норматива, т.е. слегка строже оригинала.
+ * Формула ФАКТА «Рабочие дни» откалибрована по 13 681 строке CSV
+ * интегратора (совпадение решений ok 94%): см. workDaysTouched.
  * «Календарные дни» = дробный elapsed/24ч — совпадает с оригиналом точно.
  * См. dev_docs/specs/23a-СПРАВОЧНИК-НОРМАТИВОВ-РЕГЛАМЕНТА.md.
  */
 
 import {
+  BERATER_TOUCH_EXCLUDED_TO,
   STAGE_TIME_NORMS,
   TLT_GAP_NORMS,
   TOUCH_FROM_WHITELIST,
+  TOUCH_IGNORE_ONLY_FROM_STATUS,
+  isIgnoreClose,
   touchRule,
   type FunnelKey,
   type NormUnit,
@@ -163,8 +165,15 @@ export interface TouchesRow {
  *  в документе РОПа — про исходящие вызовы); входящие участвуют лишь в TLT. */
 export function computeTouches(iv: StageInterval, touches: Touch[] | undefined): TouchesRow | null {
   if (iv.exitMs == null || !iv.nextStatus) return null;
+  if (iv.funnel === "berater" && BERATER_TOUCH_EXCLUDED_TO.has(iv.nextStatus)) return null;
   const whitelist = TOUCH_FROM_WHITELIST[iv.funnel];
-  if (whitelist && !whitelist.has(iv.status)) return null;
+  if (whitelist && !whitelist.has(iv.status)) {
+    // «Отложенный старт» проверяется только при уходе в «Игнор» — в таблице
+    // интегратора других строк из этого этапа нет (см. norms.ts).
+    const ignoreOnly =
+      iv.status === TOUCH_IGNORE_ONLY_FROM_STATUS && isIgnoreClose(iv.nextStatus, iv.closeReason);
+    if (!ignoreOnly) return null;
+  }
   const inside = (touches ?? []).filter((t) => t.ms >= iv.enterMs && t.ms <= iv.exitMs!);
   const calls = inside.filter((t) => t.type === "call").length;
   const messages = inside.filter((t) => t.type === "message").length;
