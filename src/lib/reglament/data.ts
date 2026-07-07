@@ -9,7 +9,7 @@
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db";
 import { masterManagers } from "@/lib/db/schema-existing";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { NAME_ALIASES } from "@/lib/daily/name-aliases";
 import { FUNNEL_PIPELINES, type FunnelKey } from "@/lib/reglament/norms";
 
@@ -66,10 +66,17 @@ export interface B2gRoster {
 }
 
 export async function fetchB2gRoster(): Promise<B2gRoster> {
+  // Только линейные продавцы: РОПы координируют и в регламентной аналитике
+  // не участвуют (решение пользователя 2026-07-07), админы — тем более.
   const masters = await db
     .select({ name: masterManagers.name, kommoUserId: masterManagers.kommoUserId })
     .from(masterManagers)
-    .where(eq(masterManagers.department, "b2g"));
+    .where(
+      and(
+        eq(masterManagers.department, "b2g"),
+        inArray(masterManagers.role, ["manager", "teamlead"]),
+      ),
+    );
   const ids = new Set<number>();
   const names = new Set<string>();
   const canonicalByName = new Map<string, string>();
