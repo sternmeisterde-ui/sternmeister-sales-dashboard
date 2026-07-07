@@ -18,10 +18,13 @@ import { sql } from "drizzle-orm";
 import { parseDateBoundary, todayCivil, addDaysCivil } from "@/lib/utils/date";
 import {
   FUNNEL_PIPELINES,
-  SLA_TARGET_SECONDS,
+  NEW_LEAD_SLA_WORK_MINUTES,
+  NEW_LEAD_STATUS,
+  SLA_EXCLUDE_REASON_SUBSTRING,
   TLT_GAP_NORMS,
   type FunnelKey,
 } from "@/lib/reglament/norms";
+import { workMsBetween } from "@/lib/reglament/working-time";
 import {
   berlinStr,
   esc,
@@ -39,6 +42,28 @@ import {
   computeTouches,
   displayStageLabel,
 } from "@/lib/reglament/compute";
+
+/**
+ * ✅ SLA по документу РОПа: пребывание на этапе «Новый лид» ≤ 25 рабочих
+ * минут (окно 09:00–20:00 Berlin, вс нерабочее). Лиды с причиной неквала,
+ * содержащей «язык», исключаются из расчёта (лист «ПРАВКИ»). Вход — сырые
+ * интервалы Бух Гос (anchor=enter, как «Дата вхождения» в Looker).
+ */
+interface SlaComputedRow {
+  interval: StageInterval;
+  workMinutes: number;
+  ok: boolean;
+}
+
+function computeNewLeadSla(intervals: StageInterval[], nowMs: number): SlaComputedRow[] {
+  return collapseAll(intervals)
+    .filter((iv) => iv.funnel === "gos" && iv.status === NEW_LEAD_STATUS)
+    .filter((iv) => !(iv.closeReason ?? "").toLowerCase().includes(SLA_EXCLUDE_REASON_SUBSTRING))
+    .map((iv) => {
+      const workMinutes = workMsBetween(new Date(iv.enterMs), new Date(iv.exitMs ?? nowMs)) / 60_000;
+      return { interval: iv, workMinutes, ok: workMinutes <= NEW_LEAD_SLA_WORK_MINUTES };
+    });
+}
 
 export const dynamic = "force-dynamic";
 
@@ -192,8 +217,12 @@ async function aggregateTasks(opts: {
   // дней остаётся только для просрочки, и то ограниченный её реальным
   // диапазоном (дедлайн+1 … день завершения / конец периода) — иначе на
   // полугодовом периоде выходил O(строки × дни).
+  // ✅ Документ РОПа: «показатель по задачам считаем только в рабочие дни» —
+  // воскресенья не получают строк (в CSV интегратора их тоже нет); задача с
+  // воскресным дедлайном всплывает просрочкой с понедельника.
+  const isSunday = (d: string) => new Date(d + "T00:00:00Z").getUTCDay() === 0;
   const inPeriod = (d: string | null): d is string =>
-    d != null && d >= opts.fromCivil && d <= opts.toCivil;
+    d != null && d >= opts.fromCivil && d <= opts.toCivil && !isSunday(d);
   for (const r of res.rows) {
     const funnel: FunnelKey = r.pipeline === FUNNEL_PIPELINES.gos ? "gos" : "berater";
     if (inPeriod(r.deadline_day)) bump(r.deadline_day, funnel, r.task_manager, "planned");
@@ -211,7 +240,7 @@ async function aggregateTasks(opts: {
           : "" // завершена без даты — не в просрочке
       : opts.toCivil;
     for (let d = overdueFrom; d && d <= overdueTo; d = addDaysCivil(d, 1)) {
-      bump(d, funnel, r.task_manager, "overdue");
+      if (!isSunday(d)) bump(d, funnel, r.task_manager, "overdue");
     }
   }
   return [...agg.entries()]
@@ -263,33 +292,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const nowMs = Date.now();
       const fromCivil = sp.get("from") ?? addDaysCivil(todayCivil(), -29);
       const toCivil = sp.get("to") ?? todayCivil();
-      // SLA (только Гос): доля лидов с первым звонком ≤ порога от начала
-      // смены. Лиды без звонка (pending) не участвуют. Три источника ниже
-      // независимы — грузим параллельно, последовательным остаётся только
-      // fetchTouches (ему нужны интервалы).
-      const [intervals, slaRes, taskRows] = await Promise.all([
+      // Три источника ниже независимы — грузим параллельно, последовательным
+      // остаётся только fetchTouches (ему нужны интервалы). SLA считается по
+      // документу РОПа на отдельной выборке (anchor=enter, только Гос).
+      const [intervals, slaIntervals, taskRows] = await Promise.all([
         fetchStageIntervals({
           funnels: ["gos", "berater"],
           fromUtc: period.fromUtc,
           toUtc: period.toUtc,
           anchor: "exit",
         }),
-        analyticsDb.execute<{ manager: string | null; n: string; ok: string }>(
-          sql.raw(`
-            SELECT s.manager,
-              COUNT(*)::int AS n,
-              COUNT(*) FILTER (
-                WHERE COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) <= ${SLA_TARGET_SECONDS}
-              )::int AS ok
-            FROM analytics.sla s
-            LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
-            WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
-              AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
-              AND COALESCE(lc.is_deleted, FALSE) = FALSE
-              AND COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) IS NOT NULL
-            GROUP BY s.manager
-          `),
-        ),
+        fetchStageIntervals({
+          funnels: ["gos"],
+          fromUtc: period.fromUtc,
+          toUtc: period.toUtc,
+          anchor: "enter",
+        }),
         aggregateTasks({
           pipelines,
           fromUtc: period.fromUtc,
@@ -300,6 +318,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           manager: null,
         }),
       ]);
+      const slaRows = computeNewLeadSla(slaIntervals, nowMs);
       const merged = collapseAll(intervals);
       const stageRows = merged
         .map((iv) => computeStageTime(iv, nowMs))
@@ -344,9 +363,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       for (const r of stageRows) add(r.interval.funnel, r.interval.responsible, "stage", r.ok ? 1 : 0, 1);
       for (const r of tltRows) add(r.interval.funnel, r.interval.responsible, "tlt", r.ok ? 1 : 0, 1);
       for (const r of touchRows) add(r.interval.funnel, r.interval.responsible, "touches", r.ok ? 1 : 0, 1);
-      for (const r of slaRes.rows) {
-        if (r.manager) add("gos", r.manager, "sla", Number(r.ok), Number(r.n));
-      }
+      for (const r of slaRows) add("gos", r.interval.responsible, "sla", r.ok ? 1 : 0, 1);
       for (const r of taskRows) add(r.funnel, r.manager, "tasks", Math.min(r.completed, r.total), r.total);
 
       const managersByFunnel: Record<FunnelKey, Set<string>> = { gos: new Set(), berater: new Set() };
@@ -448,7 +465,41 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           lastByPhone.set(l.phone, c);
         }
       }
-      const missed = clusters.filter((c) => !c.answered).sort((a, b) => b.startMs - a.startMs);
+      let missed = clusters.filter((c) => !c.answered).sort((a, b) => b.startMs - a.startMs);
+
+      // ✅ Лист «ПРАВКИ» xlsx: «исключить пропущенные, по которым перезвонили
+      // в течение 5 минут и дозвонились». Ищем успешный исходящий (CG или CT)
+      // на тот же номер в 5-минутном окне после последней попытки клиента.
+      if (missed.length > 0) {
+        const cbToLit = utcLiteral(new Date(period.toUtc.getTime() + 10 * 60_000));
+        const cbRes = await analyticsDb.execute<{ at_utc: string; phone: string | null }>(
+          sql.raw(`
+            SELECT DISTINCT ON (communication_id)
+              to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS at_utc,
+              phone
+            FROM analytics.communications
+            WHERE communication_type = 'call_out'
+              AND phone IS NOT NULL
+              AND call_status = 4
+              AND COALESCE(duration, 0) >= 1
+              AND created_at >= '${fromLit}' AND created_at <= '${cbToLit}'
+            ORDER BY communication_id
+          `),
+        );
+        const outsByPhone = new Map<string, number[]>();
+        for (const r of cbRes.rows) {
+          const p = norm(r.phone ?? "");
+          if (p.length < 7) continue;
+          (outsByPhone.get(p) ?? outsByPhone.set(p, []).get(p)!).push(naiveUtcToMs(r.at_utc));
+        }
+        for (const arr of outsByPhone.values()) arr.sort((a, b) => a - b);
+        const CALLBACK_WINDOW_MS = 5 * 60_000;
+        missed = missed.filter((c) => {
+          const outs = outsByPhone.get(c.phone);
+          if (!outs) return true;
+          return !outs.some((t) => t > c.lastMs && t <= c.lastMs + CALLBACK_WINDOW_MS);
+        });
+      }
 
       // Контакты по номерам (основной телефон или phones_all)
       const phones = [...new Set(missed.map((c) => c.phone))];
@@ -675,80 +726,44 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       });
     }
 
-    // ── SLA первого звонка (только Бух Гос) ──────────────────────────
-    // Семантика подтверждена сверкой с Looker (ТЗ 23 §4.2): «Время до
-    // 1-го звонка» = от начала СМЕНЫ менеджера (sla_first_call_from_shift_seconds).
-    // Лид без звонка — «ещё не позвонили» (в Looker там артефакт с датой
-    // обновления отчёта; мы показываем честный статус).
+    // ── SLA: «Новый лид ≤ 25 рабочих минут» (только Бух Гос) ─────────
+    // ✅ Формула из документа РОПа (см. computeNewLeadSla). Период — по
+    // дате ВХОДА на этап (как «Дата вхождения» в Looker).
     if (view === "sla") {
       const limit = clampInt(sp.get("limit"), 100, 500);
       const offset = clampInt(sp.get("offset"), 0, 1_000_000);
-      const managerParam = sp.get("manager");
-      const managerCond = managerParam ? `AND s.manager = '${esc(managerParam)}'` : "";
+      const managerParam = sp.get("manager") || null;
       const leadParam = sp.get("leadId");
-      const leadCond =
-        leadParam && /^\d{1,12}$/.test(leadParam) ? `AND s.lead_id = ${Number(leadParam)}` : "";
-      const query = `
-        WITH rows AS (
-          SELECT
-            s.lead_id,
-            s.manager,
-            to_char(s.sla_start AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD HH24:MI:SS') AS enter_berlin,
-            CASE WHEN s.first_call_out_at IS NULL THEN NULL
-                 ELSE to_char(s.first_call_out_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD HH24:MI:SS')
-            END AS call_berlin,
-            COALESCE(s.sla_first_call_from_shift_seconds, s.sla_first_call_seconds) AS sla_seconds,
-            s.sla_start AS sort_key
-          FROM analytics.sla s
-          LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
-          WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
-            AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
-            AND COALESCE(lc.is_deleted, FALSE) = FALSE
-            ${managerCond}
-            ${leadCond}
-        )
-        SELECT *,
-          COUNT(*) OVER ()::int AS total,
-          AVG(sla_seconds) FILTER (WHERE sla_seconds IS NOT NULL) OVER ()::bigint AS avg_seconds
-        FROM rows
-        ORDER BY sort_key DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `;
-      // Полный список менеджеров периода — для дропдауна фильтра (страница
-      // выдачи содержит лишь часть имён).
-      const managersQuery = `
-        SELECT DISTINCT s.manager
-        FROM analytics.sla s
-        LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
-        WHERE s.pipeline_name = '${esc(FUNNEL_PIPELINES.gos)}'
-          AND s.sla_start >= '${fromLit}' AND s.sla_start <= '${toLit}'
-          AND COALESCE(lc.is_deleted, FALSE) = FALSE
-          AND s.manager IS NOT NULL
-        ORDER BY s.manager
-      `;
-      const [res, managersRes] = await Promise.all([
-        analyticsDb.execute<{
-          lead_id: string;
-          manager: string | null;
-          enter_berlin: string;
-          call_berlin: string | null;
-          sla_seconds: string | null;
-          total: number;
-          avg_seconds: string | null;
-        }>(sql.raw(query)),
-        analyticsDb.execute<{ manager: string }>(sql.raw(managersQuery)),
-      ]);
+      const leadId = leadParam && /^\d{1,12}$/.test(leadParam) ? Number(leadParam) : null;
+      const nowMs = Date.now();
+      const intervals = await fetchStageIntervals({
+        funnels: ["gos"],
+        fromUtc: period.fromUtc,
+        toUtc: period.toUtc,
+        anchor: "enter",
+        manager: managerParam,
+        leadId,
+      });
+      const rows = computeNewLeadSla(intervals, nowMs).sort(
+        (a, b) => b.interval.enterMs - a.interval.enterMs,
+      );
+      const okCount = rows.reduce((a, r) => a + (r.ok ? 1 : 0), 0);
+      const managers = [...new Set(rows.map((r) => r.interval.responsible))].sort((a, b) =>
+        a.localeCompare(b, "ru"),
+      );
       return NextResponse.json({
         view,
-        total: res.rows.length > 0 ? Number(res.rows[0].total) : 0,
-        avgSeconds: res.rows.length > 0 && res.rows[0].avg_seconds != null ? Number(res.rows[0].avg_seconds) : null,
-        managers: managersRes.rows.map((r) => r.manager),
-        rows: res.rows.map((r) => ({
-          leadId: Number(r.lead_id),
-          manager: r.manager ?? "—",
-          enterAt: r.enter_berlin,
-          callAt: r.call_berlin,
-          slaSeconds: r.sla_seconds != null ? Number(r.sla_seconds) : null,
+        total: rows.length,
+        okCount,
+        managers,
+        limitMinutes: NEW_LEAD_SLA_WORK_MINUTES,
+        rows: rows.slice(offset, offset + limit).map((r) => ({
+          leadId: r.interval.leadId,
+          manager: r.interval.responsible,
+          enterAt: berlinStr(r.interval.enterMs),
+          exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
+          workMinutes: Math.round(r.workMinutes * 10) / 10,
+          ok: r.ok,
         })),
       });
     }

@@ -49,6 +49,9 @@ export interface StageInterval {
   /** Этап, В который ушла сделка (для «Касаний»); null у открытых. */
   nextStatus: string | null;
   responsible: string;
+  /** Причина закрытия сделки (расшифровка неквал-enum или loss_reason) —
+   *  для правила «Игнор → 18 звонков» и исключения «неквал язык» из SLA. */
+  closeReason: string | null;
 }
 
 export interface FetchIntervalsOpts {
@@ -101,9 +104,11 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
           AND (sc.next_status_id IS NULL OR sc2.status_id = sc.next_status_id)
         LIMIT 1
       ) AS next_status,
-      COALESCE(lc.manager, '—') AS responsible
+      COALESCE(lc.manager, '—') AS responsible,
+      COALESCE(re.value, lc.loss_reason) AS close_reason
     FROM analytics.lead_status_changes sc
     LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = sc.lead_id
+    LEFT JOIN analytics.refusal_enums re ON re.enum_id = lc.non_qual_enum_id
     WHERE sc.pipeline IN (${pipelines})
       AND ${anchorCond}
       AND COALESCE(lc.is_deleted, FALSE) = FALSE
@@ -125,6 +130,7 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
     exit_utc: string | null;
     next_status: string | null;
     responsible: string;
+    close_reason: string | null;
   }>(sql.raw(query));
 
   return res.rows.map((r) => ({
@@ -135,23 +141,25 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
     exitMs: r.exit_utc ? naiveUtcToMs(r.exit_utc) : null,
     nextStatus: r.next_status,
     responsible: r.responsible,
+    closeReason: r.close_reason,
   }));
 }
 
 export interface Touch {
   ms: number;
-  type: "call" | "message";
+  type: "call" | "call_in" | "message";
 }
 
 /**
- * Касания (исходящие звонки + исходящие сообщения) по лидам в окне.
+ * Касания по лидам в окне: исходящие звонки, входящие звонки (нужны TLT —
+ * лист «ПРАВКИ» xlsx: gap учитывает входящие) и исходящие сообщения.
  * Дедуп Pattern A fanout — DISTINCT по communication_id внутри лида.
  */
 export async function fetchTouches(
   leadIds: number[],
   fromMs: number,
   toMs: number,
-  types: readonly string[] = ["call_out", "outgoing_chat_message"],
+  types: readonly string[] = ["call_out", "call_in", "outgoing_chat_message"],
 ): Promise<Map<number, Touch[]>> {
   const map = new Map<number, Touch[]>();
   if (leadIds.length === 0) return map;
@@ -193,7 +201,12 @@ export async function fetchTouches(
       const arr = map.get(k) ?? [];
       arr.push({
         ms: naiveUtcToMs(r.at_utc),
-        type: r.communication_type === "outgoing_chat_message" ? "message" : "call",
+        type:
+          r.communication_type === "outgoing_chat_message"
+            ? "message"
+            : r.communication_type === "call_in"
+              ? "call_in"
+              : "call",
       });
       map.set(k, arr);
     }

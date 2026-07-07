@@ -122,7 +122,9 @@ export interface TltGapRow {
 /**
  * Максимальный разрыв между касаниями на этапе, рабочие дни Пн–Сб.
  * Точки: вход → касания внутри интервала → выход (или «сейчас»).
- * Бератер считает касаниями только звонки (сообщений в его правилах нет).
+ * Касание для TLT — исходящий И входящий звонок (лист «ПРАВКИ» xlsx:
+ * входящие учитываются, без порога 30 сек); у Гос также сообщения,
+ * у Бератера сообщения не считаются.
  */
 export function computeTltGap(
   iv: StageInterval,
@@ -134,7 +136,7 @@ export function computeTltGap(
   const endMs = iv.exitMs ?? nowMs;
   const inside = (touches ?? [])
     .filter((t) => t.ms >= iv.enterMs && t.ms <= endMs)
-    .filter((t) => (iv.funnel === "berater" ? t.type === "call" : true))
+    .filter((t) => (iv.funnel === "berater" ? t.type !== "message" : true))
     .map((t) => t.ms);
   const points = [iv.enterMs, ...inside, endMs];
   let gap = 0;
@@ -156,7 +158,9 @@ export interface TouchesRow {
 }
 
 /** Касания за пребывание на этапе «Из» к моменту перехода. Только закрытые
- *  интервалы (переход состоялся) и только «рабочие» из-этапы (whitelist). */
+ *  интервалы (переход состоялся) и только «рабочие» из-этапы (whitelist).
+ *  «Звонки» — только исходящие (нормативы «1 звонок» и «18 звонков Игнора»
+ *  в документе РОПа — про исходящие вызовы); входящие участвуют лишь в TLT. */
 export function computeTouches(iv: StageInterval, touches: Touch[] | undefined): TouchesRow | null {
   if (iv.exitMs == null || !iv.nextStatus) return null;
   const whitelist = TOUCH_FROM_WHITELIST[iv.funnel];
@@ -165,8 +169,9 @@ export function computeTouches(iv: StageInterval, touches: Touch[] | undefined):
   const calls = inside.filter((t) => t.type === "call").length;
   const messages = inside.filter((t) => t.type === "message").length;
   // Правило привязано к исходному (несклеенному) статусу «Из» — для
-  // Гос-группы «Новый лид / Взят в работу» действует базовое ≥1 звонок.
-  const rule = touchRule(iv.funnel, iv.status, iv.nextStatus);
+  // Гос-группы «Новый лид / Взято в работу» действует базовое ≥1 звонок.
+  // Причина закрытия включает правило «Игнор → 18 звонков на НДЗ».
+  const rule = touchRule(iv.funnel, iv.status, iv.nextStatus, iv.closeReason);
   const ok = calls >= rule.minCalls && messages >= rule.minMessages;
   return { interval: iv, calls, messages, minCalls: rule.minCalls, minMessages: rule.minMessages, ok };
 }

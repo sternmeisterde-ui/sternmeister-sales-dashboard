@@ -45,8 +45,9 @@ interface SlaRow {
   leadId: number;
   manager: string;
   enterAt: string;
-  callAt: string | null;
-  slaSeconds: number | null;
+  exitAt: string | null;
+  workMinutes: number;
+  ok: boolean;
 }
 
 type SubView = "summary" | "sla" | "stages" | "tlt" | "touches" | "tasks" | "avg";
@@ -296,34 +297,17 @@ function LeadLink({ id }: { id: number }) {
   );
 }
 
-/** Секунды → "X ч YY мин" (формат SLA-страницы Looker). */
-function fmtHoursMin(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  const h = Math.floor(s / 3600);
-  const m = Math.round((s % 3600) / 60);
-  return `${h} ч ${m.toString().padStart(2, "0")} мин`;
-}
-
-// ─── SLA первого звонка (Бух Гос) ───────────────────────────────────
-
-/** Порог подсветки превышения — ПРЕДВАРИТЕЛЬНЫЙ (норматив SLA не восстановлен,
- *  справочник 23a §4); 30 мин = верхний бакет вкладки Looker. */
-const SLA_HIGHLIGHT_SECONDS = 1800;
+// ─── SLA: «Новый лид ≤ 25 рабочих минут» (Бух Гос) ──────────────────
 
 function SlaView({ range }: { range: DateRange }) {
   const st = useDetailData<SlaRow>("sla", range);
   const { data, loading, error } = st;
 
-  const barMax = useMemo(
-    () => Math.max(SLA_HIGHLIGHT_SECONDS, ...(data?.rows ?? []).map((r) => r.slaSeconds ?? 0)),
-    [data],
-  );
-
   return (
     <div className="flex flex-col gap-3">
       <DetailToolbar
         st={st}
-        hint={`воронка ${FUNNEL_PIPELINES.gos} · SLA от начала смены менеджера · норма ≤ 10 мин (наша)`}
+        hint={`воронка ${FUNNEL_PIPELINES.gos} · норма из документа РОПа: выход с этапа «Новый лид» ≤ 25 рабочих минут (окно 09–20, вс не считается); неквал «язык» исключён`}
       />
 
       {error && (
@@ -343,10 +327,10 @@ function SlaView({ range }: { range: DateRange }) {
               <tr className="border-b border-white/10 text-left text-xs text-slate-400">
                 <th className={thCls}>Менеджер</th>
                 <th className={thCls}>Сделка</th>
-                <th className={thCls}>Дата вхождения</th>
-                <th className={thCls}>Дата звонка</th>
-                <th className={`${thCls} text-right`}>Время до 1-го звонка</th>
-                <th className={`${thCls} w-[26%]`}>SLA</th>
+                <th className={thCls}>Вход на «Новый лид»</th>
+                <th className={thCls}>Выход с этапа</th>
+                <th className={`${thCls} text-right`}>Рабочих минут на этапе</th>
+                <th className={thCls}>SLA ок</th>
               </tr>
             </thead>
             <tbody>
@@ -357,58 +341,24 @@ function SlaView({ range }: { range: DateRange }) {
                   </td>
                 </tr>
               ) : (
-                data.rows.map((r, i) => {
-                  const over = r.slaSeconds != null && r.slaSeconds > SLA_HIGHLIGHT_SECONDS;
-                  const pending = r.callAt == null;
-                  return (
-                    <tr
-                      key={`${r.leadId}-${i}`}
-                      className={`border-b border-white/5 last:border-0 ${
-                        pending ? "bg-amber-500/10" : over ? "bg-red-500/10" : "bg-slate-900/30"
-                      }`}
-                    >
-                      <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.manager}</td>
-                      <td className="px-3 py-2 text-xs">
-                        <a
-                          href={`https://sternmeister.kommo.com/leads/detail/${r.leadId}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-blue-300 hover:underline"
-                        >
-                          {r.leadId}
-                        </a>
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.enterAt)}</td>
-                      <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
-                        {pending ? <span className="text-amber-300/90">ещё не позвонили</span> : fmtBerlin(r.callAt)}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-slate-300">
-                        {r.slaSeconds != null ? fmtHoursMin(r.slaSeconds) : "—"}
-                      </td>
-                      <td className="px-3 py-2">
-                        {r.slaSeconds != null && r.slaSeconds > 0 && (
-                          <div
-                            className={`h-2 rounded ${over ? "bg-red-400/70" : "bg-blue-400/70"}`}
-                            style={{ width: `${Math.max(2, Math.min(100, (r.slaSeconds / barMax) * 100))}%` }}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })
+                data.rows.map((r, i) => (
+                  <tr key={`${r.leadId}-${i}`} className={`border-b border-white/5 last:border-0 ${okRowCls(r.ok)}`}>
+                    <td className="whitespace-nowrap px-3 py-2 text-slate-200">{r.manager}</td>
+                    <td className="px-3 py-2 text-xs">
+                      <LeadLink id={r.leadId} />
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">{fmtBerlin(r.enterAt)}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-300">
+                      {r.exitAt ? fmtBerlin(r.exitAt) : <span className="text-amber-300/90">ещё на этапе</span>}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-slate-200">
+                      {r.workMinutes.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}
+                    </td>
+                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                  </tr>
+                ))
               )}
             </tbody>
-            <tfoot>
-              <tr className="border-t border-white/10 bg-slate-900/60">
-                <td colSpan={4} className="px-3 py-2 text-right text-xs text-slate-400">
-                  Общий итог (среднее по лидам со звонком)
-                </td>
-                <td className="whitespace-nowrap px-3 py-2 text-right font-semibold tabular-nums text-slate-200">
-                  {data.avgSeconds != null ? fmtDuration(data.avgSeconds) : "—"}
-                </td>
-                <td />
-              </tr>
-            </tfoot>
           </table>
         </div>
       ) : null}
@@ -887,8 +837,8 @@ function SummaryView({ range }: { range: DateRange }) {
           <p className="-mt-3 text-[11px] text-slate-500">
             Метрика = доля проверок в нормативе за период (наведите на ячейку — счёт).
             «Регламент, %» — сводный: Σ ok / Σ проверок по всем метрикам. «SLA, %» —
-            наша норма (первый звонок ≤ 10 мин от начала смены): формула Looker
-            противоречива и не воспроизводится, расхождение с ним ожидаемо.
+            по документу РОПа: выход с этапа «Новый лид» ≤ 25 рабочих минут (неквал
+            «язык» исключён); сводный % Looker не воспроизводится, расхождение с ним ожидаемо.
             Цвета: ≤70 красный, 71–80 жёлтый, ≥81 зелёный.
           </p>
         </>

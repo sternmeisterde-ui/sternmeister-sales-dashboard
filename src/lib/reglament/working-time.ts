@@ -64,3 +64,36 @@ export function workDayGap(start: Date, end: Date): number {
   const touched = workDaysTouched(start, end);
   return Math.max(0, touched - 1);
 }
+
+// ─── Рабочие минуты (для SLA «Новый лид ≤ 25 минут») ────────────────
+
+/** Рабочее окно дня, часы Berlin. Совпадает с окном вкладки «Активность». */
+export const WORK_DAY_START_HOUR = 9;
+export const WORK_DAY_END_HOUR = 20;
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * Рабочие миллисекунды между двумя UTC-инстантами: суммируется только время
+ * внутри окна 09:00–20:00 Berlin, воскресенье нерабочее. DST-корректно —
+ * границы окна каждого дня строятся через tzOffsetMinutes.
+ */
+export function workMsBetween(start: Date, end: Date): number {
+  if (end.getTime() <= start.getTime()) return 0;
+  let total = 0;
+  let dayNum = berlinDayNumber(start);
+  const lastDay = berlinDayNumber(end);
+  for (; dayNum <= lastDay; dayNum++) {
+    if (weekdayOfDayNumber(dayNum) === 0) continue; // воскресенье
+    // 09:00 Berlin этого civil-дня как UTC: берём полдень дня как якорь
+    // для смещения (полдень никогда не попадает на DST-переход).
+    const noonUtcGuess = dayNum * DAY_MS + 12 * HOUR_MS;
+    const offsetMs = tzOffsetMinutes(new Date(noonUtcGuess), "Europe/Berlin") * 60_000;
+    const winStart = dayNum * DAY_MS + WORK_DAY_START_HOUR * HOUR_MS - offsetMs;
+    const winEnd = dayNum * DAY_MS + WORK_DAY_END_HOUR * HOUR_MS - offsetMs;
+    const s = Math.max(start.getTime(), winStart);
+    const e = Math.min(end.getTime(), winEnd);
+    if (e > s) total += e - s;
+  }
+  return total;
+}
