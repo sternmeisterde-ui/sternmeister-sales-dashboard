@@ -28,7 +28,7 @@ import { workMsBetween } from "@/lib/reglament/working-time";
 import {
   berlinStr,
   esc,
-  fetchB2bManagerNames,
+  fetchB2gRoster,
   fetchStageIntervals,
   fetchTouches,
   naiveUtcToMs,
@@ -116,11 +116,13 @@ function minMax(values: Iterable<number>): { min: number; max: number } | null {
   return min === Infinity ? null : { min, max };
 }
 
-/** WHERE-фрагменты общих фильтров детальных view (менеджер, id сделки). */
-function detailFilters(sp: URLSearchParams): string {
+/** WHERE-фрагменты общих фильтров детальных view (менеджер, id сделки).
+ *  managerNames — все написания выбранного менеджера (канон + Kommo-дрейф). */
+function detailFilters(sp: URLSearchParams, managerNames: readonly string[] | null): string {
   const parts: string[] = [];
-  const manager = sp.get("manager");
-  if (manager) parts.push(`AND lc.manager = '${esc(manager)}'`);
+  if (managerNames?.length) {
+    parts.push(`AND lc.manager IN (${managerNames.map((m) => `'${esc(m)}'`).join(", ")})`);
+  }
   const leadId = sp.get("leadId");
   if (leadId && /^\d{1,12}$/.test(leadId)) parts.push(`AND sc.lead_id = ${Number(leadId)}`);
   // «Этап воронки» (Детализированно в Looker)
@@ -171,9 +173,11 @@ async function aggregateTasks(opts: {
   toLit: string;
   fromCivil: string;
   toCivil: string;
-  manager: string | null;
+  managerNames: readonly string[] | null;
 }): Promise<TaskDayRow[]> {
-  const managerCond = opts.manager ? `AND t.task_manager = '${esc(opts.manager)}'` : "";
+  const managerCond = opts.managerNames?.length
+    ? `AND t.task_manager IN (${opts.managerNames.map((m) => `'${esc(m)}'`).join(", ")})`
+    : "";
   const horizonLit = utcLiteral(new Date(opts.fromUtc.getTime() - 183 * 86_400_000));
   const query = `
     SELECT
@@ -285,10 +289,26 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const fromLit = utcLiteral(period.fromUtc);
     const toLit = utcLiteral(period.toUtc);
 
-    // Вкладка b2g-only: менеджеры Коммерсов, просочившиеся в гос-данные
-    // (передачи сделок, ответственные контактов), скрываются во всех view.
-    const b2bNames = await fetchB2bManagerNames();
-    const notB2b = (name: string | null | undefined) => name == null || !b2bNames.has(name);
+    // Вкладка b2g-only: во всех view показываем ТОЛЬКО менеджеров из
+    // master_managers b2g (по kommo_user_id и вариантам имени) — иначе в
+    // сводку лезут сервисные аккаунты Kommo, b2b-передачи и давно ушедшие
+    // люди с висящей просрочкой задач. canon() склеивает написания одного
+    // человека (смена фамилии и т.п.) в master-имя.
+    const roster = await fetchB2gRoster();
+    const oursInterval = (iv: StageInterval) =>
+      (iv.responsibleUserId != null && roster.ids.has(iv.responsibleUserId)) ||
+      roster.names.has(iv.responsible);
+    const oursName = (name: string | null | undefined) => name != null && roster.names.has(name);
+    const canon = (name: string) => roster.canonicalByName.get(name) ?? name;
+    /** UI шлёт каноническое имя — раскрываем во все Kommo-написания для SQL. */
+    const expandManager = (name: string | null): string[] | null => {
+      if (!name) return null;
+      const variants = new Set([name]);
+      for (const [variant, canonical] of roster.canonicalByName) {
+        if (canonical === name) variants.add(variant);
+      }
+      return [...variants];
+    };
 
     // ── Сводка «Показатели соблюдения регламента» ─────────────────────
     // Каждая метрика = доля ok-проверок менеджера за период; «Регламент, %»
@@ -321,7 +341,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           toLit,
           fromCivil,
           toCivil,
-          manager: null,
+          managerNames: null,
         }),
       ]);
       const slaRows = computeNewLeadSla(slaIntervals, nowMs);
@@ -367,15 +387,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         cells.set(key, c);
       };
       for (const r of stageRows)
-        if (notB2b(r.interval.responsible)) add(r.interval.funnel, r.interval.responsible, "stage", r.ok ? 1 : 0, 1);
+        if (oursInterval(r.interval))
+          add(r.interval.funnel, canon(r.interval.responsible), "stage", r.ok ? 1 : 0, 1);
       for (const r of tltRows)
-        if (notB2b(r.interval.responsible)) add(r.interval.funnel, r.interval.responsible, "tlt", r.ok ? 1 : 0, 1);
+        if (oursInterval(r.interval))
+          add(r.interval.funnel, canon(r.interval.responsible), "tlt", r.ok ? 1 : 0, 1);
       for (const r of touchRows)
-        if (notB2b(r.interval.responsible)) add(r.interval.funnel, r.interval.responsible, "touches", r.ok ? 1 : 0, 1);
+        if (oursInterval(r.interval))
+          add(r.interval.funnel, canon(r.interval.responsible), "touches", r.ok ? 1 : 0, 1);
       for (const r of slaRows)
-        if (notB2b(r.interval.responsible)) add("gos", r.interval.responsible, "sla", r.ok ? 1 : 0, 1);
+        if (oursInterval(r.interval)) add("gos", canon(r.interval.responsible), "sla", r.ok ? 1 : 0, 1);
       for (const r of taskRows)
-        if (notB2b(r.manager)) add(r.funnel, r.manager, "tasks", Math.min(r.completed, r.total), r.total);
+        if (oursName(r.manager)) add(r.funnel, canon(r.manager), "tasks", Math.min(r.completed, r.total), r.total);
 
       const managersByFunnel: Record<FunnelKey, Set<string>> = { gos: new Set(), berater: new Set() };
       for (const key of cells.keys()) {
@@ -581,9 +604,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
                 : "—",
           };
         })
-        // b2g-only: контакты, за которые отвечают Коммерсы (например,
-        // продления), не показываем РОПу Госников.
-        .filter((r) => r.manager === "—" || notB2b(r.manager));
+        // b2g-only: показываем звонки контактов наших менеджеров (или без
+        // определённого ответственного) — чужие отделы и сервисные аккаунты
+        // РОПу Госников не нужны.
+        .filter((r) => r.manager === "—" || oursName(r.manager))
+        .map((r) => ({ ...r, manager: r.manager === "—" ? r.manager : canon(r.manager) }));
       return NextResponse.json({ view, rows: missedRows });
     }
 
@@ -600,9 +625,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           toLit,
           fromCivil,
           toCivil,
-          manager: managerParam,
+          managerNames: expandManager(managerParam),
         })
-      ).filter((r) => notB2b(r.manager));
+      ).filter((r) => oursName(r.manager));
+      for (const r of rows) r.manager = canon(r.manager);
       // Свежесть данных задач (наш ETL задач может отставать)
       const [fresh] = (
         await analyticsDb.execute<{ max_created: string | null }>(
@@ -634,16 +660,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         fromUtc: period.fromUtc,
         toUtc: period.toUtc,
         anchor: "exit",
-        manager: managerParam,
+        managerNames: expandManager(managerParam),
         leadId,
       });
 
       const paginate = <T extends { ok: boolean }>(rows: T[]) => ({
         total: rows.length,
         okCount: rows.reduce((a, r) => a + (r.ok ? 1 : 0), 0),
-        managers: [...new Set(rows.map((r) => (r as unknown as { interval: StageInterval }).interval.responsible))].sort(
-          (a, b) => a.localeCompare(b, "ru"),
-        ),
+        managers: [
+          ...new Set(rows.map((r) => canon((r as unknown as { interval: StageInterval }).interval.responsible))),
+        ].sort((a, b) => a.localeCompare(b, "ru")),
         page: rows.slice(offset, offset + limit),
       });
 
@@ -651,7 +677,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         const rows = collapseAll(intervals)
           .map((iv) => computeStageTime(iv, nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
-          .filter((r) => notB2b(r.interval.responsible));
+          .filter((r) => oursInterval(r.interval));
         const { total, okCount, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
@@ -668,7 +694,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             limit: r.limit,
             fact: Math.round(r.fact * 100) / 100,
             ok: r.ok,
-            responsible: r.interval.responsible,
+            responsible: canon(r.interval.responsible),
           })),
         });
       }
@@ -686,7 +712,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         const rows = tltIv
           .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
-          .filter((r) => notB2b(r.interval.responsible));
+          .filter((r) => oursInterval(r.interval));
         const { total, okCount, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
@@ -702,7 +728,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             limit: r.limit,
             gapFact: r.gapFact,
             ok: r.ok,
-            responsible: r.interval.responsible,
+            responsible: canon(r.interval.responsible),
           })),
         });
       }
@@ -719,7 +745,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const rows = collapsed
         .map((iv) => computeTouches(iv, touches.get(iv.leadId)))
         .filter((r): r is NonNullable<typeof r> => r !== null)
-        .filter((r) => notB2b(r.interval.responsible));
+        .filter((r) => oursInterval(r.interval));
       // свежие переходы сверху
       rows.sort((a, b) => (b.interval.exitMs ?? 0) - (a.interval.exitMs ?? 0));
       const { total, okCount, managers, page } = paginate(rows);
@@ -739,7 +765,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           minCalls: r.minCalls,
           minMessages: r.minMessages,
           ok: r.ok,
-          responsible: r.interval.responsible,
+          responsible: canon(r.interval.responsible),
         })),
       });
     }
@@ -759,14 +785,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         fromUtc: period.fromUtc,
         toUtc: period.toUtc,
         anchor: "enter",
-        manager: managerParam,
+        managerNames: expandManager(managerParam),
         leadId,
       });
       const rows = computeNewLeadSla(intervals, nowMs)
-        .filter((r) => notB2b(r.interval.responsible))
+        .filter((r) => oursInterval(r.interval))
         .sort((a, b) => b.interval.enterMs - a.interval.enterMs);
       const okCount = rows.reduce((a, r) => a + (r.ok ? 1 : 0), 0);
-      const managers = [...new Set(rows.map((r) => r.interval.responsible))].sort((a, b) =>
+      const managers = [...new Set(rows.map((r) => canon(r.interval.responsible)))].sort((a, b) =>
         a.localeCompare(b, "ru"),
       );
       return NextResponse.json({
@@ -777,7 +803,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         limitMinutes: NEW_LEAD_SLA_WORK_MINUTES,
         rows: rows.slice(offset, offset + limit).map((r) => ({
           leadId: r.interval.leadId,
-          manager: r.interval.responsible,
+          manager: canon(r.interval.responsible),
           enterAt: berlinStr(r.interval.enterMs),
           exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
           workMinutes: Math.round(r.workMinutes * 10) / 10,
@@ -808,7 +834,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           AND (sc.status_id IS NULL OR sc.status_id NOT IN (${TERMINAL_STATUS_IDS.join(", ")}))
           AND sc.event_at >= '${fromLit}' AND sc.event_at <= '${toLit}'
           AND COALESCE(lc.is_deleted, FALSE) = FALSE
-          ${detailFilters(sp)}
+          ${detailFilters(sp, expandManager(sp.get("manager")))}
       )
     `;
 
@@ -834,11 +860,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({
         view,
         rows: res.rows
-          .filter((r) => notB2b(r.responsible))
+          .filter((r) => oursName(r.responsible))
           .map((r) => ({
             pipeline: r.pipeline,
             status: r.status,
-            responsible: r.responsible,
+            // canon склеивает написания одного человека; клиентский пивот
+            // суммирует такие строки взвешенно (sec/n), итог корректен.
+            responsible: canon(r.responsible),
             stays: Number(r.stays),
             avgSeconds: Number(r.avg_seconds),
           })),
@@ -899,16 +927,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // страницу (доля b2b-строк в гос-воронках — единичные передачи сделок).
     const total = res.rows.length > 0 ? Number(res.rows[0].total) : 0;
     const statuses = [...new Set(optionsRes.rows.map((r) => r.status))];
-    const managers = [...new Set(optionsRes.rows.map((r) => r.responsible))]
-      .filter((m) => notB2b(m))
-      .sort((a, b) => a.localeCompare(b, "ru"));
+    const managers = [
+      ...new Set(optionsRes.rows.filter((r) => oursName(r.responsible)).map((r) => canon(r.responsible))),
+    ].sort((a, b) => a.localeCompare(b, "ru"));
     return NextResponse.json({
       view,
       total,
       statuses,
       managers,
       rows: res.rows
-        .filter((r) => notB2b(r.responsible))
+        .filter((r) => oursName(r.responsible))
         .map((r) => ({
           leadId: Number(r.lead_id),
           pipeline: r.pipeline,
@@ -916,7 +944,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           enterAt: r.enter_berlin,
           exitAt: r.exit_berlin,
           seconds: Number(r.seconds),
-          responsible: r.responsible,
+          responsible: canon(r.responsible),
         })),
     });
   } catch (error) {

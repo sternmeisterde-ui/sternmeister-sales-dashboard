@@ -43,23 +43,65 @@ export function berlinStr(ms: number): string {
 export const TERMINAL_STATUS_IDS = [142, 143] as const;
 
 /**
- * Имена менеджеров отдела Коммерсов (b2b) + известные алиасы написания.
- * Вкладка «Регламент» — b2g-only: b2b-имена просачиваются в гос-воронки
- * (единичные передачи сделок) и как ответственные контактов в пропущенных —
- * их скрываем. Бывшие госники, которых в master_managers уже нет, при этом
- * остаются: показываем всех, у кого есть данные в периоде.
+ * Ростер менеджеров b2g для фильтрации вкладки «Регламент».
+ *
+ * Вкладка показывает ТОЛЬКО людей из master_managers (department='b2g',
+ * включая деактивированных): без этого в сводку лезут сервисные аккаунты
+ * Kommo («Кураторы», «Виктор»), b2b-менеджеры с единичными передачами
+ * сделок и давно ушедшие люди, чьи просроченные задачи висят месяцами.
+ *
+ * Матчинг двухступенчатый, потому что имена дрейфуют:
+ *  - по kommo_user_id (lc.responsible_user_id ↔ master.kommoUserId) —
+ *    ловит смену фамилии («Валерия Казеннова» = «Валерия Новикова») и
+ *    короткие master-имена («Дмитрий» = Kommo «Дмитрий Слидзюк»);
+ *  - по имени (master-имя + алиасы NAME_ALIASES + фактические
+ *    analytics-написания тех же uid) — для строк без uid (задачи).
+ * canonicalByName переводит любые варианты в master-имя — дубли одного
+ * человека под разными написаниями склеиваются.
  */
-export async function fetchB2bManagerNames(): Promise<Set<string>> {
-  const rows = await db
-    .select({ name: masterManagers.name })
+export interface B2gRoster {
+  ids: Set<number>;
+  names: Set<string>;
+  canonicalByName: Map<string, string>;
+}
+
+export async function fetchB2gRoster(): Promise<B2gRoster> {
+  const masters = await db
+    .select({ name: masterManagers.name, kommoUserId: masterManagers.kommoUserId })
     .from(masterManagers)
-    .where(eq(masterManagers.department, "b2b"));
-  const set = new Set<string>();
-  for (const r of rows) {
-    set.add(r.name);
-    for (const alias of NAME_ALIASES[r.name] ?? []) set.add(alias);
+    .where(eq(masterManagers.department, "b2g"));
+  const ids = new Set<number>();
+  const names = new Set<string>();
+  const canonicalByName = new Map<string, string>();
+  const masterById = new Map<number, string>();
+  for (const m of masters) {
+    names.add(m.name);
+    canonicalByName.set(m.name, m.name);
+    for (const alias of NAME_ALIASES[m.name] ?? []) {
+      names.add(alias);
+      canonicalByName.set(alias, m.name);
+    }
+    if (m.kommoUserId != null) {
+      ids.add(m.kommoUserId);
+      masterById.set(m.kommoUserId, m.name);
+    }
   }
-  return set;
+  if (ids.size > 0) {
+    // Фактические Kommo-написания имён этих же людей из зеркала лидов.
+    const res = await analyticsDb.execute<{ manager: string; uid: string }>(
+      sql.raw(
+        `SELECT DISTINCT manager, responsible_user_id AS uid
+         FROM analytics.leads_cohort
+         WHERE responsible_user_id IN (${[...ids].join(",")}) AND manager IS NOT NULL`,
+      ),
+    );
+    for (const r of res.rows) {
+      names.add(r.manager);
+      const canon = masterById.get(Number(r.uid));
+      if (canon && !canonicalByName.has(r.manager)) canonicalByName.set(r.manager, canon);
+    }
+  }
+  return { ids, names, canonicalByName };
 }
 
 export interface StageInterval {
@@ -75,6 +117,8 @@ export interface StageInterval {
   /** Причина закрытия сделки (расшифровка неквал-enum или loss_reason) —
    *  для правила «Игнор → 18 звонков» и исключения «неквал язык» из SLA. */
   closeReason: string | null;
+  /** Kommo user id ответственного — для матчинга с master_managers. */
+  responsibleUserId: number | null;
 }
 
 export interface FetchIntervalsOpts {
@@ -85,7 +129,8 @@ export interface FetchIntervalsOpts {
   anchor?: "exit" | "enter";
   /** Только закрытые интервалы (переходы) — для «Касаний». */
   closedOnly?: boolean;
-  manager?: string | null;
+  /** Все варианты написания выбранного менеджера (канон + Kommo-дрейф). */
+  managerNames?: readonly string[] | null;
   leadId?: number | null;
 }
 
@@ -106,7 +151,9 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
       : `COALESCE(sc.next_event_at, NOW() AT TIME ZONE 'UTC') >= '${fromLit}'
          AND COALESCE(sc.next_event_at, NOW() AT TIME ZONE 'UTC') <= '${toLit}'`;
   const closedCond = opts.closedOnly ? "AND sc.next_event_at IS NOT NULL" : "";
-  const managerCond = opts.manager ? `AND lc.manager = '${esc(opts.manager)}'` : "";
+  const managerCond = opts.managerNames?.length
+    ? `AND lc.manager IN (${opts.managerNames.map((m) => `'${esc(m)}'`).join(", ")})`
+    : "";
   const leadCond = opts.leadId ? `AND sc.lead_id = ${Math.floor(opts.leadId)}` : "";
   const terminalIds = TERMINAL_STATUS_IDS.join(", ");
 
@@ -128,6 +175,7 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
         LIMIT 1
       ) AS next_status,
       COALESCE(lc.manager, '—') AS responsible,
+      lc.responsible_user_id,
       COALESCE(re.value, lc.loss_reason) AS close_reason
     FROM analytics.lead_status_changes sc
     LEFT JOIN analytics.leads_cohort lc ON lc.lead_id = sc.lead_id
@@ -153,6 +201,7 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
     exit_utc: string | null;
     next_status: string | null;
     responsible: string;
+    responsible_user_id: string | null;
     close_reason: string | null;
   }>(sql.raw(query));
 
@@ -164,6 +213,7 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
     exitMs: r.exit_utc ? naiveUtcToMs(r.exit_utc) : null,
     nextStatus: r.next_status,
     responsible: r.responsible,
+    responsibleUserId: r.responsible_user_id != null ? Number(r.responsible_user_id) : null,
     closeReason: r.close_reason,
   }));
 }
