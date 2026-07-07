@@ -225,6 +225,108 @@ export async function fetchStageIntervals(opts: FetchIntervalsOpts): Promise<Sta
   }));
 }
 
+// ─── Периоды ответственности ────────────────────────────────────────
+// Документ РОПа (лист «ПРАВКИ» п.10-11/20/32): Время на этапах и TLT
+// считаются по периодам ответственности — при передаче лида отсчёт
+// начинается заново, проверка приписывается владельцу периода.
+
+export interface RespChange {
+  ms: number;
+  oldUid: number | null;
+  newUid: number | null;
+}
+
+/** Смены ответственного по лидам из analytics.lead_responsible_changes. */
+export async function fetchResponsibleChanges(
+  leadIds: number[],
+): Promise<Map<number, RespChange[]>> {
+  const map = new Map<number, RespChange[]>();
+  if (leadIds.length === 0) return map;
+  const CHUNK = 5000;
+  for (let i = 0; i < leadIds.length; i += CHUNK) {
+    const res = await analyticsDb.execute<{
+      lead_id: string;
+      at_utc: string;
+      old_user_id: string | null;
+      new_user_id: string | null;
+    }>(
+      sql.raw(`
+        SELECT lead_id, to_char(event_at, 'YYYY-MM-DD HH24:MI:SS') AS at_utc,
+          old_user_id, new_user_id
+        FROM analytics.lead_responsible_changes
+        WHERE lead_id IN (${leadIds.slice(i, i + CHUNK).join(",")})
+        ORDER BY lead_id, event_at
+      `),
+    );
+    for (const r of res.rows) {
+      const k = Number(r.lead_id);
+      (map.get(k) ?? map.set(k, []).get(k)!).push({
+        ms: naiveUtcToMs(r.at_utc),
+        oldUid: r.old_user_id != null ? Number(r.old_user_id) : null,
+        newUid: r.new_user_id != null ? Number(r.new_user_id) : null,
+      });
+    }
+  }
+  return map;
+}
+
+/** Имена по kommo user id — фактические написания из зеркала лидов. */
+export async function fetchUidNames(): Promise<Map<number, string>> {
+  const res = await analyticsDb.execute<{ uid: string; manager: string }>(
+    sql.raw(`
+      SELECT DISTINCT ON (responsible_user_id) responsible_user_id AS uid, manager
+      FROM analytics.leads_cohort
+      WHERE responsible_user_id IS NOT NULL AND manager IS NOT NULL
+      ORDER BY responsible_user_id, created_at DESC
+    `),
+  );
+  return new Map(res.rows.map((r) => [Number(r.uid), r.manager]));
+}
+
+/**
+ * Режет интервалы этапов в точках смен ответственного. Каждый сегмент —
+ * отдельная проверка: отсчёт факта с начала сегмента, владелец — хозяин
+ * периода. Сегмент, завершившийся ПЕРЕДАЧЕЙ лида, считается закрытым
+ * (менеджер отдал лид — его проверка завершена); открытым остаётся только
+ * последний сегмент открытого интервала.
+ */
+export function splitByOwnership(
+  intervals: StageInterval[],
+  changes: Map<number, RespChange[]>,
+  uidNames: Map<number, string>,
+  nowMs: number,
+): StageInterval[] {
+  const out: StageInterval[] = [];
+  for (const iv of intervals) {
+    const endMs = iv.exitMs ?? nowMs;
+    const cuts = (changes.get(iv.leadId) ?? []).filter((c) => c.ms > iv.enterMs && c.ms < endMs);
+    if (cuts.length === 0) {
+      out.push(iv);
+      continue;
+    }
+    let segStart = iv.enterMs;
+    for (let i = 0; i <= cuts.length; i++) {
+      const isLast = i === cuts.length;
+      const segEnd = isLast ? iv.exitMs : cuts[i].ms;
+      // Владелец сегмента: до смены i — её old_uid; после последней — new_uid.
+      const ownerUid = isLast ? cuts[cuts.length - 1].newUid : cuts[i].oldUid;
+      out.push({
+        ...iv,
+        enterMs: segStart,
+        exitMs: segEnd,
+        // Переход в следующий этап принадлежит только последнему сегменту.
+        nextStatus: isLast ? iv.nextStatus : null,
+        responsibleUserId: ownerUid ?? iv.responsibleUserId,
+        responsible:
+          (ownerUid != null ? uidNames.get(ownerUid) : undefined) ??
+          (isLast ? iv.responsible : "—"),
+      });
+      if (!isLast) segStart = cuts[i].ms;
+    }
+  }
+  return out;
+}
+
 export interface Touch {
   ms: number;
   type: "call" | "call_in" | "message";

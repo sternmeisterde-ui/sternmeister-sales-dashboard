@@ -381,6 +381,23 @@ export const funnelTargetLevels = analyticsSchema.table(
   },
 );
 
+// Смены ответственного по лидам (Kommo events entity_responsible_changed).
+// Вкладка «Регламент»: метрики Время на этапах/TLT считаются по периодам
+// ответственности (документ РОПа) — интервал этапа режется в точках смен.
+// Наполнение: scripts/backfill-responsible-changes.ts + ETL-шаг. Migration 0031.
+export const leadResponsibleChanges = analyticsSchema.table(
+  "lead_responsible_changes",
+  {
+    eventId: text("event_id").primaryKey(),
+    leadId: bigint("lead_id", { mode: "number" }).notNull(),
+    eventAt: timestamp("event_at").notNull(),
+    oldUserId: bigint("old_user_id", { mode: "number" }),
+    newUserId: bigint("new_user_id", { mode: "number" }),
+    syncedAt: timestamp("synced_at").defaultNow().notNull(),
+  },
+  (t) => [index("idx_lrc_lead_event").on(t.leadId, t.eventAt)],
+);
+
 // Lead ↔ Contact link table. One lead can have multiple contacts (rare);
 // one contact can belong to multiple leads (common — same client across
 // Бух Гос and Бух Бератер). is_active flipped to false when Kommo no

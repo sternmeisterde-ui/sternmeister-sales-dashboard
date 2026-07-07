@@ -29,9 +29,12 @@ import {
   berlinStr,
   esc,
   fetchB2gRoster,
+  fetchResponsibleChanges,
   fetchStageIntervals,
   fetchTouches,
+  fetchUidNames,
   naiveUtcToMs,
+  splitByOwnership,
   TERMINAL_STATUS_IDS,
   utcLiteral,
   type StageInterval,
@@ -57,7 +60,9 @@ interface SlaComputedRow {
 }
 
 function computeNewLeadSla(intervals: StageInterval[], nowMs: number): SlaComputedRow[] {
-  return collapseAll(intervals)
+  // Сырые интервалы/сегменты — без склейки (как у интегратора; вход может
+  // быть уже разрезан по периодам ответственности).
+  return intervals
     .filter((iv) => iv.funnel === "gos" && iv.status === NEW_LEAD_STATUS)
     .filter((iv) => !(iv.closeReason ?? "").toLowerCase().includes(SLA_EXCLUDE_REASON_SUBSTRING))
     .map((iv) => {
@@ -344,15 +349,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           managerNames: null,
         }),
       ]);
-      const slaRows = computeNewLeadSla(slaIntervals, nowMs);
-      // Этапы/TLT считаются по СЫРЫМ интервалам, как у интегратора (склейка
-      // re-entry удлиняла пребывания циклических недозвонов и валила
-      // проценты: Дмитриев 78 vs 100 у Looker). Склейка intake остаётся
-      // только в касаниях (там она подтверждена построчной валидацией).
-      const stageRows = intervals
+      // Этапы/TLT/SLA считаются по СЫРЫМ интервалам (без склейки re-entry),
+      // РАЗРЕЗАННЫМ по периодам ответственности (документ РОПа: при передаче
+      // лида отсчёт начинается заново, проверка — владельцу периода).
+      const allLeads = [...new Set([...intervals, ...slaIntervals].map((iv) => iv.leadId))];
+      const [respChanges, uidNames] = await Promise.all([
+        fetchResponsibleChanges(allLeads),
+        fetchUidNames(),
+      ]);
+      const segmented = splitByOwnership(intervals, respChanges, uidNames, nowMs);
+      const slaRows = computeNewLeadSla(
+        splitByOwnership(slaIntervals, respChanges, uidNames, nowMs),
+        nowMs,
+      );
+      const stageRows = segmented
         .map((iv) => computeStageTime(iv, nowMs))
         .filter((r): r is NonNullable<typeof r> => r !== null);
-      const tltIv = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
+      const tltIv = segmented.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
       const touchIv = collapseAll(intervals, { intake: true }).filter(
         (iv) => iv.exitMs != null && iv.nextStatus != null,
       );
@@ -416,20 +429,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         managersByFunnel[funnel as FunnelKey].add(manager);
       }
       const METRICS = ["sla", "tlt", "stage", "touches", "tasks"] as const;
+      // ✅ Свёртка «Регламент, %» — формулой из документа РОПа: в xlsx ячейка
+      // «Соблюдение регламента» = AVERAGE(показателей), пустые пропускаются.
       const build = (funnel: FunnelKey) =>
         [...managersByFunnel[funnel]]
           .sort((a, b) => a.localeCompare(b, "ru"))
           .map((manager) => {
             const metrics: Record<string, { pct: number; ok: number; n: number } | null> = {};
-            let sumOk = 0;
-            let sumN = 0;
+            const pcts: number[] = [];
             for (const m of METRICS) {
               if (funnel === "berater" && m === "sla") continue;
               const c = cells.get(`${funnel}|${manager}|${m}`);
               if (c && c.n > 0) {
-                metrics[m] = { pct: Math.round((c.ok / c.n) * 100), ok: c.ok, n: c.n };
-                sumOk += c.ok;
-                sumN += c.n;
+                const pct = Math.round((c.ok / c.n) * 100);
+                metrics[m] = { pct, ok: c.ok, n: c.n };
+                pcts.push(pct);
               } else {
                 metrics[m] = null;
               }
@@ -437,7 +451,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             return {
               manager,
               metrics,
-              reglament: sumN > 0 ? Math.round((sumOk / sumN) * 100) : null,
+              reglament:
+                pcts.length > 0 ? Math.round(pcts.reduce((a, p) => a + p, 0) / pcts.length) : null,
             };
           })
           .filter((r) => r.reglament !== null);
@@ -673,6 +688,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         managerNames: expandManager(managerParam),
         leadId,
       });
+      // Разрезка по периодам ответственности (документ РОПа) — для Этапов и
+      // TLT; касания считаются по целым пребываниям (переходы).
+      const [respChanges, uidNames] = await Promise.all([
+        fetchResponsibleChanges([...new Set(intervals.map((iv) => iv.leadId))]),
+        fetchUidNames(),
+      ]);
+      const segmented =
+        view === "touches" ? intervals : splitByOwnership(intervals, respChanges, uidNames, nowMs);
 
       const paginate = <T extends { ok: boolean }>(rows: T[]) => ({
         total: rows.length,
@@ -691,8 +714,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         closed ? ok : ok ? null : false;
 
       if (view === "stage_time") {
-        // Сырые интервалы (без склейки re-entry) — как у интегратора.
-        const rows = intervals
+        // Сырые интервалы (без склейки re-entry), сегменты ответственности.
+        const rows = segmented
           .map((iv) => computeStageTime(iv, nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
           .filter((r) => oursInterval(r.interval));
@@ -720,8 +743,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
 
       if (view === "tlt_gap") {
-        // Только этапы с TLT-нормативом; сырые интервалы, как у интегратора.
-        const tltIv = intervals.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
+        // Только этапы с TLT-нормативом; сегменты ответственности.
+        const tltIv = segmented.filter((iv) => TLT_GAP_NORMS[iv.funnel][iv.status] != null);
         const leadIds = [...new Set(tltIv.map((iv) => iv.leadId))];
         const range = minMax(tltIv.flatMap((iv) => [iv.enterMs, iv.exitMs ?? nowMs]));
         const touches = range
@@ -809,7 +832,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         managerNames: expandManager(managerParam),
         leadId,
       });
-      const rows = computeNewLeadSla(intervals, nowMs)
+      const [respChanges, uidNames] = await Promise.all([
+        fetchResponsibleChanges([...new Set(intervals.map((iv) => iv.leadId))]),
+        fetchUidNames(),
+      ]);
+      const rows = computeNewLeadSla(splitByOwnership(intervals, respChanges, uidNames, nowMs), nowMs)
         .filter((r) => oursInterval(r.interval))
         .sort((a, b) => b.interval.enterMs - a.interval.enterMs);
       // В счёт входят закрытые + открытые, уже нарушившие 25 минут; открытый

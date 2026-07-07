@@ -26,26 +26,25 @@ function weekdayOfDayNumber(dayNum: number): number {
   return (((dayNum + 4) % 7) + 7) % 7;
 }
 
-/** Кол-во воскресений среди дней [a..b] включительно (a ≤ b, номера дней). */
-function sundaysInRange(a: number, b: number): number {
-  if (b < a) return 0;
-  // Первое воскресенье ≥ a
-  const wa = weekdayOfDayNumber(a);
-  const firstSunday = a + ((7 - wa) % 7);
-  if (firstSunday > b) return 0;
-  return Math.floor((b - firstSunday) / 7) + 1;
-}
-
 /**
- * Факт «времени на этапе» в рабочих днях (Пн–Сб): число рабочих берлинских
- * дней, которых касается [start, end]. end < start → 0.
+ * Факт «времени на этапе» в рабочих днях — формула интегратора,
+ * откалиброванная по 13 681 закрытой строке его CSV (совпадение факта 62.9%,
+ * ok-решений 94.1% — лучший из ~30 проверенных кандидатов): календарные
+ * берлинские дни, которых касается [start, end], МИНУС выходные (Сб и Вс)
+ * внутри интервала, при этом ДЕНЬ ВХОДА считается всегда, даже если он
+ * выходной. end < start → 0.
  */
 export function workDaysTouched(start: Date, end: Date): number {
   if (end.getTime() < start.getTime()) return 0;
   const a = berlinDayNumber(start);
   const b = berlinDayNumber(end);
-  const total = b - a + 1;
-  return total - sundaysInRange(a, b);
+  let n = 0;
+  for (let d = a; d <= b; d++) {
+    const w = weekdayOfDayNumber(d);
+    if (d !== a && (w === 0 || w === 6)) continue;
+    n++;
+  }
+  return n;
 }
 
 // Календарные дни и часы для «Время на этапах» считаются дробным elapsed'ом
