@@ -386,17 +386,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         c.n += n;
         cells.set(key, c);
       };
+      // Открытые пребывания в проценты НЕ входят (только Этапы/TLT):
+      // на текущем периоде «выход = сейчас» затягивает в сводку все висящие
+      // с давних времён интервалы и обваливает доли, тогда как интегратор
+      // судит только завершённые. Исключение — SLA: открытый «Новый лид»,
+      // просидевший дольше норматива, УЖЕ нарушил (иначе лид можно вечно
+      // не брать в работу и не портить метрику).
       for (const r of stageRows)
-        if (oursInterval(r.interval))
+        if (r.interval.exitMs != null && oursInterval(r.interval))
           add(r.interval.funnel, canon(r.interval.responsible), "stage", r.ok ? 1 : 0, 1);
       for (const r of tltRows)
-        if (oursInterval(r.interval))
+        if (r.interval.exitMs != null && oursInterval(r.interval))
           add(r.interval.funnel, canon(r.interval.responsible), "tlt", r.ok ? 1 : 0, 1);
       for (const r of touchRows)
         if (oursInterval(r.interval))
           add(r.interval.funnel, canon(r.interval.responsible), "touches", r.ok ? 1 : 0, 1);
       for (const r of slaRows)
-        if (oursInterval(r.interval)) add("gos", canon(r.interval.responsible), "sla", r.ok ? 1 : 0, 1);
+        if ((r.interval.exitMs != null || !r.ok) && oursInterval(r.interval))
+          add("gos", canon(r.interval.responsible), "sla", r.ok ? 1 : 0, 1);
       for (const r of taskRows)
         if (oursName(r.manager)) add(r.funnel, canon(r.manager), "tasks", Math.min(r.completed, r.total), r.total);
 
@@ -673,16 +680,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         page: rows.slice(offset, offset + limit),
       });
 
+      // Тристейт ok для открытых пребываний: уже нарушил → false, ещё в
+      // пределах норматива → null («рано судить»). В проценты («в нормативе»)
+      // и сводку входят только ЗАКРЫТЫЕ — как у интегратора; открытые
+      // нарушители видны в таблице красным.
+      const triState = (closed: boolean, ok: boolean): boolean | null =>
+        closed ? ok : ok ? null : false;
+
       if (view === "stage_time") {
         const rows = collapseAll(intervals)
           .map((iv) => computeStageTime(iv, nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
           .filter((r) => oursInterval(r.interval));
-        const { total, okCount, managers, page } = paginate(rows);
+        const closed = rows.filter((r) => r.interval.exitMs != null);
+        const { total, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
           total,
-          okCount,
+          okCount: closed.filter((r) => r.ok).length,
+          countedCount: closed.length,
           managers,
           rows: page.map((r) => ({
             leadId: r.interval.leadId,
@@ -693,7 +709,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             unit: r.unit,
             limit: r.limit,
             fact: Math.round(r.fact * 100) / 100,
-            ok: r.ok,
+            ok: triState(r.interval.exitMs != null, r.ok),
             responsible: canon(r.interval.responsible),
           })),
         });
@@ -713,11 +729,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           .map((iv) => computeTltGap(iv, touches.get(iv.leadId), nowMs))
           .filter((r): r is NonNullable<typeof r> => r !== null)
           .filter((r) => oursInterval(r.interval));
-        const { total, okCount, managers, page } = paginate(rows);
+        const closed = rows.filter((r) => r.interval.exitMs != null);
+        const { total, managers, page } = paginate(rows);
         return NextResponse.json({
           view,
           total,
-          okCount,
+          okCount: closed.filter((r) => r.ok).length,
+          countedCount: closed.length,
           managers,
           rows: page.map((r) => ({
             leadId: r.interval.leadId,
@@ -727,7 +745,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
             limit: r.limit,
             gapFact: r.gapFact,
-            ok: r.ok,
+            ok: triState(r.interval.exitMs != null, r.ok),
             responsible: canon(r.interval.responsible),
           })),
         });
@@ -753,6 +771,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         view,
         total,
         okCount,
+        countedCount: total,
         managers,
         rows: page.map((r) => ({
           leadId: r.interval.leadId,
@@ -791,14 +810,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       const rows = computeNewLeadSla(intervals, nowMs)
         .filter((r) => oursInterval(r.interval))
         .sort((a, b) => b.interval.enterMs - a.interval.enterMs);
-      const okCount = rows.reduce((a, r) => a + (r.ok ? 1 : 0), 0);
+      // В счёт входят закрытые + открытые, уже нарушившие 25 минут; открытый
+      // лид ещё в пределах норматива не судим (ok = null).
+      const counted = rows.filter((r) => r.interval.exitMs != null || !r.ok);
       const managers = [...new Set(rows.map((r) => canon(r.interval.responsible)))].sort((a, b) =>
         a.localeCompare(b, "ru"),
       );
       return NextResponse.json({
         view,
         total: rows.length,
-        okCount,
+        okCount: counted.filter((r) => r.ok).length,
+        countedCount: counted.length,
         managers,
         limitMinutes: NEW_LEAD_SLA_WORK_MINUTES,
         rows: rows.slice(offset, offset + limit).map((r) => ({
@@ -807,7 +829,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           enterAt: berlinStr(r.interval.enterMs),
           exitAt: r.interval.exitMs != null ? berlinStr(r.interval.exitMs) : null,
           workMinutes: Math.round(r.workMinutes * 10) / 10,
-          ok: r.ok,
+          ok: r.interval.exitMs != null ? r.ok : r.ok ? null : false,
         })),
       });
     }

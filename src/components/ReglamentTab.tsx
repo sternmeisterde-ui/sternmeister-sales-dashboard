@@ -47,7 +47,8 @@ interface SlaRow {
   enterAt: string;
   exitAt: string | null;
   workMinutes: number;
-  ok: boolean;
+  /** null = лид ещё на этапе и в пределах норматива («рано судить»). */
+  ok: boolean | null;
 }
 
 type SubView = "summary" | "sla" | "stages" | "tlt" | "touches" | "tasks" | "avg";
@@ -115,6 +116,8 @@ interface DetailState<R> {
   data: {
     total: number;
     okCount?: number;
+    /** Знаменатель «в нормативе»: только завершённые проверки. */
+    countedCount?: number;
     avgSeconds?: number | null;
     managers?: string[];
     rows: R[];
@@ -254,9 +257,13 @@ function DetailToolbar<R>({
         className="w-28 rounded-lg border border-white/10 bg-slate-900/60 px-2 py-1.5 text-xs text-slate-300 placeholder:text-slate-600"
       />
       {hint && <span className="text-[11px] text-slate-500">{hint}</span>}
-      {okCount != null && total > 0 && (
-        <span className="rounded bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-300">
-          в нормативе {Math.round((okCount / total) * 100)}% ({okCount}/{total})
+      {okCount != null && (st.data?.countedCount ?? total) > 0 && (
+        <span
+          className="rounded bg-blue-500/15 px-2 py-0.5 text-[11px] text-blue-300"
+          title="Считаются только завершённые проверки; открытые «ещё в этапе» не судятся (кроме уже нарушивших SLA)"
+        >
+          в нормативе {Math.round((okCount / (st.data?.countedCount ?? total)) * 100)}% ({okCount}/
+          {st.data?.countedCount ?? total})
         </span>
       )}
       <span className="ml-auto text-[11px] text-slate-500">
@@ -282,7 +289,11 @@ function DetailToolbar<R>({
   );
 }
 
-const okRowCls = (ok: boolean) => (ok ? "bg-emerald-500/10" : "bg-red-500/10");
+/** null = открытое пребывание в пределах норматива — «рано судить». */
+const okRowCls = (ok: boolean | null) =>
+  ok === null ? "bg-slate-900/30" : ok ? "bg-emerald-500/10" : "bg-red-500/10";
+
+const okCellText = (ok: boolean | null) => (ok === null ? "—" : ok ? "true" : "false");
 
 function LeadLink({ id }: { id: number }) {
   return (
@@ -354,7 +365,7 @@ function SlaView({ range }: { range: DateRange }) {
                     <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-slate-200">
                       {r.workMinutes.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}
                     </td>
-                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                    <td className="px-3 py-2 text-xs">{okCellText(r.ok)}</td>
                   </tr>
                 ))
               )}
@@ -377,7 +388,8 @@ interface StageTimeApiRow {
   unit: "work_days" | "calendar_days" | "hours";
   limit: number;
   fact: number;
-  ok: boolean;
+  /** null = открытое пребывание в пределах норматива. */
+  ok: boolean | null;
   responsible: string;
 }
 interface TltGapApiRow {
@@ -388,7 +400,8 @@ interface TltGapApiRow {
   exitAt: string | null;
   limit: number;
   gapFact: number;
-  ok: boolean;
+  /** null = открытое пребывание в пределах норматива. */
+  ok: boolean | null;
   responsible: string;
 }
 interface TouchesApiRow {
@@ -468,7 +481,7 @@ function StageTimeView({ range }: { range: DateRange }) {
                     <td className="px-3 py-2 text-right tabular-nums text-slate-200">
                       {r.unit === "work_days" ? Math.round(r.fact) : r.fact.toFixed(2)}
                     </td>
-                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                    <td className="px-3 py-2 text-xs">{okCellText(r.ok)}</td>
                   </tr>
                 ))
               )}
@@ -535,7 +548,7 @@ function TltGapView({ range }: { range: DateRange }) {
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-300">{r.limit}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-200">{r.gapFact}</td>
-                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                    <td className="px-3 py-2 text-xs">{okCellText(r.ok)}</td>
                   </tr>
                 ))
               )}
@@ -606,7 +619,7 @@ function TouchesView({ range }: { range: DateRange }) {
                     <td className="whitespace-nowrap px-3 py-2 text-right text-xs text-slate-400">
                       {r.minCalls} зв{r.minMessages > 0 ? ` + ${r.minMessages} сообщ` : ""}
                     </td>
-                    <td className="px-3 py-2 text-xs">{r.ok ? "true" : "false"}</td>
+                    <td className="px-3 py-2 text-xs">{okCellText(r.ok)}</td>
                   </tr>
                 ))
               )}
