@@ -1396,6 +1396,7 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
 }) {
   const [metric, setMetric] = useState<TrendMetric>("callsTotal");
   const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
+  const [cumulative, setCumulative] = useState(false);
   const [compareOn, setCompareOn] = useState(false);
   // Ручной выбор периода сравнения, помеченный сигнатурой окна, для которого
   // сделан: при смене основного окна override «протухает» и мы падаем на
@@ -1464,7 +1465,7 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
   // (день N ↔ день N), лишние дни сравнения за пределами окна не показываем.
   const chartData = useMemo(() => {
     if (!trendByManager || managers.length === 0) return [];
-    return currentDates.map((date, idx) => {
+    const rows = currentDates.map((date, idx) => {
       const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
       for (const m of visible) {
         row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
@@ -1475,7 +1476,19 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
       }
       return row;
     });
-  }, [trendByManager, managers, visible, metric, currentDates, compareOn, compareData]);
+    // Кумулятивно: по каждой серии нарастающий итог по дням окна.
+    if (cumulative) {
+      const acc: Record<string, number> = {};
+      for (const row of rows) {
+        for (const key of Object.keys(row)) {
+          if (key === "date") continue;
+          acc[key] = (acc[key] ?? 0) + (row[key] as number);
+          row[key] = acc[key];
+        }
+      }
+    }
+    return rows;
+  }, [trendByManager, managers, visible, metric, currentDates, compareOn, compareData, cumulative]);
 
   const fmtRange = (a: string, b: string) => `${a.slice(5).replace("-", ".")}–${b.slice(5).replace("-", ".")}`;
 
@@ -1507,6 +1520,13 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
         {managers.length > 0 && (
           <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
         )}
+        <button
+          onClick={() => setCumulative((v) => !v)}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${cumulative ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+          title="Нарастающий итог по дням"
+        >
+          Кумулятивно
+        </button>
         <button
           onClick={() => setCompareOn((v) => !v)}
           className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
