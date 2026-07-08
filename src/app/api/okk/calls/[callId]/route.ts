@@ -25,6 +25,19 @@ function stripEngineTags(feedback: string): string {
 //   inbound  → client called the company → manager answers first → Speaker A = Менеджер
 // Fallback: assume outbound (most sales calls are outbound).
 
+// Кто из спикеров — менеджер (Продавец). Общая логика для строкового
+// транскрипта и структурированных turns (чат-вид с таймкодами).
+function resolveManagerSpeaker(
+  utterances: TranscriptSpeakerSegment[],
+  direction: string | null,
+): string {
+  const isOutbound = direction !== "inbound"; // default outbound
+  const firstSpeaker = utterances[0]?.speaker ?? "A";
+  return isOutbound
+    ? (utterances.find((u) => u.speaker !== firstSpeaker)?.speaker ?? "B")
+    : firstSpeaker;
+}
+
 function buildSpeakerTranscript(
   speakersRaw: unknown,
   direction: string | null,
@@ -59,6 +72,50 @@ function buildSpeakerTranscript(
       return `${role}: ${u.text}`;
     })
     .join("\n");
+}
+
+// ─── Helper: на какой секунде звучал критерий ────────────────────────────────
+// В оценке нет таймкода — только дословная цитата (quote). Матчим её к
+// диаризованному транскрипту (utterances со start/end) и берём start той
+// реплики. Best-effort: сначала прямое вхождение (quote — обычно verbatim-
+// вырезка из реплики), затем — лучшее пересечение по словам. Нет цитаты /
+// нет совпадения → null (таймкод не показываем).
+function normQuoteText(s: string): string {
+  return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function findQuoteStartSec(
+  quote: string,
+  utterances: TranscriptSpeakerSegment[],
+  toSec: (raw: number) => number,
+): number | null {
+  if (!quote || utterances.length === 0) return null;
+  const q = normQuoteText(quote);
+  if (q.length < 3) return null;
+  const qWords = q.split(" ").filter(Boolean);
+  const probe = qWords.slice(0, Math.min(8, qWords.length)).join(" ");
+  // 1) Прямое вхождение (цитата — verbatim-вырезка реплики, либо наоборот).
+  for (const u of utterances) {
+    const ut = normQuoteText(u.text);
+    if (!ut) continue;
+    if (ut.includes(probe) || (probe.length >= 6 && probe.includes(ut)) || ut.includes(q) || q.includes(ut)) {
+      return Math.max(0, Math.floor(toSec(u.start)));
+    }
+  }
+  // 2) Fallback — реплика с наибольшим пересечением по словам (≥3 общих).
+  const qSet = new Set(qWords);
+  let best: { sec: number; score: number } | null = null;
+  for (const u of utterances) {
+    const uw = normQuoteText(u.text).split(" ").filter(Boolean);
+    if (uw.length === 0) continue;
+    let overlap = 0;
+    for (const w of uw) if (qSet.has(w)) overlap++;
+    const score = overlap / uw.length;
+    if (overlap >= 3 && (best === null || score > best.score)) {
+      best = { sec: Math.max(0, Math.floor(toSec(u.start))), score };
+    }
+  }
+  return best ? best.sec : null;
 }
 
 // ─── GET /api/okk/calls/[callId] ─────────────────────────────────────────────
@@ -149,6 +206,34 @@ export async function GET(
     const totalMaxScore =
       typeof evalJson?.total_max_score === "number" ? evalJson.total_max_score : null;
 
+    // ── Utterances (со start/end) для таймкодов критериев ─────
+    // transcript_speakers хранится как массив ЛИБО как { utterances: [...] }.
+    const utterances: TranscriptSpeakerSegment[] = (() => {
+      const raw = row.transcriptSpeakers as unknown;
+      if (!raw) return [];
+      if (Array.isArray(raw)) return raw as TranscriptSpeakerSegment[];
+      if (typeof raw === "object" && "utterances" in (raw as Record<string, unknown>)) {
+        return ((raw as { utterances: TranscriptSpeakerSegment[] }).utterances) ?? [];
+      }
+      return [];
+    })();
+    // Единицы start/end у STT — секунды, но подстрахуемся: если максимум сильно
+    // превышает длительность звонка, значит миллисекунды → делим на 1000.
+    const maxEnd = utterances.reduce((m, u) => Math.max(m, u.end ?? u.start ?? 0), 0);
+    const isMs = dSec > 0 && maxEnd > dSec * 3;
+    const toSec = (raw: number) => (isMs ? raw / 1000 : raw);
+
+    // Структурированный транскрипт для чат-вида: спикер + текст + секунда
+    // старта реплики (таймкод MM:SS на клиенте).
+    const managerSpeaker = resolveManagerSpeaker(utterances, row.direction);
+    const transcriptTurns = utterances
+      .filter((u) => u.text && u.text.trim())
+      .map((u) => ({
+        speaker: (u.speaker === managerSpeaker ? "manager" : "client") as "manager" | "client",
+        text: u.text,
+        atSecond: typeof u.start === "number" ? Math.max(0, Math.floor(toSec(u.start))) : null,
+      }));
+
     // ── Evaluation blocks with full criteria ──────────────────
     // Includes: name, score, maxScore, and per-criterion feedback/quote
     const blocks = (row.evaluationJson?.blocks ?? [])
@@ -178,6 +263,8 @@ export async function GET(
               feedback: stripEngineTags(c.feedback || ""),
               quote: c.quote || "",
               applicable: c.applicable !== false,
+              // Секунда старта реплики, к которой относится цитата (MM:SS на клиенте).
+              atSecond: findQuoteStartSec(c.quote || "", utterances, toSec),
             }))
           : [],
         // Derived summary of failed binary criteria for quick display
@@ -248,6 +335,7 @@ export async function GET(
         buildSpeakerTranscript(row.transcriptSpeakers, row.direction) ||
         row.transcript ||
         "",
+      transcriptTurns,
       aiFeedback: row.recommendations || "",
       summary: row.mistakes || "",
       evalSummary: evalSummary || "",
