@@ -63,13 +63,22 @@ export interface B2gRoster {
   ids: Set<number>;
   names: Set<string>;
   canonicalByName: Map<string, string>;
+  /** Линия менеджера по master_managers: канон-имя → '1' | '2' | '3' | null.
+   *  Нужна сводке: менеджер показывается только в таблице СВОЕЙ линии
+   *  (1 → Гос, 2/3 → Бератер) — редкие сделки чужой воронки (зачастую
+   *  ошибочные передачи) не создают строк-хвостов в чужой таблице. */
+  lineByName: Map<string, string | null>;
 }
 
 export async function fetchB2gRoster(): Promise<B2gRoster> {
   // Только линейные продавцы: РОПы координируют и в регламентной аналитике
   // не участвуют (решение пользователя 2026-07-07), админы — тем более.
   const masters = await db
-    .select({ name: masterManagers.name, kommoUserId: masterManagers.kommoUserId })
+    .select({
+      name: masterManagers.name,
+      kommoUserId: masterManagers.kommoUserId,
+      line: masterManagers.line,
+    })
     .from(masterManagers)
     .where(
       and(
@@ -80,10 +89,12 @@ export async function fetchB2gRoster(): Promise<B2gRoster> {
   const ids = new Set<number>();
   const names = new Set<string>();
   const canonicalByName = new Map<string, string>();
+  const lineByName = new Map<string, string | null>();
   const masterById = new Map<number, string>();
   for (const m of masters) {
     names.add(m.name);
     canonicalByName.set(m.name, m.name);
+    lineByName.set(m.name, m.line);
     for (const alias of NAME_ALIASES[m.name] ?? []) {
       names.add(alias);
       canonicalByName.set(alias, m.name);
@@ -108,7 +119,7 @@ export async function fetchB2gRoster(): Promise<B2gRoster> {
       if (canon && !canonicalByName.has(r.manager)) canonicalByName.set(r.manager, canon);
     }
   }
-  return { ids, names, canonicalByName };
+  return { ids, names, canonicalByName, lineByName };
 }
 
 export interface StageInterval {

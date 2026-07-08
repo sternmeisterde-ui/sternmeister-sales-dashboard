@@ -463,10 +463,20 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         managersByFunnel[funnel as FunnelKey].add(manager);
       }
       const METRICS = ["sla", "tlt", "stage", "touches", "tasks"] as const;
+      // Менеджер показывается только в таблице СВОЕЙ линии (1 → Гос,
+      // 2/3 → Бератер): единичные сделки чужой воронки (зачастую ошибочные
+      // передачи) не создают строк-хвостов вроде «только Задачи» в чужой
+      // таблице. Без линии в master_managers — показываем по данным.
+      const inOwnTable = (manager: string, funnel: FunnelKey) => {
+        const line = roster.lineByName.get(manager);
+        if (line == null) return true;
+        return funnel === "gos" ? line === "1" : line !== "1";
+      };
       // ✅ Свёртка «Регламент, %» — формулой из документа РОПа: в xlsx ячейка
       // «Соблюдение регламента» = AVERAGE(показателей), пустые пропускаются.
       const build = (funnel: FunnelKey) =>
         [...managersByFunnel[funnel]]
+          .filter((manager) => inOwnTable(manager, funnel))
           .sort((a, b) => a.localeCompare(b, "ru"))
           .map((manager) => {
             const metrics: Record<string, { pct: number; ok: number; n: number } | null> = {};
