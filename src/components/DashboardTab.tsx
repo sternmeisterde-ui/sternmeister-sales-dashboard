@@ -1028,7 +1028,7 @@ export default function DashboardTab({
           mode="b2g"
         />
       ) : (
-        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} />
+        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} department={department} vertical={vertical} />
       )}
     </div>
   );
@@ -1388,12 +1388,21 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
   );
 }
 
-function TrendChartByManager({ trendByManager }: {
+function TrendChartByManager({ trendByManager, department, vertical }: {
   trend: DailyBucket[];
   trendByManager: Record<string, DailyBucket[]> | null;
+  department: string;
+  vertical?: "buh" | "med" | "all";
 }) {
   const [metric, setMetric] = useState<TrendMetric>("callsTotal");
   const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
+  const [compareOn, setCompareOn] = useState(false);
+  // Ручной выбор периода сравнения, помеченный сигнатурой окна, для которого
+  // сделан: при смене основного окна override «протухает» и мы падаем на
+  // дефолт (предыдущее равное окно) — без setState-in-effect.
+  const [compareOverride, setCompareOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [compareData, setCompareData] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
 
   const managers = useMemo(
     () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
@@ -1404,21 +1413,85 @@ function TrendChartByManager({ trendByManager }: {
     [managers, selected],
   );
 
-  // Все серии padded на один и тот же диапазон дат → берём даты из первой и
-  // индексируем остальные по позиции.
+  // Даты текущего окна (все серии padded одинаково → берём из первой).
+  const currentDates = useMemo(
+    () => (trendByManager && managers.length ? (trendByManager[managers[0]] ?? []).map((d) => d.date) : []),
+    [trendByManager, managers],
+  );
+  const windowSig = `${currentDates[0] ?? ""}|${currentDates.length}`;
+
+  // Дефолт периода сравнения = предыдущее окно той же длины перед текущим.
+  const defaultCmp = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    const first = currentDates[0];
+    const n = currentDates.length;
+    const prevEnd = addDaysCivil(first, -1);
+    const prevStart = addDaysCivil(prevEnd, -(n - 1));
+    return { start: berlinCivilDate(prevStart), end: berlinCivilDate(prevEnd) };
+  }, [currentDates]);
+
+  // Эффективный период сравнения (override, если он для текущего окна; иначе дефолт).
+  const effectiveCmp = useMemo(
+    () => (compareOverride && compareOverride.sig === windowSig
+      ? { start: compareOverride.start, end: compareOverride.end }
+      : defaultCmp),
+    [compareOverride, windowSig, defaultCmp],
+  );
+  const cmpFrom = effectiveCmp ? formatDate(effectiveCmp.start) : null;
+  const cmpTo = effectiveCmp ? formatDate(effectiveCmp.end) : null;
+
+  // Фетч per-manager тренда за период сравнения (setState — в callback, не в теле эффекта).
+  const fetchCompare = useCallback(async (from: string, to: string) => {
+    setCompareLoading(true);
+    try {
+      const vParam = vertical && department === "b2g" ? `&vertical=${vertical}` : "";
+      const res = await fetch(`/api/dashboard/manager-trend?department=${department}&from=${from}&to=${to}${vParam}`);
+      const j = await res.json();
+      setCompareData(j.success ? j.trendByManager : null);
+    } catch {
+      setCompareData(null);
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [department, vertical]);
+
+  useEffect(() => {
+    if (!compareOn || !cmpFrom || !cmpTo) return;
+    fetchCompare(cmpFrom, cmpTo);
+  }, [compareOn, cmpFrom, cmpTo, fetchCompare]);
+
+  // x — по индексу текущего окна; период сравнения накладывается по позиции
+  // (день N ↔ день N), лишние дни сравнения за пределами окна не показываем.
   const chartData = useMemo(() => {
     if (!trendByManager || managers.length === 0) return [];
-    const dates = (trendByManager[managers[0]] ?? []).map((d) => d.date);
-    return dates.map((date, idx) => {
+    return currentDates.map((date, idx) => {
       const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
-      for (const m of visible) row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
+      for (const m of visible) {
+        row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
+        if (compareOn && compareData) {
+          const cv = compareData[m]?.[idx]?.[metric];
+          if (cv != null) row[`${m}__cmp`] = cv;
+        }
+      }
       return row;
     });
-  }, [trendByManager, managers, visible, metric]);
+  }, [trendByManager, managers, visible, metric, currentDates, compareOn, compareData]);
+
+  const fmtRange = (a: string, b: string) => `${a.slice(5).replace("-", ".")}–${b.slice(5).replace("-", ".")}`;
 
   const header = (
-    <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+    <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
+      <div className="min-w-0">
+        <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+        {compareOn && currentDates.length > 0 && cmpFrom && cmpTo && (
+          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+            <span>Текущий: {fmtRange(currentDates[0], currentDates[currentDates.length - 1])}</span>
+            <span className="text-slate-600">·</span>
+            <span className="border-b border-dashed border-slate-500">Сравнение: {fmtRange(cmpFrom, cmpTo)}</span>
+            {compareLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+          </div>
+        )}
+      </div>
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
           {METRIC_PILLS.map((p) => (
@@ -1433,6 +1506,23 @@ function TrendChartByManager({ trendByManager }: {
         </div>
         {managers.length > 0 && (
           <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
+        )}
+        <button
+          onClick={() => setCompareOn((v) => !v)}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+        >
+          Сравнить периоды
+        </button>
+        {compareOn && effectiveCmp && (
+          <CalendarPicker
+            mode="range"
+            value={{ start: effectiveCmp.start, end: effectiveCmp.end }}
+            onChange={(r) => {
+              if (!r.start) return;
+              setCompareOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+            }}
+            onClear={() => setCompareOverride(null)}
+          />
         )}
       </div>
     </div>
@@ -1451,11 +1541,19 @@ function TrendChartByManager({ trendByManager }: {
             <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
             <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
             <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
-            {visible.map((m) => {
+            {visible.flatMap((m) => {
               const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
-              return (
-                <Line key={m} type="monotone" dataKey={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />
-              );
+              const lines = [
+                <Line key={m} type="monotone" dataKey={m} name={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />,
+              ];
+              // Пунктирная линия периода сравнения — тот же цвет менеджера,
+              // скрыта из легенды (иначе двоится), видна в тултипе как «(пред.)».
+              if (compareOn && compareData) {
+                lines.push(
+                  <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (пред.)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
+                );
+              }
+              return lines;
             })}
           </LineChart>
         </ResponsiveContainer>
