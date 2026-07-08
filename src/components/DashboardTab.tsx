@@ -1028,7 +1028,7 @@ export default function DashboardTab({
           mode="b2g"
         />
       ) : (
-        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} />
+        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} department={department} vertical={vertical} />
       )}
     </div>
   );
@@ -1388,12 +1388,34 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
   );
 }
 
-function TrendChartByManager({ trendByManager }: {
+// Список civil-дат [from..to] включительно (для x-оси произвольного периода A).
+function civilDateRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  let d = from;
+  let guard = 0;
+  while (d <= to && guard < 400) { out.push(d); d = addDaysCivil(d, 1); guard++; }
+  return out;
+}
+
+function TrendChartByManager({ trendByManager, department, vertical }: {
   trend: DailyBucket[];
   trendByManager: Record<string, DailyBucket[]> | null;
+  department: string;
+  vertical?: "buh" | "med" | "all";
 }) {
   const [metric, setMetric] = useState<TrendMetric>("callsTotal");
   const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
+  const [cumulative, setCumulative] = useState(false);
+  const [compareOn, setCompareOn] = useState(false);
+  // Оба периода сравнения (A и B) — независимый ручной выбор, помеченный
+  // сигнатурой основного окна: при смене окна override «протухает» и мы падаем
+  // на дефолт (A = окно дашборда, B = предыдущее равное). Без setState-in-effect.
+  const [periodAOverride, setPeriodAOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [periodBOverride, setPeriodBOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [dataA, setDataA] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [dataB, setDataB] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [loadingA, setLoadingA] = useState(false);
+  const [loadingB, setLoadingB] = useState(false);
 
   const managers = useMemo(
     () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
@@ -1404,21 +1426,127 @@ function TrendChartByManager({ trendByManager }: {
     [managers, selected],
   );
 
-  // Все серии padded на один и тот же диапазон дат → берём даты из первой и
-  // индексируем остальные по позиции.
+  // Даты текущего окна (все серии padded одинаково → берём из первой).
+  const currentDates = useMemo(
+    () => (trendByManager && managers.length ? (trendByManager[managers[0]] ?? []).map((d) => d.date) : []),
+    [trendByManager, managers],
+  );
+  const windowSig = `${currentDates[0] ?? ""}|${currentDates.length}`;
+
+  // Дефолт A = окно дашборда; дефолт B = предыдущее равное окно перед ним.
+  const defaultA = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    return { start: berlinCivilDate(currentDates[0]), end: berlinCivilDate(currentDates[currentDates.length - 1]) };
+  }, [currentDates]);
+  const defaultB = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    const prevEnd = addDaysCivil(currentDates[0], -1);
+    const prevStart = addDaysCivil(prevEnd, -(currentDates.length - 1));
+    return { start: berlinCivilDate(prevStart), end: berlinCivilDate(prevEnd) };
+  }, [currentDates]);
+
+  // customA = пользователь переопределил A для текущего окна (иначе A = окно дашборда).
+  const customA = !!(periodAOverride && periodAOverride.sig === windowSig);
+  const effA = useMemo(
+    () => (customA && periodAOverride ? { start: periodAOverride.start, end: periodAOverride.end } : defaultA),
+    [customA, periodAOverride, defaultA],
+  );
+  const effB = useMemo(
+    () => (periodBOverride && periodBOverride.sig === windowSig
+      ? { start: periodBOverride.start, end: periodBOverride.end }
+      : defaultB),
+    [periodBOverride, windowSig, defaultB],
+  );
+  const aFrom = effA ? formatDate(effA.start) : null;
+  const aTo = effA ? formatDate(effA.end) : null;
+  const bFrom = effB ? formatDate(effB.start) : null;
+  const bTo = effB ? formatDate(effB.end) : null;
+
+  // Фетч per-manager тренда за период (setState — в callback, не в теле эффекта).
+  const fetchInto = useCallback(
+    async (
+      from: string,
+      to: string,
+      setData: (d: Record<string, DailyBucket[]> | null) => void,
+      setLoading: (b: boolean) => void,
+    ) => {
+      setLoading(true);
+      try {
+        const vParam = vertical && department === "b2g" ? `&vertical=${vertical}` : "";
+        const res = await fetch(`/api/dashboard/manager-trend?department=${department}&from=${from}&to=${to}${vParam}`);
+        const j = await res.json();
+        setData(j.success ? j.trendByManager : null);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [department, vertical],
+  );
+
+  // A фетчим только когда он переопределён (по умолчанию A = данные дашборда).
+  useEffect(() => {
+    if (!compareOn || !customA || !aFrom || !aTo) return;
+    fetchInto(aFrom, aTo, setDataA, setLoadingA);
+  }, [compareOn, customA, aFrom, aTo, fetchInto]);
+
+  useEffect(() => {
+    if (!compareOn || !bFrom || !bTo) return;
+    fetchInto(bFrom, bTo, setDataB, setLoadingB);
+  }, [compareOn, bFrom, bTo, fetchInto]);
+
+  // x-ось = дни периода A (если A = окно дашборда, берём готовые currentDates;
+  // если A переопределён — генерим диапазон и берём dataA). Период B
+  // накладывается по индексу дня (день N ↔ день N).
   const chartData = useMemo(() => {
-    if (!trendByManager || managers.length === 0) return [];
-    const dates = (trendByManager[managers[0]] ?? []).map((d) => d.date);
-    return dates.map((date, idx) => {
+    if (managers.length === 0) return [];
+    const seriesA = compareOn && customA ? dataA : trendByManager;
+    const seriesB = compareOn ? dataB : null;
+    const xDates = compareOn && customA
+      ? (aFrom && aTo ? civilDateRange(aFrom, aTo) : [])
+      : currentDates;
+    if (xDates.length === 0) return [];
+    const rows = xDates.map((date, idx) => {
       const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
-      for (const m of visible) row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
+      for (const m of visible) {
+        row[m] = seriesA?.[m]?.[idx]?.[metric] ?? 0;
+        if (seriesB) {
+          const cv = seriesB[m]?.[idx]?.[metric];
+          if (cv != null) row[`${m}__cmp`] = cv;
+        }
+      }
       return row;
     });
-  }, [trendByManager, managers, visible, metric]);
+    // Кумулятивно: по каждой серии нарастающий итог по дням окна.
+    if (cumulative) {
+      const acc: Record<string, number> = {};
+      for (const row of rows) {
+        for (const key of Object.keys(row)) {
+          if (key === "date") continue;
+          acc[key] = (acc[key] ?? 0) + (row[key] as number);
+          row[key] = acc[key];
+        }
+      }
+    }
+    return rows;
+  }, [managers, visible, metric, cumulative, compareOn, customA, dataA, dataB, trendByManager, currentDates, aFrom, aTo]);
+
+  const fmtRange = (a: string, b: string) => `${a.slice(5).replace("-", ".")}–${b.slice(5).replace("-", ".")}`;
 
   const header = (
-    <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+    <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
+      <div className="min-w-0">
+        <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+        {compareOn && aFrom && aTo && bFrom && bTo && (
+          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+            <span>A: {fmtRange(aFrom, aTo)}</span>
+            <span className="text-slate-600">·</span>
+            <span className="border-b border-dashed border-slate-500">B: {fmtRange(bFrom, bTo)}</span>
+            {(loadingA || loadingB) && <Loader2 className="w-3 h-3 animate-spin" />}
+          </div>
+        )}
+      </div>
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
           {METRIC_PILLS.map((p) => (
@@ -1433,6 +1561,43 @@ function TrendChartByManager({ trendByManager }: {
         </div>
         {managers.length > 0 && (
           <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
+        )}
+        <button
+          onClick={() => setCumulative((v) => !v)}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${cumulative ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+          title="Нарастающий итог по дням"
+        >
+          Кумулятивно
+        </button>
+        <button
+          onClick={() => setCompareOn((v) => !v)}
+          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+        >
+          Сравнить периоды
+        </button>
+        {compareOn && effA && effB && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-bold text-slate-500">A</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effA.start, end: effA.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodAOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodAOverride(null)}
+            />
+            <span className="text-[10px] font-bold text-slate-500">B</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effB.start, end: effB.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodBOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodBOverride(null)}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -1451,11 +1616,19 @@ function TrendChartByManager({ trendByManager }: {
             <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
             <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
             <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
-            {visible.map((m) => {
+            {visible.flatMap((m) => {
               const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
-              return (
-                <Line key={m} type="monotone" dataKey={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />
-              );
+              const lines = [
+                <Line key={m} type="monotone" dataKey={m} name={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />,
+              ];
+              // Пунктирная линия периода сравнения — тот же цвет менеджера,
+              // скрыта из легенды (иначе двоится), видна в тултипе как «(пред.)».
+              if (compareOn && dataB) {
+                lines.push(
+                  <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (B)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
+                );
+              }
+              return lines;
             })}
           </LineChart>
         </ResponsiveContainer>
