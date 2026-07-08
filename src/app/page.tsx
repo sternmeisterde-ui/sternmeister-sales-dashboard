@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse,
+  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -24,6 +24,7 @@ import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
 import BroadcastTab from "@/components/BroadcastTab";
 import EnpsTab from "@/components/EnpsTab";
+import ReglamentTab from "@/components/ReglamentTab";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
 import {
   fmtLocalDate,
@@ -102,7 +103,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps";
+type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps" | "reglament";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -139,6 +140,9 @@ const NAV_ITEMS: NavItem[] = [
   // Анонимный пульс-опрос менеджеров (Typeform → Google Sheets → D1). Только Гос:
   // форма заведена на «Гос ОП»; для Коммерсов формы нет.
   { id: "enps", icon: HeartPulse, label: "eNPS", adminOnly: true, departments: ["b2g"] },
+  // Зеркало Looker-отчёта РОПа «Госники V7»: соблюдение регламента (SLA, TLT-GAP,
+  // этапы, касания, задачи) + пропущенные звонки. ТЗ 23 + справочник 23a в dev_docs/specs.
+  { id: "reglament", icon: ShieldCheck, label: "Регламент", adminOnly: true, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   // Только Госники: у Коммерсов ролевки разбираются внутри «Оценки критериев»
   // (toggle OKK/Ролевки в analytics), отдельная вкладка не нужна — убрана 2026-06-19.
@@ -1192,6 +1196,10 @@ export default function Dashboard() {
 
         {activeTab === "enps" && tabAllowedInDept("enps", activeDepartment) && (
           <EnpsTab department={activeDepartment} />
+        )}
+
+        {activeTab === "reglament" && tabAllowedInDept("reglament", activeDepartment) && (
+          <ReglamentTab department={activeDepartment} />
         )}
 
         {activeTab === "termins" && tabAllowedInDept("termins", activeDepartment) && (

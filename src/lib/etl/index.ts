@@ -27,10 +27,11 @@ import { syncContacts } from "./sync-contacts";
 import { syncCommunications } from "./sync-communications";
 import { syncStatusChanges } from "./sync-status-changes";
 import { syncCloseReasonChanges } from "./sync-close-reason-changes";
+import { syncResponsibleChanges } from "./sync-responsible-changes";
 import { syncLeadDeletions } from "./sync-lead-deletions";
 import { syncClientRoleplays } from "./sync-client-roleplays";
 import { syncBotRoleplays, syncBotUsers } from "./sync-bot-roleplays";
-import { syncTasks } from "./sync-tasks";
+import { syncTasks, syncTasksIncremental } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { detectWonExports } from "./detect-won-exports";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
@@ -75,7 +76,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -158,17 +159,20 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
   const incremental = opts.incremental ?? false;
   const stepErrors: { step: string; message: string }[] = [];
 
-  // In incremental mode: skip tasks (slow — pulls all open tasks per lead).
+  // In incremental mode tasks are synced by the LIGHT path (see the tasks
+  // step below): Kommo /tasks with filter[updated_at] over the tick window —
+  // creation, edits, deadline moves and completion all bump updated_at.
+  // The heavy syncTasks (pulls ALL open tasks per lead) runs only on full
+  // backfills. Before 2026-07-08 incremental mode skipped tasks entirely and
+  // analytics.tasks went stale (the 29.05–07.07 gap needed a manual backfill).
+  //
   // Status_changes USED to be skipped here too, but the Termin dashboard
   // depends on TERM_DC_DONE event timestamps for its AA-baseline formula —
   // without per-tick syncing the AA average drifts upward (falls back to
   // created_at instead of dt(TERM_DC_DONE)). The Kommo /events endpoint
   // supports filter[created_at][from/to], so a 15-min window pulls ~25
   // events on average — negligible cost. (2026-04-28)
-  const skip = new Set([
-    ...(opts.skip ?? []),
-    ...(incremental ? (["tasks"] as const) : []),
-  ]);
+  const skip = new Set([...(opts.skip ?? [])]);
 
   console.log(
     `[ETL] runSync mode=${incremental ? "incremental" : "full"} from=${opts.fromDate.toISOString()} to=${opts.toDate.toISOString()}`,
@@ -248,12 +252,19 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
 
   const tasksCount = skip.has("tasks")
     ? 0
-    : await runStep(
-        "sync-tasks",
-        () => syncTasks(leadCache, lookups),
-        0,
-        stepErrors,
-      );
+    : incremental
+      ? await runStep(
+          "sync-tasks-incremental",
+          () => syncTasksIncremental(opts.fromDate, opts.toDate),
+          0,
+          stepErrors,
+        )
+      : await runStep(
+          "sync-tasks",
+          () => syncTasks(leadCache, lookups),
+          0,
+          stepErrors,
+        );
 
   // Close-reason history (CFV 879824 transitions) — нужна Funnel'у для точного
   // disqualified_at. 1 req/sec вне основной плотности — добавляет 5-15s к тику.
@@ -261,6 +272,18 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await runStep(
       "sync-close-reason-changes",
       () => syncCloseReasonChanges(opts.fromDate, opts.toDate),
+      0,
+      stepErrors,
+    );
+  }
+
+  // Смены ответственного — нужны вкладке «Регламент» (периоды ответственности:
+  // Время на этапах/TLT/SLA считаются от передачи лида). Идемпотентный upsert
+  // по event_id; окно то же, что у остальных инкрементальных шагов.
+  if (!skip.has("responsible_changes")) {
+    await runStep(
+      "sync-responsible-changes",
+      () => syncResponsibleChanges(opts.fromDate, opts.toDate),
       0,
       stepErrors,
     );
