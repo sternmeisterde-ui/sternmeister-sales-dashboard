@@ -1388,6 +1388,15 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
   );
 }
 
+// Список civil-дат [from..to] включительно (для x-оси произвольного периода A).
+function civilDateRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  let d = from;
+  let guard = 0;
+  while (d <= to && guard < 400) { out.push(d); d = addDaysCivil(d, 1); guard++; }
+  return out;
+}
+
 function TrendChartByManager({ trendByManager, department, vertical }: {
   trend: DailyBucket[];
   trendByManager: Record<string, DailyBucket[]> | null;
@@ -1398,12 +1407,15 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
   const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
   const [cumulative, setCumulative] = useState(false);
   const [compareOn, setCompareOn] = useState(false);
-  // Ручной выбор периода сравнения, помеченный сигнатурой окна, для которого
-  // сделан: при смене основного окна override «протухает» и мы падаем на
-  // дефолт (предыдущее равное окно) — без setState-in-effect.
-  const [compareOverride, setCompareOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
-  const [compareData, setCompareData] = useState<Record<string, DailyBucket[]> | null>(null);
-  const [compareLoading, setCompareLoading] = useState(false);
+  // Оба периода сравнения (A и B) — независимый ручной выбор, помеченный
+  // сигнатурой основного окна: при смене окна override «протухает» и мы падаем
+  // на дефолт (A = окно дашборда, B = предыдущее равное). Без setState-in-effect.
+  const [periodAOverride, setPeriodAOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [periodBOverride, setPeriodBOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [dataA, setDataA] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [dataB, setDataB] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [loadingA, setLoadingA] = useState(false);
+  const [loadingB, setLoadingB] = useState(false);
 
   const managers = useMemo(
     () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
@@ -1421,56 +1433,86 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
   );
   const windowSig = `${currentDates[0] ?? ""}|${currentDates.length}`;
 
-  // Дефолт периода сравнения = предыдущее окно той же длины перед текущим.
-  const defaultCmp = useMemo(() => {
+  // Дефолт A = окно дашборда; дефолт B = предыдущее равное окно перед ним.
+  const defaultA = useMemo(() => {
     if (currentDates.length === 0) return null;
-    const first = currentDates[0];
-    const n = currentDates.length;
-    const prevEnd = addDaysCivil(first, -1);
-    const prevStart = addDaysCivil(prevEnd, -(n - 1));
+    return { start: berlinCivilDate(currentDates[0]), end: berlinCivilDate(currentDates[currentDates.length - 1]) };
+  }, [currentDates]);
+  const defaultB = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    const prevEnd = addDaysCivil(currentDates[0], -1);
+    const prevStart = addDaysCivil(prevEnd, -(currentDates.length - 1));
     return { start: berlinCivilDate(prevStart), end: berlinCivilDate(prevEnd) };
   }, [currentDates]);
 
-  // Эффективный период сравнения (override, если он для текущего окна; иначе дефолт).
-  const effectiveCmp = useMemo(
-    () => (compareOverride && compareOverride.sig === windowSig
-      ? { start: compareOverride.start, end: compareOverride.end }
-      : defaultCmp),
-    [compareOverride, windowSig, defaultCmp],
+  // customA = пользователь переопределил A для текущего окна (иначе A = окно дашборда).
+  const customA = !!(periodAOverride && periodAOverride.sig === windowSig);
+  const effA = useMemo(
+    () => (customA && periodAOverride ? { start: periodAOverride.start, end: periodAOverride.end } : defaultA),
+    [customA, periodAOverride, defaultA],
   );
-  const cmpFrom = effectiveCmp ? formatDate(effectiveCmp.start) : null;
-  const cmpTo = effectiveCmp ? formatDate(effectiveCmp.end) : null;
+  const effB = useMemo(
+    () => (periodBOverride && periodBOverride.sig === windowSig
+      ? { start: periodBOverride.start, end: periodBOverride.end }
+      : defaultB),
+    [periodBOverride, windowSig, defaultB],
+  );
+  const aFrom = effA ? formatDate(effA.start) : null;
+  const aTo = effA ? formatDate(effA.end) : null;
+  const bFrom = effB ? formatDate(effB.start) : null;
+  const bTo = effB ? formatDate(effB.end) : null;
 
-  // Фетч per-manager тренда за период сравнения (setState — в callback, не в теле эффекта).
-  const fetchCompare = useCallback(async (from: string, to: string) => {
-    setCompareLoading(true);
-    try {
-      const vParam = vertical && department === "b2g" ? `&vertical=${vertical}` : "";
-      const res = await fetch(`/api/dashboard/manager-trend?department=${department}&from=${from}&to=${to}${vParam}`);
-      const j = await res.json();
-      setCompareData(j.success ? j.trendByManager : null);
-    } catch {
-      setCompareData(null);
-    } finally {
-      setCompareLoading(false);
-    }
-  }, [department, vertical]);
+  // Фетч per-manager тренда за период (setState — в callback, не в теле эффекта).
+  const fetchInto = useCallback(
+    async (
+      from: string,
+      to: string,
+      setData: (d: Record<string, DailyBucket[]> | null) => void,
+      setLoading: (b: boolean) => void,
+    ) => {
+      setLoading(true);
+      try {
+        const vParam = vertical && department === "b2g" ? `&vertical=${vertical}` : "";
+        const res = await fetch(`/api/dashboard/manager-trend?department=${department}&from=${from}&to=${to}${vParam}`);
+        const j = await res.json();
+        setData(j.success ? j.trendByManager : null);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [department, vertical],
+  );
+
+  // A фетчим только когда он переопределён (по умолчанию A = данные дашборда).
+  useEffect(() => {
+    if (!compareOn || !customA || !aFrom || !aTo) return;
+    fetchInto(aFrom, aTo, setDataA, setLoadingA);
+  }, [compareOn, customA, aFrom, aTo, fetchInto]);
 
   useEffect(() => {
-    if (!compareOn || !cmpFrom || !cmpTo) return;
-    fetchCompare(cmpFrom, cmpTo);
-  }, [compareOn, cmpFrom, cmpTo, fetchCompare]);
+    if (!compareOn || !bFrom || !bTo) return;
+    fetchInto(bFrom, bTo, setDataB, setLoadingB);
+  }, [compareOn, bFrom, bTo, fetchInto]);
 
-  // x — по индексу текущего окна; период сравнения накладывается по позиции
-  // (день N ↔ день N), лишние дни сравнения за пределами окна не показываем.
+  // x-ось = дни периода A (если A = окно дашборда, берём готовые currentDates;
+  // если A переопределён — генерим диапазон и берём dataA). Период B
+  // накладывается по индексу дня (день N ↔ день N).
   const chartData = useMemo(() => {
-    if (!trendByManager || managers.length === 0) return [];
-    const rows = currentDates.map((date, idx) => {
+    if (managers.length === 0) return [];
+    const seriesA = compareOn && customA ? dataA : trendByManager;
+    const seriesB = compareOn ? dataB : null;
+    const xDates = compareOn && customA
+      ? (aFrom && aTo ? civilDateRange(aFrom, aTo) : [])
+      : currentDates;
+    if (xDates.length === 0) return [];
+    const rows = xDates.map((date, idx) => {
       const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
       for (const m of visible) {
-        row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
-        if (compareOn && compareData) {
-          const cv = compareData[m]?.[idx]?.[metric];
+        row[m] = seriesA?.[m]?.[idx]?.[metric] ?? 0;
+        if (seriesB) {
+          const cv = seriesB[m]?.[idx]?.[metric];
           if (cv != null) row[`${m}__cmp`] = cv;
         }
       }
@@ -1488,7 +1530,7 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
       }
     }
     return rows;
-  }, [trendByManager, managers, visible, metric, currentDates, compareOn, compareData, cumulative]);
+  }, [managers, visible, metric, cumulative, compareOn, customA, dataA, dataB, trendByManager, currentDates, aFrom, aTo]);
 
   const fmtRange = (a: string, b: string) => `${a.slice(5).replace("-", ".")}–${b.slice(5).replace("-", ".")}`;
 
@@ -1496,12 +1538,12 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
     <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
       <div className="min-w-0">
         <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
-        {compareOn && currentDates.length > 0 && cmpFrom && cmpTo && (
+        {compareOn && aFrom && aTo && bFrom && bTo && (
           <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
-            <span>Текущий: {fmtRange(currentDates[0], currentDates[currentDates.length - 1])}</span>
+            <span>A: {fmtRange(aFrom, aTo)}</span>
             <span className="text-slate-600">·</span>
-            <span className="border-b border-dashed border-slate-500">Сравнение: {fmtRange(cmpFrom, cmpTo)}</span>
-            {compareLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+            <span className="border-b border-dashed border-slate-500">B: {fmtRange(bFrom, bTo)}</span>
+            {(loadingA || loadingB) && <Loader2 className="w-3 h-3 animate-spin" />}
           </div>
         )}
       </div>
@@ -1533,16 +1575,29 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
         >
           Сравнить периоды
         </button>
-        {compareOn && effectiveCmp && (
-          <CalendarPicker
-            mode="range"
-            value={{ start: effectiveCmp.start, end: effectiveCmp.end }}
-            onChange={(r) => {
-              if (!r.start) return;
-              setCompareOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
-            }}
-            onClear={() => setCompareOverride(null)}
-          />
+        {compareOn && effA && effB && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-bold text-slate-500">A</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effA.start, end: effA.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodAOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodAOverride(null)}
+            />
+            <span className="text-[10px] font-bold text-slate-500">B</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effB.start, end: effB.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodBOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodBOverride(null)}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -1568,9 +1623,9 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
               ];
               // Пунктирная линия периода сравнения — тот же цвет менеджера,
               // скрыта из легенды (иначе двоится), видна в тултипе как «(пред.)».
-              if (compareOn && compareData) {
+              if (compareOn && dataB) {
                 lines.push(
-                  <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (пред.)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
+                  <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (B)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
                 );
               }
               return lines;
