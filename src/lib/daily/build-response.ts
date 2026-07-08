@@ -9,8 +9,8 @@ import {
   hasCategoryLetter,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsCombined, getOverdueTasksByManager } from "@/lib/daily/analytics-calls";
-import { getManagersWithKommo, getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
+import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsCombined, getOverdueTasksByManager, getManagersWithKommoForPeriod } from "@/lib/daily/analytics-calls";
+import { getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
 import { getDailySections } from "@/lib/daily/metrics-config";
 import {
   getPipelineIds,
@@ -650,7 +650,8 @@ export async function buildDailyResponse(department: string, period: string, dat
   //     different (computed or monthly-scaled) value because the day record
   //     never reached getPlan.
   const [allManagers, monthlyPlans, dayPlans, scheduleMap] = await Promise.all([
-    getManagersWithKommo(department),
+    // Komm: soft-deleted менеджеры не выпадают из статистики за периоды работы.
+    getManagersWithKommoForPeriod(department, from, to, v),
     getPlans(department, "month", monthPeriodDate, v),
     periodType === "day" ? getPlans(department, "day", dateStr, v) : Promise.resolve([]),
     period === "day" ? getScheduleForDate(dateStr) : Promise.resolve(null),

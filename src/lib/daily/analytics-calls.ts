@@ -33,6 +33,7 @@ function includeNullPipeline(vertical?: Vertical): boolean {
   return vertical !== "buh" && vertical !== "med";
 }
 import type { UserCallMetrics } from "@/lib/kommo/metrics";
+import { getManagersWithKommo, type ManagerRow } from "@/lib/db/queries-daily";
 import { cached } from "@/lib/kommo/cache";
 
 // 60s TTL + in-flight dedup для всех analytics-запросов. В months-mode 12
@@ -1681,14 +1682,23 @@ export async function getManagerNamesWithComms(
 ): Promise<Set<string>> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept, vertical);
-  if (pipelineIds.length === 0) return new Set();
+  // b2g атрибутируется по воронке — без воронок считать нечего. b2b — по агенту
+  // (deptCond=TRUE ниже), поэтому там пустой список воронок не важен.
+  if (dept === "b2g" && pipelineIds.length === 0) return new Set();
 
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-  const pipelineCond = includeNullPipeline(vertical)
-    ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
-    : sql`pipeline_id IN (${pipelineList})`;
+  // ВАЖНО: атрибуция как в fetchCallMetricsByMaster. b2b (Коммерсы) считается
+  // ПО АГЕНТУ вне зависимости от воронки лида (deptCond=TRUE) — иначе звонки
+  // менеджера к лидам в чужой/NULL-воронке теряются, и удалённый менеджер не
+  // «оживает». b2g — по воронке.
+  const deptCond =
+    dept === "b2b"
+      ? sql`TRUE`
+      : includeNullPipeline(vertical)
+        ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+        : sql`pipeline_id IN (${pipelineList})`;
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -1697,12 +1707,40 @@ export async function getManagerNamesWithComms(
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
-      AND ${pipelineCond}
+      AND ${deptCond}
       AND manager IS NOT NULL
       AND manager <> ''
   `);
 
   return new Set(result.rows.map((r) => r.manager));
+}
+
+/**
+ * Ростер менеджеров за период: активные ∪ (для b2b) неактивные (soft-deleted),
+ * у которых есть звонки в [fromTs, toTs]. Единая точка, чтобы «удалённый
+ * менеджер не выпадает из статистики» работало во ВСЕХ Komm-вьюхах (Звонки,
+ * Дейли, …), а не в одной вкладке. Для b2g возвращает только активных.
+ */
+export async function getManagersWithKommoForPeriod(
+  department: string,
+  fromTs: number,
+  toTs: number,
+  vertical?: Vertical,
+): Promise<ManagerRow[]> {
+  const active = await getManagersWithKommo(department);
+  if (department !== "b2b") return active;
+  try {
+    const activeIds = new Set(active.map((m) => m.id));
+    const [withInactive, namesWithComms] = await Promise.all([
+      getManagersWithKommo(department, { includeInactive: true }),
+      getManagerNamesWithComms(department, fromTs, toTs, vertical),
+    ]);
+    const revived = withInactive.filter((m) => !activeIds.has(m.id) && namesWithComms.has(m.name));
+    return revived.length > 0 ? [...active, ...revived] : active;
+  } catch (e) {
+    console.error("[roster] revive inactive managers failed:", e);
+    return active;
+  }
 }
 
 /**

@@ -18,7 +18,6 @@ import {
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getManagersWithKommo } from "@/lib/db/queries-daily";
 import {
   getPipelineIds,
   getActiveStatusIds,
@@ -35,7 +34,7 @@ import {
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
   getAnalyticsDailyTrendByManager,
-  getManagerNamesWithComms,
+  getManagersWithKommoForPeriod,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
   getAnalyticsAvgWaitSeconds,
@@ -523,24 +522,9 @@ async function buildDashboardResponse(
     const pipelineIds = getPipelineIds(department, vertical);
     const activeStatusIds = getActiveStatusIds(department, vertical);
 
-    let allManagers = await getManagersWithKommo(department);
-    // Задача (Komm): не терять soft-deleted менеджеров за периоды, когда они
-    // работали. Для b2b добавляем неактивных менеджеров, у которых есть звонки
-    // в выбранном периоде [from, to] — их данные уже лежат в communications,
-    // выпадал только ростер (isActive=false).
-    if (department === "b2b") {
-      try {
-        const activeIds = new Set(allManagers.map((m) => m.id));
-        const [withInactive, namesWithComms] = await Promise.all([
-          getManagersWithKommo(department, { includeInactive: true }),
-          getManagerNamesWithComms(department, from, to, vertical),
-        ]);
-        const revived = withInactive.filter((m) => !activeIds.has(m.id) && namesWithComms.has(m.name));
-        if (revived.length > 0) allManagers = [...allManagers, ...revived];
-      } catch (e) {
-        console.error("[Dashboard] revive inactive managers failed:", e);
-      }
-    }
+    // Komm: soft-deleted менеджеры не выпадают из статистики за периоды, когда
+    // работали (единый ростер за период; для b2g = только активные).
+    const allManagers = await getManagersWithKommoForPeriod(department, from, to, vertical);
     const managerKommoIds = allManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id != null);
