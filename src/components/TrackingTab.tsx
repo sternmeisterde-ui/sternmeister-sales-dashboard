@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users, Search, X } from "lucide-react";
+import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users, Search, X, Clock } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import {
   EVENT_TYPES,
@@ -42,6 +42,9 @@ interface ManagerTimeline {
   id: string;
   name: string;
   line: string | null;
+  // CallGear-only менеджер: его звонки приходят с задержкой ~7ч (эмбарго
+  // CallGear API) — показываем пометку, чтобы не выглядело багом.
+  callgearDelayed?: boolean;
   days: DayTimeline[];
 }
 
@@ -447,6 +450,14 @@ function ManagerList({
                 Линия {m.line}
               </span>
             )}
+            {m.callgearDelayed && (
+              <span
+                className="mt-0.5 inline-flex w-fit items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider bg-amber-500/15 text-amber-400"
+                title="CallGear отдаёт данные о звонках с задержкой ~7 часов (эмбарго их API) — это ожидаемо, не баг. CloudTalk обновляется за ~10 минут."
+              >
+                <Clock className="w-2.5 h-2.5" /> CallGear · ~7ч
+              </span>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -508,6 +519,14 @@ function DialerList({
             {m.line && (
               <span className="text-[10px] uppercase tracking-widest text-slate-500">
                 Линия {m.line}
+              </span>
+            )}
+            {m.callgearDelayed && (
+              <span
+                className="mt-0.5 inline-flex w-fit items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider bg-amber-500/15 text-amber-400"
+                title="CallGear отдаёт данные о звонках с задержкой ~7 часов (эмбарго их API) — это ожидаемо, не баг. CloudTalk обновляется за ~10 минут."
+              >
+                <Clock className="w-2.5 h-2.5" /> CallGear · ~7ч
               </span>
             )}
           </div>
