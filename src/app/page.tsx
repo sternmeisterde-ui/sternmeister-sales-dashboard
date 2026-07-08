@@ -227,12 +227,14 @@ type Vertical = "buh" | "med" | "all";
 const VERTICAL_STORAGE_KEY = "sm_active_vertical";
 
 function readStoredVertical(): Vertical {
-  if (typeof window === "undefined") return "all";
+  // Дефолт вертикали — «Бухгалтерия» (buh), а не «Все». Явный выбор пользователя
+  // (buh/med/all в localStorage) сохраняется и переопределяет дефолт.
+  if (typeof window === "undefined") return "buh";
   try {
     const v = window.localStorage.getItem(VERTICAL_STORAGE_KEY);
-    return v === "buh" || v === "med" || v === "all" ? v : "all";
+    return v === "buh" || v === "med" || v === "all" ? v : "buh";
   } catch {
-    return "all";
+    return "buh";
   }
 }
 
@@ -269,9 +271,9 @@ export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
   const [activeDepartment, setActiveDepartment] = useState<"b2g" | "b2b">("b2g");
-  // Вертикаль внутри b2g (Бух/Мед/Все). SSR-safe дефолт "all"; реальное значение
-  // из localStorage применяется после монтирования (в session-effect, ветка admin).
-  const [activeVertical, setActiveVertical] = useState<Vertical>("all");
+  // Вертикаль внутри b2g (Бух/Мед/Все). SSR-safe дефолт "buh" (Бухгалтерия);
+  // реальное значение из localStorage применяется после монтирования (session-effect).
+  const [activeVertical, setActiveVertical] = useState<Vertical>("buh");
   // Начальный таб — стабильный SSR-safe "dashboard". Реальный таб из URL hash
   // (#funnel и т.д.) применяется в useEffect ПОСЛЕ монтирования (см. ниже).
   // Читать hash прямо в инициализаторе нельзя: на сервере window нет → "dashboard",

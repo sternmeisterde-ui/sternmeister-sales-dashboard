@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeCohortLeads } from "@/lib/funnel/lead-list";
 import { parseLangBuckets } from "@/lib/funnel/compute";
+import { funnelFrom, funnelToExclusive } from "@/lib/funnel/date-range";
 import type { ConversionId } from "@/lib/funnel/types";
 import { CONVERSION_ORDER } from "@/lib/funnel/conversions";
 
@@ -48,8 +49,9 @@ export async function GET(
   // Чтобы посчитать корректно, нужны те же фильтры, что у /cohorts:
   // from/to определяют размер baseLeads-выборки, а потом мы фильтруем по неделе.
   // На фронте — берутся из текущих фильтров.
-  const from = parseDate(sp.get("from"));
-  const to = parseDate(sp.get("to"));
+  // Границы — берлинские гражданские, правая включительна (см. date-range.ts).
+  const from = funnelFrom(sp.get("from"));
+  const to = funnelToExclusive(sp.get("to"));
   if (!from || !to) {
     return NextResponse.json(
       { error: "from and to are required (YYYY-MM-DD)" },
@@ -95,14 +97,4 @@ export async function GET(
       { status: 500 }
     );
   }
-}
-
-function parseDate(raw: string | null): Date | null {
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(
-    Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  );
-  return Number.isNaN(d.getTime()) ? null : d;
 }

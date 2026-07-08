@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeManagers } from "@/lib/funnel/managers";
 import { parseLangBuckets } from "@/lib/funnel/compute";
+import { funnelFrom, funnelToExclusive } from "@/lib/funnel/date-range";
 import type { Vertical } from "@/lib/kommo/pipeline-config";
 
 /** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховая (legacy). */
@@ -22,8 +23,9 @@ export async function GET(req: NextRequest) {
   }
 
   const params = req.nextUrl.searchParams;
-  const from = parseDate(params.get("from"));
-  const to = parseDate(params.get("to"));
+  // Границы — берлинские гражданские, правая включительна (см. date-range.ts).
+  const from = funnelFrom(params.get("from"));
+  const to = funnelToExclusive(params.get("to"));
   if (!from || !to) {
     return NextResponse.json(
       { error: "from and to are required (YYYY-MM-DD)" },
@@ -53,12 +55,4 @@ export async function GET(req: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-function parseDate(raw: string | null): Date | null {
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return Number.isNaN(d.getTime()) ? null : d;
 }
