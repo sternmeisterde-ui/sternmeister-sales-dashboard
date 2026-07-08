@@ -306,6 +306,20 @@ export default function AnalyticsTab({
   const [excludedList, setExcludedList] = useState<ExcludedCall[]>([]);
   const [excludedOpen, setExcludedOpen] = useState(false);
   const [excludeBusy, setExcludeBusy] = useState(false);
+  // Плашка «Исключённые» — не висит вечно: показываем только исключения за
+  // последнюю минуту (по createdAt). nowMs тикает, чтобы плашка сама скрылась,
+  // когда все исключения станут старше 60с. Само исключение из статистики
+  // остаётся — прячется только панель-подтверждение.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const recentExclusions = useMemo(
+    () => excludedList.filter((ex) => ex.createdAt != null && nowMs - Date.parse(ex.createdAt) < 60_000),
+    [excludedList, nowMs],
+  );
+  useEffect(() => {
+    if (!canModerate || recentExclusions.length === 0) return;
+    const id = setInterval(() => setNowMs(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, [canModerate, recentExclusions.length]);
 
   // Comparison mode
   const [compareMode, setCompareMode] = useState(false);
@@ -935,8 +949,10 @@ export default function AnalyticsTab({
                 </button>
               </div>
             )}
-            {/* Исключённые из статистики — панель модерации (admin/rop/teamlead). */}
-            {canModerate && excludedList.length > 0 && (
+            {/* Исключённые из статистики — панель-подтверждение (admin/rop).
+                Живёт ~минуту после исключения (recentExclusions), потом сама
+                скрывается; исключение из статистики при этом остаётся. */}
+            {canModerate && recentExclusions.length > 0 && (
               <div className="glass-panel rounded-2xl border border-rose-500/15 mb-2 overflow-hidden">
                 <button
                   type="button"
@@ -945,13 +961,13 @@ export default function AnalyticsTab({
                 >
                   <span className="flex items-center gap-2 text-[11px] uppercase tracking-widest font-bold text-rose-300">
                     <Ban className="w-3.5 h-3.5" />
-                    Исключённые из статистики ({excludedList.length})
+                    Исключённые из статистики ({recentExclusions.length})
                   </span>
                   {excludedOpen ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
                 </button>
                 {excludedOpen && (
                   <div className="px-3 pb-3 flex flex-col gap-1">
-                    {excludedList.map((ex) => (
+                    {recentExclusions.map((ex) => (
                       <div key={ex.id} className="flex items-center gap-2 text-[11px] text-slate-400 bg-slate-900/40 rounded-lg px-3 py-1.5">
                         <span className="text-slate-200 font-medium truncate max-w-[160px]">{ex.managerName ?? "—"}</span>
                         <span className="text-slate-600">·</span>

@@ -154,6 +154,10 @@ export async function GET(req: NextRequest) {
         // below; not echoed back to the client.
         telegramUsername: masterManagers.telegramUsername,
         kommoUserId: masterManagers.kommoUserId,
+        // Телефония: CallGear отдаёт CDR с эмбарго ~7ч (их API), CloudTalk — ~10 мин.
+        // Для CG-only менеджеров (напр. Сафронова) показываем пометку о задержке.
+        callgearEmployeeId: masterManagers.callgearEmployeeId,
+        cloudtalkAgentId: masterManagers.cloudtalkAgentId,
       })
       .from(masterManagers)
       .where(
@@ -419,6 +423,9 @@ export async function GET(req: NextRequest) {
       id: m.id,
       name: m.name,
       line: m.line,
+      // CallGear-only менеджер → его звонки приходят с задержкой ~7ч (эмбарго
+      // CallGear API). Клиент рисует пометку, чтобы это не выглядело багом.
+      callgearDelayed: m.callgearEmployeeId != null && m.cloudtalkAgentId == null,
       days: dates.map((date) => {
         const sched = scheduleIndex.get(`${m.id}|${date}`) ?? null;
         // Fallback: if no schedule row but manager has shift times, treat as full day

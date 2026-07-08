@@ -18,7 +18,6 @@ import {
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getManagersWithKommo } from "@/lib/db/queries-daily";
 import {
   getPipelineIds,
   getActiveStatusIds,
@@ -35,6 +34,7 @@ import {
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
   getAnalyticsDailyTrendByManager,
+  getManagersWithKommoForPeriod,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
   getAnalyticsAvgWaitSeconds,
@@ -522,7 +522,9 @@ async function buildDashboardResponse(
     const pipelineIds = getPipelineIds(department, vertical);
     const activeStatusIds = getActiveStatusIds(department, vertical);
 
-    const allManagers = await getManagersWithKommo(department);
+    // Komm: soft-deleted менеджеры не выпадают из статистики за периоды, когда
+    // работали (единый ростер за период; для b2g = только активные).
+    const allManagers = await getManagersWithKommoForPeriod(department, from, to, vertical);
     const managerKommoIds = allManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id != null);
