@@ -18,6 +18,7 @@ import type {
   CohortWeek,
   ConversionMeta,
   ConversionSummary,
+  MaturityFilter,
 } from "@/lib/funnel/types";
 import {
   conversionNote,
@@ -32,6 +33,8 @@ interface Props {
   cohorts: CohortWeek[];
   summary: ConversionSummary;
   mode: ChartMode;
+  /** Текущий фильтр зрелости — определяет подпись и базис средней. */
+  maturity: MaturityFilter;
   selectedWeekStartIso: string | null;
   onSelectWeek: (weekStartIso: string | null) => void;
   /** Слот для тулбара (Цель,% / тогглер режима / кнопка сравнения). */
@@ -43,6 +46,7 @@ export default function FunnelChart({
   cohorts,
   summary,
   mode,
+  maturity,
   selectedWeekStartIso,
   onSelectWeek,
   toolbarSlot,
@@ -119,7 +123,11 @@ export default function FunnelChart({
         <div className="flex items-center gap-4 shrink-0">
           <div className="text-right">
             <div className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">
-              Средняя по зрелым
+              {maturity === "mature"
+                ? "Средняя по зрелым"
+                : maturity === "immature"
+                  ? "Средняя по незрелым"
+                  : "Средняя по всем"}
             </div>
             <div className="text-lg font-bold text-white tabular-nums">
               {fmtPercent(summary.matureAvgPct, 1)}

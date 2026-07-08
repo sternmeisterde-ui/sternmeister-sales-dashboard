@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeDcBreakdown } from "@/lib/funnel/dc-breakdown";
 import { parseLangBuckets } from "@/lib/funnel/compute";
+import { funnelFrom, funnelToExclusive } from "@/lib/funnel/date-range";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,8 +22,9 @@ export async function GET(req: NextRequest) {
   }
 
   const sp = req.nextUrl.searchParams;
-  const from = parseDate(sp.get("from"));
-  const to = parseDate(sp.get("to"));
+  // Границы — берлинские гражданские, правая включительна (см. date-range.ts).
+  const from = funnelFrom(sp.get("from"));
+  const to = funnelToExclusive(sp.get("to"));
   if (!from || !to) {
     return NextResponse.json(
       { error: "from and to are required (YYYY-MM-DD)" },
@@ -65,12 +67,4 @@ export async function GET(req: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-function parseDate(raw: string | null): Date | null {
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return Number.isNaN(d.getTime()) ? null : d;
 }

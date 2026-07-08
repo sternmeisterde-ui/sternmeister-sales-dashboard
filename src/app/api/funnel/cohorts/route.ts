@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { computeCohorts, parseLangBuckets } from "@/lib/funnel/compute";
+import { funnelFrom, funnelToExclusive } from "@/lib/funnel/date-range";
 import type { MaturityFilter } from "@/lib/funnel/types";
 import type { Vertical } from "@/lib/kommo/pipeline-config";
 
@@ -26,8 +27,9 @@ export async function GET(req: NextRequest) {
   }
 
   const params = req.nextUrl.searchParams;
-  const from = parseDate(params.get("from"));
-  const to = parseDate(params.get("to"));
+  // Границы — берлинские гражданские, правая включительна (см. date-range.ts).
+  const from = funnelFrom(params.get("from"));
+  const to = funnelToExclusive(params.get("to"));
   if (!from || !to) {
     return NextResponse.json(
       { error: "from and to are required (YYYY-MM-DD)" },
@@ -68,17 +70,6 @@ export async function GET(req: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-function parseDate(raw: string | null): Date | null {
-  if (!raw) return null;
-  // YYYY-MM-DD → UTC-midnight (трактуем как «полночь Berlin» близко достаточно).
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(
-    Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  );
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function parseMaturity(raw: string | null): MaturityFilter {

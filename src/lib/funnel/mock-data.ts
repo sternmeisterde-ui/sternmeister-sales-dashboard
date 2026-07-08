@@ -8,6 +8,7 @@ import type {
   CohortWeek,
   ConversionSummary,
   LanguageBreakdown,
+  MaturityFilter,
 } from "./types";
 import { CONVERSION_ORDER, CONVERSIONS } from "./conversions";
 
@@ -163,14 +164,20 @@ export function generateAllMockCohorts(): Record<ConversionId, CohortWeek[]> {
 
 /**
  * Сводка по конверсии. См. 03 §4.2.
- * basis = только зрелые когорты; если зрелых нет — все когорты (избегаем «—»).
+ * Базис средней зависит от выбранного фильтра зрелости:
+ *   all → все когорты, mature → только зрелые, immature → только незрелые.
+ * Раньше средняя всегда считалась по зрелым — при тоггле «Все» это вводило в
+ * заблуждение (незрелый хвост исключался вопреки выбору пользователя).
  */
 export function summarizeConversion(
   cohorts: CohortWeek[],
-  benchmark: number | null
+  benchmark: number | null,
+  maturity: MaturityFilter = "all"
 ): ConversionSummary {
   const mature = cohorts.filter((c) => c.maturityState === "mature");
-  const basis = mature.length > 0 ? mature : cohorts;
+  const immature = cohorts.filter((c) => c.maturityState !== "mature");
+  const basis =
+    maturity === "mature" ? mature : maturity === "immature" ? immature : cohorts;
   const baseSum = basis.reduce((acc, c) => acc + c.baseCount, 0);
   const targetSum = basis.reduce((acc, c) => acc + c.targetCount, 0);
   const matureAvgPct = baseSum > 0 ? (targetSum / baseSum) * 100 : null;
@@ -178,7 +185,7 @@ export function summarizeConversion(
     matureAvgPct,
     matureBase: baseSum,
     matureCount: mature.length,
-    immatureCount: cohorts.length - mature.length,
+    immatureCount: immature.length,
     totalCount: cohorts.length,
     benchmarkDelta:
       matureAvgPct !== null && benchmark !== null

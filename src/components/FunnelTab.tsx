@@ -369,7 +369,7 @@ export default function FunnelTab({
       bundles[id] = {
         meta,
         cohorts,
-        summary: summarizeConversion(cohorts, benchmark),
+        summary: summarizeConversion(cohorts, benchmark, filters.maturity),
         isMock,
       };
     }
@@ -556,6 +556,7 @@ export default function FunnelTab({
         cohorts={activeBundle.cohorts}
         summary={activeBundle.summary}
         mode={chartMode}
+        maturity={filters.maturity}
         selectedWeekStartIso={selectedWeekStartIso}
         onSelectWeek={setSelectedWeekStartIso}
         toolbarSlot={
