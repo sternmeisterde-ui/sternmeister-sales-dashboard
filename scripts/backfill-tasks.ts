@@ -29,10 +29,27 @@ import { sql } from "drizzle-orm";
 const RATE_MS = 1100; // ≤1 rps, с запасом
 let lastRequestAt = 0;
 async function politeFetch(url: string, headers: HeadersInit): Promise<Response> {
-  const wait = lastRequestAt + RATE_MS - Date.now();
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastRequestAt = Date.now();
-  return fetch(url, { headers });
+  // Ретраи: на длинных прогонах Kommo/прокси иногда рвёт keep-alive
+  // («other side closed») — это транзиент, повторяем с паузой. Пауза
+  // ретрая длиннее RATE_MS, так что 1 rps не нарушается.
+  for (let attempt = 1; ; attempt++) {
+    const wait = lastRequestAt + RATE_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastRequestAt = Date.now();
+    try {
+      const res = await fetch(url, { headers });
+      if (res.status >= 500 && attempt < 4) {
+        console.warn(`  HTTP ${res.status}, ретрай ${attempt}/3 через 3с…`);
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      if (attempt >= 4) throw e;
+      console.warn(`  сеть: ${e instanceof Error ? e.message : e}, ретрай ${attempt}/3 через 3с…`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
 }
 
 function arg(name: string, def: string | null = null): string | null {
