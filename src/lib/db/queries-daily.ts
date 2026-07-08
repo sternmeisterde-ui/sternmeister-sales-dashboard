@@ -16,7 +16,18 @@ export interface ManagerRow {
  * Includes `manager`, `teamlead` and `rop` roles (ROPs/teamleads also make calls and count
  * toward line metrics).
  */
-export async function getManagersWithKommo(department: string = "b2g"): Promise<ManagerRow[]> {
+export async function getManagersWithKommo(
+  department: string = "b2g",
+  opts?: { includeInactive?: boolean },
+): Promise<ManagerRow[]> {
+  const conds = [
+    eq(masterManagers.department, department),
+    inArray(masterManagers.role, ["manager", "teamlead", "rop"]),
+  ];
+  // По умолчанию только активные. includeInactive нужен, чтобы «оживить»
+  // soft-deleted менеджеров за периоды, когда они работали (см. dashboard route).
+  if (!opts?.includeInactive) conds.push(eq(masterManagers.isActive, true));
+
   const rows = await db
     .select({
       id: masterManagers.id,
@@ -26,13 +37,7 @@ export async function getManagersWithKommo(department: string = "b2g"): Promise<
       role: masterManagers.role,
     })
     .from(masterManagers)
-    .where(
-      and(
-        eq(masterManagers.department, department),
-        eq(masterManagers.isActive, true),
-        inArray(masterManagers.role, ["manager", "teamlead", "rop"]),
-      ),
-    );
+    .where(and(...conds));
 
   return rows;
 }

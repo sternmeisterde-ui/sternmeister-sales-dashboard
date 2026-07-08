@@ -35,6 +35,7 @@ import {
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
   getAnalyticsDailyTrendByManager,
+  getManagerNamesWithComms,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
   getAnalyticsAvgWaitSeconds,
@@ -522,7 +523,24 @@ async function buildDashboardResponse(
     const pipelineIds = getPipelineIds(department, vertical);
     const activeStatusIds = getActiveStatusIds(department, vertical);
 
-    const allManagers = await getManagersWithKommo(department);
+    let allManagers = await getManagersWithKommo(department);
+    // Задача (Komm): не терять soft-deleted менеджеров за периоды, когда они
+    // работали. Для b2b добавляем неактивных менеджеров, у которых есть звонки
+    // в выбранном периоде [from, to] — их данные уже лежат в communications,
+    // выпадал только ростер (isActive=false).
+    if (department === "b2b") {
+      try {
+        const activeIds = new Set(allManagers.map((m) => m.id));
+        const [withInactive, namesWithComms] = await Promise.all([
+          getManagersWithKommo(department, { includeInactive: true }),
+          getManagerNamesWithComms(department, from, to, vertical),
+        ]);
+        const revived = withInactive.filter((m) => !activeIds.has(m.id) && namesWithComms.has(m.name));
+        if (revived.length > 0) allManagers = [...allManagers, ...revived];
+      } catch (e) {
+        console.error("[Dashboard] revive inactive managers failed:", e);
+      }
+    }
     const managerKommoIds = allManagers
       .map((m) => m.kommoUserId)
       .filter((id): id is number => id != null);

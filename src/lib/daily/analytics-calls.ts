@@ -1668,6 +1668,44 @@ export async function getAnalyticsDailyTrendByLine(
 }
 
 /**
+ * Имена менеджеров, у которых есть звонки в периоде [fromTs, toTs] (по
+ * department-воронкам). Нужно, чтобы вернуть в статистику soft-deleted
+ * менеджеров за периоды, когда они реально работали (задача «удалённый
+ * менеджер не должен выпадать из статистики»).
+ */
+export async function getManagerNamesWithComms(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+  vertical?: Vertical,
+): Promise<Set<string>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept, vertical);
+  if (pipelineIds.length === 0) return new Set();
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const pipelineCond = includeNullPipeline(vertical)
+    ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+    : sql`pipeline_id IN (${pipelineList})`;
+
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{ manager: string }>(sql`
+    SELECT DISTINCT manager
+    FROM analytics.communications
+    WHERE created_at >= ${fromDate}
+      AND created_at <= ${toDate}
+      AND ${pipelineCond}
+      AND manager IS NOT NULL
+      AND manager <> ''
+  `);
+
+  return new Set(result.rows.map((r) => r.manager));
+}
+
+/**
  * Per-manager daily trend — one padded series per manager, keyed by the raw
  * `manager` value in analytics.communications. Used by the «Динамика звонков»
  * chart to render a line per manager (metric chosen client-side).
