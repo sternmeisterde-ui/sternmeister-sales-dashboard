@@ -251,12 +251,13 @@ export async function getAnalyticsCallEventsByMaster(
   const managerIds = managers.map((m) => m.id).sort().join(",");
   const cacheKey = `call-events:${dept}:${fromTs}:${toTs}:${managerIds}`;
   return cached(cacheKey, ANALYTICS_TTL, () =>
-    fetchCallEventsByMaster(managers, pipelineIds, fromTs, toTs),
+    fetchCallEventsByMaster(managers, dept, pipelineIds, fromTs, toTs),
   );
 }
 
 async function fetchCallEventsByMaster(
   managers: Array<{ id: string; name: string }>,
+  dept: "b2g" | "b2b",
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
@@ -267,6 +268,16 @@ async function fetchCallEventsByMaster(
     pipelineIds.map((id) => sql`${id}`),
     sql`, `,
   );
+  // Атрибуция как в fetchCallMetricsByMaster (и getManagerNamesWithComms):
+  // b2b (Коммерсы) — ПО АГЕНТУ (deptCond=TRUE), т.к. звонок менеджера
+  // принадлежит b2b вне зависимости от воронки лида. Старый фильтр по воронке
+  // терял звонки к лидам в чужой/NULL-воронке → «время в звонках» в Активности
+  // было МЕНЬШЕ, чем «Длительность» в Звонках (расхождение у Метальниковой).
+  // Scope по отделу далее держит nameToMaster (только менеджеры этого отдела).
+  const deptCond =
+    dept === "b2b"
+      ? sql`TRUE`
+      : sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`;
 
   // Build name → master_managers.id map (with aliases) up front so the loop
   // below stays O(N).
@@ -293,7 +304,7 @@ async function fetchCallEventsByMaster(
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
       AND communication_type LIKE 'call%'
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
+      AND ${deptCond}
       AND manager IS NOT NULL AND manager <> ''
     ORDER BY communication_id, lead_id NULLS LAST
   `);
