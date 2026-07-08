@@ -1668,6 +1668,98 @@ export async function getAnalyticsDailyTrendByLine(
 }
 
 /**
+ * Per-manager daily trend — one padded series per manager, keyed by the raw
+ * `manager` value in analytics.communications. Used by the «Динамика звонков»
+ * chart to render a line per manager (metric chosen client-side).
+ *
+ * managerNames — department-filtered names (caller builds from master_managers).
+ * Calls whose manager isn't in the list are dropped (same behaviour as the
+ * per-line trend; name-alias drift can undercount). Managers with zero calls
+ * in the period are omitted from the result so the chart isn't cluttered with
+ * flat-zero lines.
+ */
+export async function getAnalyticsDailyTrendByManager(
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+  managerNames: string[],
+  vertical?: Vertical,
+): Promise<Record<string, DailyCallBucket[]>> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept, vertical);
+  if (pipelineIds.length === 0 || managerNames.length === 0) return {};
+
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const pipelineCond = includeNullPipeline(vertical)
+    ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+    : sql`pipeline_id IN (${pipelineList})`;
+  const nameList = sql.join(managerNames.map((n) => sql`${n}`), sql`, `);
+
+  // DISTINCT ON collapses Pattern-A fan-out; each fanned row shares the same
+  // manager, so per-manager bucketing is unaffected by dedup.
+  const result = await (analyticsDb as unknown as {
+    execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+  }).execute<{
+    manager: string;
+    day: string;
+    calls_total: string | number;
+    calls_connected: string | number;
+    outgoing_total: string | number;
+    incoming_total: string | number;
+    missed_incoming: string | number;
+    total_duration_s: string | number;
+  }>(sql`
+    WITH deduped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, manager, duration, call_status,
+        to_char((created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date, 'YYYY-MM-DD') AS day
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND ${pipelineCond}
+        AND manager IN (${nameList})
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
+    SELECT
+      manager,
+      day,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in'))                          AS calls_total,
+      COUNT(*) FILTER (WHERE communication_type IN ('call_out','call_in') AND call_status = 4)      AS calls_connected,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out')                                       AS outgoing_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
+      COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (call_status IS NULL OR call_status <> 4)) AS missed_incoming,
+      COALESCE(SUM(CASE WHEN call_status = 4 THEN duration ELSE 0 END), 0)                          AS total_duration_s
+    FROM deduped
+    GROUP BY manager, day
+    ORDER BY day
+  `);
+
+  const byManagerDay = new Map<string, Map<string, DailyCallBucket>>();
+  for (const row of result.rows) {
+    const secs = Number(row.total_duration_s);
+    const bucket: DailyCallBucket = {
+      date: row.day,
+      callsTotal: Number(row.calls_total),
+      callsConnected: Number(row.calls_connected),
+      totalMinutes: Math.round(secs / 60),
+      missedIncoming: Number(row.missed_incoming),
+      incomingTotal: Number(row.incoming_total),
+      outgoingTotal: Number(row.outgoing_total),
+    };
+    if (!byManagerDay.has(row.manager)) byManagerDay.set(row.manager, new Map());
+    byManagerDay.get(row.manager)!.set(row.day, bucket);
+  }
+
+  const out: Record<string, DailyCallBucket[]> = {};
+  for (const [manager, days] of byManagerDay) {
+    out[manager] = padDailyTrend(Array.from(days.values()), fromTs, toTs);
+  }
+  return out;
+}
+
+/**
  * Per-pipeline daily trend — the B2B mirror of getAnalyticsDailyTrendByLine.
  * Splits each day's call activity across the department's pipelines (Бух
  * Комм / Мед Комм for B2B). Returns a Map<pipelineId, padded series>. NULL

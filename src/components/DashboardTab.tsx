@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ChevronDown, Check,
   PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -103,6 +103,9 @@ interface DashboardData {
     incomingTotal: number; outgoingTotal: number;
   }> | null;
   trendByPipeline?: Record<string, DailyBucket[]> | null;
+  // B2B-only: manager name → daily buckets. Drives the per-manager «Динамика
+  // звонков» chart (line per manager, metric via pill toggle).
+  trendByManager?: Record<string, DailyBucket[]> | null;
 }
 
 // Строка детализации «Потерянных» (ответ /api/dashboard/lost-calls).
@@ -1012,15 +1015,21 @@ export default function DashboardTab({
         );
       })}
 
-      {/* ============ TREND CHART — line filter for B2G, pipeline filter for B2B ============ */}
-      <TrendChart
-        trend={data.trend}
-        trendByLine={data.trendByLine}
-        trendByPipeline={data.trendByPipeline ?? null}
-        filter={trendLine}
-        onFilterChange={setTrendLine}
-        mode={isB2G ? "b2g" : "b2b"}
-      />
+      {/* ============ TREND CHART ============
+           B2G — line/pipeline dropdown (3 aggregate metric lines).
+           B2B — line per manager, metric via pill toggle + manager multiselect. */}
+      {isB2G ? (
+        <TrendChart
+          trend={data.trend}
+          trendByLine={data.trendByLine}
+          trendByPipeline={data.trendByPipeline ?? null}
+          filter={trendLine}
+          onFilterChange={setTrendLine}
+          mode="b2g"
+        />
+      ) : (
+        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} />
+      )}
     </div>
   );
 }
@@ -1292,6 +1301,165 @@ function CallMetricTile({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ==================== B2B trend chart: line per manager ====================
+// Метрика (Звонки/Дозвон/Пропущенные) выбирается пилюлей, менеджеры — мульти-
+// селектом. По линии на выбранного менеджера; пусто → все менеджеры.
+
+// Палитра линий (различимы на тёмном фоне; повторяется по кругу при 12+).
+const MANAGER_LINE_COLORS = [
+  "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899",
+  "#06b6d4", "#84cc16", "#f97316", "#14b8a6", "#a855f7", "#eab308",
+];
+
+type TrendMetric = "callsTotal" | "callsConnected" | "missedIncoming";
+const METRIC_PILLS: { key: TrendMetric; label: string }[] = [
+  { key: "callsTotal", label: "Звонки" },
+  { key: "callsConnected", label: "Дозвон" },
+  { key: "missedIncoming", label: "Пропущенные" },
+];
+
+// Мультиселект менеджеров. selected === null означает «все».
+function ManagerMultiSelect({ managers, selected, onChange }: {
+  managers: string[];
+  selected: Set<string> | null;
+  onChange: (next: Set<string> | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const isAll = selected === null;
+  const count = isAll ? managers.length : selected.size;
+  const toggle = (m: string) => {
+    const base = isAll ? new Set(managers) : new Set(selected);
+    if (base.has(m)) base.delete(m);
+    else base.add(m);
+    // Снова выбраны все → возвращаемся к null (=«все»), чтобы новые менеджеры
+    // в следующих периодах тоже попадали в выборку.
+    onChange(base.size === managers.length ? null : base);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:outline-none transition-colors"
+      >
+        Менеджеры <span className="text-slate-500">{count}/{managers.length}</span>
+        <ChevronDown className="w-3.5 h-3.5" />
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 z-30 w-56 max-h-64 overflow-y-auto glass-panel rounded-lg border border-white/10 p-1 shadow-xl scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+          <button
+            onClick={() => onChange(null)}
+            className="w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-white/5 rounded flex items-center justify-between"
+          >
+            Выбрать всех {isAll && <Check className="w-3.5 h-3.5 text-blue-400" />}
+          </button>
+          <div className="h-px bg-white/10 my-1" />
+          {managers.map((m, i) => {
+            const checked = isAll || selected.has(m);
+            return (
+              <button
+                key={m}
+                onClick={() => toggle(m)}
+                className="w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-white/5 rounded flex items-center gap-2"
+              >
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: MANAGER_LINE_COLORS[i % MANAGER_LINE_COLORS.length] }} />
+                <span className="flex-1 truncate">{m}</span>
+                {checked && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TrendChartByManager({ trendByManager }: {
+  trend: DailyBucket[];
+  trendByManager: Record<string, DailyBucket[]> | null;
+}) {
+  const [metric, setMetric] = useState<TrendMetric>("callsTotal");
+  const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
+
+  const managers = useMemo(
+    () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
+    [trendByManager],
+  );
+  const visible = useMemo(
+    () => (selected === null ? managers : managers.filter((m) => selected.has(m))),
+    [managers, selected],
+  );
+
+  // Все серии padded на один и тот же диапазон дат → берём даты из первой и
+  // индексируем остальные по позиции.
+  const chartData = useMemo(() => {
+    if (!trendByManager || managers.length === 0) return [];
+    const dates = (trendByManager[managers[0]] ?? []).map((d) => d.date);
+    return dates.map((date, idx) => {
+      const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
+      for (const m of visible) row[m] = trendByManager[m]?.[idx]?.[metric] ?? 0;
+      return row;
+    });
+  }, [trendByManager, managers, visible, metric]);
+
+  const header = (
+    <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
+          {METRIC_PILLS.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => setMetric(p.key)}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${metric === p.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {managers.length > 0 && (
+          <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="glass-panel rounded-2xl p-5 border border-white/5">
+      {header}
+      {managers.length === 0 ? (
+        <div className="py-10 text-center text-slate-500 text-sm">Нет данных по менеджерам за период</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={240}>
+          <LineChart data={chartData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis dataKey="date" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={{ stroke: "#334155" }} tickLine={false} />
+            <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+            <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
+            {visible.map((m) => {
+              const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
+              return (
+                <Line key={m} type="monotone" dataKey={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />
+              );
+            })}
+          </LineChart>
+        </ResponsiveContainer>
+      )}
     </div>
   );
 }

@@ -461,6 +461,26 @@ td.traffic-red    { background-color: rgba(239, 68, 68, 0.18) !important; color:
 }
 
 /* ────────────────────────────────────────────────────────────────
+   Transcript chat bubbles (модалка звонка → Транскрипт).
+   В тёмной теме текст near-white (text-blue-50/text-slate-100) на
+   полупрозрачной заливке — читается. На белом фоне тот же текст
+   исчезает: перекрашиваем в тёмный на плотной пастельной заливке.
+   ──────────────────────────────────────────────────────────────── */
+.theme-light .transcript-bubble-manager {
+  background-color: #dbeafe !important; /* blue-100 */
+  border-color: #93c5fd !important;     /* blue-300 */
+  color: #0f172a !important;            /* slate-900 */
+}
+.theme-light .transcript-bubble-client {
+  background-color: #d1fae5 !important; /* emerald-100 */
+  border-color: #6ee7b7 !important;     /* emerald-300 */
+  color: #0f172a !important;
+}
+.theme-light .transcript-plain {
+  color: #0f172a !important;
+}
+
+/* ────────────────────────────────────────────────────────────────
    `.light-panel-header` — opt-in "blue banner" for panel title bars.
    Added as a marker class to specific components (OKK/AI calls table
    header row, the Scripts/WorstCalls section title bars).

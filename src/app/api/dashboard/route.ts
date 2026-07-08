@@ -34,6 +34,7 @@ import {
   getAnalyticsCallMetricsByMaster,
   getAnalyticsDailyTrend,
   getAnalyticsDailyTrendByLine,
+  getAnalyticsDailyTrendByManager,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
   getAnalyticsAvgWaitSeconds,
@@ -540,7 +541,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager, inboundByLine] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -627,6 +628,15 @@ async function buildDashboardResponse(
             return 0;
           })
         : Promise.resolve(0),
+      // Per-manager daily trend — one series per manager for the B2B «Динамика
+      // звонков» chart (metric + manager selection happen client-side). B2G
+      // keeps its per-line chart, so this query is B2B-only.
+      department === "b2b"
+        ? getAnalyticsDailyTrendByManager(department, trendFrom, trendTo, allManagers.map((m) => m.name), vertical).catch((e) => {
+            console.error("[Dashboard] per-manager trend failed:", e);
+            return {} as Record<string, DailyCallBucket[]>;
+          })
+        : Promise.resolve({} as Record<string, DailyCallBucket[]>),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -801,6 +811,7 @@ async function buildDashboardResponse(
       perManager,
       trend,
       trendByLine,
+      trendByManager: trendByManagerRaw,
       todayMetricsByPipeline,
       trendByPipeline,
       pipelineBreakdown,
