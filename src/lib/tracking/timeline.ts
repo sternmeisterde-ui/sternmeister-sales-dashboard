@@ -384,19 +384,23 @@ export function buildTimeline(params: {
   }
 
   // Side-panel metrics: independent of the visual minute-grid.
-  //   • call comes from callSecExact — actual seconds on the line, clipped
-  //     to shift. The grid is allowed to over-count short calls for the
-  //     reader's eyes, but the numbers next to the bar must be honest.
+  //   • call comes from callSecExact — actual seconds on the line.
   //   • crm = number of grid cells == 1 (1 event = 1 minute, intentional).
-  //   • idle = total − call − crm, never below 0.
+  //   • idle («Простой») ФИКСИРУЕМ от 8-часовой нормы рабочего дня, а не от
+  //     длины окна: idle = 8ч − активность (call+crm), не ниже 0. Так простой
+  //     меряется относительно ожидаемых 8 продуктивных часов, а не 09–20/окна.
+  //   Проценты — от базы call+crm+idle (= max(8ч, активность)), чтобы в сумме
+  //   давали 100% и не переполнялись, если активность > 8ч.
+  const SHIFT_NORM_MIN = 8 * 60;
   const callMin = Math.round(callSecExact / 60);
   let crmMin = 0;
   for (let i = 0; i < total; i++) if (grid[i] === 1) crmMin++;
-  const idleMin = Math.max(0, total - callMin - crmMin);
+  const idleMin = Math.max(0, SHIFT_NORM_MIN - callMin - crmMin);
+  const denom = callMin + crmMin + idleMin;
   const pct = {
-    call: total > 0 ? Math.round((callMin / total) * 100) : 0,
-    crm: total > 0 ? Math.round((crmMin / total) * 100) : 0,
-    idle: total > 0 ? Math.round((idleMin / total) * 100) : 0,
+    call: denom > 0 ? Math.round((callMin / denom) * 100) : 0,
+    crm: denom > 0 ? Math.round((crmMin / denom) * 100) : 0,
+    idle: denom > 0 ? Math.round((idleMin / denom) * 100) : 0,
   };
 
   return {
