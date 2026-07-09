@@ -1003,15 +1003,24 @@ function formatSpeakerBlocks(words: ScribeWord[] | undefined): string {
     .join("\n\n");
 }
 
+const SELLER_MARKERS = [
+  /sternmeister/i, /штерн/i, /штермайстер/i, /штур?ман\s*мастер/i,
+  /при[её]мной\s+комисс/i, /при[её]мн/i, /специалист/i,
+];
+
 /**
  * Превратить блоки «**Speaker A:** … / **Speaker B:** …» в диалог
  * «**Продавец:** … / **Клиент:** …» — выгрузка читается как переписка в
- * мессенджере. Кто продавец, определяем по направлению звонка (та же эвристика,
- * что в ОКК, src/app/api/okk/calls/[callId]/route.ts):
- *   исходящий → первым отвечает Клиент → продавец = второй спикер;
- *   входящий  → первым отвечает Менеджер → продавец = первый спикер.
+ * мессенджере. Кто продавец, определяем по содержанию (зеркало ОКК,
+ * src/app/api/okk/calls/[callId]/route.ts resolveManagerSpeaker):
+ *   1) маркеры в репликах — имя менеджера в самопредставлении + «Sternmeister /
+ *      приёмной комиссии / специалист»;
+ *   2) эвристика по направлению (резерв; ненадёжна: ломается, когда продавец
+ *      здоровается первым или direction неизвестен).
+ * Поле seller_speaker из ОКК-оценки здесь недоступно — это свежая транскрипция
+ * без оценки, поэтому уровня 1 (из оценки) нет.
  */
-function formatChatTranscript(speakers: string, direction: string): string {
+function formatChatTranscript(speakers: string, direction: string, managerName?: string | null): string {
   const blocks: { speaker: string; text: string }[] = [];
   const re = /\*\*Speaker ([A-Z]):\*\*\s*([\s\S]*?)(?=\n\n\*\*Speaker [A-Z]:\*\*|$)/g;
   let m: RegExpExecArray | null;
@@ -1021,11 +1030,27 @@ function formatChatTranscript(speakers: string, direction: string): string {
   }
   if (blocks.length === 0) return speakers.trim();
 
-  const isInbound = direction === "входящий" || direction === "inbound";
-  const firstSpeaker = blocks[0].speaker;
-  const managerSpeaker = isInbound
-    ? firstSpeaker
-    : (blocks.find((b) => b.speaker !== firstSpeaker)?.speaker ?? firstSpeaker);
+  const resolveManager = (): string => {
+    // 1) маркеры в репликах
+    const firstNameRaw = (managerName || "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    const firstName = firstNameRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // escape: имя из CRM может нести спецсимвол
+    const introRe = firstNameRaw.length >= 3 ? new RegExp(`(меня зовут|это|зовут)\\s+${firstName}\\b`, "i") : null;
+    const scores: Record<string, number> = {};
+    blocks.forEach((b, i) => {
+      if (introRe && i < 12 && introRe.test(b.text.toLowerCase())) scores[b.speaker] = (scores[b.speaker] || 0) + 3;
+      if (SELLER_MARKERS.some((rx) => rx.test(b.text))) scores[b.speaker] = (scores[b.speaker] || 0) + 1;
+    });
+    const ranked = Object.keys(scores).sort((a, b) => scores[b] - scores[a]);
+    if (ranked[0] && scores[ranked[0]] >= 3 && scores[ranked[0]] > (scores[ranked[1]] ?? 0)) return ranked[0];
+
+    // 2) эвристика по направлению (резерв)
+    const isInbound = direction === "входящий" || direction === "inbound";
+    const firstSpeaker = blocks[0].speaker;
+    return isInbound
+      ? firstSpeaker
+      : (blocks.find((b) => b.speaker !== firstSpeaker)?.speaker ?? firstSpeaker);
+  };
+  const managerSpeaker = resolveManager();
 
   return blocks
     .map((b) => `**${b.speaker === managerSpeaker ? "Продавец" : "Клиент"}:** ${b.text}`)
@@ -1702,7 +1727,7 @@ export async function runAnalysisPipeline(
         md += `⚠️ Запись транскрибирована, но текст пустой (тишина / неразборчивый звук).\n`;
       } else {
         // Диалог «Продавец/Клиент» — выгрузка читается как переписка.
-        md += `${formatChatTranscript(transcript.speakers, call.direction)}\n`;
+        md += `${formatChatTranscript(transcript.speakers, call.direction, managerName)}\n`;
       }
 
       // DB ops MUST NOT throw out of the worker — that would kill the whole
