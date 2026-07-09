@@ -152,6 +152,10 @@ export const okkEvaluations = pgTable("evaluations", {
     overrides_applied: number[];
     score_before_override: number | null;
     score_after_override: number;
+    /** Диаризационная метка спикера-продавца (A/B), определённая при оценке
+     *  (OKK с 2026-07-09). Используем для корректной раскраски ролей в
+     *  транскрипте вместо эвристики по направлению. */
+    seller_speaker?: string;
   }>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });

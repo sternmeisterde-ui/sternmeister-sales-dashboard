@@ -18,19 +18,48 @@ function stripEngineTags(feedback: string): string {
   return feedback.replace(/^\s*(\[Auto-override[^\]]*\]\s*)+/i, "").trim();
 }
 
-// ─── Helper: build speaker-labelled transcript ───────────────────────────────
-// Speakers are labelled "A", "B", etc. (set by the STT pipeline).
-// We determine who is the manager based on call direction:
-//   outbound → manager called the client → client picks up first → Speaker A = Клиент
-//   inbound  → client called the company → manager answers first → Speaker A = Менеджер
-// Fallback: assume outbound (most sales calls are outbound).
-
-// Кто из спикеров — менеджер (Продавец). Общая логика для строкового
-// транскрипта и структурированных turns (чат-вид с таймкодами).
+// ─── Helper: кто из спикеров — менеджер (Продавец) ───────────────────────────
+// Спикеры помечены "A"/"B" диаризацией; сама метка не привязана к роли.
+// Порядок определения (от надёжного к запасному):
+//   1) seller_speaker из оценки (OKK определил роль по СОДЕРЖАНИЮ при
+//      скоринге — тот же источник, что и балл) — если метка реальна;
+//   2) маркеры в репликах: имя менеджера в самопредставлении + «Sternmeister /
+//      приёмной комиссии / специалист»;
+//   3) эвристика по направлению звонка (историческое поведение, ненадёжна:
+//      ломается при direction=unknown и когда продавец здоровается первым).
+const SELLER_MARKERS = [
+  /sternmeister/i, /штерн/i, /штермайстер/i, /штур?ман\s*мастер/i,
+  /при[её]мной\s+комисс/i, /при[её]мн/i, /специалист/i,
+];
 function resolveManagerSpeaker(
   utterances: TranscriptSpeakerSegment[],
   direction: string | null,
+  sellerSpeaker?: string | null,
+  managerName?: string | null,
 ): string {
+  const labels = new Set(utterances.map((u) => u.speaker));
+
+  // 1) из оценки
+  if (sellerSpeaker && labels.has(sellerSpeaker)) return sellerSpeaker;
+
+  // 2) маркеры в репликах
+  const firstName = (managerName || "").trim().split(/\s+/)[0]?.toLowerCase();
+  const scores: Record<string, number> = {};
+  utterances.forEach((u, i) => {
+    const t = u.text || "";
+    if (firstName && firstName.length >= 3 && i < 12) {
+      if (new RegExp(`(меня зовут|это|зовут)\\s+${firstName}\\b`, "i").test(t.toLowerCase())) {
+        scores[u.speaker] = (scores[u.speaker] || 0) + 3;
+      }
+    }
+    if (SELLER_MARKERS.some((re) => re.test(t))) scores[u.speaker] = (scores[u.speaker] || 0) + 1;
+  });
+  const ranked = Object.keys(scores).sort((a, b) => scores[b] - scores[a]);
+  if (ranked[0] && scores[ranked[0]] >= 3 && scores[ranked[0]] > (scores[ranked[1]] ?? 0)) {
+    return ranked[0];
+  }
+
+  // 3) эвристика по направлению (последний резерв)
   const isOutbound = direction !== "inbound"; // default outbound
   const firstSpeaker = utterances[0]?.speaker ?? "A";
   return isOutbound
@@ -41,6 +70,8 @@ function resolveManagerSpeaker(
 function buildSpeakerTranscript(
   speakersRaw: unknown,
   direction: string | null,
+  sellerSpeaker?: string | null,
+  managerName?: string | null,
 ): string {
   // transcript_speakers is stored as { utterances: [...] }
   const utterances: TranscriptSpeakerSegment[] = (() => {
@@ -57,14 +88,7 @@ function buildSpeakerTranscript(
 
   if (utterances.length === 0) return "";
 
-  // Determine which speaker label is the manager
-  const isOutbound = direction !== "inbound"; // default outbound
-  // outbound: first speaker (A) = Client, second (B) = Manager
-  // inbound:  first speaker (A) = Manager, second (B) = Client
-  const firstSpeaker = utterances[0]?.speaker ?? "A";
-  const managerSpeaker = isOutbound
-    ? (utterances.find((u) => u.speaker !== firstSpeaker)?.speaker ?? "B")
-    : firstSpeaker;
+  const managerSpeaker = resolveManagerSpeaker(utterances, direction, sellerSpeaker, managerName);
 
   return utterances
     .map((u) => {
@@ -168,6 +192,7 @@ export async function GET(
         // Evaluation fields (may be null when no evaluation exists yet)
         totalScore: okkEvaluations.totalScore,
         evaluationJson: okkEvaluations.evaluationJson,
+        overrideMetadata: okkEvaluations.overrideMetadata,
         mistakes: okkEvaluations.mistakes,
         recommendations: okkEvaluations.recommendations,
         evaluationCreatedAt: okkEvaluations.createdAt,
@@ -225,7 +250,8 @@ export async function GET(
 
     // Структурированный транскрипт для чат-вида: спикер + текст + секунда
     // старта реплики (таймкод MM:SS на клиенте).
-    const managerSpeaker = resolveManagerSpeaker(utterances, row.direction);
+    const sellerSpeaker = row.overrideMetadata?.seller_speaker ?? null;
+    const managerSpeaker = resolveManagerSpeaker(utterances, row.direction, sellerSpeaker, row.managerName);
     const transcriptTurns = utterances
       .filter((u) => u.text && u.text.trim())
       .map((u) => ({
@@ -332,7 +358,7 @@ export async function GET(
         : "#",
       kommoUrl: row.kommoLeadUrl || "",
       transcript:
-        buildSpeakerTranscript(row.transcriptSpeakers, row.direction) ||
+        buildSpeakerTranscript(row.transcriptSpeakers, row.direction, sellerSpeaker, row.managerName) ||
         row.transcript ||
         "",
       transcriptTurns,
