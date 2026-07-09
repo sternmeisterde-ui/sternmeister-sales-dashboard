@@ -184,19 +184,46 @@ export function buildTimeline(params: {
     };
   }
 
-  const shiftStartLabel = fmtHm(window.startLocal);
-  const shiftEndLabel = fmtHm(window.endLocal);
-  const total = window.totalMinutes;
-
-  // Absolute UTC timestamps for shift boundaries on this date.
-  // dateISO is a calendar date in the dashboard's TZ. Convert to UTC via offset.
-  // tzOffsetMinutes: e.g. Europe/Moscow in summer is +180.
+  // Base shift + day boundaries in UTC. dateISO is a calendar date in the
+  // dashboard's TZ; UTC = local − offset.
   const [y, mo, d] = dateISO.split("-").map(Number);
-  // Local time = UTC + offset, so UTC = local - offset
-  const shiftStartUtcMs =
-    Date.UTC(y, mo - 1, d, window.startLocal.h, window.startLocal.m) -
-    tzOffsetMinutes * 60_000;
-  const shiftEndUtcMs = shiftStartUtcMs + total * 60_000;
+  const localToUtcMs = (h: number, m: number) =>
+    Date.UTC(y, mo - 1, d, h, m) - tzOffsetMinutes * 60_000;
+  const baseStartMs = localToUtcMs(window.startLocal.h, window.startLocal.m);
+  const baseEndMs = baseStartMs + window.totalMinutes * 60_000;
+  const dayStartMs = localToUtcMs(0, 0);
+  const dayEndMs = dayStartMs + 1440 * 60_000;
+
+  // Динамическое окно: от ПЕРВОГО действия менеджера за сутки (или 09:00, если
+  // первое действие позже) до ПОСЛЕДНЕГО (или 20:00, если последнее раньше).
+  // «Действие» = реальный звонок (duration>0) или любое CRM-событие. Так ранние
+  // звонки (напр. 06:00) больше не режутся окном — «Звонок» в Активности
+  // сходится со «Звонками». Минимум окна остаётся 09:00–20:00. Границы
+  // выравниваем по минуте (floor/ceil) для чистой сетки.
+  let firstActionMs = Infinity;
+  let lastActionMs = -Infinity;
+  for (const ev of events) {
+    const isCallEv = CALL_TYPES.has(ev.eventType);
+    if (isCallEv && (!ev.durationSec || ev.durationSec <= 0)) continue; // пропущенный звонок — не действие
+    const evMs = ev.createdAt.getTime();
+    const evEndMs = isCallEv ? evMs + ev.durationSec * 1000 : evMs;
+    if (evMs < firstActionMs) firstActionMs = evMs;
+    if (evEndMs > lastActionMs) lastActionMs = evEndMs;
+  }
+  const rawStartMs = Math.max(dayStartMs, Math.min(baseStartMs, firstActionMs === Infinity ? baseStartMs : firstActionMs));
+  const rawEndMs = Math.min(dayEndMs, Math.max(baseEndMs, lastActionMs === -Infinity ? baseEndMs : lastActionMs));
+  const shiftStartUtcMs = Math.floor(rawStartMs / 60_000) * 60_000;
+  const shiftEndUtcMs = Math.ceil(rawEndMs / 60_000) * 60_000;
+  const total = Math.max(1, Math.round((shiftEndUtcMs - shiftStartUtcMs) / 60_000));
+
+  // Локальные h:m границ окна (для подписей и меток сегментов).
+  const utcToLocalHm = (utcMs: number) => {
+    const lm = Math.round((utcMs + tzOffsetMinutes * 60_000) / 60_000);
+    return { h: Math.floor((((lm % 1440) + 1440) % 1440) / 60), m: ((lm % 60) + 60) % 60 };
+  };
+  const startLocal = utcToLocalHm(shiftStartUtcMs);
+  const shiftStartLabel = fmtHm(startLocal);
+  const shiftEndLabel = fmtHm(utcToLocalHm(shiftEndUtcMs));
 
   // Allocate per-minute array: 0 = idle, 1 = crm, 2 = call (highest priority)
   const grid = new Uint8Array(total);
@@ -344,8 +371,8 @@ export function buildTimeline(params: {
       // when the session was, plus the visible bar already conveys length.
       // Event count is the user's selected types only (filtered above), so
       // matches the dropdown selection.
-      const startHm = fmtSegmentTime(window.startLocal, cursor);
-      const endHm = fmtSegmentTime(window.startLocal, end);
+      const startHm = fmtSegmentTime(startLocal, cursor);
+      const endHm = fmtSegmentTime(startLocal, end);
       const evWord = evCount === 1 ? "событие" : evCount < 5 ? "события" : "событий";
       seg.label = `Работа в CRM · ${startHm}–${endHm} · ${evCount} ${evWord}`;
     } else {
