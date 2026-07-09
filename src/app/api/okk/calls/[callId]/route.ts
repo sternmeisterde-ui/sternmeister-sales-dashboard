@@ -43,14 +43,16 @@ function resolveManagerSpeaker(
   if (sellerSpeaker && labels.has(sellerSpeaker)) return sellerSpeaker;
 
   // 2) маркеры в репликах
-  const firstName = (managerName || "").trim().split(/\s+/)[0]?.toLowerCase();
+  // Экранируем имя: из CRM может прийти «Иван (стажёр)» и т.п. — без escape
+  // спецсимвол уронил бы RegExp в SyntaxError и весь роут в 500.
+  const firstNameRaw = (managerName || "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  const firstName = firstNameRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const introRe = firstNameRaw.length >= 3 ? new RegExp(`(меня зовут|это|зовут)\\s+${firstName}\\b`, "i") : null;
   const scores: Record<string, number> = {};
   utterances.forEach((u, i) => {
     const t = u.text || "";
-    if (firstName && firstName.length >= 3 && i < 12) {
-      if (new RegExp(`(меня зовут|это|зовут)\\s+${firstName}\\b`, "i").test(t.toLowerCase())) {
-        scores[u.speaker] = (scores[u.speaker] || 0) + 3;
-      }
+    if (introRe && i < 12 && introRe.test(t.toLowerCase())) {
+      scores[u.speaker] = (scores[u.speaker] || 0) + 3;
     }
     if (SELLER_MARKERS.some((re) => re.test(t))) scores[u.speaker] = (scores[u.speaker] || 0) + 1;
   });
