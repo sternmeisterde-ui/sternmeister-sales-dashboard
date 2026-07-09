@@ -298,8 +298,11 @@ async function fetchCallEventsByMaster(
     duration: string | number | null;
     created_at: string;
   }>(sql`
+    -- durationExpr, а не голый duration: для CallGear (cg-leg) добавляем дозвон
+    -- (wait), как в «Длительности» Звонков (fetchCallMetricsByMaster). Иначе
+    -- «Звонок» в Активности занижен на время дозвона CG (расхождение у Лигай).
     SELECT DISTINCT ON (communication_id)
-      communication_id, communication_type, manager, duration, created_at
+      communication_id, communication_type, manager, ${durationExpr(dept)} AS duration, created_at
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
