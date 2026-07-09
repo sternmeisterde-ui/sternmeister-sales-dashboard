@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users, Search, X, Clock } from "lucide-react";
+import { RefreshCw, Loader2, Filter, ChevronDown, Check, Users, Search, X, Clock, Info } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import {
   EVENT_TYPES,
@@ -374,6 +374,32 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           />
         )}
       </div>
+
+      {/* Инфо-блок для не-технических пользователей (общий вид). */}
+      {!isDialer && data && data.managers.length > 0 && (
+        <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4 text-[12px] text-slate-400 leading-relaxed">
+          <div className="flex items-center gap-2 mb-2.5 text-slate-300 font-semibold">
+            <Info className="w-4 h-4 text-blue-400 shrink-0" /> Как читать эту вкладку
+          </div>
+          <ul className="flex flex-col gap-2">
+            <li>
+              <b className="text-slate-300">Полоска дня</b> — рабочий день менеджера с 09:00 до 20:00 (или шире, если он звонил/работал раньше или позже).{" "}
+              <span className="text-blue-400 font-semibold">Синий</span> — время в звонках,{" "}
+              <span className="text-emerald-400 font-semibold">зелёный</span> — работа в CRM,{" "}
+              <span className="text-rose-400 font-semibold">красный</span> — простой.
+            </li>
+            <li>
+              <b className="text-slate-300">Простой</b> считается от нормы 8 рабочих часов: 8 часов минус время активности (звонки + работа в CRM).
+            </li>
+            <li>
+              <b className="text-slate-300">Обновление данных.</b> Вкладка сама обновляется примерно раз в 5 минут. Звонки попадают сюда из телефонии не мгновенно: по CloudTalk — обычно в течение ~10 минут после звонка.
+            </li>
+            <li>
+              <b className="text-slate-300">Пометка «CallGear · ~7ч».</b> У части менеджеров звонки идут через CallGear, и их данные приходят с задержкой около 7 часов. Это ограничение самого сервиса CallGear, а не ошибка: если менеджер позвонил сейчас, звонок появится в отчёте через несколько часов.
+            </li>
+          </ul>
+        </div>
+      )}
 
       {detailTarget && (
         <DetailModal
