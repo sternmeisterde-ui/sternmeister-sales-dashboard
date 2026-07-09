@@ -132,6 +132,7 @@ Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear
 | `criteria` | Критерии | session(R, свой отдел), admin | `CriteriaTab.tsx` | `/api/criteria` | **D2 OKK БД `criteria_configs`** (jsonb). FS `src/criteria/*.json` — image backup для OKK FS fallback. Read-only: POST → 405, критерии редактируются в OKK-репо и синкаются в D2 на деплое. OKK reads same table via `loadCriteriaConfigCached`. У Коммерсов рендерится внутри вкладки «Артефакты» (см. `artifacts` в NAV_ITEMS), открытой менеджерам b2b на чтение. |
 | `scripts` | Скрипты | session(R, свой отдел), admin(W) | `ScriptsTab.tsx` | `/api/scripts` | D1 `scripts` |
 | `audit` | Аудит | admin | `AuditTab.tsx` | `/api/okk/audit` | D2/R2 `evaluations.override_metadata` JSONB, `phantom_history` |
+| `docflow` | BGS DocFlow | admin, b2g-only | `DocflowTab.tsx` | `/api/docflow` | Внешний сервис (репо `BGS_DocFlow`, отдельный Neon-проект): `clients`, `applications` — сколько учеников пользуется автоматизацией откликов на вакансии и % ответов работодателей |
 
 Auth & роли:
 - Session: `/api/auth/me` (HMAC cookie, см. `src/lib/auth`)
@@ -205,6 +206,10 @@ MCP_D1_RO_URL=               # read-only Postgres role для MCP
 # Monitoring
 SENTRY_DSN=                  # app
 SENTRY_DSN_MCP=              # отдельный для mcp service
+
+# External services (read-only, все OPTIONAL — отсутствие = graceful no-op)
+BERATER_BOT_DATABASE_URL=    # bot ролевок (репо berater_bot), для Воронки/Рассылки
+DOCFLOW_DATABASE_URL=        # BGS DocFlow (репо BGS_DocFlow), для вкладки «BGS DocFlow»
 ```
 
 ---
@@ -236,6 +241,8 @@ src/lib/db/
   schema-okk.ts         ← D2/R2 schema (calls + evaluations)
   schema-analytics.ts   ← analytics.* schema
   schema-tracking.ts    ← tracking_events + tracking_sync_state
+  berater-bot.ts         ← getBeraterBotDb() optional external Neon (bot ролевок)
+  docflow-db.ts          ← getDocflowDb() optional external Neon (BGS DocFlow)
 
 src/lib/etl/
   index.ts              ← runSync orchestrator
