@@ -20,6 +20,7 @@ import DinoLoader from "@/components/DinoLoader";
 import DrillModal from "@/components/DrillModal";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import { kommoLeadUrl } from "@/components/TerminLeadDrillModal";
+import type { DocflowUsageBucket } from "@/lib/docflow/stats";
 
 // Форма ответа /api/docflow (зеркалит src/lib/docflow/stats.ts).
 interface DayPoint {
@@ -41,7 +42,10 @@ interface UsageBuckets {
   one: number;
   many: number;
 }
-type UsageBucketKey = keyof UsageBuckets;
+// Тип бакета импортируем из бэка (не keyof UsageBuckets) — так переименование/
+// добавление бакета в stats.ts валит компиляцию здесь же (Record<UsageBucketKey,...>
+// ниже перестанет собираться), а не расходится молча (#simplification review).
+type UsageBucketKey = DocflowUsageBucket;
 interface ClientUsageRow {
   leadId: number | null;
   leadName: string | null;
@@ -69,6 +73,8 @@ interface ClientsModalSelection {
 interface AppsModalSelection {
   title: string;
   predicate: (a: ApplicationRow) => boolean;
+  /** Настоящее кол-во по этому срезу (из агрегатов, не из усечённого списка) — для предупреждения о cap. */
+  expectedCount?: number;
 }
 
 const USAGE_COLORS: Record<UsageBucketKey, string> = {
@@ -150,9 +156,12 @@ function UsageDonut({
             paddingAngle={total > 0 ? 2 : 0}
             strokeWidth={0}
             cursor="pointer"
-            onClick={(entry) => {
-              const key = (entry as { key?: UsageBucketKey } | undefined)?.key;
-              if (key) onSegmentClick(key);
+            onClick={(_entry, index) => {
+              // Индексируем в НАШ типизированный `data`, а не полагаемся на форму
+              // объекта, который отдаёт recharts в onClick (может измениться
+              // между версиями — #simplification review).
+              const item = data[index];
+              if (item) onSegmentClick(item.key);
             }}
           >
             {data.map((d) => (
@@ -289,13 +298,21 @@ function ApplicationsListModal({
   title,
   rows,
   truncated,
+  expectedCount,
   onClose,
 }: {
   title: string;
   rows: ApplicationRow[];
   truncated: boolean;
+  /** Настоящее кол-во строк за фильтр (из stats.days/stats.applications) —
+   *  applicationsList capped на APPLICATIONS_CAP последних по всему периоду,
+   *  так что для старых дней/подмножеств при truncated список может быть
+   *  меньше expectedCount или вовсе пуст, даже если график показывает >0. */
+  expectedCount?: number;
   onClose: () => void;
 }) {
+  const possiblyIncomplete =
+    truncated && expectedCount != null && rows.length < expectedCount;
   return (
     <DrillModal
       onClose={onClose}
@@ -303,13 +320,29 @@ function ApplicationsListModal({
         <>
           <div className="text-sm font-semibold text-white">{title}</div>
           <div className="mt-0.5 text-[11px] text-slate-400">
-            {rows.length} шт.{truncated ? " · список периода усечён (2000)" : ""}
+            {rows.length} шт.
+            {possiblyIncomplete && (
+              <span className="text-amber-300/80">
+                {" "}
+                из {expectedCount} · список периода усечён (2000 последних) — часть могла не попасть
+              </span>
+            )}
           </div>
         </>
       }
     >
       {rows.length === 0 ? (
-        <div className="py-12 text-center text-sm text-slate-500">Список пуст.</div>
+        <div className="py-12 text-center text-sm text-slate-500">
+          {possiblyIncomplete ? (
+            <>
+              Записи есть ({expectedCount}), но не попали в усечённый список последних 2000
+              откликов периода.
+              <div className="mt-1 text-xs text-slate-600">Сузьте период фильтра, чтобы их увидеть.</div>
+            </>
+          ) : (
+            "Список пуст."
+          )}
+        </div>
       ) : (
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-10">
@@ -510,7 +543,11 @@ export default function DocflowTab({ department: _department }: { department: "b
                   value={String(stats.applications.sent)}
                   accent="text-blue-300"
                   onClick={() =>
-                    setAppsModal({ title: "Отправлено за период", predicate: () => true })
+                    setAppsModal({
+                      title: "Отправлено за период",
+                      predicate: () => true,
+                      expectedCount: stats.applications.sent,
+                    })
                   }
                 />
                 <MiniStat
@@ -521,6 +558,7 @@ export default function DocflowTab({ department: _department }: { department: "b
                     setAppsModal({
                       title: "Получили ответ за период",
                       predicate: (a) => a.status === "replied",
+                      expectedCount: stats.applications.replied,
                     })
                   }
                 />
@@ -570,9 +608,11 @@ export default function DocflowTab({ department: _department }: { department: "b
                       const lbl = (state as { activeLabel?: string | number } | null)?.activeLabel;
                       if (lbl == null) return;
                       const day = String(lbl);
+                      const dayPoint = stats.days.find((d) => d.day === day);
                       setAppsModal({
                         title: `Отклики — ${fmtDay(day)}`,
                         predicate: (a) => a.day === day,
+                        expectedCount: dayPoint?.sent,
                       });
                     }}
                   >
@@ -630,6 +670,7 @@ export default function DocflowTab({ department: _department }: { department: "b
           title={appsModal.title}
           rows={appsModalRows}
           truncated={stats?.applicationsTruncated ?? false}
+          expectedCount={appsModal.expectedCount}
           onClose={() => setAppsModal(null)}
         />
       )}

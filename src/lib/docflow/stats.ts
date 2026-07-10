@@ -182,7 +182,7 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       AND (sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)`;
 
   try {
-    const [clientsRaw, appTotalsRaw, dayRaw, appListRaw] = await Promise.all([
+    const [clientsRaw, dayRaw, appListRaw] = await Promise.all([
       // Роспись клиентов — снимок по всему времени (не period-scoped), как
       // "здоровье доставки"/"сводка подписок" в Рассылке: это lifecycle-состояние.
       // sent_cnt — сколько откликов клиент отправил за всё время (для бублика).
@@ -192,12 +192,6 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
         FROM clients c
         LEFT JOIN applications a ON a.client_id = c.id
         GROUP BY c.id, c.kommo_lead_id
-      `),
-      db.execute(sql`
-        SELECT count(*) FILTER (WHERE sent_at IS NOT NULL) AS sent,
-               count(*) FILTER (WHERE status = 'replied') AS replied
-        FROM applications
-        WHERE sent_at IS NOT NULL AND ${inBerlinPeriod}
       `),
       db.execute(sql`
         SELECT to_char((sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
@@ -262,11 +256,15 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       };
     });
 
-    const appTotalsRow = rows<{ sent: string | number; replied: string | number }>(appTotalsRaw)[0];
-    const sent = Number(appTotalsRow?.sent) || 0;
-    const replied = Number(appTotalsRow?.replied) || 0;
-
+    // Итоги за период — сумма по дням (dayRaw уже посчитан с тем же WHERE-фильтром
+    // по sent_at; отдельный агрегирующий запрос на totals был бы дублем — #efficiency review).
     const dayRows = rows<{ day: string; sent: string | number; replied: string | number }>(dayRaw);
+    let sent = 0;
+    let replied = 0;
+    for (const r of dayRows) {
+      sent += Number(r.sent) || 0;
+      replied += Number(r.replied) || 0;
+    }
 
     const appListRows = rows<{
       sent_at: string;
