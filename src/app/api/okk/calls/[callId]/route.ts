@@ -101,11 +101,16 @@ function buildSpeakerTranscript(
 }
 
 // ─── Helper: на какой секунде звучал критерий ────────────────────────────────
-// В оценке нет таймкода — только дословная цитата (quote). Матчим её к
-// диаризованному транскрипту (utterances со start/end) и берём start той
-// реплики. Best-effort: сначала прямое вхождение (quote — обычно verbatim-
-// вырезка из реплики), затем — лучшее пересечение по словам. Нет цитаты /
-// нет совпадения → null (таймкод не показываем).
+// С ~июля 2026 OKK-движок для составных критериев (несколько реплик подряд)
+// сам вклеивает в quote таймкоды вида «[MM:SS] – Роль – текст», поэтому в
+// приоритете — распарсить первый такой таймкод из самой цитаты (он точный,
+// это данные диаризации на стороне OKK). Если таймкода в цитате нет (старый
+// формат — дословная вырезка одной реплики без префикса), матчим текст к
+// диаризованному транскрипту (utterances со start/end): сначала прямое
+// вхождение, затем — лучшее пересечение по словам. Нет цитаты / нет
+// совпадения → null (таймкод не показываем).
+const QUOTE_TIMECODE_RE = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/;
+
 function normQuoteText(s: string): string {
   return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
@@ -114,8 +119,23 @@ function findQuoteStartSec(
   quote: string,
   utterances: TranscriptSpeakerSegment[],
   toSec: (raw: number) => number,
+  /** Длительность звонка (сек) — sanity-потолок для таймкода из quote. */
+  maxSec?: number,
 ): number | null {
-  if (!quote || utterances.length === 0) return null;
+  if (!quote) return null;
+  const tc = quote.match(QUOTE_TIMECODE_RE);
+  if (tc) {
+    const [, a, b, c] = tc;
+    const sec = c != null ? Number(a) * 3600 + Number(b) * 60 + Number(c) : Number(a) * 60 + Number(b);
+    // Таймкод не должен превышать длительность звонка (+5с на округление) —
+    // иначе это, вероятно, битый таймкод от движка либо 2-сегментный HH:MM,
+    // ошибочно прочитанный как MM:SS. В обоих случаях лучше откатиться на
+    // fuzzy-матчинг ниже, чем показать абсурдное время.
+    if (maxSec == null || sec <= maxSec + 5) {
+      return Math.max(0, sec);
+    }
+  }
+  if (utterances.length === 0) return null;
   const q = normQuoteText(quote);
   if (q.length < 3) return null;
   const qWords = q.split(" ").filter(Boolean);
@@ -292,7 +312,7 @@ export async function GET(
               quote: c.quote || "",
               applicable: c.applicable !== false,
               // Секунда старта реплики, к которой относится цитата (MM:SS на клиенте).
-              atSecond: findQuoteStartSec(c.quote || "", utterances, toSec),
+              atSecond: findQuoteStartSec(c.quote || "", utterances, toSec, dSec || undefined),
             }))
           : [],
         // Derived summary of failed binary criteria for quick display
