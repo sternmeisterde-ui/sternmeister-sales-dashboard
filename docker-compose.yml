@@ -40,6 +40,10 @@ services:
       # berater_bot Neon (read-only) — bot-roleplay enrichment of the funnel
       # «Клиенты» scoring. OPTIONAL: absent → graceful no-op. Set value in Dokploy.
       - BERATER_BOT_DATABASE_URL=${BERATER_BOT_DATABASE_URL}
+      # BGS DocFlow Neon (read-only) — external service (repo BGS_DocFlow) stats
+      # tab: job-application automation for B2G students. OPTIONAL: absent →
+      # graceful no-op. Set value in Dokploy.
+      - DOCFLOW_DATABASE_URL=${DOCFLOW_DATABASE_URL}
 
       # Roleplay audio servers
       - D1_API_URL=${D1_API_URL}
