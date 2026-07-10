@@ -1362,7 +1362,7 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
       {open && (
         <div className="absolute right-0 mt-1 z-30 w-56 max-h-64 overflow-y-auto glass-panel rounded-lg border border-white/10 p-1 shadow-xl scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
           <button
-            onClick={() => onChange(null)}
+            onClick={() => onChange(isAll ? new Set() : null)}
             className="w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-white/5 rounded flex items-center justify-between"
           >
             Выбрать всех {isAll && <Check className="w-3.5 h-3.5 text-blue-400" />}
