@@ -1561,18 +1561,20 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
       }
       return row;
     });
-    // Серый оверлей на выходных: точка входит в `${m}__off`, если ЭТОТ день —
-    // выходной у менеджера, либо сосед вплотную к выходному (±1 день) — так
-    // серый отрезок стыкуется с цветной линией без разрыва (просто «гаснет»
-    // цвет на выходные, а не рвётся сама линия).
+    // Серый оверлей на выходных: точка входит в `${m}__off`, только если
+    // ЭТОТ день подтверждённо выходной у менеджера — без захвата соседних
+    // дней. Раньше захватывали ±1 день ради бесшовности при type="monotone",
+    // но с переходом на type="linear" (см. фикс излома на стыках) это больше
+    // не нужно: прямая между двумя точками — всегда одна и та же прямая,
+    // независимо от того, какая серия её рисует, так что стык остаётся
+    // бесшовным и без искусственного расширения на соседние (рабочие) дни.
     for (const m of visible) {
       const id = managerIdByName?.[m];
       if (!id) continue;
       const isOff = xDates.map((d) => offDays.has(`${id}|${d}`));
       if (!isOff.some(Boolean)) continue;
       for (let idx = 0; idx < rows.length; idx++) {
-        const padded = isOff[idx] || (idx > 0 && isOff[idx - 1]) || (idx < isOff.length - 1 && isOff[idx + 1]);
-        rows[idx][`${m}__off`] = padded ? rows[idx][m] : null;
+        rows[idx][`${m}__off`] = isOff[idx] ? rows[idx][m] : null;
       }
     }
     return rows;
