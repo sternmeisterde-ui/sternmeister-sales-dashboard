@@ -1677,9 +1677,13 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
               }
               // Серый отрезок поверх цветной линии на выходных днях менеджера
               // (см. offDays/chartData выше). Рисуется последним — ложится
-              // поверх цветной линии на нужном участке.
+              // поверх цветной линии на нужном участке. Точка (dot) обязательна:
+              // без соседнего выходного дня Recharts не рисует сегмент по одной
+              // non-null точке (нужно ≥2 смежных), и изолированный однодневный
+              // выходной иначе пропадал бы с графика совсем — точка остаётся
+              // видна даже когда линии нет.
               lines.push(
-                <Line key={`${m}__off`} type="linear" dataKey={`${m}__off`} name={`${m} · выходной`} stroke="#64748b" strokeWidth={3} strokeOpacity={0.9} dot={false} legendType="none" isAnimationActive={false} connectNulls={false} />,
+                <Line key={`${m}__off`} type="linear" dataKey={`${m}__off`} name={`${m} · выходной`} stroke="#64748b" strokeWidth={3} strokeOpacity={0.9} dot={{ fill: "#64748b", r: 3 }} legendType="none" isAnimationActive={false} connectNulls={false} />,
               );
               return lines;
             })}
