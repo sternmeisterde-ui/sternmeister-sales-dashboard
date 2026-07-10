@@ -1658,20 +1658,26 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
             {visible.flatMap((m) => {
               const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
               const lines = [
-                <Line key={m} type="monotone" dataKey={m} name={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />,
+                // linear, не monotone: серый оверлей на выходных (ниже) должен
+                // стыковаться с этой линией в общих граничных точках. Monotone
+                // считает кривизну по своим соседям независимо для каждой
+                // серии — даже совпадая в точке, две monotone-кривые подходят
+                // к ней под разными углами и дают видимый излом на стыке.
+                // Прямая между теми же двумя точками — всегда одна и та же.
+                <Line key={m} type="linear" dataKey={m} name={m} stroke={color} strokeWidth={2} dot={{ fill: color, r: 2 }} connectNulls />,
               ];
               // Пунктирная линия периода сравнения — тот же цвет менеджера,
               // скрыта из легенды (иначе двоится), видна в тултипе как «(пред.)».
               if (compareOn && dataB) {
                 lines.push(
-                  <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (B)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
+                  <Line key={`${m}__cmp`} type="linear" dataKey={`${m}__cmp`} name={`${m} (B)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
                 );
               }
               // Серый отрезок поверх цветной линии на выходных днях менеджера
               // (см. offDays/chartData выше). Рисуется последним — ложится
               // поверх цветной линии на нужном участке.
               lines.push(
-                <Line key={`${m}__off`} type="monotone" dataKey={`${m}__off`} name={`${m} · выходной`} stroke="#64748b" strokeWidth={3} strokeOpacity={0.9} dot={false} legendType="none" isAnimationActive={false} connectNulls={false} />,
+                <Line key={`${m}__off`} type="linear" dataKey={`${m}__off`} name={`${m} · выходной`} stroke="#64748b" strokeWidth={3} strokeOpacity={0.9} dot={false} legendType="none" isAnimationActive={false} connectNulls={false} />,
               );
               return lines;
             })}
