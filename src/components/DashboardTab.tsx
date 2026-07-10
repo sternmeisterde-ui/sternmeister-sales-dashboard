@@ -1405,7 +1405,6 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
 }) {
   const [metric, setMetric] = useState<TrendMetric>("callsTotal");
   const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
-  const [cumulative, setCumulative] = useState(false);
   const [compareOn, setCompareOn] = useState(false);
   // Оба периода сравнения (A и B) — независимый ручной выбор, помеченный
   // сигнатурой основного окна: при смене окна override «протухает» и мы падаем
@@ -1432,6 +1431,23 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
     [trendByManager, managers],
   );
   const windowSig = `${currentDates[0] ?? ""}|${currentDates.length}`;
+
+  // Имя менеджера → id (master_managers), для сверки с manager_schedule
+  // (тот же справочник, что использует Дейли/Активность — не гейтится ролью).
+  const [managerIdByName, setManagerIdByName] = useState<Record<string, string> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/daily/managers?department=${department}`)
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const m of (j.managers ?? []) as Array<{ id: string; name: string }>) map[m.name] = m.id;
+        setManagerIdByName(map);
+      })
+      .catch(() => { if (!cancelled) setManagerIdByName({}); });
+    return () => { cancelled = true; };
+  }, [department]);
 
   // Дефолт A = окно дашборда; дефолт B = предыдущее равное окно перед ним.
   const defaultA = useMemo(() => {
@@ -1499,16 +1515,43 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
   // x-ось = дни периода A (если A = окно дашборда, берём готовые currentDates;
   // если A переопределён — генерим диапазон и берём dataA). Период B
   // накладывается по индексу дня (день N ↔ день N).
+  const xDates = useMemo(
+    () => (compareOn && customA ? (aFrom && aTo ? civilDateRange(aFrom, aTo) : []) : currentDates),
+    [compareOn, customA, aFrom, aTo, currentDates],
+  );
+
+  // Выходные менеджеров (manager_schedule.is_on_line=false) на видимых датах —
+  // подтягиваем по месяцам, которые реально попадают в окно графика.
+  const [offDays, setOffDays] = useState<Set<string>>(new Set()); // `${userId}|${date}`
+  useEffect(() => {
+    if (xDates.length === 0) { setOffDays(new Set()); return; }
+    const months = Array.from(new Set(xDates.map((d) => d.slice(0, 7))));
+    let cancelled = false;
+    Promise.all(
+      months.map((mo) =>
+        fetch(`/api/daily/schedule?month=${mo}`).then((r) => r.json()).catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const set = new Set<string>();
+      for (const res of results) {
+        const schedule = res?.schedule as Array<{ userId: string; scheduleDate: string; isOnLine: boolean }> | undefined;
+        if (!schedule) continue;
+        for (const row of schedule) {
+          if (!row.isOnLine) set.add(`${row.userId}|${row.scheduleDate}`);
+        }
+      }
+      setOffDays(set);
+    });
+    return () => { cancelled = true; };
+  }, [xDates]);
+
   const chartData = useMemo(() => {
-    if (managers.length === 0) return [];
+    if (managers.length === 0 || xDates.length === 0) return [];
     const seriesA = compareOn && customA ? dataA : trendByManager;
     const seriesB = compareOn ? dataB : null;
-    const xDates = compareOn && customA
-      ? (aFrom && aTo ? civilDateRange(aFrom, aTo) : [])
-      : currentDates;
-    if (xDates.length === 0) return [];
-    const rows = xDates.map((date, idx) => {
-      const row: Record<string, string | number> = { date: date.slice(5).replace("-", ".") };
+    const rows: Array<Record<string, string | number | null>> = xDates.map((date, idx) => {
+      const row: Record<string, string | number | null> = { date: date.slice(5).replace("-", ".") };
       for (const m of visible) {
         row[m] = seriesA?.[m]?.[idx]?.[metric] ?? 0;
         if (seriesB) {
@@ -1518,19 +1561,22 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
       }
       return row;
     });
-    // Кумулятивно: по каждой серии нарастающий итог по дням окна.
-    if (cumulative) {
-      const acc: Record<string, number> = {};
-      for (const row of rows) {
-        for (const key of Object.keys(row)) {
-          if (key === "date") continue;
-          acc[key] = (acc[key] ?? 0) + (row[key] as number);
-          row[key] = acc[key];
-        }
+    // Серый оверлей на выходных: точка входит в `${m}__off`, если ЭТОТ день —
+    // выходной у менеджера, либо сосед вплотную к выходному (±1 день) — так
+    // серый отрезок стыкуется с цветной линией без разрыва (просто «гаснет»
+    // цвет на выходные, а не рвётся сама линия).
+    for (const m of visible) {
+      const id = managerIdByName?.[m];
+      if (!id) continue;
+      const isOff = xDates.map((d) => offDays.has(`${id}|${d}`));
+      if (!isOff.some(Boolean)) continue;
+      for (let idx = 0; idx < rows.length; idx++) {
+        const padded = isOff[idx] || (idx > 0 && isOff[idx - 1]) || (idx < isOff.length - 1 && isOff[idx + 1]);
+        rows[idx][`${m}__off`] = padded ? rows[idx][m] : null;
       }
     }
     return rows;
-  }, [managers, visible, metric, cumulative, compareOn, customA, dataA, dataB, trendByManager, currentDates, aFrom, aTo]);
+  }, [managers, visible, metric, compareOn, customA, dataA, dataB, trendByManager, xDates, managerIdByName, offDays]);
 
   const fmtRange = (a: string, b: string) => `${a.slice(5).replace("-", ".")}–${b.slice(5).replace("-", ".")}`;
 
@@ -1562,13 +1608,6 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
         {managers.length > 0 && (
           <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
         )}
-        <button
-          onClick={() => setCumulative((v) => !v)}
-          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${cumulative ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
-          title="Нарастающий итог по дням"
-        >
-          Кумулятивно
-        </button>
         <button
           onClick={() => setCompareOn((v) => !v)}
           className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
@@ -1628,6 +1667,12 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
                   <Line key={`${m}__cmp`} type="monotone" dataKey={`${m}__cmp`} name={`${m} (B)`} stroke={color} strokeWidth={2} strokeDasharray="4 3" strokeOpacity={0.65} dot={false} legendType="none" connectNulls />,
                 );
               }
+              // Серый отрезок поверх цветной линии на выходных днях менеджера
+              // (см. offDays/chartData выше). Рисуется последним — ложится
+              // поверх цветной линии на нужном участке.
+              lines.push(
+                <Line key={`${m}__off`} type="monotone" dataKey={`${m}__off`} name={`${m} · выходной`} stroke="#64748b" strokeWidth={3} strokeOpacity={0.9} dot={false} legendType="none" isAnimationActive={false} connectNulls={false} />,
+              );
               return lines;
             })}
           </LineChart>
