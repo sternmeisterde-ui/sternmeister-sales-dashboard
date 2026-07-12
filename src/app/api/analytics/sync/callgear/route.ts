@@ -145,16 +145,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   );
 
   try {
-    // Skip leads/comms/status/tasks — those are the main cron's job. Only
-    // pull CallGear telephony, run enrichment for the new rows, and
-    // recompute SLA for affected leads. Telephony provider is filtered to
-    // CallGear so we don't redundantly re-pull CloudTalk (which the main
-    // cron already covered for this window).
+    // Skip leads/comms/status/tasks/foreign_calls — those are the main
+    // cron's job. Only pull CallGear telephony, run enrichment for the new
+    // rows, and recompute SLA for affected leads. Telephony provider is
+    // filtered to CallGear so we don't redundantly re-pull CloudTalk (which
+    // the main cron already covered for this window). foreign_calls would
+    // otherwise re-run a full 3-entity-type Kommo /notes pagination every
+    // hour for a window the 10-min cron already swept.
     const result = await runSync({
       fromDate,
       toDate,
       incremental: false,
-      skip: ["leads", "communications", "status_changes", "tasks"],
+      skip: ["leads", "communications", "status_changes", "tasks", "foreign_calls"],
       telephonyProviders: ["callgear"],
       // Add-missing-only: the 3h window overlaps prior ticks — re-pulled
       // CDRs that are already stored (incl. their enrichment fan-out) are

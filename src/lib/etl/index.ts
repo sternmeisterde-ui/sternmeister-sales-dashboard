@@ -9,11 +9,14 @@
 //   6. updateContactDates  — back-fills leads_cohort.contact_date
 //   7. syncTelephony       — analytics.communications dial-attempt rows from
 //                            CallGear/CloudTalk (auto-skipped if CALLGEAR_ACCESS_TOKEN absent)
-//   8. enrichTelephonyLeads — phone→lead resolution, fan-out raw telephony
-//                            rows into per-lead copies (Pattern A from
-//                            docs/mysql-analytics.md). Skipped if no
-//                            KOMMO_ACCESS_TOKEN OR no telephony in step 7.
-//   9. computeSla          — analytics.sla (from leads_cohort + enriched
+//   8. syncForeignCallNotes — analytics.communications rows from Kommo /notes
+//                            whose pbxSource isn't CloudTalk/CallGear (WhatsApp
+//                            via Wazzup, Zadarma, …) — no CDR provider for these.
+//   9. enrichTelephonyLeads — phone→lead resolution, fan-out raw telephony +
+//                            foreign-call rows into per-lead copies (Pattern A
+//                            from docs/mysql-analytics.md). Skipped if no
+//                            KOMMO_ACCESS_TOKEN OR no rows from steps 7/8.
+//  10. computeSla          — analytics.sla (from leads_cohort + enriched
 //                            communications). Last so it sees both Kommo
 //                            and telephony rows with real lead_ids.
 //
@@ -35,6 +38,7 @@ import { syncTasks, syncTasksIncremental } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { detectWonExports } from "./detect-won-exports";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
+import { syncForeignCallNotes } from "./sync-foreign-calls";
 import { enrichTelephonyLeads } from "./enrich-telephony-leads";
 import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
@@ -76,7 +80,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "foreign_calls" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -116,6 +120,8 @@ export interface SyncResult {
   telephonyRowsLinked: number;
   /** Additional rows INSERTed by enrichment fan-out (one per extra lead) */
   telephonyRowsFannedOut: number;
+  /** Call notes from Kommo /notes whose pbxSource isn't CloudTalk/CallGear (WhatsApp, Zadarma, …) */
+  foreignCalls: number;
   /** B2B won/installment leads newly queued for Google Drive call export. */
   exportsQueued: number;
   durationMs: number;
@@ -363,15 +369,32 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     );
   }
 
+  // Foreign call notes — Kommo /notes rows whose pbxSource isn't CloudTalk/
+  // CallGear (WhatsApp via Wazzup, Zadarma, …). No CDR provider covers these,
+  // so /notes is the only source. Written with lead_id=NULL + phone set, same
+  // shape as raw telephony CDRs, so the enrichment step right below resolves
+  // them in the same pass. Must run before enrichTelephonyLeads.
+  let foreignCalls = 0;
+  if (!skip.has("foreign_calls")) {
+    const foreignRes = await runStep(
+      "sync-foreign-calls",
+      () => syncForeignCallNotes(opts.fromDate, opts.toDate),
+      { notesScanned: 0, foreignNotes: 0, unmatchedManagers: [] as { kommoUserId: number; count: number }[], inserted: 0 },
+      stepErrors,
+    );
+    foreignCalls = foreignRes.inserted;
+  }
+
   // Enrichment turns raw telephony rows (lead_id=NULL) into per-lead rows
   // by resolving phone → contact → leads via Kommo and fanning out one row
-  // per matched lead (Pattern A — docs/mysql-analytics.md). Runs only when
-  // telephony was attempted in this window AND a Kommo token is available.
+  // per matched lead (Pattern A — docs/mysql-analytics.md). Runs whenever
+  // telephony CDRs OR foreign call notes landed lead_id=NULL/phone rows
+  // this tick — both use the same shape, one enrichment pass resolves both.
   // Non-fatal on error: SLA + the raw rows still ship.
   let telephonyRowsLinked = 0;
   let telephonyRowsFannedOut = 0;
   const enrichmentLeadIds: number[] = [];
-  if (!skip.has("telephony") && hasTelephonyCreds) {
+  if ((!skip.has("telephony") && hasTelephonyCreds) || (!skip.has("foreign_calls") && foreignCalls > 0)) {
     // In incremental mode (15-min cron), Kommo may not have the contact
     // for a phone yet at first attempt — without sweep we'd never retry.
     // 7-day lookback re-tries every still-unenriched call so cron is
@@ -467,6 +490,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     telephonyLegs,
     telephonyRowsLinked,
     telephonyRowsFannedOut,
+    foreignCalls,
     exportsQueued,
     durationMs: Date.now() - t0,
     stepErrors,
@@ -480,6 +504,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     `status_changes=${result.statusChanges}`,
     `tasks=${result.tasks}`,
     `telephony=${result.telephonyLegs}`,
+    `foreignCalls=${result.foreignCalls}`,
     `linked=${result.telephonyRowsLinked}`,
     `fannedOut=${result.telephonyRowsFannedOut}`,
     `sla=${result.slaRows}`,
