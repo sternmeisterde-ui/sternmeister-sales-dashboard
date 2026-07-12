@@ -162,6 +162,10 @@ export const communications = analyticsSchema.table(
     // B2B по line_name LIKE 'KOM%' (как CloudTalk — по номеру, с непринятыми).
     // NULL на CallGear/Kommo-строках. Added in 0028.
     lineName: text("line_name"),
+    // Провайдер звонка из Kommo /notes params.source (напр. «WhatsApp (GPT)»,
+    // «amo_zadarma») — только для строк sync-foreign-calls.ts. NULL на
+    // cg-leg:/ct: строках (источник виден по префиксу comm_id). Added in 0032.
+    pbxSource: text("pbx_source"),
   },
   (t) => [
     index().on(t.leadId),
