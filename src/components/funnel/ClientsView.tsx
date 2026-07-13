@@ -148,11 +148,14 @@ function countCats(clients: ClientRow[]): { hot: number; warm: number; cold: num
   return c;
 }
 
-// Клиентский фильтр группы по менеджеру (данные уже загружены целиком, ~250 строк).
-// manager === "" → без фильтра. Пересчитываем total/shown/categories под отфильтрованных.
-function filterGroupByManager(group: ClientGroup, manager: string): ClientGroup {
-  if (!manager) return group;
-  const clients = group.clients.filter((c) => c.managerName === manager);
+// Клиентский фильтр группы по менеджеру+этапу (данные уже загружены целиком, ~250
+// строк). "" → без фильтра по этому полю. Пересчитываем total/shown/categories
+// под отфильтрованных (ТЗ со звонка 2026-07-13: нужны именно эти два фильтра).
+function filterGroup(group: ClientGroup, manager: string, stage: string): ClientGroup {
+  if (!manager && !stage) return group;
+  const clients = group.clients.filter(
+    (c) => (!manager || c.managerName === manager) && (!stage || c.status === stage),
+  );
   return { clients, total: clients.length, shown: clients.length, categories: countCats(clients) };
 }
 
@@ -161,11 +164,17 @@ function ClientTable({
   title,
   icon,
   onRowClick,
+  onFilterManager,
+  onFilterStage,
 }: {
   group: ClientGroup;
   title: string;
   icon: ReactNode;
   onRowClick: (c: ClientRow) => void;
+  /** Клик по значению «Этап»/«Менеджер» в строке — фильтрует по нему (запрос
+   *  со звонка 2026-07-13: «просто менеджер прям тыкаешь», без отдельного дропдауна). */
+  onFilterManager: (name: string) => void;
+  onFilterStage: (status: string) => void;
 }) {
   const [sort, setSort] = useState<SortState>(null);
 
@@ -248,8 +257,40 @@ function ClientTable({
                   className="border-t border-white/5 hover:bg-blue-500/5 focus:bg-blue-500/10 cursor-pointer outline-none"
                 >
                   <td className="px-3 py-2 text-slate-200 max-w-[200px] truncate">{c.name}</td>
-                  <td className="px-3 py-2 text-slate-400 max-w-[190px] truncate">{c.status ?? "—"}</td>
-                  <td className="px-3 py-2 text-slate-400 max-w-[150px] truncate">{c.managerName ?? "—"}</td>
+                  <td className="px-3 py-2 max-w-[190px] truncate">
+                    {c.status ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onFilterStage(c.status as string);
+                        }}
+                        className="text-slate-400 hover:text-blue-300 hover:underline"
+                        title="Отфильтровать по этому этапу"
+                      >
+                        {c.status}
+                      </button>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-3 py-2 max-w-[150px] truncate">
+                    {c.managerName ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onFilterManager(c.managerName as string);
+                        }}
+                        className="text-slate-400 hover:text-blue-300 hover:underline"
+                        title="Отфильтровать по этому менеджеру"
+                      >
+                        {c.managerName}
+                      </button>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
                     {c.daysOnStage === null ? "—" : `${c.daysOnStage}д`}
                   </td>
@@ -686,6 +727,24 @@ interface CorrPayload {
   points: CorrTimePoint[];
 }
 
+// Понедельник недели, к которой относится дата (для группировки «по неделям»).
+function mondayOf(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  const day = d.getUTCDay(); // 0=вс..6=сб
+  const diff = (day === 0 ? -6 : 1) - day;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+
+// «По неделям» — НЕ пересредняем (ряд уже скользящее среднее за 30 дн, повторное
+// усреднение исказит смысл), берём последнюю точку каждой недели: она уже вобрала
+// в себя все дни недели через скользящее окно.
+function toWeekly(points: CorrTimePoint[]): CorrTimePoint[] {
+  const byWeek = new Map<string, CorrTimePoint>();
+  for (const p of points) byWeek.set(mondayOf(p.date), p);
+  return Array.from(byWeek.values()).sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
 const CORR_FACTORS: { key: string; label: string }[] = [
   { key: "bot", label: "Ролевки с ботом" },
   { key: "language", label: "Уровень языка" },
@@ -739,9 +798,14 @@ function TimeTooltip({ active, payload, label, series }: {
   );
 }
 
-function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
+function CorrelationPanel({
+  vertical,
+}: {
+  vertical?: "buh" | "med" | "all";
+}) {
   const [factor, setFactor] = useState<string>("bot");
   const [data, setData] = useState<CorrPayload | null>(null);
+  const [granularity, setGranularity] = useState<"day" | "week">("day");
 
   // Мед + фактор «бот»: у мед будет СВОЙ бот (ещё не подключён) — данные
   // бухового бота не применимы, показываем заглушку и не дёргаем API.
@@ -765,6 +829,10 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
   const hasSeg = !loading && data!.segments.length > 0;
   // линия по времени осмысленна только если есть хоть одна непустая точка
   const hasTime = !loading && data!.points.some((p) => p.a != null || p.b != null);
+  const displayPoints = useMemo(
+    () => (!loading && data ? (granularity === "week" ? toWeekly(data.points) : data.points) : []),
+    [data, loading, granularity],
+  );
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4">
@@ -800,30 +868,42 @@ function CorrelationPanel({ vertical }: { vertical?: "buh" | "med" | "all" }) {
           <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Слева — линия по времени */}
             <div className="flex flex-col">
-              <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                 <span className="text-[10px] uppercase tracking-wider text-slate-500">
                   По дате закрытия · скользящее за {data.windowDays ?? 30} дн
                 </span>
-                <InfoPopover
-                  title="Линия по времени"
-                  points={[
-                    "Доля Гутшайна среди РЕШЁННЫХ сделок (Гутшайн или закрыто), по дате закрытия, для двух групп.",
-                    "Чья линия выше — та группа чаще доводит до Гутшайна. Видно, крепнет ли разрыв со временем.",
-                    "Показан общий период — где у ОБЕИХ групп набирается ≥15 сделок в окне; так линии сравнимы и стартуют вместе.",
-                    "Зачем скользящее среднее: в день закрывается мало сделок, точечный % скакал бы 0↔100%. Поэтому каждая точка = среднее за 30 дней.",
-                    "Это корреляция, не причина (напр. бот выбирают более мотивированные клиенты).",
-                  ]}
-                />
+                <div className="flex items-center gap-2">
+                  <div className="inline-flex p-0.5 rounded-md bg-slate-800/60 border border-white/5">
+                    {(["day", "week"] as const).map((g) => (
+                      <button key={g} type="button" onClick={() => setGranularity(g)}
+                        aria-pressed={granularity === g}
+                        className={`text-[10px] px-2 py-0.5 rounded transition-colors ${granularity === g ? "bg-blue-500/20 text-blue-300" : "text-slate-500 hover:text-white"}`}>
+                        {g === "day" ? "Дни" : "Недели"}
+                      </button>
+                    ))}
+                  </div>
+                  <InfoPopover
+                    title="Линия по времени"
+                    points={[
+                      "Доля Гутшайна среди РЕШЁННЫХ сделок (Гутшайн или закрыто), по дате закрытия, для двух групп.",
+                      "Чья линия выше — та группа чаще доводит до Гутшайна. Видно, крепнет ли разрыв со временем.",
+                      "Показан общий период — где у ОБЕИХ групп набирается ≥15 сделок в окне; так линии сравнимы и стартуют вместе.",
+                      "Зачем скользящее среднее: в день закрывается мало сделок, точечный % скакал бы 0↔100%. Поэтому каждая точка = среднее за 30 дней.",
+                      "«Недели» — та же линия, реже точки (конец каждой недели), для читаемости на длинном периоде.",
+                      "Это корреляция, не причина (напр. бот выбирают более мотивированные клиенты).",
+                    ]}
+                  />
+                </div>
               </div>
               {hasTime ? (
                 <div className="h-52">
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={data.points} margin={{ top: 8, right: 12, bottom: 0, left: -14 }}>
+                    <ComposedChart data={displayPoints} margin={{ top: 8, right: 12, bottom: 0, left: -14 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#94a3b8" }} minTickGap={36}
                         tickFormatter={(d: string) => (typeof d === "string" ? d.slice(5) : d)} />
                       <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} unit="%"
-                        domain={[0, yMax(Math.max(1, ...data.points.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
+                        domain={[0, yMax(Math.max(1, ...displayPoints.flatMap((p) => [p.a ?? 0, p.b ?? 0])))]} />
                       <Tooltip content={<TimeTooltip series={data.series} />} />
                       <Line type="monotone" dataKey="a" name={data.series[0]?.label} stroke="#34d399" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
                       <Line type="monotone" dataKey="b" name={data.series[1]?.label} stroke="#94a3b8" strokeWidth={2.5} dot={false} connectNulls isAnimationActive={false} />
@@ -897,6 +977,9 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
   const [drill, setDrill] = useState<{ title: string; rows: DrillRow[] } | null>(null);
   // Клиентский фильтр по ответственному менеджеру ("" = все). Влияет и на чарты, и на таблицы.
   const [manager, setManager] = useState("");
+  // Клиентский фильтр по этапу ("" = все) — запрошен со звонка 2026-07-13,
+  // вместе с менеджером это единственные два доп. фильтра, которые нужны.
+  const [stage, setStage] = useState("");
   // Собственный фильтр вкладки — по дате термина. По умолчанию сегодня (1 день),
   // но можно выбрать период.
   const [termin, setTermin] = useState<{ start: Date | null; end: Date | null }>(
@@ -922,20 +1005,39 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
       .map((n) => ({ value: n, label: n }));
   }, [data]);
 
+  // Этапы для дропдауна — distinct из загруженных клиентов (active+won).
+  const stageOptions = useMemo(() => {
+    if (!data) return [];
+    const names = new Set<string>();
+    for (const c of [...data.active.clients, ...data.won.clients]) {
+      if (c.status) names.add(c.status);
+    }
+    return Array.from(names)
+      .sort((a, b) => a.localeCompare(b, "ru"))
+      .map((n) => ({ value: n, label: n }));
+  }, [data]);
+
   const chartClients = useMemo(() => {
     if (!data) return [];
     return [...data.active.clients, ...data.won.clients].filter(
-      (c) => c.terminInRange && (manager === "" || c.managerName === manager),
+      (c) =>
+        c.terminInRange &&
+        (manager === "" || c.managerName === manager) &&
+        (stage === "" || c.status === stage),
     );
-  }, [data, manager]);
+  }, [data, manager, stage]);
   const uniqueBotUsers = useMemo(
     () => chartClients.filter((c) => c.botRoleplayCount > 0).length,
     [chartClients],
   );
-  // Выбранный менеджер пропал из новых данных (смена периода) → сброс на «Все», чтобы
-  // дропдаун и фильтр не рассинхронились (render-time паттерн, без setState-в-эффекте).
+  // Выбранные менеджер/этап пропали из новых данных (смена периода) → сброс на
+  // «Все», чтобы дропдаун и фильтр не рассинхронились (render-time паттерн, без
+  // setState-в-эффекте).
   if (manager !== "" && data !== null && !managerOptions.some((o) => o.value === manager)) {
     setManager("");
+  }
+  if (stage !== "" && data !== null && !stageOptions.some((o) => o.value === stage)) {
+    setStage("");
   }
 
   const start = termin.start ?? todayBerlinDate();
@@ -996,7 +1098,9 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="glass-panel rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-3 flex-wrap">
+      {/* Sticky — запрос со звонка 2026-07-13: плашки фильтров должны оставаться
+          сверху окна при скролле длинных таблиц ниже, а не «уезжать» вверх страницы. */}
+      <div className="glass-panel sticky top-0 z-20 rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-3 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
           Дата термина
         </span>
@@ -1018,6 +1122,17 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
           onChange={setManager}
           emptyLabel="Все"
           ariaLabel="Фильтр по менеджеру"
+          minWidthClass="min-w-[160px]"
+        />
+        <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+          Этап
+        </span>
+        <FilterSelect
+          value={stage}
+          options={stageOptions}
+          onChange={setStage}
+          emptyLabel="Все"
+          ariaLabel="Фильтр по этапу"
           minWidthClass="min-w-[160px]"
         />
         {loading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
@@ -1064,16 +1179,20 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
           <CorrelationPanel vertical={vertical} />
           <ClientTable
-            group={filterGroupByManager(data.active, manager)}
+            group={filterGroup(data.active, manager, stage)}
             title="Клиенты в работе"
             icon={<Users className="w-4 h-4 text-blue-400" />}
             onRowClick={setSelected}
+            onFilterManager={setManager}
+            onFilterStage={setStage}
           />
           <ClientTable
-            group={filterGroupByManager(data.won, manager)}
+            group={filterGroup(data.won, manager, stage)}
             title="Гутшайн одобрен"
             icon={<Trophy className="w-4 h-4 text-emerald-400" />}
             onRowClick={setSelected}
+            onFilterManager={setManager}
+            onFilterStage={setStage}
           />
         </>
       )}

@@ -930,7 +930,7 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="flex sm:flex-row flex-col min-h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-hidden text-sm">
+    <div className="flex sm:flex-row flex-col min-h-screen text-slate-100 p-2 sm:p-4 gap-4 relative overflow-clip text-sm">
       {/* BACKGROUND DECORATIONS (GLOWS) - Changed to Blue tones */}
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[30%] h-[50%] bg-cyan-500/10 blur-[150px] rounded-full pointer-events-none" />
