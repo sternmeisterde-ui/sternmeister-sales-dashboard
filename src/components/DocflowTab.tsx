@@ -467,13 +467,11 @@ function FunnelPanel({
 
   return (
     <div className="flex flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
-      <div className="mb-3 flex items-baseline justify-between gap-2">
+      <div className="mb-3">
         <h3 className="text-xs uppercase tracking-wider text-slate-500">
-          Воронка сервиса · {funnel.label}
+          Воронка · {funnel.label}
         </h3>
-        <span className="text-[11px] text-blue-300/80 whitespace-nowrap">
-          за период · нажмите на ступень
-        </span>
+        <span className="text-[11px] text-blue-300/80">нажмите на ступень</span>
       </div>
       <div className="flex flex-col gap-1.5">
         {steps.map((s, i) => {
@@ -785,7 +783,7 @@ export default function DocflowTab({
           <div
             className={`grid items-stretch gap-4 ${
               visibleFunnels.length > 0
-                ? "lg:grid-cols-[minmax(260px,1fr)_280px_minmax(0,1.4fr)]"
+                ? "lg:grid-cols-[240px_260px_minmax(0,1fr)]"
                 : "lg:grid-cols-[280px_1fr]"
             }`}
           >
