@@ -1791,7 +1791,17 @@ export default function Dashboard() {
                           <span className="font-medium text-slate-200">{call.name}</span>
                         </td>
                         <td className="px-5 py-3 text-slate-400 whitespace-nowrap">{call.date}</td>
-                        <td className="px-5 py-3 text-slate-300 font-mono text-center">{call.callDuration}</td>
+                        <td className="px-5 py-3 text-slate-300 font-mono text-center">
+                          {call.callDuration}
+                          {call.chainLegs && call.chainLegs > 1 ? (
+                            <span
+                              className="ml-1.5 px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-sans align-middle"
+                              title={`Разговор прерывался: оценка склеена из ${call.chainLegs} звонков, показана суммарная длительность`}
+                            >
+                              ⛓{call.chainLegs}
+                            </span>
+                          ) : null}
+                        </td>
                         {activeTab === "real_calls" && (
                           <td className="px-5 py-3 text-center">
                             {call.callNumber ? (
@@ -1969,7 +1979,12 @@ export default function Dashboard() {
               <div className="flex items-center gap-4">
                 <div>
                   <h3 className="font-bold text-lg text-white">{selectedCall.name}</h3>
-                  <p className="text-xs text-slate-400">{selectedCall.date} • Длительность: {selectedCall.callDuration}</p>
+                  <p className="text-xs text-slate-400">
+                    {selectedCall.date} • Длительность: {selectedCall.callDuration}
+                    {selectedCall.chainLegs && selectedCall.chainLegs > 1 ? (
+                      <span className="text-indigo-300"> • склеен из {selectedCall.chainLegs} звонков</span>
+                    ) : null}
+                  </p>
                 </div>
               </div>
               <button onClick={closeModal} className="p-2 text-slate-400 hover:text-white bg-white/5 rounded-full hover:bg-white/10 transition-colors">
