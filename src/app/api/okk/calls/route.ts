@@ -127,6 +127,7 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
           managerId: okkCalls.managerId,
           managerName: okkCalls.managerName,
           durationSeconds: okkCalls.durationSeconds,
+          pairRole: okkCalls.pairRole,
           recordingUrl: okkCalls.recordingUrl,
           direction: okkCalls.direction,
           kommoLeadUrl: okkCalls.kommoLeadUrl,
@@ -194,9 +195,34 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       return true;
     });
 
+    // ── Chain aggregates for continuation tails ──────────────────────────
+    // A stitched conversation's evaluation lives on its TAIL row, whose own
+    // duration is just the last leg («4 мин» on a 70-min conversation) —
+    // the source of the «засчитался только последний звонок» complaints
+    // (b2b batch 07.2026). Fetch legs count + prior duration for the visible
+    // tails in ONE query and surface the TOTAL to the UI.
+    const tailIds = uniqueRows.filter((r) => r.pairRole === "continuation").map((r) => r.id);
+    const chainAggByTail = new Map<string, { legs: number; priorDur: number }>();
+    if (tailIds.length > 0) {
+      const chainRows = await db
+        .select({
+          tailId: okkCalls.pairedCallId,
+          legs: sql<number>`count(*)::int`,
+          priorDur: sql<number>`coalesce(sum(${okkCalls.durationSeconds}), 0)::int`,
+        })
+        .from(okkCalls)
+        .where(and(inArray(okkCalls.pairedCallId, tailIds), eq(okkCalls.pairRole, "primary")))
+        .groupBy(okkCalls.pairedCallId);
+      for (const r of chainRows) {
+        if (r.tailId) chainAggByTail.set(r.tailId, { legs: Number(r.legs) || 0, priorDur: Number(r.priorDur) || 0 });
+      }
+    }
+
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
     const calls = uniqueRows.map((row) => {
-      const dSec = row.durationSeconds || 0;
+      const chain = row.pairRole === "continuation" ? chainAggByTail.get(row.id) : undefined;
+      // Conversation-level duration: tail + all stitched legs.
+      const dSec = (row.durationSeconds || 0) + (chain?.priorDur || 0);
       const mins = Math.floor(dSec / 60);
       const secs = dSec % 60;
 
@@ -223,6 +249,8 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         name: row.managerName || "—",
         avatarUrl: "",
         callDuration: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
+        // >1 → the row is a stitched conversation of N calls (badge in UI).
+        chainLegs: chain ? chain.legs + 1 : undefined,
         callNumber: row.callNumber || "",
         date: formatCallDate(row.callCreatedAt),
         // Raw ISO so clients can filter without round-tripping the display string.

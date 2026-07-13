@@ -6,6 +6,9 @@ export interface ManagerCall {
     name: string;
     avatarUrl: string;
     callDuration: string;
+    /** Склеенный разговор: из скольких звонков сшита оценка (undefined = обычный
+     *  одиночный звонок). callDuration при этом — СУММАРНАЯ длительность цепочки. */
+    chainLegs?: number;
     callNumber?: string;
     score: number;
     /** Raw max score from evaluationJson.total_max_score (e.g. 33), used to display "8/33 (24%)" */
