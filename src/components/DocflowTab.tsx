@@ -466,14 +466,14 @@ function FunnelPanel({
   const max = steps[0].count;
 
   return (
-    <div className="flex flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
+    <div className="flex flex-1 flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
       <div className="mb-3">
         <h3 className="text-xs uppercase tracking-wider text-slate-500">
           Воронка · {funnel.label}
         </h3>
         <span className="text-[11px] text-blue-300/80">нажмите на ступень</span>
       </div>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-1 flex-col justify-center gap-1.5">
         {steps.map((s, i) => {
           const widthPct = max > 0 ? Math.max(2, (s.count / max) * 100) : 0;
           const prev = i > 0 ? steps[i - 1].count : null;
@@ -783,12 +783,12 @@ export default function DocflowTab({
           <div
             className={`grid items-stretch gap-4 ${
               visibleFunnels.length > 0
-                ? "lg:grid-cols-[240px_260px_minmax(0,1fr)]"
+                ? "lg:grid-cols-[280px_250px_minmax(0,1fr)]"
                 : "lg:grid-cols-[280px_1fr]"
             }`}
           >
             {visibleFunnels.length > 0 && (
-              <div className="flex flex-col gap-4">
+              <div className="flex h-full flex-col gap-4">
                 {visibleFunnels.map((f) => (
                   <FunnelPanel key={f.label} funnel={f} onStepClick={setFunnelModal} />
                 ))}
