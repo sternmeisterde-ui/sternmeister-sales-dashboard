@@ -108,8 +108,9 @@ export interface DocflowStats {
   days: DocflowDayPoint[];
   applicationsList: DocflowApplicationRow[];
   applicationsTruncated: boolean;
-  /** Воронки «принят от 1-й линии → анкета → отклик» по вертикалям (Бух/Мед
-   *  Бератер) — отдельными блоками, цифры НЕ объединяются. Пусто при сбое. */
+  /** Воронка «принят от 1-й линии → анкета → отклик» под выбранную вертикаль
+   *  (buh → Бух, med → Мед, all → объединённая Бух+Мед). Массив из ≤1 элемента;
+   *  пусто при сбое. */
   funnels: DocflowFunnel[];
 }
 
@@ -207,9 +208,10 @@ async function resolveLeadNames(leadIds: number[]): Promise<Map<number, string>>
 }
 
 /**
- * Воронка по когорте лидов, переданных на 2-ю линию (пайплайн `pipelineId`,
+ * Воронка по когорте лидов, переданных на 2-ю линию (пайплайны `pipelineIds`,
  * Бератер) за берлинский период [from, to]. Из этой когорты считаем, сколько
- * завели анкету в BGS DocFlow и сколько откликнулись.
+ * завели анкету в BGS DocFlow и сколько откликнулись. Для вертикали «Все»
+ * передаётся несколько пайплайнов (Бух + Мед) — когорта объединённая, одна воронка.
  *
  * «Принято от первой линии» = СОЗДАНИЕ Бератер-сделки (leads_cohort.created_at)
  * в периоде — так же, как это считает вкладка Воронка (overview.ts, bl.createdAt).
@@ -227,7 +229,7 @@ async function resolveLeadNames(leadIds: number[]): Promise<Map<number, string>>
  */
 async function computeFunnel(
   label: string,
-  pipelineId: number,
+  pipelineIds: number[],
   from: string,
   to: string,
   sentByLeadId: Map<number, number>,
@@ -240,11 +242,12 @@ async function computeFunnel(
     cohort: [],
   };
   try {
+    const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
     const cohortRaw = rows<{ lead_id: string | number }>(
       await analyticsDb.execute(sql`
         SELECT lead_id
         FROM analytics.leads_cohort
-        WHERE pipeline_id = ${pipelineId}
+        WHERE pipeline_id IN (${pipelineList})
           AND exclude_from_analytics = FALSE
           AND is_deleted = FALSE
           AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date
@@ -362,21 +365,27 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       }
     }
 
-    // Воронки «принят от 1-й линии → анкета → отклик» по выбранной вертикали.
-    // «all» → обе (Бух + Мед) отдельными блоками, цифры НЕ суммируются.
-    const funnelTasks: Array<Promise<DocflowFunnel>> = [];
-    if (vertical === "buh" || vertical === "all") {
-      funnelTasks.push(computeFunnel("Бух Бератер", B2G_PIPELINES.BERATER, from, to, sentByLeadId));
-    }
-    if (vertical === "med" || vertical === "all") {
-      funnelTasks.push(computeFunnel("Мед Бератер", B2G_PIPELINES.MED_BERATER, from, to, sentByLeadId));
-    }
+    // Воронка «принят от 1-й линии → анкета → отклик» по выбранной вертикали.
+    // «all» → ОДНА общая воронка по объединённой когорте Бух + Мед Бератер.
+    const funnelTask =
+      vertical === "med"
+        ? computeFunnel("Мед Бератер", [B2G_PIPELINES.MED_BERATER], from, to, sentByLeadId)
+        : vertical === "all"
+          ? computeFunnel(
+              "Бух + Мед Бератер",
+              [B2G_PIPELINES.BERATER, B2G_PIPELINES.MED_BERATER],
+              from,
+              to,
+              sentByLeadId,
+            )
+          : computeFunnel("Бух Бератер", [B2G_PIPELINES.BERATER], from, to, sentByLeadId);
 
-    const [terminByLeadId, names, funnels] = await Promise.all([
+    const [terminByLeadId, names, funnel] = await Promise.all([
       resolveTerminInfo(allLeadIds),
       resolveLeadNames(allLeadIds),
-      Promise.all(funnelTasks),
+      funnelTask,
     ]);
+    const funnels = [funnel];
 
     const total = clientRows.length;
     let done = 0;
