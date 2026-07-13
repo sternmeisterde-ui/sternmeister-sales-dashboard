@@ -1100,7 +1100,7 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
     <div className="flex flex-col gap-4">
       {/* Sticky — запрос со звонка 2026-07-13: плашки фильтров должны оставаться
           сверху окна при скролле длинных таблиц ниже, а не «уезжать» вверх страницы. */}
-      <div className="glass-panel sticky top-0 z-20 rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-3 flex-wrap">
+      <div className="bg-slate-900 shadow-lg sticky top-0 z-20 rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-3 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
           Дата термина
         </span>
