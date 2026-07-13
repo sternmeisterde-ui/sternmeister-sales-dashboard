@@ -23,6 +23,7 @@
 import { sql } from "drizzle-orm";
 import { getDocflowDb } from "@/lib/db/docflow-db";
 import { analyticsDb } from "@/lib/db/analytics";
+import { B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeline-config";
 
 /** Локальный распаковщик результата neon-http (массив либо {rows:[]}). */
 function rows<T>(result: unknown): T[] {
@@ -68,7 +69,33 @@ export interface DocflowClientUsageRow {
   leadName: string | null;
   sentCount: number;
   done: boolean;
+  /** YYYY-MM-DD (берлинская дата) — термин сделки в Kommo (АА, иначе ДЦ), либо null. */
+  terminDate: string | null;
   bucket: DocflowUsageBucket;
+}
+
+/** Один лид когорты воронки — прошёл этап «принят от 1-й линии» за период. */
+export interface DocflowFunnelRow {
+  leadId: number;
+  leadName: string | null;
+  filledAnketa: boolean; // завёл клиента в BGS DocFlow (= заполнил анкету)
+  responded: boolean; // хотя бы один отправленный отклик
+}
+
+/**
+ * Воронка использования сервиса по когорте лидов, прошедших этап «Принято от
+ * первой линии» (Бух Бератер) за период — по дате перехода в статус:
+ *   accepted → заполнили анкету → откликнулись.
+ * Регистрация в сервисе отдельно не трекается: клиент в BGS_DocFlow создаётся
+ * ровно при заполнении анкеты (backend/app/api/routes/submissions.py), так что
+ * «зарегался» = «заполнил анкету» — одна ступень.
+ */
+export interface DocflowFunnel {
+  label: string;
+  acceptedFromFirst: number;
+  filledAnketa: number;
+  responded: number;
+  cohort: DocflowFunnelRow[];
 }
 
 export interface DocflowStats {
@@ -81,6 +108,10 @@ export interface DocflowStats {
   days: DocflowDayPoint[];
   applicationsList: DocflowApplicationRow[];
   applicationsTruncated: boolean;
+  /** Воронка «принят от 1-й линии → анкета → отклик» под выбранную вертикаль
+   *  (buh → Бух, med → Мед, all → объединённая Бух+Мед). Массив из ≤1 элемента;
+   *  пусто при сбое. */
+  funnels: DocflowFunnel[];
 }
 
 function emptyStats(range: { from: string; to: string }): DocflowStats {
@@ -94,6 +125,7 @@ function emptyStats(range: { from: string; to: string }): DocflowStats {
     days: [],
     applicationsList: [],
     applicationsTruncated: false,
+    funnels: [],
   };
 }
 
@@ -103,35 +135,45 @@ function bucketFor(sentCount: number): DocflowUsageBucket {
   return "many";
 }
 
-/** Лиды, у которых термин (АА, иначе ДЦ) уже прошёл — по берлинской гражд. дате. */
-async function resolveDoneLeadIds(leadIds: number[]): Promise<Set<number>> {
-  const done = new Set<number>();
+export interface LeadTerminInfo {
+  terminDate: string | null; // YYYY-MM-DD (берлинская дата)
+  done: boolean; // термин уже прошёл
+}
+
+/** Термин (АА, иначе ДЦ) по каждому лиду — дата + прошёл ли уже, одним запросом. */
+async function resolveTerminInfo(leadIds: number[]): Promise<Map<number, LeadTerminInfo>> {
+  const out = new Map<number, LeadTerminInfo>();
   const ids = Array.from(new Set(leadIds.filter((n) => Number.isInteger(n) && n > 0)));
-  if (ids.length === 0) return done;
+  if (ids.length === 0) return out;
   try {
     const idList = sql.join(ids.map((id) => sql`${id}`), sql`, `);
-    const data = rows<{ lead_id: string | number }>(
+    const data = rows<{ lead_id: string | number; termin_date: string | null; is_done: boolean }>(
       await analyticsDb.execute(sql`
-        SELECT lead_id
-        FROM analytics.leads_cohort
-        WHERE lead_id IN (${idList})
-        GROUP BY lead_id
-        HAVING (
-          (MAX(COALESCE(aa_termin_date, termin_date)) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'
-        )::date < ((now() AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
+        SELECT lead_id,
+               to_char(termin, 'YYYY-MM-DD') AS termin_date,
+               COALESCE(termin::date < ((now() AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date, false) AS is_done
+        FROM (
+          SELECT lead_id,
+                 (MAX(COALESCE(aa_termin_date, termin_date)) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' AS termin
+          FROM analytics.leads_cohort
+          WHERE lead_id IN (${idList})
+          GROUP BY lead_id
+        ) t
       `),
     );
     for (const r of data) {
       const id = Number(r.lead_id);
-      if (Number.isInteger(id)) done.add(id);
+      if (Number.isInteger(id)) {
+        out.set(id, { terminDate: r.termin_date, done: Boolean(r.is_done) });
+      }
     }
   } catch (e) {
     console.error(
-      "[docflow] resolveDoneLeadIds failed (non-fatal, treated as none done):",
+      "[docflow] resolveTerminInfo failed (non-fatal, treated as none done):",
       e instanceof Error ? e.message : e,
     );
   }
-  return done;
+  return out;
 }
 
 /** Имя лида по kommo_lead_id из НАШЕЙ analytics (для ссылки в Kommo). Graceful: пусто при сбое. */
@@ -165,14 +207,103 @@ async function resolveLeadNames(leadIds: number[]): Promise<Map<number, string>>
   return out;
 }
 
+/**
+ * Воронка по когорте лидов, переданных на 2-ю линию (пайплайны `pipelineIds`,
+ * Бератер) за берлинский период [from, to]. Из этой когорты считаем, сколько
+ * завели анкету в BGS DocFlow и сколько откликнулись. Для вертикали «Все»
+ * передаётся несколько пайплайнов (Бух + Мед) — когорта объединённая, одна воронка.
+ *
+ * «Принято от первой линии» = СОЗДАНИЕ Бератер-сделки (leads_cohort.created_at)
+ * в периоде — так же, как это считает вкладка Воронка (overview.ts, bl.createdAt).
+ * Событие статуса RECEIVED_FROM_FIRST (93860331) для этого НЕ годится: при
+ * автопереходе из «Термин ДЦ» Kommo создаёт Бератер-сделку сразу в этом статусе
+ * и события смены статуса не пишет — 63 лида в lead_status_changes отсутствуют
+ * вовсе, а у остальных первое событие («Доведение») сдвигает дату. Сверено на
+ * 2026-06-11..07-10: created_at даёт 243 (как Воронка) против 247 по event_at.
+ * Уважаем те же фильтры аналитики, что и Воронка (exclude_from_analytics/is_deleted).
+ *
+ * `sentByLeadId` — карта kommo_lead_id → число отправленных откликов (за всё
+ * время), собранная из уже загруженных clients (переиспользуем, чтобы не
+ * ходить в БД DocFlow повторно). Наличие ключа = у лида есть клиент = анкета
+ * заполнена; значение > 0 = откликался. Graceful: пустая когорта при сбое.
+ */
+async function computeFunnel(
+  label: string,
+  pipelineIds: number[],
+  from: string,
+  to: string,
+  sentByLeadId: Map<number, number>,
+): Promise<DocflowFunnel> {
+  const empty: DocflowFunnel = {
+    label,
+    acceptedFromFirst: 0,
+    filledAnketa: 0,
+    responded: 0,
+    cohort: [],
+  };
+  try {
+    const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+    const cohortRaw = rows<{ lead_id: string | number }>(
+      await analyticsDb.execute(sql`
+        SELECT lead_id
+        FROM analytics.leads_cohort
+        WHERE pipeline_id IN (${pipelineList})
+          AND exclude_from_analytics = FALSE
+          AND is_deleted = FALSE
+          AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date
+          AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)
+      `),
+    );
+    const leadIds: number[] = [];
+    for (const r of cohortRaw) {
+      const id = Number(r.lead_id);
+      if (Number.isInteger(id) && id > 0) leadIds.push(id);
+    }
+    if (leadIds.length === 0) return empty;
+
+    const names = await resolveLeadNames(leadIds);
+    let filledAnketa = 0;
+    let responded = 0;
+    const cohort: DocflowFunnelRow[] = leadIds.map((leadId) => {
+      const hasClient = sentByLeadId.has(leadId);
+      const didRespond = (sentByLeadId.get(leadId) ?? 0) > 0;
+      if (hasClient) filledAnketa++;
+      if (didRespond) responded++;
+      return {
+        leadId,
+        leadName: names.get(leadId) ?? null,
+        filledAnketa: hasClient,
+        responded: didRespond,
+      };
+    });
+
+    return {
+      label,
+      acceptedFromFirst: leadIds.length,
+      filledAnketa,
+      responded,
+      cohort,
+    };
+  } catch (e) {
+    console.error(
+      "[docflow] computeFunnel failed (non-fatal, empty funnel):",
+      e instanceof Error ? e.message : e,
+    );
+    return empty;
+  }
+}
+
 export interface GetDocflowStatsArgs {
   /** YYYY-MM-DD включительно (берлинская гражд. дата). Фильтрует sent_at откликов. */
   from: string;
   to: string;
+  /** Вертикаль b2g (Бух/Мед/Все) — какие воронки Бератер показать. Дефолт buh.
+   *  «all» → обе воронки ОТДЕЛЬНЫМИ блоками, цифры не суммируются. */
+  vertical?: Vertical;
 }
 
 export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<DocflowStats> {
-  const { from, to } = args;
+  const { from, to, vertical = "buh" } = args;
   const range = { from, to };
   const db = getDocflowDb();
   if (!db) return emptyStats(range);
@@ -220,24 +351,46 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
     }>(clientsRaw);
     const leadByClientId = new Map<number, number>();
     const allLeadIds: number[] = [];
+    // kommo_lead_id → сумма отправленных откликов (для воронки: наличие ключа =
+    // анкета заполнена, значение > 0 = откликался). Дубли клиентов на один лид
+    // суммируем (submissions.py допускает повторную анкету при потере ссылки).
+    const sentByLeadId = new Map<number, number>();
     for (const r of clientRows) {
       const clientId = Number(r.id);
       const leadId = r.kommo_lead_id != null ? Number(r.kommo_lead_id) : NaN;
       if (Number.isInteger(leadId) && leadId > 0) {
         leadByClientId.set(clientId, leadId);
         allLeadIds.push(leadId);
+        sentByLeadId.set(leadId, (sentByLeadId.get(leadId) ?? 0) + (Number(r.sent_cnt) || 0));
       }
     }
 
-    const [doneLeadIds, names] = await Promise.all([
-      resolveDoneLeadIds(allLeadIds),
+    // Воронка «принят от 1-й линии → анкета → отклик» по выбранной вертикали.
+    // «all» → ОДНА общая воронка по объединённой когорте Бух + Мед Бератер.
+    const funnelTask =
+      vertical === "med"
+        ? computeFunnel("Мед Бератер", [B2G_PIPELINES.MED_BERATER], from, to, sentByLeadId)
+        : vertical === "all"
+          ? computeFunnel(
+              "Бух + Мед Бератер",
+              [B2G_PIPELINES.BERATER, B2G_PIPELINES.MED_BERATER],
+              from,
+              to,
+              sentByLeadId,
+            )
+          : computeFunnel("Бух Бератер", [B2G_PIPELINES.BERATER], from, to, sentByLeadId);
+
+    const [terminByLeadId, names, funnel] = await Promise.all([
+      resolveTerminInfo(allLeadIds),
       resolveLeadNames(allLeadIds),
+      funnelTask,
     ]);
+    const funnels = [funnel];
 
     const total = clientRows.length;
     let done = 0;
     for (const leadId of leadByClientId.values()) {
-      if (doneLeadIds.has(leadId)) done++;
+      if (terminByLeadId.get(leadId)?.done) done++;
     }
     const inProgress = total - done;
 
@@ -247,11 +400,13 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       const sentCount = Number(r.sent_cnt) || 0;
       const bucket = bucketFor(sentCount);
       usage[bucket]++;
+      const termin = leadId != null ? terminByLeadId.get(leadId) : undefined;
       return {
         leadId,
         leadName: leadId != null ? names.get(leadId) ?? null : null,
         sentCount,
-        done: leadId != null && doneLeadIds.has(leadId),
+        done: termin?.done ?? false,
+        terminDate: termin?.terminDate ?? null,
         bucket,
       };
     });
@@ -306,6 +461,7 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
         };
       }),
       applicationsTruncated,
+      funnels,
     };
   } catch (e) {
     console.error(

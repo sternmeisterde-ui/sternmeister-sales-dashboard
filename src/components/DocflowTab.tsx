@@ -14,7 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Briefcase, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { Briefcase, ChevronDown, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import DrillModal from "@/components/DrillModal";
@@ -51,7 +51,21 @@ interface ClientUsageRow {
   leadName: string | null;
   sentCount: number;
   done: boolean;
+  terminDate: string | null;
   bucket: UsageBucketKey;
+}
+interface FunnelRow {
+  leadId: number;
+  leadName: string | null;
+  filledAnketa: boolean;
+  responded: boolean;
+}
+interface Funnel {
+  label: string;
+  acceptedFromFirst: number;
+  filledAnketa: number;
+  responded: number;
+  cohort: FunnelRow[];
 }
 interface DocflowStats {
   available: boolean;
@@ -62,6 +76,7 @@ interface DocflowStats {
   days: DayPoint[];
   applicationsList: ApplicationRow[];
   applicationsTruncated: boolean;
+  funnels: Funnel[];
 }
 
 /** Drill-модалка по клиентам, параметризована заголовком + предикатом (bucket/статус/всё). */
@@ -75,6 +90,11 @@ interface AppsModalSelection {
   predicate: (a: ApplicationRow) => boolean;
   /** Настоящее кол-во по этому срезу (из агрегатов, не из усечённого списка) — для предупреждения о cap. */
   expectedCount?: number;
+}
+/** Drill-модалка по ступени воронки — уже отфильтрованные строки конкретной воронки. */
+interface FunnelModalSelection {
+  title: string;
+  rows: FunnelRow[];
 }
 
 const USAGE_COLORS: Record<UsageBucketKey, string> = {
@@ -117,6 +137,12 @@ function defaultRange(): DateRange {
 /** "YYYY-MM-DD" → "DD.MM" без таймзонных сюрпризов (чистая строка). */
 function fmtDay(day: string): string {
   return `${day.slice(8, 10)}.${day.slice(5, 7)}`;
+}
+
+/** "YYYY-MM-DD" → "DD.MM.YYYY" (чистая строка, без Date/TZ). */
+function fmtTerminDate(day: string | null): string {
+  if (!day) return "—";
+  return `${day.slice(8, 10)}.${day.slice(5, 7)}.${day.slice(0, 4)}`;
 }
 
 function fmtTime(iso: string): string {
@@ -257,6 +283,7 @@ function ClientsListModal({
             <tr className="border-b border-white/10 bg-slate-900 text-left text-xs text-slate-400">
               <th className="px-3 py-2 font-medium">Лид</th>
               <th className="px-3 py-2 font-medium">Отправлено</th>
+              <th className="px-3 py-2 font-medium">Термин</th>
               <th className="px-3 py-2 font-medium">Статус</th>
             </tr>
           </thead>
@@ -282,6 +309,9 @@ function ClientsListModal({
                   )}
                 </td>
                 <td className="px-3 py-1.5 text-xs text-slate-400">{r.sentCount}</td>
+                <td className="whitespace-nowrap px-3 py-1.5 text-xs text-slate-400">
+                  {fmtTerminDate(r.terminDate)}
+                </td>
                 <td className="px-3 py-1.5 text-xs text-slate-400">
                   {r.done ? "Завершил" : "В работе"}
                 </td>
@@ -392,14 +422,182 @@ function ApplicationsListModal({
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export default function DocflowTab({ department: _department }: { department: "b2g" | "b2b" }) {
+/**
+ * Воронка сервиса в виде убывающих полос (аналогично «Объединённой воронке» во
+ * вкладке Воронка): ширина бара ∝ количеству от первой ступени, между
+ * ступенями — % перехода. Каждая ступень кликабельна → drill по когорте.
+ */
+function FunnelPanel({
+  funnel,
+  onStepClick,
+}: {
+  funnel: Funnel;
+  onStepClick: (sel: FunnelModalSelection) => void;
+}) {
+  const steps: Array<{
+    key: string;
+    label: string;
+    count: number;
+    hint: string;
+    predicate: (r: FunnelRow) => boolean;
+  }> = [
+    {
+      key: "accepted",
+      label: "Принято от 1-й линии",
+      count: funnel.acceptedFromFirst,
+      hint: "Лиды, переданные на 2-ю линию (первое попадание в пайплайн Бератер) за период",
+      predicate: () => true,
+    },
+    {
+      key: "anketa",
+      label: "Заполнили анкету",
+      count: funnel.filledAnketa,
+      hint: "Из них завели анкету в BGS DocFlow (= зарегались в сервисе)",
+      predicate: (r) => r.filledAnketa,
+    },
+    {
+      key: "responded",
+      label: "Откликнулись",
+      count: funnel.responded,
+      hint: "Из заполнивших анкету — хотя бы один отправленный отклик",
+      predicate: (r) => r.responded,
+    },
+  ];
+  const max = steps[0].count;
+
+  return (
+    <div className="flex flex-1 flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
+      <div className="mb-3">
+        <h3 className="text-xs uppercase tracking-wider text-slate-500">
+          Воронка · {funnel.label}
+        </h3>
+        <span className="text-[11px] text-blue-300/80">нажмите на ступень</span>
+      </div>
+      <div className="flex flex-1 flex-col justify-center gap-1.5">
+        {steps.map((s, i) => {
+          const widthPct = max > 0 ? Math.max(2, (s.count / max) * 100) : 0;
+          const prev = i > 0 ? steps[i - 1].count : null;
+          const transitionPct =
+            prev != null && prev > 0 ? Math.round((s.count / prev) * 100) : null;
+          return (
+            <div key={s.key} className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                title={s.hint}
+                onClick={() =>
+                  onStepClick({
+                    title: `${s.label} · ${funnel.label}`,
+                    rows: funnel.cohort.filter(s.predicate),
+                  })
+                }
+                className="group flex flex-col gap-1 text-left"
+              >
+                <span className="text-[11px] text-slate-300">{s.label}</span>
+                <div className="relative h-7 overflow-hidden rounded-md bg-slate-800/40 transition-colors group-hover:bg-slate-800/70">
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-md bg-gradient-to-r from-blue-500/60 to-cyan-500/45 transition-[width] duration-500"
+                    style={{ width: `${widthPct}%` }}
+                  />
+                  <div className="absolute inset-0 flex items-center px-2">
+                    <span className="text-xs font-bold tabular-nums text-white">
+                      {s.count}
+                    </span>
+                  </div>
+                </div>
+              </button>
+              {transitionPct != null && (
+                <div className="flex items-center gap-1.5 pl-2 text-[10px] leading-none text-slate-500">
+                  <ChevronDown className="h-2.5 w-2.5 shrink-0" />
+                  <span className="font-semibold tabular-nums text-slate-400">
+                    {transitionPct}%
+                  </span>
+                  <span className="text-slate-600">от предыдущего</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FunnelListModal({
+  title,
+  rows,
+  onClose,
+}: {
+  title: string;
+  rows: FunnelRow[];
+  onClose: () => void;
+}) {
+  return (
+    <DrillModal
+      onClose={onClose}
+      header={
+        <>
+          <div className="text-sm font-semibold text-white">{title}</div>
+          <div className="mt-0.5 text-[11px] text-slate-400">{rows.length} чел.</div>
+        </>
+      }
+    >
+      {rows.length === 0 ? (
+        <div className="py-12 text-center text-sm text-slate-500">Список пуст.</div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 z-10">
+            <tr className="border-b border-white/10 bg-slate-900 text-left text-xs text-slate-400">
+              <th className="px-3 py-2 font-medium">Лид</th>
+              <th className="px-3 py-2 font-medium">Анкета</th>
+              <th className="px-3 py-2 font-medium">Отклик</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr
+                key={`${r.leadId}-${i}`}
+                className="border-b border-white/5 text-slate-200 last:border-0 hover:bg-white/5"
+              >
+                <td className="px-3 py-1.5">
+                  <a
+                    href={kommoLeadUrl(r.leadId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-cyan-300 hover:text-cyan-200 hover:underline"
+                  >
+                    {r.leadName ?? "Открыть сделку"}
+                    <ExternalLink className="h-3 w-3 opacity-70" />
+                  </a>
+                </td>
+                <td className="px-3 py-1.5 text-xs text-slate-400">
+                  {r.filledAnketa ? "✓" : "—"}
+                </td>
+                <td className="px-3 py-1.5 text-xs text-slate-400">
+                  {r.responded ? "✓" : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </DrillModal>
+  );
+}
+
+export default function DocflowTab({
+  vertical,
+}: {
+  department: "b2g" | "b2b";
+  /** Вертикаль b2g (Бух/Мед/Все) из общего тоггла в шапке. */
+  vertical?: "buh" | "med" | "all";
+}) {
   const [stats, setStats] = useState<DocflowStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<DateRange>(defaultRange);
   const [clientsModal, setClientsModal] = useState<ClientsModalSelection | null>(null);
   const [appsModal, setAppsModal] = useState<AppsModalSelection | null>(null);
+  const [funnelModal, setFunnelModal] = useState<FunnelModalSelection | null>(null);
 
   const load = useCallback(async (r: DateRange) => {
     const start = r.start ?? todayBerlinDate();
@@ -408,11 +606,13 @@ export default function DocflowTab({ department: _department }: { department: "b
     setError(null);
     setClientsModal(null);
     setAppsModal(null);
+    setFunnelModal(null);
     try {
       const params = new URLSearchParams({
         from: fmtLocalDate(start),
         to: fmtLocalDate(end),
       });
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/docflow?${params}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStats((await res.json()) as DocflowStats);
@@ -421,12 +621,13 @@ export default function DocflowTab({ department: _department }: { department: "b
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [vertical]);
 
+  // Первичная загрузка + перезагрузка при смене вертикали (тоггл в шапке).
   useEffect(() => {
     load(range);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [vertical]);
 
   const onRangeChange = (r: DateRange) => {
     setRange(r);
@@ -442,6 +643,10 @@ export default function DocflowTab({ department: _department }: { department: "b
     if (!appsModal || !stats) return [];
     return stats.applicationsList.filter(appsModal.predicate);
   }, [appsModal, stats]);
+
+  // Воронки под выбранную вертикаль уже отфильтрованы бэкендом (buh→бух,
+  // med→мед, all→обе отдельными блоками). Показываем как есть.
+  const visibleFunnels = stats?.funnels ?? [];
 
   if (loading && !stats) {
     return (
@@ -575,7 +780,21 @@ export default function DocflowTab({ department: _department }: { department: "b
             </div>
           </div>
 
-          <div className="grid items-stretch gap-4 lg:grid-cols-[280px_1fr]">
+          <div
+            className={`grid items-stretch gap-4 ${
+              visibleFunnels.length > 0
+                ? "lg:grid-cols-[280px_250px_minmax(0,1fr)]"
+                : "lg:grid-cols-[280px_1fr]"
+            }`}
+          >
+            {visibleFunnels.length > 0 && (
+              <div className="flex h-full flex-col gap-4">
+                {visibleFunnels.map((f) => (
+                  <FunnelPanel key={f.label} funnel={f} onStepClick={setFunnelModal} />
+                ))}
+              </div>
+            )}
+
             <div className="flex flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
               <div className="mb-3">
                 <h3 className="text-xs uppercase tracking-wider text-slate-500">
@@ -680,6 +899,14 @@ export default function DocflowTab({ department: _department }: { department: "b
           title={clientsModal.title}
           rows={clientsModalRows}
           onClose={() => setClientsModal(null)}
+        />
+      )}
+
+      {funnelModal && (
+        <FunnelListModal
+          title={funnelModal.title}
+          rows={funnelModal.rows}
+          onClose={() => setFunnelModal(null)}
         />
       )}
     </div>
