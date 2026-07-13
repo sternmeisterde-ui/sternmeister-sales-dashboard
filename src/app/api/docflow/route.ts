@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { getDocflowStats } from "@/lib/docflow/stats";
+import { parseVertical } from "@/lib/kommo/pipeline-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,9 +28,10 @@ export async function GET(req: NextRequest) {
   if (!from || !to || !DATE_RE.test(from) || !DATE_RE.test(to)) {
     return NextResponse.json({ error: "bad range" }, { status: 400 });
   }
+  const vertical = parseVertical(sp.get("vertical"));
 
   try {
-    const stats = await getDocflowStats({ from, to });
+    const stats = await getDocflowStats({ from, to, vertical });
     return NextResponse.json(stats, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[/api/docflow] failed:", e);

@@ -586,8 +586,13 @@ function FunnelListModal({
   );
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export default function DocflowTab({ department: _department }: { department: "b2g" | "b2b" }) {
+export default function DocflowTab({
+  vertical,
+}: {
+  department: "b2g" | "b2b";
+  /** Вертикаль b2g (Бух/Мед/Все) из общего тоггла в шапке. */
+  vertical?: "buh" | "med" | "all";
+}) {
   const [stats, setStats] = useState<DocflowStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -609,6 +614,7 @@ export default function DocflowTab({ department: _department }: { department: "b
         from: fmtLocalDate(start),
         to: fmtLocalDate(end),
       });
+      if (vertical) params.set("vertical", vertical);
       const res = await fetch(`/api/docflow?${params}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStats((await res.json()) as DocflowStats);
@@ -617,12 +623,13 @@ export default function DocflowTab({ department: _department }: { department: "b
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [vertical]);
 
+  // Первичная загрузка + перезагрузка при смене вертикали (тоггл в шапке).
   useEffect(() => {
     load(range);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [vertical]);
 
   const onRangeChange = (r: DateRange) => {
     setRange(r);
@@ -639,13 +646,9 @@ export default function DocflowTab({ department: _department }: { department: "b
     return stats.applicationsList.filter(appsModal.predicate);
   }, [appsModal, stats]);
 
-  // Воронки с непустой когортой — панель с 0 «принято» бессмысленна (нечего
-  // разбирать). Так мед-воронка скрывается сама, пока сервисом пользуются
-  // только бух-госники.
-  const visibleFunnels = useMemo(
-    () => (stats?.funnels ?? []).filter((f) => f.acceptedFromFirst > 0),
-    [stats],
-  );
+  // Воронки под выбранную вертикаль уже отфильтрованы бэкендом (buh→бух,
+  // med→мед, all→обе отдельными блоками). Показываем как есть.
+  const visibleFunnels = stats?.funnels ?? [];
 
   if (loading && !stats) {
     return (

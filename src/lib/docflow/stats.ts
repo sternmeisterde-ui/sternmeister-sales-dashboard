@@ -23,7 +23,7 @@
 import { sql } from "drizzle-orm";
 import { getDocflowDb } from "@/lib/db/docflow-db";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeline-config";
 
 /** Локальный распаковщик результата neon-http (массив либо {rows:[]}). */
 function rows<T>(result: unknown): T[] {
@@ -294,10 +294,13 @@ export interface GetDocflowStatsArgs {
   /** YYYY-MM-DD включительно (берлинская гражд. дата). Фильтрует sent_at откликов. */
   from: string;
   to: string;
+  /** Вертикаль b2g (Бух/Мед/Все) — какие воронки Бератер показать. Дефолт buh.
+   *  «all» → обе воронки ОТДЕЛЬНЫМИ блоками, цифры не суммируются. */
+  vertical?: Vertical;
 }
 
 export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<DocflowStats> {
-  const { from, to } = args;
+  const { from, to, vertical = "buh" } = args;
   const range = { from, to };
   const db = getDocflowDb();
   if (!db) return emptyStats(range);
@@ -359,13 +362,20 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       }
     }
 
-    const [terminByLeadId, names, funnelBuh, funnelMed] = await Promise.all([
+    // Воронки «принят от 1-й линии → анкета → отклик» по выбранной вертикали.
+    // «all» → обе (Бух + Мед) отдельными блоками, цифры НЕ суммируются.
+    const funnelTasks: Array<Promise<DocflowFunnel>> = [];
+    if (vertical === "buh" || vertical === "all") {
+      funnelTasks.push(computeFunnel("Бух Бератер", B2G_PIPELINES.BERATER, from, to, sentByLeadId));
+    }
+    if (vertical === "med" || vertical === "all") {
+      funnelTasks.push(computeFunnel("Мед Бератер", B2G_PIPELINES.MED_BERATER, from, to, sentByLeadId));
+    }
+
+    const [terminByLeadId, names, funnels] = await Promise.all([
       resolveTerminInfo(allLeadIds),
       resolveLeadNames(allLeadIds),
-      // Воронки «принят от 1-й линии → анкета → отклик» — Бух и Мед Бератер
-      // отдельными блоками, цифры НЕ объединяются (решение пользователя).
-      computeFunnel("Бух Бератер", B2G_PIPELINES.BERATER, from, to, sentByLeadId),
-      computeFunnel("Мед Бератер", B2G_PIPELINES.MED_BERATER, from, to, sentByLeadId),
+      Promise.all(funnelTasks),
     ]);
 
     const total = clientRows.length;
@@ -442,7 +452,7 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
         };
       }),
       applicationsTruncated,
-      funnels: [funnelBuh, funnelMed],
+      funnels,
     };
   } catch (e) {
     console.error(
