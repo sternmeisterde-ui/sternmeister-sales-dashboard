@@ -201,13 +201,19 @@ export async function computeClients(
   const { terminFrom, terminTo, lang, vertical } = params;
   const beraterIds = getBeraterPipelineIds(vertical);
   const brStatus = getBeraterStatusSets(vertical);
+  // Термин хранится как момент полуночи Berlin (напр. 2026-07-12 22:00 UTC =
+  // 13.07 00:00 Berlin), поэтому гражданскую дату берём в Berlin, а не UTC
+  // (CLAUDE.md #1). Без этого termin_date::date уезжал на день назад и термины
+  // «прятались» в предыдущий день.
+  const dcDate = sql`((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`;
+  const aaDate = sql`((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`;
   // Одна дата (terminTo == null) = «с этого числа и дальше» (>=); период = диапазон.
   const dcCond = terminTo
-    ? sql`(termin_date::date >= ${terminFrom}::date AND termin_date::date <= ${terminTo}::date)`
-    : sql`(termin_date::date >= ${terminFrom}::date)`;
+    ? sql`(${dcDate} >= ${terminFrom}::date AND ${dcDate} <= ${terminTo}::date)`
+    : sql`(${dcDate} >= ${terminFrom}::date)`;
   const aaCond = terminTo
-    ? sql`(aa_termin_date::date >= ${terminFrom}::date AND aa_termin_date::date <= ${terminTo}::date)`
-    : sql`(aa_termin_date::date >= ${terminFrom}::date)`;
+    ? sql`(${aaDate} >= ${terminFrom}::date AND ${aaDate} <= ${terminTo}::date)`
+    : sql`(${aaDate} >= ${terminFrom}::date)`;
   const baseRows = unwrapRows<BaseRow>(
     await analyticsDb.execute(sql`
       SELECT
@@ -423,7 +429,13 @@ function emptyGroup(): ClientGroup {
 
 function toIso(v: string | Date | null): string | null {
   if (v === null) return null;
-  return v instanceof Date ? v.toISOString() : String(v);
+  if (v instanceof Date) return v.toISOString();
+  // neon-http отдаёт timestamp-without-tz как "YYYY-MM-DD HH:MM:SS" — UTC-момент
+  // без метки зоны. Без 'Z' new Date() на фронте трактует строку как локальное
+  // время браузера → дата уезжает. Помечаем как UTC (CLAUDE.md #1).
+  const s = String(v);
+  if (/[zZ]|[+-]\d\d:?\d\d$/.test(s)) return s;
+  return s.replace(" ", "T") + "Z";
 }
 
 function toRow(s: ScoredLead, names: Map<number, string>): ClientRow {
