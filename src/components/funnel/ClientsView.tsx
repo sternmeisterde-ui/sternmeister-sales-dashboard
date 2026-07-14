@@ -749,6 +749,7 @@ function toWeekly(points: CorrTimePoint[]): CorrTimePoint[] {
 
 const CORR_FACTORS: { key: string; label: string }[] = [
   { key: "bot", label: "Ролевки с ботом" },
+  { key: "readiness", label: "Уровень готовности" },
   { key: "language", label: "Уровень языка" },
   { key: "okk", label: "Балл ОКК" },
 ];

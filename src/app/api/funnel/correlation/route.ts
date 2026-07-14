@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/funnel/correlation?factor=bot|language|okk
+ * GET /api/funnel/correlation?factor=bot|language|okk|readiness
  * Связь фактора с Гутшайном на РЕШЁННЫХ берётер-сделках (WON 142 / LOST 143).
  * Возвращает ОБА вида:
  *  • segments — win-rate по упорядоченным сегментам + средняя + corr (для столбиков справа).
@@ -200,9 +200,64 @@ async function okkData(vertical?: Vertical): Promise<FactorData> {
   };
 }
 
+function readinessBucket(avg: number): string {
+  if (avg < 2.5) return "<2.5";
+  if (avg < 3.5) return "2.5-3.4";
+  if (avg < 4.5) return "3.5-4.4";
+  return "4.5+";
+}
+
+/**
+ * Уровень подготовки клиента = средний балл его ролевок (score_5, 1–5, обе
+ * стороны). Связь со Гутшайном на решённых сделках: получившие Гутшайн против
+ * не получивших. Клиенты без ролевок исключены (уровня подготовки нет).
+ */
+async function readinessData(vertical?: Vertical): Promise<FactorData> {
+  const raw = unwrapRows<{ won: number | string; res_date: string | null; avg5: number | string }>(
+    await analyticsDb.execute(sql`
+      WITH rp AS (
+        SELECT lead_id, AVG(score_5)::float AS avg5
+        FROM analytics.client_roleplays
+        WHERE score_5 IS NOT NULL
+        GROUP BY lead_id
+      )
+      SELECT (lc.status_id = ${WON})::int AS won,
+             to_char(res.res_at, 'YYYY-MM-DD') AS res_date,
+             rp.avg5 AS avg5
+      FROM analytics.leads_cohort lc
+      JOIN rp ON rp.lead_id = lc.lead_id
+      ${resAtJoin(vertical)}
+      WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
+        AND lc.exclude_from_analytics = FALSE
+        AND lc.status_id IN (${WON}, ${LOST})`),
+  );
+  return {
+    factor: "readiness",
+    label: "Уровень готовности",
+    population: "решённые сделки с ролевками (всё время)",
+    caveat: "Уровень = средний балл ролевок клиента (1–5). Клиенты без ролевок исключены. Это корреляция, не причина.",
+    segOrder: [
+      { key: "<2.5", label: "< 2.5" }, { key: "2.5-3.4", label: "2.5–3.4" },
+      { key: "3.5-4.4", label: "3.5–4.4" }, { key: "4.5+", label: "4.5+" },
+    ],
+    macro: { aLabel: "Готовы (≥3.5)", bLabel: "Слабо (<3.5)" },
+    rows: raw
+      .map((r) => ({ won: Number(r.won), resDate: r.res_date ?? null, avg5: Number(r.avg5) }))
+      .filter((d) => Number.isFinite(d.avg5))
+      .map((d) => ({
+        won: d.won,
+        resDate: d.resDate,
+        seg: readinessBucket(d.avg5),
+        macro: (d.avg5 >= 3.5 ? "a" : "b") as "a" | "b",
+        metric: d.avg5,
+      })),
+  };
+}
+
 async function loadFactor(factor: string, vertical?: Vertical): Promise<FactorData> {
   if (factor === "language") return languageData(vertical);
   if (factor === "okk") return okkData(vertical);
+  if (factor === "readiness") return readinessData(vertical);
   return botData(vertical);
 }
 
