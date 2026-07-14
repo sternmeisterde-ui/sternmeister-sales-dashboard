@@ -43,6 +43,14 @@ const CF = {
    * сотрудничества} from the SLA AVG.
    */
   B2B_CLOSE_REASON: 876383,
+  /**
+   * «Факт. Дата 1-го платежа» (date) — строгий факт первого платежа. Читается
+   * по точному field_id, потому что по имени опасно: в аккаунте ДВА разных
+   * поля «Дата 1-го платежа» (876372 плановая и 878914 из блока рассрочки), и
+   * findByName-фолбэк уже испортил first_payment_date (смесь план/факт).
+   * Драйвит «продажи» вкладки «Динамика категорий» (когортно к created_at).
+   */
+  FIRST_PAYMENT_FACT: 888296,
 } as const;
 
 // ---- B2B payment custom-fields (looked up by name, not by id) ----
@@ -251,6 +259,7 @@ export async function syncLeads(
     const cf = lead.custom_fields_values;
     const closedAt = lead.closed_at ? new Date(lead.closed_at * 1000) : null;
     const firstPaymentDate = parseDate(findByName(cf, B2B_CUSTOM_FIELD_NAMES.firstPaymentDate));
+    const firstPaymentFactDate = parseDate(findByFieldId(cf, CF.FIRST_PAYMENT_FACT));
     const firstPaymentAmount = parseNumber(findByName(cf, B2B_CUSTOM_FIELD_NAMES.firstPaymentAmount));
     const prepaymentDate = parseDate(findByName(cf, B2B_CUSTOM_FIELD_NAMES.prepaymentDate));
     const prepaymentAmount = parseNumber(findByName(cf, B2B_CUSTOM_FIELD_NAMES.prepaymentAmount));
@@ -305,6 +314,7 @@ export async function syncLeads(
       category: entry.category,
       closedAt,
       firstPaymentDate,
+      firstPaymentFactDate,
       firstPaymentAmount,
       prepaymentDate,
       prepaymentAmount,

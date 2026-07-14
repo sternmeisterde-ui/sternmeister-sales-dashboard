@@ -41,7 +41,10 @@ const OWN_SLA_PIPELINE = "Бух Комм";
 // закрытия» b2b; менеджеры заполняют его, стандартный loss_reason чаще
 // NULL — сверено по прод-данным diag-b2b-close-reasons.ts). Текстовый сет —
 // фолбэк для строк без enum. Id получены из Kommo (diag-b2b-reason-enums).
-const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
+// Exported: тот же сет фильтрует «правильное количество лидов» вкладки
+// «Динамика категорий» (src/lib/category-dynamics) — единая точка, чтобы
+// SLA и категории не разъехались при изменении списка причин.
+export const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
   740593, // Спам
   740587, // Неквал лид
   740595, // Предложение сотрудничества
@@ -49,7 +52,7 @@ const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
   753716, // Бух дубль
   753718, // Мед дубль
 ]);
-const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
+export const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
   "Спам",
   "Неквал лид",
   "Предложение сотрудничества",
