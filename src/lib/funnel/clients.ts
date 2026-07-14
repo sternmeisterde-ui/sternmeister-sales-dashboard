@@ -370,8 +370,12 @@ export async function computeClients(
       shown: wonTop.length,
       categories: countCategories(wonScored),
     },
-    // По ВСЕМ клиентам периода (active + won), а не по усечённым top.
-    summary: summarizeReadiness([...activeScored, ...wonScored]),
+    // Только клиенты, чей термин попал в период (terminInRange) — как графики.
+    // Иначе won-бэклог (status 142 включается в WHERE независимо от дат) раздул
+    // бы «без оценки». По ВСЕМ таким клиентам, не по усечённым до limit top.
+    summary: summarizeReadiness(
+      [...activeScored, ...wonScored].filter((s) => s.terminInRange),
+    ),
   };
 }
 

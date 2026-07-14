@@ -973,8 +973,16 @@ function CorrelationPanel({
 
 /** Баллы ролевок (5-балльная шкала), в порядке отображения распределения. */
 const READINESS_BINS = [5, 4, 3, 2, 1] as const;
+/** Цвет балла: 5 — зелёный … 1 — красный (визуальный светофор). */
+const BIN_COLOR: Record<number, string> = {
+  5: "#34d399",
+  4: "#a3e635",
+  3: "#fbbf24",
+  2: "#fb923c",
+  1: "#fb7185",
+};
 
-/** Одна сторона (ДЦ или АА): среднее + дельта + распределение по баллам. */
+/** Одна сторона (ДЦ или АА): крупное среднее + дельта + гистограмма баллов. */
 function ReadinessMetric({
   label,
   side,
@@ -990,14 +998,17 @@ function ReadinessMetric({
     hasCompare && side.avg != null && compareAvg != null
       ? Math.round((side.avg - compareAvg) * 10) / 10
       : null;
+  const maxBin = Math.max(1, ...READINESS_BINS.map((b) => side.dist[String(b)] ?? 0));
   return (
-    <div className="flex flex-col gap-1 min-w-[240px]">
-      <div className="flex items-baseline gap-2">
-        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{label}</span>
-        <span className="text-2xl font-black text-white tabular-nums">{side.avg ?? "—"}</span>
+    <div className="flex-1 min-w-[280px] flex flex-col gap-3">
+      <div className="flex items-baseline gap-3">
+        <span className="text-sm font-bold text-slate-300 uppercase tracking-wider">{label}</span>
+        <span className="text-4xl font-black text-white tabular-nums leading-none">
+          {side.avg ?? "—"}
+        </span>
         {delta != null && (
           <span
-            className={`text-xs font-bold tabular-nums ${
+            className={`text-sm font-bold tabular-nums ${
               delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-slate-400"
             }`}
           >
@@ -1005,17 +1016,35 @@ function ReadinessMetric({
             {Math.abs(delta)}
           </span>
         )}
-        {hasCompare && (
-          <span className="text-[11px] text-slate-500 tabular-nums">было {compareAvg ?? "—"}</span>
-        )}
+        <span className="ml-auto text-[11px] text-slate-500 tabular-nums self-center">
+          {side.scored} с оценкой · {side.none} без
+          {hasCompare && <> · было {compareAvg ?? "—"}</>}
+        </span>
       </div>
-      <div className="flex items-center gap-2 flex-wrap text-[11px] tabular-nums">
-        {READINESS_BINS.map((b) => (
-          <span key={b} className="text-slate-400">
-            <b className="text-slate-200">{b}</b>:{side.dist[String(b)] ?? 0}
-          </span>
-        ))}
-        <span className="text-slate-500">· без оценки: {side.none}</span>
+      <div className="flex flex-col gap-1.5">
+        {READINESS_BINS.map((b) => {
+          const n = side.dist[String(b)] ?? 0;
+          const pct = (n / maxBin) * 100;
+          return (
+            <div key={b} className="flex items-center gap-2.5">
+              <span
+                className="w-3 text-sm font-bold tabular-nums text-right"
+                style={{ color: BIN_COLOR[b] }}
+              >
+                {b}
+              </span>
+              <div className="flex-1 h-5 rounded-md bg-slate-800/50 overflow-hidden">
+                <div
+                  className="h-full rounded-md transition-[width] duration-300"
+                  style={{ width: `${pct}%`, backgroundColor: BIN_COLOR[b] }}
+                />
+              </div>
+              <span className="w-7 text-right text-xs font-semibold tabular-nums text-slate-300">
+                {n}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
