@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/funnel/correlation?factor=bot|language|okk
+ * GET /api/funnel/correlation?factor=bot|language|okk|readiness
  * Связь фактора с Гутшайном на РЕШЁННЫХ берётер-сделках (WON 142 / LOST 143).
  * Возвращает ОБА вида:
  *  • segments — win-rate по упорядоченным сегментам + средняя + corr (для столбиков справа).
@@ -200,9 +200,64 @@ async function okkData(vertical?: Vertical): Promise<FactorData> {
   };
 }
 
+function readinessBucket(avg: number): string {
+  if (avg < 2.5) return "<2.5";
+  if (avg < 3.5) return "2.5-3.4";
+  if (avg < 4.5) return "3.5-4.4";
+  return "4.5+";
+}
+
+/**
+ * Уровень подготовки клиента = средний балл его ролевок (score_5, 1–5, обе
+ * стороны). Связь со Гутшайном на решённых сделках: получившие Гутшайн против
+ * не получивших. Клиенты без ролевок исключены (уровня подготовки нет).
+ */
+async function readinessData(vertical?: Vertical): Promise<FactorData> {
+  const raw = unwrapRows<{ won: number | string; res_date: string | null; avg5: number | string }>(
+    await analyticsDb.execute(sql`
+      WITH rp AS (
+        SELECT lead_id, AVG(score_5)::float AS avg5
+        FROM analytics.client_roleplays
+        WHERE score_5 IS NOT NULL
+        GROUP BY lead_id
+      )
+      SELECT (lc.status_id = ${WON})::int AS won,
+             to_char(res.res_at, 'YYYY-MM-DD') AS res_date,
+             rp.avg5 AS avg5
+      FROM analytics.leads_cohort lc
+      JOIN rp ON rp.lead_id = lc.lead_id
+      ${resAtJoin(vertical)}
+      WHERE lc.pipeline_id IN (${beraterIn(vertical)}) AND lc.is_deleted = FALSE
+        AND lc.exclude_from_analytics = FALSE
+        AND lc.status_id IN (${WON}, ${LOST})`),
+  );
+  return {
+    factor: "readiness",
+    label: "Уровень готовности",
+    population: "решённые сделки с ролевками (всё время)",
+    caveat: "Уровень = средний балл ролевок клиента (1–5). Клиенты без ролевок исключены. Это корреляция, не причина.",
+    segOrder: [
+      { key: "<2.5", label: "< 2.5" }, { key: "2.5-3.4", label: "2.5–3.4" },
+      { key: "3.5-4.4", label: "3.5–4.4" }, { key: "4.5+", label: "4.5+" },
+    ],
+    macro: { aLabel: "Готовы (≥3.5)", bLabel: "Слабо (<3.5)" },
+    rows: raw
+      .map((r) => ({ won: Number(r.won), resDate: r.res_date ?? null, avg5: Number(r.avg5) }))
+      .filter((d) => Number.isFinite(d.avg5))
+      .map((d) => ({
+        won: d.won,
+        resDate: d.resDate,
+        seg: readinessBucket(d.avg5),
+        macro: (d.avg5 >= 3.5 ? "a" : "b") as "a" | "b",
+        metric: d.avg5,
+      })),
+  };
+}
+
 async function loadFactor(factor: string, vertical?: Vertical): Promise<FactorData> {
   if (factor === "language") return languageData(vertical);
   if (factor === "okk") return okkData(vertical);
+  if (factor === "readiness") return readinessData(vertical);
   return botData(vertical);
 }
 
@@ -236,7 +291,7 @@ function addDays(s: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function buildTime(fd: FactorData) {
+function buildTime(fd: FactorData, windowDays: number, minN: number) {
   const rows = fd.rows.filter((r) => r.resDate) as (LeadRow & { resDate: string })[];
   if (rows.length === 0) {
     return { series: [{ key: "a", label: fd.macro.aLabel }, { key: "b", label: fd.macro.bLabel }], points: [] };
@@ -250,7 +305,7 @@ function buildTime(fd: FactorData) {
   const points: { date: string; a: number | null; aN: number; b: number | null; bN: number }[] = [];
   let lo = 0, hi = 0; // [lo, hi) — индексы строк в текущем окне
   for (let day = minDate; day <= maxDate; day = addDays(day, 1)) {
-    const from = addDays(day, -(TIME_WINDOW - 1));
+    const from = addDays(day, -(windowDays - 1));
     while (hi < rows.length && rows[hi].resDate <= day) hi++;
     while (lo < hi && rows[lo].resDate < from) lo++;
     let aD = 0, aW = 0, bD = 0, bW = 0;
@@ -260,8 +315,8 @@ function buildTime(fd: FactorData) {
     }
     points.push({
       date: day,
-      a: aD >= TIME_MIN_N ? pct(aW, aD) : null, aN: aD,
-      b: bD >= TIME_MIN_N ? pct(bW, bD) : null, bN: bD,
+      a: aD >= minN ? pct(aW, aD) : null, aN: aD,
+      b: bD >= minN ? pct(bW, bD) : null, bN: bD,
     });
   }
   // Общий период: обрезаем до диапазона, где есть ОБЕ линии (обе стартуют/кончаются
@@ -295,11 +350,17 @@ export async function GET(req: NextRequest) {
       `${fd.caveat} Коэффициент считается по каждой сделке (исход 0/1): ` +
       `группа «${fd.macro.aLabel}» — ${aN} из ${fd.rows.length} решённых, ` +
       `при малой группе даже большая разница win-rate даёт невысокое значение.`;
+    // Уровень готовности — редкий фактор (ролевки недавние, группа «готовы» мала):
+    // 30-дневное окно не набирает TIME_MIN_N=15 в этой группе, линия пустует.
+    // Шире окно + ниже порог, чтобы линия рисовалась (ценой большего сглаживания).
+    const isSparse = fd.factor === "readiness";
+    const windowDays = isSparse ? 60 : TIME_WINDOW;
+    const minN = isSparse ? 6 : TIME_MIN_N;
     const payload = {
       factor: fd.factor, label: fd.label, population: fd.population, caveat,
-      windowDays: TIME_WINDOW,
+      windowDays,
       ...buildSegments(fd),
-      ...buildTime(fd),
+      ...buildTime(fd, windowDays, minN),
     };
     return NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
