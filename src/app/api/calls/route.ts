@@ -18,13 +18,13 @@ export async function GET(request: NextRequest) {
       if (type === "all") {
         const [calls, managers] = await Promise.all([
           getAIRoleCalls(department, fromDate, toDate),
-          getManagerStats(department),
+          getManagerStats(department, fromDate, toDate),
         ]);
         return { success: true, data: { calls, managers } };
       }
 
       if (type === "managers") {
-        const managers = await getManagerStats(department);
+        const managers = await getManagerStats(department, fromDate, toDate);
         return { success: true, data: managers };
       }
 

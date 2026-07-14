@@ -39,20 +39,25 @@ export async function getDeptManagerWhitelist(
   // Дерикова, b2g, line=2). They must be included in the Looker whitelist.
   // Teamleads (role='teamlead') get admin-level UI access but work the line
   // like managers, so they are always counted in analytics.
+  // b2b: неактивных (soft-deleted) менеджеров НЕ выкидываем из whitelist —
+  // задача списка лишь отсечь чужой отдел/legacy-имена, а удалённый менеджер
+  // Коммерсов «свой»: его исторические строки в Looker/SLA должны оставаться
+  // видимыми за периоды, когда он работал. В периодах после удаления у него
+  // просто нет данных. b2g остаётся active-only (ревайв для Госников не включён).
+  const conds = [
+    eq(masterManagers.department, dept),
+    or(
+      eq(masterManagers.role, "manager"),
+      eq(masterManagers.role, "teamlead"),
+      and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
+    ),
+  ];
+  if (dept !== "b2b") conds.push(eq(masterManagers.isActive, true));
+
   const rows = await db
     .select({ name: masterManagers.name, shiftStartTime: masterManagers.shiftStartTime })
     .from(masterManagers)
-    .where(
-      and(
-        eq(masterManagers.department, dept),
-        eq(masterManagers.isActive, true),
-        or(
-          eq(masterManagers.role, "manager"),
-          eq(masterManagers.role, "teamlead"),
-          and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
-        ),
-      ),
-    );
+    .where(and(...conds));
 
   const names = new Set<string>();
   const aliasToCanonical = new Map<string, string>();
@@ -97,6 +102,15 @@ export async function getDeptScheduleOverrides(
   toDate: string,
 ): Promise<ScheduleOverride[]> {
   const dept = department === "b2b" ? "b2b" : "b2g";
+  // b2b: включаем и soft-deleted менеджеров — их прошлые смены нужны для
+  // корректного исторического SLA (см. комментарий в getDeptManagerWhitelist).
+  const scheduleConds = [
+    eq(masterManagers.department, dept),
+    isNotNull(managerSchedule.shiftStartTime),
+    between(managerSchedule.scheduleDate, fromDate, toDate),
+  ];
+  if (dept !== "b2b") scheduleConds.push(eq(masterManagers.isActive, true));
+
   const rows = await db
     .select({
       name: masterManagers.name,
@@ -105,14 +119,7 @@ export async function getDeptScheduleOverrides(
     })
     .from(managerSchedule)
     .innerJoin(masterManagers, eq(managerSchedule.userId, masterManagers.id))
-    .where(
-      and(
-        eq(masterManagers.department, dept),
-        eq(masterManagers.isActive, true),
-        isNotNull(managerSchedule.shiftStartTime),
-        between(managerSchedule.scheduleDate, fromDate, toDate),
-      ),
-    );
+    .where(and(...scheduleConds));
 
   const out: ScheduleOverride[] = [];
   for (const r of rows) {

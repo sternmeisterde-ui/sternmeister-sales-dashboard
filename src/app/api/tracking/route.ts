@@ -10,7 +10,7 @@ import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type DialerCall } from "@/lib/tracking/timeline";
-import { getAnalyticsCallEventsByMaster, getDialerCallEventsByMaster } from "@/lib/daily/analytics-calls";
+import { getAnalyticsCallEventsByMaster, getDialerCallEventsByMaster, getManagerNamesWithComms } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
 
@@ -141,15 +141,30 @@ export async function GET(req: NextRequest) {
     // (project_double_status.md) brings in ROPs who still take calls,
     // signaled by a non-null line. Right now: Татьяна Дерикова, b2g, line='2'.
     // ROPs without a line (e.g. Дмитрий) coordinate, don't dial — stay out.
-    // Inactive managers are dropped, so a long-window backfill won't pollute
-    // the cache with people who already left.
-    const allManagers = await d1Db
+    // b2g: inactive managers are dropped, so a long-window backfill won't
+    // pollute the cache with people who already left. b2b: неактивных
+    // (удалённых) НЕ отсекаем на уровне SQL — ниже оставляем из них только
+    // тех, у кого есть звонки в выбранном периоде (история удалённого
+    // менеджера должна быть видна, как в Звонках/Дейли).
+    const rosterConditions = [
+      eq(masterManagers.department, department),
+      or(
+        eq(masterManagers.role, "manager"),
+        eq(masterManagers.role, "teamlead"),
+        and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
+      ),
+    ];
+    if (department !== "b2b") {
+      rosterConditions.push(eq(masterManagers.isActive, true));
+    }
+    const rosterRows = await d1Db
       .select({
         id: masterManagers.id,
         name: masterManagers.name,
         line: masterManagers.line,
         shiftStartTime: masterManagers.shiftStartTime,
         shiftEndTime: masterManagers.shiftEndTime,
+        isActive: masterManagers.isActive,
         // Only needed to match the session user for the manager-only filter
         // below; not echoed back to the client.
         telegramUsername: masterManagers.telegramUsername,
@@ -160,18 +175,31 @@ export async function GET(req: NextRequest) {
         cloudtalkAgentId: masterManagers.cloudtalkAgentId,
       })
       .from(masterManagers)
-      .where(
-        and(
-          eq(masterManagers.department, department),
-          eq(masterManagers.isActive, true),
-          or(
-            eq(masterManagers.role, "manager"),
-            eq(masterManagers.role, "teamlead"),
-            and(eq(masterManagers.role, "rop"), isNotNull(masterManagers.line)),
-          ),
-        ),
-      )
+      .where(and(...rosterConditions))
       .orderBy(asc(masterManagers.line), asc(masterManagers.name));
+
+    // b2b: «оживляем» soft-deleted менеджеров только за периоды, когда они
+    // реально звонили — иначе список навсегда рос бы пустыми строками.
+    let allManagers = rosterRows;
+    if (department === "b2b" && rosterRows.some((m) => !m.isActive)) {
+      try {
+        const toUtc = new Date(`${toISO}T00:00:00Z`);
+        const fromTs = Math.floor(rangeStart.getTime() / 1000);
+        const toTs =
+          Math.floor((toUtc.getTime() - berlinOffsetMin(toUtc) * 60_000) / 1000) +
+          24 * 3600;
+        const namesWithComms = await getManagerNamesWithComms(department, fromTs, toTs);
+        // Имя занято активным менеджером → неактивный дубль не оживляем
+        // (см. getManagersWithKommoForPeriod — иначе задвоение строк).
+        const activeNames = new Set(rosterRows.filter((m) => m.isActive).map((m) => m.name));
+        allManagers = rosterRows.filter(
+          (m) => m.isActive || (namesWithComms.has(m.name) && !activeNames.has(m.name)),
+        );
+      } catch (err) {
+        console.error("[tracking] revive inactive managers failed:", err);
+        allManagers = rosterRows.filter((m) => m.isActive);
+      }
+    }
 
     // Own-timeline-only sessions (B2G managers): collapse the roster to the
     // caller's own row. Match by telegram username (the login key) first, then

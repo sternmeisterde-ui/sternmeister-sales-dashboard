@@ -31,35 +31,32 @@ export async function GET(request: NextRequest) {
 async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) {
     const db = getOkkDbForDepartment(department);
 
-    // Уволенных менеджеров не показываем (ни звонки, ни дропдаун). Флаг
+    // b2g: уволенных менеджеров не показываем (ни звонки, ни дропдаун). Флаг
     // okkManagers.isActive синкается из master_managers (источник правды) — при
     // увольнении sync ставит is_active=false. Фильтруем по okk-стороне (тот же
     // коннекшн; id okk-менеджеров НЕ равны master.id — связь по
-    // kommoUserId/telegramId/name, см. /api/managers). Согласует ОКК с
-    // Дейли/Активностью.
-    const activeOkk = await db
-      .select({ id: okkManagers.id })
-      .from(okkManagers)
-      .where(eq(okkManagers.isActive, true));
-    const activeOkkIds = activeOkk.map((m) => m.id);
-
-    // Build WHERE conditions
+    // kommoUserId/telegramId/name, см. /api/managers).
+    // b2b: наоборот — история удалённого менеджера должна оставаться видимой
+    // за периоды, когда он работал (как в Звонках/Дейли). Фильтр по isActive
+    // на звонках НЕ ставим (период и managerId IS NOT NULL ниже уже ограничивают
+    // выборку), а в дропдаун добавляем неактивных со звонками в периоде.
     const conditions: ReturnType<typeof eq>[] = [];
 
-    // Только звонки активных менеджеров (уволенные выпадают целиком).
-    conditions.push(inArray(okkCalls.managerId, activeOkkIds));
+    if (department !== "b2b") {
+      const activeOkk = await db
+        .select({ id: okkManagers.id })
+        .from(okkManagers)
+        .where(eq(okkManagers.isActive, true));
+      conditions.push(inArray(okkCalls.managerId, activeOkk.map((m) => m.id)));
+    }
 
     const fromParam = sp.get("from");
-    if (fromParam) {
-      const fromDate = parseDateBoundary(fromParam, "start");
-      if (fromDate) conditions.push(gte(okkCalls.callCreatedAt, fromDate));
-    }
+    const fromDate = fromParam ? parseDateBoundary(fromParam, "start") : null;
+    if (fromDate) conditions.push(gte(okkCalls.callCreatedAt, fromDate));
 
     const toParam = sp.get("to");
-    if (toParam) {
-      const toDate = parseDateBoundary(toParam, "end");
-      if (toDate) conditions.push(lte(okkCalls.callCreatedAt, toDate));
-    }
+    const toDate = toParam ? parseDateBoundary(toParam, "end") : null;
+    if (toDate) conditions.push(lte(okkCalls.callCreatedAt, toDate));
 
     const statusParam = sp.get("status");
     if (statusParam) {
@@ -149,10 +146,11 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         // counters and broke payroll attribution).
         .limit(5000),
 
-      // Query 2: Managers visible in the dropdown — только активные (is_active
-      // синкается из master). Уволенных не показываем по запросу бизнеса
-      // (раньше тут был «исторический» leg, тащивший уволенных ради
-      // payroll-атрибуции — теперь их звонки и так отфильтрованы выше).
+      // Query 2: Managers visible in the dropdown.
+      // b2g — только активные (is_active синкается из master), уволенных не
+      // показываем по запросу бизнеса.
+      // b2b — активные ∪ неактивные, у кого есть звонки в выбранном периоде:
+      // удалённый менеджер выбирается в фильтре за периоды, когда он работал.
       db
         .select({
           id: okkManagers.id,
@@ -164,7 +162,14 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         .where(
           and(
             sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
-            eq(okkManagers.isActive, true),
+            department === "b2b"
+              ? sql`(${okkManagers.isActive} = TRUE OR ${okkManagers.id} IN (
+                  SELECT DISTINCT ${okkCalls.managerId} FROM ${okkCalls}
+                  WHERE ${okkCalls.managerId} IS NOT NULL
+                    ${fromDate ? sql`AND ${okkCalls.callCreatedAt} >= ${fromDate}` : sql``}
+                    ${toDate ? sql`AND ${okkCalls.callCreatedAt} <= ${toDate}` : sql``}
+                ))`
+              : eq(okkManagers.isActive, true),
           ),
         )
         .orderBy(okkManagers.name),

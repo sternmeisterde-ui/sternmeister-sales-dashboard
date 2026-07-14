@@ -168,19 +168,22 @@ export async function getUniqueOnLineManagerCount(
   toDate: string,
   department: string = "b2g",
 ): Promise<number> {
+  // b2b: удалённых (isActive=false) не выкидываем — выборка и так ограничена
+  // датами расписания, а исторический факт «на линии» должен учитывать
+  // менеджеров, работавших в том периоде (см. soft-delete в /api/managers).
+  const conds = [
+    eq(masterManagers.department, department),
+    eq(managerSchedule.isOnLine, true),
+    gte(managerSchedule.scheduleDate, fromDate),
+    lte(managerSchedule.scheduleDate, toDate),
+  ];
+  if (department !== "b2b") conds.push(eq(masterManagers.isActive, true));
+
   const rows = await db
     .select({ userId: managerSchedule.userId })
     .from(managerSchedule)
     .innerJoin(masterManagers, eq(managerSchedule.userId, masterManagers.id))
-    .where(
-      and(
-        eq(masterManagers.department, department),
-        eq(masterManagers.isActive, true),
-        eq(managerSchedule.isOnLine, true),
-        gte(managerSchedule.scheduleDate, fromDate),
-        lte(managerSchedule.scheduleDate, toDate),
-      ),
-    );
+    .where(and(...conds));
   const unique = new Set(rows.map((r) => r.userId));
   return unique.size;
 }

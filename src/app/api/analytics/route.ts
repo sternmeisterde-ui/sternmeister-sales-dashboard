@@ -7,7 +7,7 @@ import {
   okkManagers,
 } from "@/lib/db/schema-okk";
 import { d1Users, d1Calls, r1Users, r1Calls, analyticsExcludedCalls } from "@/lib/db/schema-existing";
-import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc } from "drizzle-orm";
+import { eq, sql, and, or, gte, lte, isNotNull, isNull, inArray, desc, type SQL } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { cached } from "@/lib/kommo/cache";
@@ -755,29 +755,34 @@ async function fetchOkkData(
   // конкретной линии (не «все воронки»), т.е. внутри ветки !isAllFunnels.
   const useSpellit = !!promptTypes && promptTypes.some((pt) => SPELLIT_PROMPT_TYPES.has(pt));
 
-  // Уволенных менеджеров не показываем нигде в ОКК. Флаг okkManagers.isActive
+  // b2g: уволенных менеджеров не показываем нигде в ОКК. Флаг okkManagers.isActive
   // синкается из master_managers (источник правды): при увольнении sync ставит
   // is_active=false в R2/D2.managers. Поэтому фильтруем по okk-стороне (тот же
   // R2/D2-коннекшн — id okk-менеджеров НЕ равны master.id, связь по
   // kommoUserId/telegramId/name, см. /api/managers). Звонки уволенных выпадают
-  // из выборки целиком, чтобы итоги периода сходились с разбивкой по менеджерам
-  // (как в Дейли/Активности). Звонки без менеджера (NULL) — оставляем.
-  const activeOkk = await db
-    .select({ id: okkManagers.id })
-    .from(okkManagers)
-    .where(eq(okkManagers.isActive, true));
-  const activeOkkIds = activeOkk.map((m) => m.id);
-
-  const conditions = [
+  // из выборки целиком, чтобы итоги периода сходились с разбивкой по менеджерам.
+  // b2b: наоборот — история удалённых менеджеров остаётся видимой за периоды,
+  // когда они работали (как в Звонках/Дейли), поэтому isActive-фильтр на
+  // звонках не ставим; итоги сходятся, т.к. разбивка строится из самих звонков,
+  // а дропдаун ниже включает неактивных со звонками в периоде.
+  const conditions: (SQL<unknown> | undefined)[] = [
     sql`${okkCalls.callCreatedAt} >= ${from}`,
     sql`${okkCalls.callCreatedAt} <= ${to}`,
     sql`${okkCalls.status} IN ('notified', 'evaluated', 'completed')`,
     isNotNull(okkEvaluations.totalScore),
-    or(
-      inArray(okkEvaluations.managerId, activeOkkIds),
-      isNull(okkEvaluations.managerId),
-    ),
   ];
+  if (department !== "b2b") {
+    const activeOkk = await db
+      .select({ id: okkManagers.id })
+      .from(okkManagers)
+      .where(eq(okkManagers.isActive, true));
+    conditions.push(
+      or(
+        inArray(okkEvaluations.managerId, activeOkk.map((m) => m.id)),
+        isNull(okkEvaluations.managerId),
+      ),
+    );
+  }
   if (promptTypes && promptTypes.length > 0) {
     conditions.push(inArray(okkEvaluations.promptType, promptTypes));
   }
@@ -803,8 +808,20 @@ async function fetchOkkData(
   // full roster. Per-line scoping happens on the call rows themselves via
   // `prompt_type`. New hires/fires flow in automatically through the
   // `master_managers` sync (is_active toggle).
+  // b2b: плюс неактивные (удалённые) менеджеры, у которых есть оценённые
+  // звонки в периоде — их можно выбрать в фильтре за время, когда они работали.
   const managerConditions = [
-    eq(okkManagers.isActive, true),
+    department === "b2b"
+      ? sql`(${okkManagers.isActive} = TRUE OR ${okkManagers.id} IN (
+          SELECT DISTINCT ${okkEvaluations.managerId}
+          FROM ${okkEvaluations}
+          JOIN ${okkCalls} ON ${okkCalls.id} = ${okkEvaluations.callId}
+          WHERE ${okkEvaluations.managerId} IS NOT NULL
+            AND ${okkEvaluations.totalScore} IS NOT NULL
+            AND ${okkCalls.callCreatedAt} >= ${from}
+            AND ${okkCalls.callCreatedAt} <= ${to}
+        ))`
+      : eq(okkManagers.isActive, true),
     sql`${okkManagers.role} IN ('manager', 'teamlead', 'rop')`,
   ];
 
@@ -1045,8 +1062,17 @@ async function fetchRoleplayData(
   }
 
   // Manager dropdown — full active roster (see OKK comment). Same rationale.
+  // b2b: плюс неактивные (удалённые) менеджеры с ролевками в периоде — данные
+  // ролевок и так не фильтруются по isActive, оживляем только дропдаун.
   const managerConditions = [
-    eq(usersTable.isActive, true),
+    department === "b2b"
+      ? sql`(${usersTable.isActive} = TRUE OR ${usersTable.id} IN (
+          SELECT DISTINCT ${callsTable.userId} FROM ${callsTable}
+          WHERE ${callsTable.startedAt} >= ${from}
+            AND ${callsTable.startedAt} <= ${to}
+            AND ${callsTable.score} IS NOT NULL
+        ))`
+      : eq(usersTable.isActive, true),
     sql`${usersTable.role} IN ('manager', 'teamlead', 'rop')`,
   ];
 

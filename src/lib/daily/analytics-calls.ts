@@ -1745,11 +1745,17 @@ export async function getManagersWithKommoForPeriod(
   if (department !== "b2b") return active;
   try {
     const activeIds = new Set(active.map((m) => m.id));
+    // Имя уже занято активным менеджером → неактивную строку не оживляем:
+    // это legacy-дубликат (напр. вторая «Рузанна»), звонки по имени и так
+    // атрибутируются активной строке, а ревайв дал бы задвоение в таблице.
+    const activeNames = new Set(active.map((m) => m.name));
     const [withInactive, namesWithComms] = await Promise.all([
       getManagersWithKommo(department, { includeInactive: true }),
       getManagerNamesWithComms(department, fromTs, toTs, vertical),
     ]);
-    const revived = withInactive.filter((m) => !activeIds.has(m.id) && namesWithComms.has(m.name));
+    const revived = withInactive.filter(
+      (m) => !activeIds.has(m.id) && !activeNames.has(m.name) && namesWithComms.has(m.name),
+    );
     return revived.length > 0 ? [...active, ...revived] : active;
   } catch (e) {
     console.error("[roster] revive inactive managers failed:", e);
