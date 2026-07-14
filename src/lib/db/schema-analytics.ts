@@ -51,6 +51,10 @@ export const leadsCohort = analyticsSchema.table(
     // Pulled by field-name from lead.custom_fields_values in sync-leads.
     closedAt: timestamp("closed_at"),
     firstPaymentDate: timestamp("first_payment_date"),
+    // Строгий факт 1-го платежа (CFV 888296 «Факт. Дата 1-го платежа», по
+    // точному field_id). first_payment_date выше — смесь план/факт (findByName
+    // с алиасами) — не менять, на нём факты Дейли. Миграция 0033.
+    firstPaymentFactDate: timestamp("first_payment_fact_date"),
     firstPaymentAmount: doublePrecision("first_payment_amount"),
     prepaymentDate: timestamp("prepayment_date"),
     prepaymentAmount: doublePrecision("prepayment_amount"),

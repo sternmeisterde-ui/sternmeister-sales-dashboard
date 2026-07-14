@@ -10,6 +10,7 @@ Last updated: 2026-04-30
 |---|---|---|---|---|
 | `dashboard` | Звонки | admin | `DashboardTab.tsx` | [`DASHBOARD-ZVONKI.md`](./DASHBOARD-ZVONKI.md) |
 | `daily` | Дейли | admin | `DailyTab.tsx` | [`DASHBOARD-DAILY.md`](./DASHBOARD-DAILY.md) + [`daily-commerce-spec.md`](./daily-commerce-spec.md) (B2B бизнес-спека) |
+| `category_dynamics` | Динамика категорий | admin (b2b) | `CategoryDynamicsTab.tsx` | [`DASHBOARD-DINAMIKA-KATEGORIY.md`](./DASHBOARD-DINAMIKA-KATEGORIY.md) |
 | `analytics` | Аналитика | admin | `AnalyticsTab.tsx` | [`DASHBOARD-ANALITIKA.md`](./DASHBOARD-ANALITIKA.md) |
 | `tracking` | Активность | admin | `TrackingTab.tsx` | [`DASHBOARD-AKTIVNOST.md`](./DASHBOARD-AKTIVNOST.md) |
 | `termins` | Термин | admin | `TerminTab.tsx` | [`DASHBOARD-TERMIN.md`](./DASHBOARD-TERMIN.md) |

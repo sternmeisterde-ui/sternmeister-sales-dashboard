@@ -5,12 +5,13 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase,
+  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase, Tags,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
+import CategoryDynamicsTab from "@/components/CategoryDynamicsTab";
 import AnalyticsTab from "@/components/AnalyticsTab";
 import TrackingTab from "@/components/TrackingTab";
 import DashboardTab from "@/components/DashboardTab";
@@ -104,7 +105,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps" | "reglament" | "docflow";
+type TabId = "dashboard" | "daily" | "category_dynamics" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps" | "reglament" | "docflow";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -132,6 +133,9 @@ const NAV_ITEMS: NavItem[] = [
   // adminOnlyByDept.b2b=false. У Госников остаются admin-only.
   { id: "dashboard", icon: LayoutDashboard, label: "Звонки", adminOnly: true, adminOnlyByDept: { b2b: false } },
   { id: "daily", icon: ClipboardList, label: "Дейли", adminOnly: true },
+  // Доли категорий CATEGORY (A–E/без метки) по подпериодам + продажи/конверсии.
+  // Только Коммерсы: поле CATEGORY ведётся в их воронках (Бух/Мед Комм).
+  { id: "category_dynamics", icon: Tags, label: "Динамика категорий", adminOnly: true, departments: ["b2b"] },
   { id: "analytics", icon: BarChart3, label: "Аналитика", adminOnly: true, adminOnlyByDept: { b2b: false }, labelByDept: { b2b: "Оценка критериев" } },
   { id: "tracking", icon: Activity, label: "Активность", adminOnly: true, adminOnlyByDept: { b2b: false } },
   { id: "termins", icon: CalendarClock, label: "Термин", adminOnly: true, departments: ["b2g"] },
@@ -1115,6 +1119,11 @@ export default function Dashboard() {
             department={activeDepartment}
             vertical={activeDepartment === "b2g" ? activeVertical : undefined}
           />
+        )}
+
+        {/* --------------------- CATEGORY DYNAMICS VIEW --------------------- */}
+        {activeTab === "category_dynamics" && tabAllowedInDept("category_dynamics", activeDepartment) && (
+          <CategoryDynamicsTab />
         )}
 
         {/* --------------------- ANALYTICS VIEW --------------------- */}

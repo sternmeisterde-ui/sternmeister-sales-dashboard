@@ -120,6 +120,7 @@ Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear
 |---|---|---|---|---|---|
 | `dashboard` | Звонки | admin | `DashboardTab.tsx` | `/api/dashboard` | `analytics.communications` (DISTINCT comm_id), `leads_cohort` |
 | `daily` | Дейли | admin | `DailyTab.tsx` | `/api/daily` | `analytics.*` + `daily_plans` (plan/fact) |
+| `category_dynamics` | Динамика категорий | admin, b2b-only | `CategoryDynamicsTab.tsx` | `/api/category-dynamics` | `leads_cohort` (`category`, `first_payment_fact_date`, `b2b_close_reason_enum_id`); исключаемые причины = SLA-сет из `compute-sla.ts` |
 | `analytics` | Аналитика | admin | `AnalyticsTab.tsx` | `/api/analytics/data` | `analytics.communications` + roleplay (union okk/roleplay) |
 | `tracking` | Активность | admin | `TrackingTab.tsx` | `/api/tracking` | `tracking_events` + calls из `analytics.communications` |
 | `termins` | Термин | admin | `TerminTab.tsx` | `/api/dashboard/termins`, looker views | `leads_cohort.termin_date/aa_termin_date`, `lead_status_changes` |
