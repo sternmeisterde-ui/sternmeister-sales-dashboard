@@ -372,8 +372,8 @@ function summarizeReadiness(scored: ScoredLead[]): ClientsReadinessSummary {
     if (s.aa.latest !== null) { aaSum += s.aa.latest; aaN += 1; }
   }
   return {
-    avgDc: dcN > 0 ? Math.round(dcSum / dcN) : null,
-    avgAa: aaN > 0 ? Math.round(aaSum / aaN) : null,
+    avgDc: dcN > 0 ? Math.round((dcSum / dcN) * 10) / 10 : null,
+    avgAa: aaN > 0 ? Math.round((aaSum / aaN) * 10) / 10 : null,
     countDc: dcN,
     countAa: aaN,
   };

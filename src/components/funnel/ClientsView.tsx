@@ -984,7 +984,10 @@ function ReadinessMetric({
   compare: number | null | undefined;
 }) {
   const hasCompare = compare !== undefined;
-  const delta = hasCompare && value != null && compare != null ? value - compare : null;
+  const delta =
+    hasCompare && value != null && compare != null
+      ? Math.round((value - compare) * 10) / 10
+      : null;
   return (
     <div className="flex flex-col">
       <div className="flex items-baseline gap-2">
@@ -1274,16 +1277,6 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
         </span>
       </div>
 
-      {data && !isEmpty && (
-        <ReadinessSummaryWidget
-          summary={data.summary}
-          compareSummary={compareData?.summary ?? null}
-          compareTermin={compareTermin}
-          onCompareChange={setCompareTermin}
-          compareLoading={compareLoading}
-        />
-      )}
-
       {loading && !data && (
         <div className="glass-panel rounded-2xl border border-white/5 px-4 py-12 flex items-center justify-center gap-2 text-sm text-slate-400">
           <Loader2 className="w-4 h-4 animate-spin" /> Загрузка клиентов…
@@ -1321,6 +1314,13 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
           </div>
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
           <CorrelationPanel vertical={vertical} />
+          <ReadinessSummaryWidget
+            summary={data.summary}
+            compareSummary={compareData?.summary ?? null}
+            compareTermin={compareTermin}
+            onCompareChange={setCompareTermin}
+            compareLoading={compareLoading}
+          />
           <ClientTable
             group={filterGroup(data.active, manager, stage)}
             title="Клиенты в работе"
