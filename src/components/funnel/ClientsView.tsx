@@ -9,6 +9,8 @@ import type { FunnelFiltersState } from "@/lib/funnel/types";
 import type {
   ClientRow,
   ClientsResult,
+  ClientsReadinessSummary,
+  SideReadinessSummary,
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
@@ -969,6 +971,144 @@ function CorrelationPanel({
   );
 }
 
+/** Баллы ролевок (5-балльная шкала), в порядке отображения распределения. */
+const READINESS_BINS = [5, 4, 3, 2, 1] as const;
+
+/** Дельта среднего со стрелкой (зелёная рост / красная падение). */
+function AvgDelta({ delta }: { delta: number }) {
+  return (
+    <span
+      className={`text-xs font-bold tabular-nums ${
+        delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-slate-400"
+      }`}
+    >
+      {delta > 0 ? "▲" : delta < 0 ? "▼" : "="}
+      {Math.abs(delta)}
+    </span>
+  );
+}
+
+/** Одна сторона (ДЦ или АА): среднее + компактная гистограмма с наложением
+ *  периода сравнения (тонкая «призрачная» полоса = было). */
+function ReadinessMetric({
+  label,
+  side,
+  compareSide,
+}: {
+  label: string;
+  side: SideReadinessSummary;
+  /** Сторона периода сравнения; undefined = сравнение выключено. */
+  compareSide: SideReadinessSummary | undefined;
+}) {
+  const cmp = compareSide;
+  const delta =
+    cmp && side.avg != null && cmp.avg != null
+      ? Math.round((side.avg - cmp.avg) * 10) / 10
+      : null;
+  const maxBin = Math.max(
+    1,
+    ...READINESS_BINS.map((b) => Math.max(side.dist[String(b)] ?? 0, cmp?.dist[String(b)] ?? 0)),
+  );
+  return (
+    <div className="flex-1 min-w-[240px] flex flex-col gap-2">
+      <div className="flex items-baseline gap-2">
+        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">{label}</span>
+        <span className="text-3xl font-black text-white tabular-nums leading-none">
+          {side.avg ?? "—"}
+        </span>
+        {cmp && (
+          <span className="text-sm text-slate-500 tabular-nums">
+            <span className="text-slate-600">←</span> {cmp.avg ?? "—"}
+          </span>
+        )}
+        {delta != null && <AvgDelta delta={delta} />}
+        <span className="ml-auto text-[10px] text-slate-500 tabular-nums self-center">
+          {side.scored} оц. · {side.none} без
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        {READINESS_BINS.map((b) => {
+          const n = side.dist[String(b)] ?? 0;
+          const cn = cmp?.dist[String(b)] ?? 0;
+          return (
+            <div key={b} className="flex items-center gap-2">
+              <span className="w-2.5 text-[11px] font-semibold tabular-nums text-slate-500 text-right">
+                {b}
+              </span>
+              <div className="flex-1 h-2.5 rounded-full bg-slate-800/60 relative overflow-hidden">
+                {cmp && (
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-full bg-slate-500/40"
+                    style={{ width: `${(cn / maxBin) * 100}%` }}
+                  />
+                )}
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-sky-400 transition-[width] duration-300"
+                  style={{ width: `${(n / maxBin) * 100}%` }}
+                />
+              </div>
+              <span className="w-12 text-right text-[11px] tabular-nums text-slate-300">
+                {n}
+                {cmp && <span className="text-slate-600"> ({cn})</span>}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Виджет «Готовность к терминам» с распределением баллов и сравнением периодов. */
+function ReadinessSummaryWidget({
+  summary,
+  compareSummary,
+  compareTermin,
+  onCompareChange,
+  compareLoading,
+}: {
+  summary: ClientsReadinessSummary;
+  compareSummary: ClientsReadinessSummary | null;
+  compareTermin: { start: Date | null; end: Date | null } | null;
+  onCompareChange: (r: { start: Date | null; end: Date | null } | null) => void;
+  compareLoading: boolean;
+}) {
+  const cmpActive = compareTermin != null;
+  return (
+    <div className="bg-slate-900/40 rounded-2xl border border-white/5 px-4 py-3 flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+          Готовность к терминам (среднее за период)
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+            Сравнить с
+          </span>
+          <CalendarPicker
+            mode="range"
+            value={compareTermin ?? { start: null, end: null }}
+            onChange={onCompareChange}
+            onClear={() => onCompareChange(null)}
+          />
+          {compareLoading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
+        </div>
+      </div>
+      <div className="flex gap-8 flex-wrap">
+        <ReadinessMetric
+          label="ДЦ"
+          side={summary.dc}
+          compareSide={cmpActive ? compareSummary?.dc : undefined}
+        />
+        <ReadinessMetric
+          label="АА"
+          side={summary.aa}
+          compareSide={cmpActive ? compareSummary?.aa : undefined}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function ClientsView({ filters: _filters, vertical }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -988,6 +1128,10 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
       return { start: t, end: t };
     }
   );
+  // Период сравнения для виджета готовности (null = сравнение выключено).
+  const [compareTermin, setCompareTermin] = useState<{ start: Date | null; end: Date | null } | null>(null);
+  const [compareData, setCompareData] = useState<ClientsResult | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // Набор для графиков/метрик: клиенты, чей термин попал в выбранный диапазон дат
@@ -1093,6 +1237,47 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
     return () => clearTimeout(id);
   }, [key, terminFrom, terminTo, lang, load]);
 
+  // Период сравнения → отдельный запрос (тот же endpoint + общий кеш).
+  const cmpStart = compareTermin?.start ?? null;
+  const cmpHasRange =
+    compareTermin?.start != null &&
+    compareTermin?.end != null &&
+    compareTermin.end.getTime() !== compareTermin.start.getTime();
+  const compareFrom = cmpStart ? fmtLocalDate(cmpStart) : null;
+  const compareTo = cmpHasRange ? fmtLocalDate(compareTermin!.end as Date) : null;
+  const compareKey = compareFrom
+    ? `${compareFrom}|${compareTo ?? "open"}|${lang}|${vertical ?? "-"}`
+    : null;
+
+  useEffect(() => {
+    if (!compareFrom || !compareKey) {
+      setCompareData(null);
+      return;
+    }
+    const cached = cache.get(compareKey);
+    if (cached) {
+      setCompareData(cached);
+      return;
+    }
+    const ctrl = new AbortController();
+    setCompareLoading(true);
+    const params = new URLSearchParams({ termin_from: compareFrom, limit: String(FETCH_LIMIT) });
+    if (compareTo) params.set("termin_to", compareTo);
+    if (lang) params.set("lang", lang);
+    if (vertical) params.set("vertical", vertical);
+    fetch(`/api/funnel/clients?${params}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? (r.json() as Promise<ClientsResult>) : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j) => {
+        cache.set(compareKey, j);
+        setCompareData(j);
+      })
+      .catch((e) => {
+        if ((e as Error).name !== "AbortError") setCompareData(null);
+      })
+      .finally(() => setCompareLoading(false));
+    return () => ctrl.abort();
+  }, [compareKey, compareFrom, compareTo, lang, vertical]);
+
   const isEmpty =
     data && data.active.shown === 0 && data.won.shown === 0;
 
@@ -1178,6 +1363,13 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
           </div>
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
           <CorrelationPanel vertical={vertical} />
+          <ReadinessSummaryWidget
+            summary={data.summary}
+            compareSummary={compareData?.summary ?? null}
+            compareTermin={compareTermin}
+            onCompareChange={setCompareTermin}
+            compareLoading={compareLoading}
+          />
           <ClientTable
             group={filterGroup(data.active, manager, stage)}
             title="Клиенты в работе"

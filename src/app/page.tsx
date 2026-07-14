@@ -1359,8 +1359,8 @@ export default function Dashboard() {
                   <div className="glass-panel rounded-2xl px-3 py-2 border border-white/5 flex items-center justify-between">
                     <span className="text-[9px] text-slate-400 uppercase tracking-widest font-semibold">Ср. балл</span>
                     <span className={`text-xl font-black ${
-                      callsDashStats.avgScore >= 66 ? "text-emerald-400" :
-                      callsDashStats.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                      callsDashStats.avgScore >= 90 ? "text-emerald-400" :
+                      callsDashStats.avgScore >= 70 ? "text-amber-400" : "text-rose-400"
                     }`}>
                       {callsDashStats.avgScore}%
                     </span>
@@ -1383,8 +1383,8 @@ export default function Dashboard() {
                         <div className="flex items-center justify-between mt-0.5">
                           <span className="text-[11px] text-white font-medium truncate mr-1">{best?.name?.split(" ")[0] || "—"}</span>
                           <span className={`text-lg font-black shrink-0 ${
-                            best && best.avgScore >= 66 ? "text-emerald-400" :
-                            best && best.avgScore >= 41 ? "text-amber-400" : "text-rose-400"
+                            best && best.avgScore >= 90 ? "text-emerald-400" :
+                            best && best.avgScore >= 70 ? "text-amber-400" : "text-rose-400"
                           }`}>
                             {best ? `${best.avgScore}%` : "—"}
                           </span>
@@ -1423,8 +1423,8 @@ export default function Dashboard() {
                           <div className="flex items-center gap-3 shrink-0">
                             <span className="text-sm font-bold text-white">{m.count} <span className="text-[10px] font-normal text-slate-500">{activeTab === "ai_calls" ? "рол." : "зв."}</span></span>
                             <span className={`text-sm font-bold min-w-[36px] text-right ${
-                              m.avgScore >= 66 ? "text-emerald-400" :
-                              m.avgScore >= 41 ? "text-amber-400" :
+                              m.avgScore >= 90 ? "text-emerald-400" :
+                              m.avgScore >= 70 ? "text-amber-400" :
                               m.count === 0 ? "text-slate-600" : "text-rose-400"
                             }`}>
                               {m.count > 0 ? `${m.avgScore}%` : "—"}
@@ -1839,8 +1839,8 @@ export default function Dashboard() {
                         )}
                         <td className="px-5 py-3">
                           <div className="flex justify-center items-center">
-                            <button onClick={() => handleSelectCall(call, "scoring")} className={`relative flex items-center justify-center w-9 h-9 rounded-full border-[2px] cursor-pointer hover:scale-110 transition-transform ${call.score >= 66 ? "border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.3)] text-emerald-400" :
-                              call.score >= 41 ? "border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.3)] text-amber-400" :
+                            <button onClick={() => handleSelectCall(call, "scoring")} className={`relative flex items-center justify-center w-9 h-9 rounded-full border-[2px] cursor-pointer hover:scale-110 transition-transform ${call.score >= 90 ? "border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.3)] text-emerald-400" :
+                              call.score >= 70 ? "border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.3)] text-amber-400" :
                                 "border-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.3)] text-rose-400"
                               }`}>
                               <span className="text-[10px] font-bold">{call.score}%</span>
@@ -2180,9 +2180,9 @@ export default function Dashboard() {
                 {/* ── Overall Score ── */}
                 <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 flex items-center gap-5 shadow-inner">
                   <div className={`relative flex items-center justify-center w-20 h-20 rounded-full border-[5px] shrink-0 ${
-                    selectedCall.score >= 66
+                    selectedCall.score >= 90
                       ? "border-emerald-400 text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.2)]"
-                      : selectedCall.score >= 41
+                      : selectedCall.score >= 70
                       ? "border-amber-400 text-amber-400 shadow-[0_0_20px_rgba(251,191,36,0.2)]"
                       : "border-rose-400 text-rose-400 shadow-[0_0_20px_rgba(251,113,133,0.2)]"
                   }`}>
@@ -2234,8 +2234,8 @@ export default function Dashboard() {
                       const blockPct = block.maxScore > 0 ? (block.score / block.maxScore) * 100 : -1;
                       const blockAccent = isInfoBlock
                         ? { text: "text-blue-400", bg: "bg-blue-500/10", border: "border-blue-500/20", bar: "bg-blue-500" }
-                        : blockPct >= 70 ? { text: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/20", bar: "bg-emerald-500" }
-                        : blockPct >= 40 ? { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/20", bar: "bg-amber-500" }
+                        : blockPct >= 90 ? { text: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/20", bar: "bg-emerald-500" }
+                        : blockPct >= 70 ? { text: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/20", bar: "bg-amber-500" }
                         : { text: "text-rose-400", bg: "bg-rose-500/10", border: "border-rose-500/20", bar: "bg-rose-500" };
 
                       return (
@@ -2626,7 +2626,7 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <p className="text-xs text-slate-400 mb-1">Ср. Скоринг</p>
-                  <p className={`text-lg font-bold ${managerStats.avgScore >= 66 ? "text-emerald-400" : managerStats.avgScore >= 41 ? "text-amber-400" : "text-rose-400"}`}>
+                  <p className={`text-lg font-bold ${managerStats.avgScore >= 90 ? "text-emerald-400" : managerStats.avgScore >= 70 ? "text-amber-400" : "text-rose-400"}`}>
                     {managerStats.avgScore}%
                   </p>
                 </div>
@@ -2659,7 +2659,7 @@ export default function Dashboard() {
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-[10px] text-slate-400">{call.date}</span>
                         <span className={`text-xs font-bold ${
-                          call.score >= 66 ? "text-emerald-400" : call.score >= 41 ? "text-amber-400" : "text-rose-400"
+                          call.score >= 90 ? "text-emerald-400" : call.score >= 70 ? "text-amber-400" : "text-rose-400"
                         }`}>
                           {call.score}%
                         </span>

@@ -49,8 +49,8 @@ interface AnalyticsData {
 
 function getCriteriaColor(v: number | null | undefined): string {
   if (v === undefined || v === null) return "text-slate-600";
-  if (v >= 80) return "text-emerald-400";
-  if (v >= 50) return "text-amber-400";
+  if (v >= 90) return "text-emerald-400";
+  if (v >= 70) return "text-amber-400";
   return "text-rose-400";
 }
 
@@ -120,8 +120,8 @@ function getCriteriaBgFor(name: string, v: number | null | undefined, spellitVie
 
 function getCriteriaBg(v: number | null | undefined): string {
   if (v === undefined || v === null) return "";
-  if (v >= 80) return "bg-emerald-500/5";
-  if (v >= 50) return "bg-amber-500/5";
+  if (v >= 90) return "bg-emerald-500/5";
+  if (v >= 70) return "bg-amber-500/5";
   return "bg-rose-500/5";
 }
 
@@ -1888,11 +1888,11 @@ function CallMediaModal({ callId, dept, source, initialView, onClose }: {
 // полей — по спеке dev_docs/Книга1.xlsx (серые колонки; красные исключены).
 // Причина/цитата заполнены у оценок criteria-engine (~с мая 2026); у legacy
 // звонков поля пустые — рендерим только то, что есть.
-// Пороги цвета оценки (66/41) — единые для бейджа в шапке и блоков.
+// Пороги цвета оценки (90/70) — единые для бейджа в шапке и блоков.
 // [Auto-override…]-маркеры движка срезаются на стороне API (см.
 // api/okk/calls/[callId]/route.ts stripEngineTags) — здесь feedback уже чистый.
 function scoreTone(pct: number): string {
-  return pct >= 66 ? "text-emerald-400" : pct >= 41 ? "text-amber-400" : "text-rose-400";
+  return pct >= 90 ? "text-emerald-400" : pct >= 70 ? "text-amber-400" : "text-rose-400";
 }
 
 // Секунды → MM:SS для таймкода критерия в записи звонка.

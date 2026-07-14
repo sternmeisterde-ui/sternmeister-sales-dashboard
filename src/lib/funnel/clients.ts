@@ -129,9 +129,34 @@ export interface ClientGroup {
   categories: { hot: number; warm: number; cold: number };
 }
 
+/**
+ * Сводка готовности одной стороны (ДЦ или АА) по всем клиентам периода:
+ * среднее последнего балла ролевки (5-балльная шкала, до десятых), число
+ * клиентов с оценкой, число без оценки и распределение по баллам (балл → кол-во).
+ */
+export interface SideReadinessSummary {
+  avg: number | null; // среднее latest-балла (до десятых); null → нет оценок
+  scored: number; // клиентов с оценкой (latest !== null)
+  none: number; // клиентов без оценки стороны (latest === null)
+  /** Балл (1..5, ключ-строка) → число клиентов с таким последним баллом. */
+  dist: Record<string, number>;
+}
+
+/**
+ * Совокупная готовность по ВСЕМ клиентам периода — ДЦ и АА отдельно. Берётся
+ * dc.latest/aa.latest (как колонки ДЦ/АА в таблице — актуальная готовность),
+ * по полному набору scored-лидов (active + won), не по усечённому до limit
+ * списку, поэтому не зависит от пагинации/фильтров фронта.
+ */
+export interface ClientsReadinessSummary {
+  dc: SideReadinessSummary;
+  aa: SideReadinessSummary;
+}
+
 export interface ClientsResult {
   active: ClientGroup;
   won: ClientGroup;
+  summary: ClientsReadinessSummary;
 }
 
 type BaseRow = {
@@ -210,7 +235,12 @@ export async function computeClients(
     `)
   );
   if (baseRows.length === 0) {
-    return { active: emptyGroup(), won: emptyGroup() };
+    const emptySide: SideReadinessSummary = { avg: null, scored: 0, none: 0, dist: {} };
+    return {
+      active: emptyGroup(),
+      won: emptyGroup(),
+      summary: { dc: emptySide, aa: emptySide },
+    };
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
@@ -340,6 +370,40 @@ export async function computeClients(
       shown: wonTop.length,
       categories: countCategories(wonScored),
     },
+    // Только клиенты, чей термин попал в период (terminInRange) — как графики.
+    // Иначе won-бэклог (status 142 включается в WHERE независимо от дат) раздул
+    // бы «без оценки». По ВСЕМ таким клиентам, не по усечённым до limit top.
+    summary: summarizeReadiness(
+      [...activeScored, ...wonScored].filter((s) => s.terminInRange),
+    ),
+  };
+}
+
+/** Сводка одной стороны: среднее + распределение по баллам (по latest). */
+function summarizeSide(scored: ScoredLead[], pick: (s: ScoredLead) => number | null): SideReadinessSummary {
+  const dist: Record<string, number> = {};
+  let sum = 0, n = 0, none = 0;
+  for (const s of scored) {
+    const v = pick(s);
+    if (v === null) { none += 1; continue; }
+    sum += v;
+    n += 1;
+    const bin = String(Math.round(v)); // балл 1..5
+    dist[bin] = (dist[bin] ?? 0) + 1;
+  }
+  return {
+    avg: n > 0 ? Math.round((sum / n) * 10) / 10 : null,
+    scored: n,
+    none,
+    dist,
+  };
+}
+
+/** Совокупная готовность ДЦ/АА по клиентам (среднее + распределение баллов). */
+function summarizeReadiness(scored: ScoredLead[]): ClientsReadinessSummary {
+  return {
+    dc: summarizeSide(scored, (s) => s.dc.latest),
+    aa: summarizeSide(scored, (s) => s.aa.latest),
   };
 }
 
