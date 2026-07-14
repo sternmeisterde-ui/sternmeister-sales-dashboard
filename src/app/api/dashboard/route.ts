@@ -40,9 +40,10 @@ import {
   getAnalyticsAvgWaitSeconds,
   getAnalyticsSlaFirstCallMinutes,
   getAnalyticsSlaFirstCallMinutesByManager,
-  getAnalyticsLostCalls,
+  getAnalyticsLostCallsByManager,
   getAnalyticsInboundByLine,
   type DailyCallBucket,
+  type ManagerSlaStat,
 } from "@/lib/daily/analytics-calls";
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
 
@@ -471,10 +472,10 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
-    // v12 cache-key bump (2026-04-29): all date windows now resolve in Europe/
-    // Berlin (was UTC). Same dateStr means a different UTC window than v11, so
-    // the old cached responses must not leak into the new boundary semantics.
-    const cacheKey = `dashboard-response:v12:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v13 cache-key bump (2026-07-14): perManager rows grew slaLeadCount +
+    // lostCalls (веса для клиентского фильтра «Менеджеры») — v12-кэш отдавал
+    // бы строки без этих полей. (v12, 2026-04-29: Berlin boundaries.)
+    const cacheKey = `dashboard-response:v13:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, vertical, period, dateStr, fromStr, toStr)
     );
@@ -543,7 +544,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCalls, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -608,20 +609,22 @@ async function buildDashboardResponse(
           })
         : Promise.resolve(0),
       // B2B «Потерянные»: outbound no-answer attempts with no callback to the
-      // same number within 15 min (business hours 09–19 Berlin).
+      // same number within 15 min (business hours 09–19 Berlin). total — для
+      // плитки, byManager — для клиентского пересчёта при фильтре «Менеджеры».
       department === "b2b"
-        ? getAnalyticsLostCalls(allManagers, department, from, to).catch((e) => {
+        ? getAnalyticsLostCallsByManager(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] lost calls failed:", e);
-            return 0;
+            return { total: 0, byManager: new Map<string, number>() };
           })
-        : Promise.resolve(0),
-      // Per-manager first-call SLA (min) for the B2B per-manager «SLA» column.
+        : Promise.resolve({ total: 0, byManager: new Map<string, number>() }),
+      // Per-manager first-call SLA (min + число лидов) for the B2B per-manager
+      // «SLA» column and the client-side tile recompute.
       department === "b2b"
         ? getAnalyticsSlaFirstCallMinutesByManager(allManagers, department, from, to).catch((e) => {
             console.error("[Dashboard] per-manager sla failed:", e);
-            return new Map<string, number>();
+            return new Map<string, ManagerSlaStat>();
           })
-        : Promise.resolve(new Map<string, number>()),
+        : Promise.resolve(new Map<string, ManagerSlaStat>()),
       // B2B inbound counted BY NUMBER (line_name LIKE 'KOM%'), incl. missed
       // no-agent calls — matches CloudTalk's group inbound. Drives «Всего».
       department === "b2b"
@@ -713,7 +716,11 @@ async function buildDashboardResponse(
           // B2B per-manager columns.
           outgoingConnected: cm?.outgoingConnected ?? 0,
           avgWaitSeconds: cm?.avgWaitSeconds ?? 0,
-          slaFirstCallMin: slaByManager.get(mgr.id) ?? 0,
+          slaFirstCallMin: slaByManager.get(mgr.id)?.avgMin ?? 0,
+          // Веса для клиентского пересчёта плиток при фильтре «Менеджеры»:
+          // SLA — взвешенное среднее по числу лидов, Потерянные — сумма.
+          slaLeadCount: slaByManager.get(mgr.id)?.leadCount ?? 0,
+          lostCalls: lostCallsRes.byManager.get(mgr.id) ?? 0,
           overdueTasks: tm?.overdueTasks ?? 0,
         };
       })
@@ -803,7 +810,7 @@ async function buildDashboardResponse(
         outgoingConnected: todaySummary.outgoingConnected ?? 0,
         avgWaitSeconds,
         slaFirstCallMin,
-        lostCalls,
+        lostCalls: lostCallsRes.total,
         overdueTasks: totalOverdue,
         revenue: todayRevenue,
         managersCount: allManagers.length,

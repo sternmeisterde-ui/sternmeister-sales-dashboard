@@ -209,7 +209,20 @@ export async function POST(request: NextRequest) {
         .where(eq(masterManagers.id, id));
 
       if (deleted) {
-        await db.delete(masterManagers).where(eq(masterManagers.id, id));
+        if (department === "b2b") {
+          // Коммерсы: soft-delete в master. Строка (kommo/cg/ct id, имя, FK на
+          // manager_schedule/payroll) нужна, чтобы удалённый менеджер «оживал»
+          // за периоды, когда он работал (Звонки/Дейли/Активность/Looker —
+          // ревайв через getManagersWithKommoForPeriod и период-aware выборки).
+          // Hard delete рвал name→master.id атрибуцию и терял историю.
+          await db
+            .update(masterManagers)
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(masterManagers.id, id));
+        } else {
+          // Госники: прежнее поведение (hard delete) — ревайв для b2g не включён.
+          await db.delete(masterManagers).where(eq(masterManagers.id, id));
+        }
         await softDeleteFromTargets(department, okkDept, deleted.name, deleted.telegramId, warnings);
       }
     }
@@ -241,6 +254,26 @@ export async function POST(request: NextRequest) {
       .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, true)));
     for (const row of existingRows) {
       existingMap.set(row.id, row);
+    }
+
+    // ── Step 2.5: Soft-deleted rows of this department ──
+    // При повторном добавлении человека с тем же telegram_id/именем оживляем
+    // его старую master-строку (isActive=true) вместо вставки дубликата: id
+    // сохраняется, а с ним — история manager_schedule/payroll и атрибуция
+    // name→master.id в аналитике.
+    const inactiveByTg = new Map<string, string>();   // telegramId → master id
+    const inactiveByName = new Map<string, string>(); // trimmed lowercase name → master id
+    const inactiveRows = await db
+      .select({
+        id: masterManagers.id,
+        name: masterManagers.name,
+        telegramId: masterManagers.telegramId,
+      })
+      .from(masterManagers)
+      .where(and(eq(masterManagers.department, department), eq(masterManagers.isActive, false)));
+    for (const row of inactiveRows) {
+      if (row.telegramId) inactiveByTg.set(row.telegramId, row.id);
+      inactiveByName.set(row.name.trim().toLowerCase(), row.id);
     }
 
     // ── Step 3: Resolve telegram_ids (parallel, only when needed) ──
@@ -466,11 +499,26 @@ export async function POST(request: NextRequest) {
           .returning();
         savedRow = updated;
       } else {
-        const [inserted] = await db
-          .insert(masterManagers)
-          .values(values)
-          .returning();
-        savedRow = inserted;
+        // Новый менеджер: сперва ищем soft-deleted строку того же человека
+        // (по telegram_id, затем по имени) и реактивируем её — see Step 2.5.
+        const reviveId =
+          (telegramId ? inactiveByTg.get(telegramId) : undefined) ??
+          inactiveByName.get(mgr.name.trim().toLowerCase()) ??
+          null;
+        if (reviveId) {
+          const [revived] = await db
+            .update(masterManagers)
+            .set(values)
+            .where(eq(masterManagers.id, reviveId))
+            .returning();
+          savedRow = revived;
+        } else {
+          const [inserted] = await db
+            .insert(masterManagers)
+            .values(values)
+            .returning();
+          savedRow = inserted;
+        }
       }
 
       if (savedRow) results.push(savedRow);

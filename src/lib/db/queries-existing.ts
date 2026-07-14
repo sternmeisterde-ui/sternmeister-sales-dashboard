@@ -125,10 +125,21 @@ export async function getAIRoleCalls(departmentType: DepartmentType, fromDate?: 
   });
 }
 
-// Получить статистику менеджеров (2 запроса вместо N+1)
-export async function getManagerStats(departmentType: DepartmentType) {
+// Получить статистику менеджеров (2 запроса вместо N+1).
+// b2b: помимо активных в карточки попадают неактивные (удалённые) менеджеры,
+// у которых есть ролевки в [fromDate, toDate] — история удалённого менеджера
+// остаётся видимой за периоды, когда он работал. Без периода (fromDate/toDate
+// не переданы) ревайв идёт по всем ролевкам за всё время.
+export async function getManagerStats(
+  departmentType: DepartmentType,
+  fromDate?: string,
+  toDate?: string,
+) {
   const { calls, users } = getTables(departmentType);
   const db = getDbForDepartment(departmentType);
+
+  const userConds = [inArray(users.role, ["manager", "teamlead"])];
+  if (departmentType !== "b2b") userConds.push(eq(users.isActive, true));
 
   // Параллельно: все пользователи + все звонки (2 запроса вместо N+1)
   const [allUsers, allCalls] = await Promise.all([
@@ -138,12 +149,14 @@ export async function getManagerStats(departmentType: DepartmentType) {
       telegramUsername: users.telegramUsername,
       role: users.role,
       line: users.line,
-    }).from(users).where(and(eq(users.isActive, true), inArray(users.role, ["manager", "teamlead"]))),
+      isActive: users.isActive,
+    }).from(users).where(and(...userConds)),
 
     db.select({
       userId: calls.userId,
       duration: calls.durationSeconds,
       score: calls.score,
+      startedAt: calls.startedAt,
     }).from(calls),
   ]);
 
@@ -155,7 +168,26 @@ export async function getManagerStats(departmentType: DepartmentType) {
     callsByUser.set(call.userId, existing);
   }
 
-  return allUsers.map(user => {
+  // b2b-ревайв: неактивный менеджер остаётся в списке, только если у него есть
+  // ролевки в выбранном периоде — иначе карточки навсегда копили бы уволенных.
+  // Ролевка считается той же меркой, что и лента getAIRoleCalls (score задан,
+  // длительность ≥ минимума) — иначе появлялась бы карточка без единого
+  // звонка в видимом списке.
+  const fromUtc = fromDate ? parseDateBoundary(fromDate, "start") : null;
+  const toUtc = toDate ? parseDateBoundary(toDate, "end") : null;
+  const minDuration = MIN_DURATION_ROLEPLAY[departmentType];
+  const visibleUsers = allUsers.filter((user) => {
+    if (user.isActive) return true;
+    const userCalls = callsByUser.get(user.id) || [];
+    return userCalls.some((c) => {
+      if (!c.startedAt || c.score === null || (c.duration ?? 0) < minDuration) return false;
+      if (fromUtc && c.startedAt < fromUtc) return false;
+      if (toUtc && c.startedAt > toUtc) return false;
+      return true;
+    });
+  });
+
+  return visibleUsers.map(user => {
     const userCalls = callsByUser.get(user.id) || [];
     const totalCalls = userCalls.length;
     const avgScore = totalCalls > 0

@@ -1057,23 +1057,33 @@ async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, t
   return v == null ? 0 : Math.round(Number(v));
 }
 
+/** Per-manager SLA: среднее + число лидов (вес для клиентского пересчёта). */
+export interface ManagerSlaStat {
+  avgMin: number;
+  leadCount: number;
+}
+
 /**
- * Per-manager "time-to-first-call" SLA in MINUTES — same metric as
+ * Per-manager "time-to-first-call" SLA — same metric as
  * getAnalyticsSlaFirstCallMinutes but grouped by manager and resolved to
  * master_managers.id (via NAME_ALIASES). Drives the B2B per-manager «SLA»
- * column. Managers with no qualifying leads in the window are absent (→ 0).
+ * column. leadCount — число лидов в среднем: без него клиент не может честно
+ * пересчитать SLA-плитку по выбранному подмножеству менеджеров (фильтр
+ * «Менеджеры» на всю вкладку). Managers with no qualifying leads are absent.
  */
 export async function getAnalyticsSlaFirstCallMinutesByManager(
   managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
-): Promise<Map<string, number>> {
+): Promise<Map<string, ManagerSlaStat>> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const pipelineIds = getPipelineIds(dept);
   if (pipelineIds.length === 0) return new Map();
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `sla-first-call-min-mgr:${dept}:${fromTs}:${toTs}:${managerIds}`;
+  // :v2 — форма значения изменилась (number → {avgMin, leadCount}), старые
+  // кэш-записи с тем же ключом отдавали бы прежний shape.
+  const cacheKey = `sla-first-call-min-mgr:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs, dept === "b2b"));
 }
 
@@ -1083,7 +1093,7 @@ async function fetchSlaFirstCallMinutesByManager(
   fromTs: number,
   toTs: number,
   useOwn: boolean,
-): Promise<Map<string, number>> {
+): Promise<Map<string, ManagerSlaStat>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
@@ -1091,10 +1101,11 @@ async function fetchSlaFirstCallMinutesByManager(
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ manager: string | null; avg_min: string | number | null }>(sql`
+  }).execute<{ manager: string | null; avg_min: string | number | null; lead_count: string | number | null }>(sql`
     SELECT
       manager,
-      AVG(${src})::float / 60.0 AS avg_min
+      AVG(${src})::float / 60.0 AS avg_min,
+      COUNT(*)::int AS lead_count
     FROM analytics.sla
     WHERE lead_created_at >= ${fromDate}
       AND lead_created_at <= ${toDate}
@@ -1104,13 +1115,16 @@ async function fetchSlaFirstCallMinutesByManager(
     GROUP BY manager
   `);
 
-  const byName = new Map<string, number>();
+  const byName = new Map<string, ManagerSlaStat>();
   for (const row of result.rows) {
     if (row.manager == null || row.avg_min == null) continue;
-    byName.set(row.manager, Math.round(Number(row.avg_min)));
+    byName.set(row.manager, {
+      avgMin: Math.round(Number(row.avg_min)),
+      leadCount: Number(row.lead_count ?? 0),
+    });
   }
 
-  const byMaster = new Map<string, number>();
+  const byMaster = new Map<string, ManagerSlaStat>();
   for (const m of managers) {
     let v = byName.get(m.name);
     if (v == null) {
@@ -1220,6 +1234,33 @@ export async function getAnalyticsLostCallsDetail(
   const managerIds = managers.map((m) => m.id).sort().join(",");
   const cacheKey = `lost-calls-detail:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCallsDetail(managers, fromTs, toTs));
+}
+
+/**
+ * «Потерянные»: счётчик плитки + разбивка по менеджерам (master id) из одного
+ * списка детализации (шарит кэш с getAnalyticsLostCallsDetail, расхождение
+ * плитка↔drill-down невозможно по построению). byManager нужен клиенту, чтобы
+ * пересчитывать плитку при фильтре «Менеджеры» на всю вкладку Звонки.
+ */
+export async function getAnalyticsLostCallsByManager(
+  managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+): Promise<{ total: number; byManager: Map<string, number> }> {
+  const rows = await getAnalyticsLostCallsDetail(managers, department, fromTs, toTs);
+  const idByName = new Map<string, string>();
+  for (const m of managers) {
+    idByName.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) idByName.set(alias, m.id);
+  }
+  const byManager = new Map<string, number>();
+  for (const r of rows) {
+    const id = r.manager ? idByName.get(r.manager) : undefined;
+    if (!id) continue;
+    byManager.set(id, (byManager.get(id) ?? 0) + 1);
+  }
+  return { total: rows.length, byManager };
 }
 
 async function fetchLostCallsDetail(
@@ -1745,11 +1786,17 @@ export async function getManagersWithKommoForPeriod(
   if (department !== "b2b") return active;
   try {
     const activeIds = new Set(active.map((m) => m.id));
+    // Имя уже занято активным менеджером → неактивную строку не оживляем:
+    // это legacy-дубликат (напр. вторая «Рузанна»), звонки по имени и так
+    // атрибутируются активной строке, а ревайв дал бы задвоение в таблице.
+    const activeNames = new Set(active.map((m) => m.name));
     const [withInactive, namesWithComms] = await Promise.all([
       getManagersWithKommo(department, { includeInactive: true }),
       getManagerNamesWithComms(department, fromTs, toTs, vertical),
     ]);
-    const revived = withInactive.filter((m) => !activeIds.has(m.id) && namesWithComms.has(m.name));
+    const revived = withInactive.filter(
+      (m) => !activeIds.has(m.id) && !activeNames.has(m.name) && namesWithComms.has(m.name),
+    );
     return revived.length > 0 ? [...active, ...revived] : active;
   } catch (e) {
     console.error("[roster] revive inactive managers failed:", e);

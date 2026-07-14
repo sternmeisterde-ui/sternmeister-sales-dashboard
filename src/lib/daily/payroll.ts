@@ -54,19 +54,22 @@ export async function computePayroll(
 ): Promise<PayrollRow[]> {
   const { from, to } = monthBounds(periodMonth);
 
+  // b2b: soft-deleted (удалённые) менеджеры участвуют в расчёте — иначе
+  // менеджер, удалённый 1-го числа, выпал бы из табеля за полностью
+  // отработанный прошлый месяц. Ниже их строки оставляем только если в месяце
+  // есть смены или премия, чтобы старые уволенные не копились в каждом табеле.
+  const managerConds = [eq(masterManagers.department, department)];
+  if (department !== "b2b") managerConds.push(eq(masterManagers.isActive, true));
+
   const managers = await db
     .select({
       id: masterManagers.id,
       name: masterManagers.name,
       dailyRate: masterManagers.dailyRate,
+      isActive: masterManagers.isActive,
     })
     .from(masterManagers)
-    .where(
-      and(
-        eq(masterManagers.department, department),
-        eq(masterManagers.isActive, true),
-      ),
-    )
+    .where(and(...managerConds))
     .orderBy(masterManagers.name);
 
   if (managers.length === 0) return [];
@@ -131,7 +134,13 @@ export async function computePayroll(
     bucket[code] = (bucket[code] ?? 0) + 1;
   }
 
-  return managers.map((m): PayrollRow => {
+  // Неактивные попадают в табель только за месяцы, где они реально работали
+  // (есть смены) или получили премию — см. комментарий у managerConds.
+  const visibleManagers = managers.filter(
+    (m) => m.isActive || breakdownByUser.has(m.id) || bonusByUser.has(m.id),
+  );
+
+  return visibleManagers.map((m): PayrollRow => {
     const breakdown = breakdownByUser.get(m.id) ?? {};
     let equivFullDays = 0;
     for (const [code, count] of Object.entries(breakdown)) {
