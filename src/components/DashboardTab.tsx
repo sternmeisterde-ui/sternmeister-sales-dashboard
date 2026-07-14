@@ -6,7 +6,7 @@ import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
   ChevronLeft, ChevronRight, ChevronDown, Check,
-  PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff,
+  PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff, Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -80,6 +80,10 @@ interface PerManagerRow {
   outgoingConnected: number;
   avgWaitSeconds: number;
   slaFirstCallMin: number;
+  // Веса для пересчёта плиток при фильтре «Менеджеры» (см. selectedManagers):
+  // SLA — взвешенное среднее по slaLeadCount, Потерянные — сумма lostCalls.
+  slaLeadCount: number;
+  lostCalls: number;
   overdueTasks: number;
 }
 
@@ -211,6 +215,14 @@ export default function DashboardTab({
   // since the dashboard switches modes when the user toggles department,
   // and the new value is reset to "all" on every department change.
   const [trendLine, setTrendLine] = useState<string>("all");
+  // Глобальный фильтр «Менеджеры» (B2B): null = все. Живёт в шапке вкладки и
+  // фильтрует ВСЁ — KPI-плитки, таблицу, график и детализации. Выбор
+  // переживает смену периода (сравнивать одну и ту же группу по датам), но
+  // сбрасывается при смене отдела (имена другого отдела не пересекаются).
+  const [selectedManagers, setSelectedManagers] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    setSelectedManagers(null);
+  }, [department]);
   // Drill-down «Потерянных» (спека 22 п.6): клик по плитке открывает панель
   // с разбивкой по менеджерам. Данные грузятся лениво по клику и сбрасываются
   // при смене периода/отдела (см. useEffect ниже).
@@ -385,6 +397,35 @@ export default function DashboardTab({
   const missed = data.missedBreakdown;
   const isB2G = department === "b2g";
 
+  // Ростер глобального фильтра «Менеджеры» (B2B): имена таблицы ∪ серии
+  // графика (график включает РОПов со звонками, которых нет в таблице).
+  const managerNames = !isB2G
+    ? Array.from(
+        new Set([
+          ...data.perManager.map((r) => r.name),
+          ...Object.keys(data.trendByManager ?? {}),
+        ]),
+      ).sort((a, b) => a.localeCompare(b, "ru"))
+    : [];
+  // Строки таблицы под фильтром. selectedManagers === null («все») → плитки
+  // показывают серверные dept-итоги: они включают и звонки, которые не
+  // сматчились ни с одним менеджером, поэтому «все» ≠ сумма по строкам.
+  const filteredPerManager =
+    selectedManagers === null
+      ? data.perManager
+      : data.perManager.filter((r) => selectedManagers.has(r.name));
+  // Детализации «Потерянные»/«SLA» под тем же фильтром — матч по имени
+  // менеджера (сервер атрибутирует строки так же, поэтому суммы в модалке
+  // сходятся с плитками). Строки «Без менеджера» при активном фильтре скрыты.
+  const visibleLostItems =
+    lostItems && selectedManagers !== null
+      ? lostItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
+      : lostItems;
+  const visibleSlaItems =
+    slaItems && selectedManagers !== null
+      ? slaItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
+      : slaItems;
+
   const isSingleDay =
     range.start.getTime() === range.end.getTime() ||
     formatDate(range.start) === formatDate(range.end);
@@ -482,6 +523,16 @@ export default function DashboardTab({
               setRange({ start: today, end: today });
             }}
           />
+          {/* Глобальный фильтр «Менеджеры» (B2B) — фильтрует всю вкладку:
+              плитки, таблицу, график и детализации. */}
+          {!isB2G && managerNames.length > 0 && (
+            <ManagerMultiSelect
+              managers={managerNames}
+              selected={selectedManagers}
+              onChange={setSelectedManagers}
+              align="left"
+            />
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button aria-label="Предыдущий период" onClick={() => shiftDate(-1)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
@@ -564,12 +615,28 @@ export default function DashboardTab({
         // исходящие / все исходящие (≤100%). Ожидание = средний answer-wait
         // (сек). SLA = среднее время до 1-го звонка (мин).
         (() => {
-          const outgoing = m.outgoingTotal;
-          const answeredOut = m.outgoingConnected ?? 0;
+          // При активном фильтре «Менеджеры» плитки пересчитываются из
+          // perManager-строк: суммы напрямую, Ожидание/SLA — взвешенные
+          // средние (веса: отвеченные звонки / slaLeadCount). Без фильтра —
+          // серверные dept-итоги (включают несматченные звонки), как раньше.
+          const sub = selectedManagers === null ? null : filteredPerManager;
+          const outgoing = sub === null ? m.outgoingTotal : sub.reduce((s, r) => s + r.outgoingTotal, 0);
+          const answeredOut = sub === null ? m.outgoingConnected ?? 0 : sub.reduce((s, r) => s + r.outgoingConnected, 0);
           const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
-          const waitSec = m.avgWaitSeconds ?? 0;
-          const slaMin = m.slaFirstCallMin ?? 0;
-          const lost = m.lostCalls ?? 0;
+          const totalMinutes = sub === null ? m.totalMinutes : sub.reduce((s, r) => s + r.totalMinutes, 0);
+          let waitSec = m.avgWaitSeconds ?? 0;
+          let slaMin = m.slaFirstCallMin ?? 0;
+          if (sub !== null) {
+            const waitWeight = sub.reduce((s, r) => s + r.callsConnected, 0);
+            waitSec = waitWeight > 0
+              ? Math.round(sub.reduce((s, r) => s + r.avgWaitSeconds * r.callsConnected, 0) / waitWeight)
+              : 0;
+            const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
+            slaMin = slaWeight > 0
+              ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
+              : 0;
+          }
+          const lost = sub === null ? m.lostCalls ?? 0 : sub.reduce((s, r) => s + (r.lostCalls ?? 0), 0);
           return (
             // 7 колонок под 7 плиток — после удаления «Всего» (спека 22 п.4)
             // 8-колоночная сетка оставляла дыру справа.
@@ -597,7 +664,7 @@ export default function DashboardTab({
                 tip="Доля исходящих, на которые ответили: принятые ÷ исходящие. Клик — дозваниваемость по часам дня."
               />
               <CallMetricTile
-                icon={Clock} label="Длительность" color="blue" totalValue={fmtHoursMinutes(m.totalMinutes)} rows={null}
+                icon={Clock} label="Длительность" color="blue" totalValue={fmtHoursMinutes(totalMinutes)} rows={null}
                 tip="Суммарная длительность по всем звонкам, как её считают кабинеты телефоний: CloudTalk — время разговора, CallGear — полное время звонка."
               />
               <CallMetricTile
@@ -688,7 +755,7 @@ export default function DashboardTab({
               <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2 min-w-0">
                 <PhoneOff className="w-4 h-4 shrink-0" />
                 <span className="truncate">Потерянные звонки — детализация</span>
-                {lostItems && <span className="text-slate-500 font-normal shrink-0">({lostItems.length})</span>}
+                {visibleLostItems && <span className="text-slate-500 font-normal shrink-0">({visibleLostItems.length})</span>}
               </h3>
               <button
                 onClick={() => setLostOpen(false)}
@@ -706,14 +773,14 @@ export default function DashboardTab({
           )}
           {lostError && <p className="text-rose-400 text-sm py-2">{lostError}</p>}
 
-          {lostItems && lostItems.length === 0 && (
+          {visibleLostItems && visibleLostItems.length === 0 && (
             <p className="text-slate-400 text-sm py-2">За выбранный период потерянных звонков нет 🎉</p>
           )}
 
-          {lostItems && lostItems.length > 0 && (() => {
+          {visibleLostItems && visibleLostItems.length > 0 && (() => {
             // Группировка по ответственному МОПу (Рузанна: «разбито по мопам»).
             const byManager = new Map<string, LostCallItem[]>();
-            for (const it of lostItems) {
+            for (const it of visibleLostItems) {
               const key = it.manager || "Без менеджера";
               const arr = byManager.get(key) ?? [];
               arr.push(it);
@@ -796,9 +863,9 @@ export default function DashboardTab({
               <h3 className="text-sm font-bold text-blue-400 flex items-center gap-2 min-w-0">
                 <Gauge className="w-4 h-4 shrink-0" />
                 <span className="truncate">SLA — из каких сделок состоит среднее</span>
-                {slaItems && slaItems.length > 0 && (
+                {visibleSlaItems && visibleSlaItems.length > 0 && (
                   <span className="text-slate-500 font-normal shrink-0">
-                    ({slaItems.length} · ср. {Math.round(slaItems.reduce((s, x) => s + x.slaMinutes, 0) / slaItems.length)}м)
+                    ({visibleSlaItems.length} · ср. {Math.round(visibleSlaItems.reduce((s, x) => s + x.slaMinutes, 0) / visibleSlaItems.length)}м)
                   </span>
                 )}
               </h3>
@@ -817,12 +884,12 @@ export default function DashboardTab({
                 </div>
               )}
               {slaError && <p className="text-rose-400 text-sm py-2">{slaError}</p>}
-              {slaItems && slaItems.length === 0 && (
+              {visibleSlaItems && visibleSlaItems.length === 0 && (
                 <p className="text-slate-400 text-sm py-2">За выбранный период SLA-сделок нет.</p>
               )}
-              {slaItems && slaItems.length > 0 && (() => {
+              {visibleSlaItems && visibleSlaItems.length > 0 && (() => {
                 const byManager = new Map<string, SlaLeadItem[]>();
-                for (const it of slaItems) {
+                for (const it of visibleSlaItems) {
                   const key = it.manager || "Без менеджера";
                   const arr = byManager.get(key) ?? [];
                   arr.push(it);
@@ -908,12 +975,14 @@ export default function DashboardTab({
             { title: "Менеджеры", line: "__all__", color: "blue" },
           ]
       ).map(({ title, line, color }) => {
+        // filteredPerManager учитывает глобальный фильтр «Менеджеры» (B2B);
+        // для B2G selectedManagers всегда null → это те же data.perManager.
         const lineManagers =
           line === "__all__"
-            ? data.perManager
+            ? filteredPerManager
             : line === "__none__"
-              ? data.perManager.filter((mgr) => !mgr.line)
-              : data.perManager.filter((mgr) => mgr.line === line);
+              ? filteredPerManager.filter((mgr) => !mgr.line)
+              : filteredPerManager.filter((mgr) => mgr.line === line);
         if (lineManagers.length === 0) return null;
         const titleColorClass =
           color === "emerald"
@@ -1028,7 +1097,13 @@ export default function DashboardTab({
           mode="b2g"
         />
       ) : (
-        <TrendChartByManager trend={data.trend} trendByManager={data.trendByManager ?? null} department={department} vertical={vertical} />
+        <TrendChartByManager
+          trend={data.trend}
+          trendByManager={data.trendByManager ?? null}
+          department={department}
+          vertical={vertical}
+          selected={selectedManagers}
+        />
       )}
     </div>
   );
@@ -1322,11 +1397,17 @@ const METRIC_PILLS: { key: TrendMetric; label: string }[] = [
   { key: "missedIncoming", label: "Пропущенные" },
 ];
 
-// Мультиселект менеджеров. selected === null означает «все».
-function ManagerMultiSelect({ managers, selected, onChange }: {
+// Мультиселект менеджеров. selected === null означает «все». Внешний вид —
+// 1в1 как фильтр «Менеджеры» на вкладке Активность (TrackingTab): кнопка с
+// иконкой и подписью «Все (N)» / «k/N» / «никто», непрозрачный поповер с
+// шапкой (счётчик + Все/Снять) и квадратными чекбоксами.
+function ManagerMultiSelect({ managers, selected, onChange, align = "right" }: {
   managers: string[];
   selected: Set<string> | null;
   onChange: (next: Set<string> | null) => void;
+  /** Край кнопки, к которому прижат дропдаун. В шапке вкладки (слева у
+      календаря) нужен "left", иначе список уезжает за левый край экрана. */
+  align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -1350,38 +1431,56 @@ function ManagerMultiSelect({ managers, selected, onChange }: {
     onChange(base.size === managers.length ? null : base);
   };
 
+  const buttonLabel = isAll
+    ? `Все (${managers.length})`
+    : count === 0
+      ? "никто"
+      : `${count}/${managers.length}`;
+
   return (
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:outline-none transition-colors"
+        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 border border-white/5 hover:bg-slate-800 text-xs text-slate-300 transition-all"
       >
-        Менеджеры <span className="text-slate-500">{count}/{managers.length}</span>
-        <ChevronDown className="w-3.5 h-3.5" />
+        <Users className="w-3.5 h-3.5" />
+        Менеджеры
+        <span className="text-slate-500">{buttonLabel}</span>
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="absolute right-0 mt-1 z-30 w-56 max-h-64 overflow-y-auto glass-panel rounded-lg border border-white/10 p-1 shadow-xl scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-          <button
-            onClick={() => onChange(isAll ? new Set() : null)}
-            className="w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-white/5 rounded flex items-center justify-between"
-          >
-            Выбрать всех {isAll && <Check className="w-3.5 h-3.5 text-blue-400" />}
-          </button>
-          <div className="h-px bg-white/10 my-1" />
-          {managers.map((m, i) => {
-            const checked = isAll || selected.has(m);
-            return (
-              <button
-                key={m}
-                onClick={() => toggle(m)}
-                className="w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-white/5 rounded flex items-center gap-2"
-              >
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: MANAGER_LINE_COLORS[i % MANAGER_LINE_COLORS.length] }} />
-                <span className="flex-1 truncate">{m}</span>
-                {checked && <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
-              </button>
-            );
-          })}
+        <div className={`absolute ${align === "left" ? "left-0" : "right-0"} mt-1 z-30 w-64 max-h-72 bg-slate-900 rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col`}>
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-950">
+            <span className="text-xs font-semibold text-white">Менеджеры</span>
+            <span className="text-[11px] text-slate-400 ml-auto">{count}/{managers.length}</span>
+            <button type="button" onClick={() => onChange(null)} className="text-[11px] text-blue-400 hover:text-blue-300 px-1.5">
+              Все
+            </button>
+            <button type="button" onClick={() => onChange(new Set())} className="text-[11px] text-rose-400 hover:text-rose-300 px-1.5">
+              Снять
+            </button>
+          </div>
+          <div className="overflow-y-auto flex-1 px-2 py-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+            {managers.map((m) => {
+              const checked = isAll || selected.has(m);
+              return (
+                <label
+                  key={m}
+                  className="flex items-center gap-2 px-2 py-1 rounded-md text-xs cursor-pointer hover:bg-white/5"
+                >
+                  <span
+                    className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                      checked ? "bg-blue-500 border-blue-500" : "border-slate-600"
+                    }`}
+                  >
+                    {checked && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
+                  </span>
+                  <input type="checkbox" checked={checked} onChange={() => toggle(m)} className="sr-only" />
+                  <span className="text-slate-200 truncate">{m}</span>
+                </label>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -1397,14 +1496,15 @@ function civilDateRange(from: string, to: string): string[] {
   return out;
 }
 
-function TrendChartByManager({ trendByManager, department, vertical }: {
+function TrendChartByManager({ trendByManager, department, vertical, selected }: {
   trend: DailyBucket[];
   trendByManager: Record<string, DailyBucket[]> | null;
   department: string;
   vertical?: "buh" | "med" | "all";
+  /** Глобальный фильтр «Менеджеры» из шапки вкладки (null = все). */
+  selected: Set<string> | null;
 }) {
   const [metric, setMetric] = useState<TrendMetric>("callsTotal");
-  const [selected, setSelected] = useState<Set<string> | null>(null); // null = все
   const [compareOn, setCompareOn] = useState(false);
   // Оба периода сравнения (A и B) — независимый ручной выбор, помеченный
   // сигнатурой основного окна: при смене окна override «протухает» и мы падаем
@@ -1607,9 +1707,8 @@ function TrendChartByManager({ trendByManager, department, vertical }: {
             </button>
           ))}
         </div>
-        {managers.length > 0 && (
-          <ManagerMultiSelect managers={managers} selected={selected} onChange={setSelected} />
-        )}
+        {/* Мультиселект «Менеджеры» переехал в шапку вкладки (глобальный
+            фильтр) — график получает выбор через проп selected. */}
         <button
           onClick={() => setCompareOn((v) => !v)}
           className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
