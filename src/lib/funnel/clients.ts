@@ -129,9 +129,24 @@ export interface ClientGroup {
   categories: { hot: number; warm: number; cold: number };
 }
 
+/**
+ * Совокупные средние готовности (последний балл ролевок стороны) по ВСЕМ
+ * клиентам периода — ДЦ и АА отдельно. Берётся dc.latest/aa.latest (как колонки
+ * ДЦ/АА в таблице — актуальная готовность), усредняется по полному набору
+ * scored-лидов (active + won), не по усечённому до limit списку, поэтому не
+ * зависит от пагинации/фильтров фронта. null → нет клиентов с ролевками стороны.
+ */
+export interface ClientsReadinessSummary {
+  avgDc: number | null;
+  avgAa: number | null;
+  countDc: number; // клиентов с хотя бы одной ДЦ-ролевкой (dc.latest !== null)
+  countAa: number;
+}
+
 export interface ClientsResult {
   active: ClientGroup;
   won: ClientGroup;
+  summary: ClientsReadinessSummary;
 }
 
 type BaseRow = {
@@ -210,7 +225,11 @@ export async function computeClients(
     `)
   );
   if (baseRows.length === 0) {
-    return { active: emptyGroup(), won: emptyGroup() };
+    return {
+      active: emptyGroup(),
+      won: emptyGroup(),
+      summary: { avgDc: null, avgAa: null, countDc: 0, countAa: 0 },
+    };
   }
 
   const ids = baseRows.map((r) => Number(r.leadId));
@@ -340,6 +359,23 @@ export async function computeClients(
       shown: wonTop.length,
       categories: countCategories(wonScored),
     },
+    // По ВСЕМ клиентам периода (active + won), а не по усечённым top.
+    summary: summarizeReadiness([...activeScored, ...wonScored]),
+  };
+}
+
+/** Совокупное среднее dc.latest / aa.latest по клиентам (null пропускаются). */
+function summarizeReadiness(scored: ScoredLead[]): ClientsReadinessSummary {
+  let dcSum = 0, dcN = 0, aaSum = 0, aaN = 0;
+  for (const s of scored) {
+    if (s.dc.latest !== null) { dcSum += s.dc.latest; dcN += 1; }
+    if (s.aa.latest !== null) { aaSum += s.aa.latest; aaN += 1; }
+  }
+  return {
+    avgDc: dcN > 0 ? Math.round(dcSum / dcN) : null,
+    avgAa: aaN > 0 ? Math.round(aaSum / aaN) : null,
+    countDc: dcN,
+    countAa: aaN,
   };
 }
 

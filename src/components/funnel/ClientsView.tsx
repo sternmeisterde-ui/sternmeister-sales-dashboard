@@ -9,6 +9,7 @@ import type { FunnelFiltersState } from "@/lib/funnel/types";
 import type {
   ClientRow,
   ClientsResult,
+  ClientsReadinessSummary,
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
@@ -969,6 +970,93 @@ function CorrelationPanel({
   );
 }
 
+/** Одна метрика готовности (ДЦ или АА) + дельта к периоду сравнения. */
+function ReadinessMetric({
+  label,
+  value,
+  count,
+  compare,
+}: {
+  label: string;
+  value: number | null;
+  count: number;
+  /** Значение периода сравнения; undefined = сравнение выключено. */
+  compare: number | null | undefined;
+}) {
+  const hasCompare = compare !== undefined;
+  const delta = hasCompare && value != null && compare != null ? value - compare : null;
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-baseline gap-2">
+        <span className="text-2xl font-black text-white tabular-nums">{value ?? "—"}</span>
+        {delta != null && (
+          <span
+            className={`text-xs font-bold tabular-nums ${
+              delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-slate-400"
+            }`}
+          >
+            {delta > 0 ? "↑" : delta < 0 ? "↓" : "="}
+            {Math.abs(delta)}
+          </span>
+        )}
+      </div>
+      <span className="text-[11px] text-slate-400">
+        <b className="text-slate-300">{label}</b> · {count} кл.
+        {hasCompare && <span className="text-slate-500"> · было {compare ?? "—"}</span>}
+      </span>
+    </div>
+  );
+}
+
+/** Виджет «Готовность к терминам (среднее за период)» с ручным сравнением периодов. */
+function ReadinessSummaryWidget({
+  summary,
+  compareSummary,
+  compareTermin,
+  onCompareChange,
+  compareLoading,
+}: {
+  summary: ClientsReadinessSummary | null;
+  compareSummary: ClientsReadinessSummary | null;
+  compareTermin: { start: Date | null; end: Date | null } | null;
+  onCompareChange: (r: { start: Date | null; end: Date | null } | null) => void;
+  compareLoading: boolean;
+}) {
+  const cmpActive = compareTermin != null;
+  return (
+    <div className="bg-slate-900/40 rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-6 flex-wrap">
+      <div className="text-[10px] uppercase tracking-widest font-semibold text-slate-500 leading-tight">
+        Готовность
+        <br />к терминам
+      </div>
+      <ReadinessMetric
+        label="ДЦ"
+        value={summary?.avgDc ?? null}
+        count={summary?.countDc ?? 0}
+        compare={cmpActive ? compareSummary?.avgDc ?? null : undefined}
+      />
+      <ReadinessMetric
+        label="АА"
+        value={summary?.avgAa ?? null}
+        count={summary?.countAa ?? 0}
+        compare={cmpActive ? compareSummary?.avgAa ?? null : undefined}
+      />
+      <div className="ml-auto flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+          Сравнить с
+        </span>
+        <CalendarPicker
+          mode="range"
+          value={compareTermin ?? { start: null, end: null }}
+          onChange={onCompareChange}
+          onClear={() => onCompareChange(null)}
+        />
+        {compareLoading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
+      </div>
+    </div>
+  );
+}
+
 export default function ClientsView({ filters: _filters, vertical }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -988,6 +1076,10 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
       return { start: t, end: t };
     }
   );
+  // Период сравнения для виджета готовности (null = сравнение выключено).
+  const [compareTermin, setCompareTermin] = useState<{ start: Date | null; end: Date | null } | null>(null);
+  const [compareData, setCompareData] = useState<ClientsResult | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // Набор для графиков/метрик: клиенты, чей термин попал в выбранный диапазон дат
@@ -1093,6 +1185,47 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
     return () => clearTimeout(id);
   }, [key, terminFrom, terminTo, lang, load]);
 
+  // Период сравнения → отдельный запрос (тот же endpoint + общий кеш).
+  const cmpStart = compareTermin?.start ?? null;
+  const cmpHasRange =
+    compareTermin?.start != null &&
+    compareTermin?.end != null &&
+    compareTermin.end.getTime() !== compareTermin.start.getTime();
+  const compareFrom = cmpStart ? fmtLocalDate(cmpStart) : null;
+  const compareTo = cmpHasRange ? fmtLocalDate(compareTermin!.end as Date) : null;
+  const compareKey = compareFrom
+    ? `${compareFrom}|${compareTo ?? "open"}|${lang}|${vertical ?? "-"}`
+    : null;
+
+  useEffect(() => {
+    if (!compareFrom || !compareKey) {
+      setCompareData(null);
+      return;
+    }
+    const cached = cache.get(compareKey);
+    if (cached) {
+      setCompareData(cached);
+      return;
+    }
+    const ctrl = new AbortController();
+    setCompareLoading(true);
+    const params = new URLSearchParams({ termin_from: compareFrom, limit: String(FETCH_LIMIT) });
+    if (compareTo) params.set("termin_to", compareTo);
+    if (lang) params.set("lang", lang);
+    if (vertical) params.set("vertical", vertical);
+    fetch(`/api/funnel/clients?${params}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? (r.json() as Promise<ClientsResult>) : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j) => {
+        cache.set(compareKey, j);
+        setCompareData(j);
+      })
+      .catch((e) => {
+        if ((e as Error).name !== "AbortError") setCompareData(null);
+      })
+      .finally(() => setCompareLoading(false));
+    return () => ctrl.abort();
+  }, [compareKey, compareFrom, compareTo, lang, vertical]);
+
   const isEmpty =
     data && data.active.shown === 0 && data.won.shown === 0;
 
@@ -1140,6 +1273,16 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
           одна дата — термины с этого числа и дальше; период — диапазон
         </span>
       </div>
+
+      {data && !isEmpty && (
+        <ReadinessSummaryWidget
+          summary={data.summary}
+          compareSummary={compareData?.summary ?? null}
+          compareTermin={compareTermin}
+          onCompareChange={setCompareTermin}
+          compareLoading={compareLoading}
+        />
+      )}
 
       {loading && !data && (
         <div className="glass-panel rounded-2xl border border-white/5 px-4 py-12 flex items-center justify-center gap-2 text-sm text-slate-400">
