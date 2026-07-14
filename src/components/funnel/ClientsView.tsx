@@ -973,74 +973,83 @@ function CorrelationPanel({
 
 /** Баллы ролевок (5-балльная шкала), в порядке отображения распределения. */
 const READINESS_BINS = [5, 4, 3, 2, 1] as const;
-/** Цвет балла: 5 — зелёный … 1 — красный (визуальный светофор). */
-const BIN_COLOR: Record<number, string> = {
-  5: "#34d399",
-  4: "#a3e635",
-  3: "#fbbf24",
-  2: "#fb923c",
-  1: "#fb7185",
-};
 
-/** Одна сторона (ДЦ или АА): крупное среднее + дельта + гистограмма баллов. */
+/** Дельта среднего со стрелкой (зелёная рост / красная падение). */
+function AvgDelta({ delta }: { delta: number }) {
+  return (
+    <span
+      className={`text-xs font-bold tabular-nums ${
+        delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-slate-400"
+      }`}
+    >
+      {delta > 0 ? "▲" : delta < 0 ? "▼" : "="}
+      {Math.abs(delta)}
+    </span>
+  );
+}
+
+/** Одна сторона (ДЦ или АА): среднее + компактная гистограмма с наложением
+ *  периода сравнения (тонкая «призрачная» полоса = было). */
 function ReadinessMetric({
   label,
   side,
-  compareAvg,
+  compareSide,
 }: {
   label: string;
   side: SideReadinessSummary;
-  /** Среднее периода сравнения; undefined = сравнение выключено. */
-  compareAvg: number | null | undefined;
+  /** Сторона периода сравнения; undefined = сравнение выключено. */
+  compareSide: SideReadinessSummary | undefined;
 }) {
-  const hasCompare = compareAvg !== undefined;
+  const cmp = compareSide;
   const delta =
-    hasCompare && side.avg != null && compareAvg != null
-      ? Math.round((side.avg - compareAvg) * 10) / 10
+    cmp && side.avg != null && cmp.avg != null
+      ? Math.round((side.avg - cmp.avg) * 10) / 10
       : null;
-  const maxBin = Math.max(1, ...READINESS_BINS.map((b) => side.dist[String(b)] ?? 0));
+  const maxBin = Math.max(
+    1,
+    ...READINESS_BINS.map((b) => Math.max(side.dist[String(b)] ?? 0, cmp?.dist[String(b)] ?? 0)),
+  );
   return (
-    <div className="flex-1 min-w-[280px] flex flex-col gap-3">
-      <div className="flex items-baseline gap-3">
-        <span className="text-sm font-bold text-slate-300 uppercase tracking-wider">{label}</span>
-        <span className="text-4xl font-black text-white tabular-nums leading-none">
+    <div className="flex-1 min-w-[240px] flex flex-col gap-2">
+      <div className="flex items-baseline gap-2">
+        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">{label}</span>
+        <span className="text-3xl font-black text-white tabular-nums leading-none">
           {side.avg ?? "—"}
         </span>
-        {delta != null && (
-          <span
-            className={`text-sm font-bold tabular-nums ${
-              delta > 0 ? "text-emerald-400" : delta < 0 ? "text-rose-400" : "text-slate-400"
-            }`}
-          >
-            {delta > 0 ? "↑" : delta < 0 ? "↓" : "="}
-            {Math.abs(delta)}
+        {cmp && (
+          <span className="text-sm text-slate-500 tabular-nums">
+            <span className="text-slate-600">←</span> {cmp.avg ?? "—"}
           </span>
         )}
-        <span className="ml-auto text-[11px] text-slate-500 tabular-nums self-center">
-          {side.scored} с оценкой · {side.none} без
-          {hasCompare && <> · было {compareAvg ?? "—"}</>}
+        {delta != null && <AvgDelta delta={delta} />}
+        <span className="ml-auto text-[10px] text-slate-500 tabular-nums self-center">
+          {side.scored} оц. · {side.none} без
         </span>
       </div>
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-1">
         {READINESS_BINS.map((b) => {
           const n = side.dist[String(b)] ?? 0;
-          const pct = (n / maxBin) * 100;
+          const cn = cmp?.dist[String(b)] ?? 0;
           return (
-            <div key={b} className="flex items-center gap-2.5">
-              <span
-                className="w-3 text-sm font-bold tabular-nums text-right"
-                style={{ color: BIN_COLOR[b] }}
-              >
+            <div key={b} className="flex items-center gap-2">
+              <span className="w-2.5 text-[11px] font-semibold tabular-nums text-slate-500 text-right">
                 {b}
               </span>
-              <div className="flex-1 h-5 rounded-md bg-slate-800/50 overflow-hidden">
+              <div className="flex-1 h-2.5 rounded-full bg-slate-800/60 relative overflow-hidden">
+                {cmp && (
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-full bg-slate-500/40"
+                    style={{ width: `${(cn / maxBin) * 100}%` }}
+                  />
+                )}
                 <div
-                  className="h-full rounded-md transition-[width] duration-300"
-                  style={{ width: `${pct}%`, backgroundColor: BIN_COLOR[b] }}
+                  className="absolute inset-y-0 left-0 rounded-full bg-sky-400 transition-[width] duration-300"
+                  style={{ width: `${(n / maxBin) * 100}%` }}
                 />
               </div>
-              <span className="w-7 text-right text-xs font-semibold tabular-nums text-slate-300">
+              <span className="w-12 text-right text-[11px] tabular-nums text-slate-300">
                 {n}
+                {cmp && <span className="text-slate-600"> ({cn})</span>}
               </span>
             </div>
           );
@@ -1088,12 +1097,12 @@ function ReadinessSummaryWidget({
         <ReadinessMetric
           label="ДЦ"
           side={summary.dc}
-          compareAvg={cmpActive ? compareSummary?.dc.avg ?? null : undefined}
+          compareSide={cmpActive ? compareSummary?.dc : undefined}
         />
         <ReadinessMetric
           label="АА"
           side={summary.aa}
-          compareAvg={cmpActive ? compareSummary?.aa.avg ?? null : undefined}
+          compareSide={cmpActive ? compareSummary?.aa : undefined}
         />
       </div>
     </div>
