@@ -10,6 +10,7 @@ import type {
   ClientRow,
   ClientsResult,
   ClientsReadinessSummary,
+  SideReadinessSummary,
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
@@ -970,28 +971,30 @@ function CorrelationPanel({
   );
 }
 
-/** Одна метрика готовности (ДЦ или АА) + дельта к периоду сравнения. */
+/** Баллы ролевок (5-балльная шкала), в порядке отображения распределения. */
+const READINESS_BINS = [5, 4, 3, 2, 1] as const;
+
+/** Одна сторона (ДЦ или АА): среднее + дельта + распределение по баллам. */
 function ReadinessMetric({
   label,
-  value,
-  count,
-  compare,
+  side,
+  compareAvg,
 }: {
   label: string;
-  value: number | null;
-  count: number;
-  /** Значение периода сравнения; undefined = сравнение выключено. */
-  compare: number | null | undefined;
+  side: SideReadinessSummary;
+  /** Среднее периода сравнения; undefined = сравнение выключено. */
+  compareAvg: number | null | undefined;
 }) {
-  const hasCompare = compare !== undefined;
+  const hasCompare = compareAvg !== undefined;
   const delta =
-    hasCompare && value != null && compare != null
-      ? Math.round((value - compare) * 10) / 10
+    hasCompare && side.avg != null && compareAvg != null
+      ? Math.round((side.avg - compareAvg) * 10) / 10
       : null;
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col gap-1 min-w-[240px]">
       <div className="flex items-baseline gap-2">
-        <span className="text-2xl font-black text-white tabular-nums">{value ?? "—"}</span>
+        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{label}</span>
+        <span className="text-2xl font-black text-white tabular-nums">{side.avg ?? "—"}</span>
         {delta != null && (
           <span
             className={`text-xs font-bold tabular-nums ${
@@ -1002,16 +1005,23 @@ function ReadinessMetric({
             {Math.abs(delta)}
           </span>
         )}
+        {hasCompare && (
+          <span className="text-[11px] text-slate-500 tabular-nums">было {compareAvg ?? "—"}</span>
+        )}
       </div>
-      <span className="text-[11px] text-slate-400">
-        <b className="text-slate-300">{label}</b> · {count} кл.
-        {hasCompare && <span className="text-slate-500"> · было {compare ?? "—"}</span>}
-      </span>
+      <div className="flex items-center gap-2 flex-wrap text-[11px] tabular-nums">
+        {READINESS_BINS.map((b) => (
+          <span key={b} className="text-slate-400">
+            <b className="text-slate-200">{b}</b>:{side.dist[String(b)] ?? 0}
+          </span>
+        ))}
+        <span className="text-slate-500">· без оценки: {side.none}</span>
+      </div>
     </div>
   );
 }
 
-/** Виджет «Готовность к терминам (среднее за период)» с ручным сравнением периодов. */
+/** Виджет «Готовность к терминам» с распределением баллов и сравнением периодов. */
 function ReadinessSummaryWidget({
   summary,
   compareSummary,
@@ -1019,7 +1029,7 @@ function ReadinessSummaryWidget({
   onCompareChange,
   compareLoading,
 }: {
-  summary: ClientsReadinessSummary | null;
+  summary: ClientsReadinessSummary;
   compareSummary: ClientsReadinessSummary | null;
   compareTermin: { start: Date | null; end: Date | null } | null;
   onCompareChange: (r: { start: Date | null; end: Date | null } | null) => void;
@@ -1027,34 +1037,35 @@ function ReadinessSummaryWidget({
 }) {
   const cmpActive = compareTermin != null;
   return (
-    <div className="bg-slate-900/40 rounded-2xl border border-white/5 px-4 py-3 flex items-center gap-6 flex-wrap">
-      <div className="text-[10px] uppercase tracking-widest font-semibold text-slate-500 leading-tight">
-        Готовность
-        <br />к терминам
-      </div>
-      <ReadinessMetric
-        label="ДЦ"
-        value={summary?.avgDc ?? null}
-        count={summary?.countDc ?? 0}
-        compare={cmpActive ? compareSummary?.avgDc ?? null : undefined}
-      />
-      <ReadinessMetric
-        label="АА"
-        value={summary?.avgAa ?? null}
-        count={summary?.countAa ?? 0}
-        compare={cmpActive ? compareSummary?.avgAa ?? null : undefined}
-      />
-      <div className="ml-auto flex items-center gap-2">
+    <div className="bg-slate-900/40 rounded-2xl border border-white/5 px-4 py-3 flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
-          Сравнить с
+          Готовность к терминам (среднее за период)
         </span>
-        <CalendarPicker
-          mode="range"
-          value={compareTermin ?? { start: null, end: null }}
-          onChange={onCompareChange}
-          onClear={() => onCompareChange(null)}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
+            Сравнить с
+          </span>
+          <CalendarPicker
+            mode="range"
+            value={compareTermin ?? { start: null, end: null }}
+            onChange={onCompareChange}
+            onClear={() => onCompareChange(null)}
+          />
+          {compareLoading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
+        </div>
+      </div>
+      <div className="flex gap-8 flex-wrap">
+        <ReadinessMetric
+          label="ДЦ"
+          side={summary.dc}
+          compareAvg={cmpActive ? compareSummary?.dc.avg ?? null : undefined}
         />
-        {compareLoading && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
+        <ReadinessMetric
+          label="АА"
+          side={summary.aa}
+          compareAvg={cmpActive ? compareSummary?.aa.avg ?? null : undefined}
+        />
       </div>
     </div>
   );

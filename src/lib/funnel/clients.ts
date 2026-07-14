@@ -130,17 +130,27 @@ export interface ClientGroup {
 }
 
 /**
- * Совокупные средние готовности (последний балл ролевок стороны) по ВСЕМ
- * клиентам периода — ДЦ и АА отдельно. Берётся dc.latest/aa.latest (как колонки
- * ДЦ/АА в таблице — актуальная готовность), усредняется по полному набору
- * scored-лидов (active + won), не по усечённому до limit списку, поэтому не
- * зависит от пагинации/фильтров фронта. null → нет клиентов с ролевками стороны.
+ * Сводка готовности одной стороны (ДЦ или АА) по всем клиентам периода:
+ * среднее последнего балла ролевки (5-балльная шкала, до десятых), число
+ * клиентов с оценкой, число без оценки и распределение по баллам (балл → кол-во).
+ */
+export interface SideReadinessSummary {
+  avg: number | null; // среднее latest-балла (до десятых); null → нет оценок
+  scored: number; // клиентов с оценкой (latest !== null)
+  none: number; // клиентов без оценки стороны (latest === null)
+  /** Балл (1..5, ключ-строка) → число клиентов с таким последним баллом. */
+  dist: Record<string, number>;
+}
+
+/**
+ * Совокупная готовность по ВСЕМ клиентам периода — ДЦ и АА отдельно. Берётся
+ * dc.latest/aa.latest (как колонки ДЦ/АА в таблице — актуальная готовность),
+ * по полному набору scored-лидов (active + won), не по усечённому до limit
+ * списку, поэтому не зависит от пагинации/фильтров фронта.
  */
 export interface ClientsReadinessSummary {
-  avgDc: number | null;
-  avgAa: number | null;
-  countDc: number; // клиентов с хотя бы одной ДЦ-ролевкой (dc.latest !== null)
-  countAa: number;
+  dc: SideReadinessSummary;
+  aa: SideReadinessSummary;
 }
 
 export interface ClientsResult {
@@ -225,10 +235,11 @@ export async function computeClients(
     `)
   );
   if (baseRows.length === 0) {
+    const emptySide: SideReadinessSummary = { avg: null, scored: 0, none: 0, dist: {} };
     return {
       active: emptyGroup(),
       won: emptyGroup(),
-      summary: { avgDc: null, avgAa: null, countDc: 0, countAa: 0 },
+      summary: { dc: emptySide, aa: emptySide },
     };
   }
 
@@ -364,18 +375,31 @@ export async function computeClients(
   };
 }
 
-/** Совокупное среднее dc.latest / aa.latest по клиентам (null пропускаются). */
-function summarizeReadiness(scored: ScoredLead[]): ClientsReadinessSummary {
-  let dcSum = 0, dcN = 0, aaSum = 0, aaN = 0;
+/** Сводка одной стороны: среднее + распределение по баллам (по latest). */
+function summarizeSide(scored: ScoredLead[], pick: (s: ScoredLead) => number | null): SideReadinessSummary {
+  const dist: Record<string, number> = {};
+  let sum = 0, n = 0, none = 0;
   for (const s of scored) {
-    if (s.dc.latest !== null) { dcSum += s.dc.latest; dcN += 1; }
-    if (s.aa.latest !== null) { aaSum += s.aa.latest; aaN += 1; }
+    const v = pick(s);
+    if (v === null) { none += 1; continue; }
+    sum += v;
+    n += 1;
+    const bin = String(Math.round(v)); // балл 1..5
+    dist[bin] = (dist[bin] ?? 0) + 1;
   }
   return {
-    avgDc: dcN > 0 ? Math.round((dcSum / dcN) * 10) / 10 : null,
-    avgAa: aaN > 0 ? Math.round((aaSum / aaN) * 10) / 10 : null,
-    countDc: dcN,
-    countAa: aaN,
+    avg: n > 0 ? Math.round((sum / n) * 10) / 10 : null,
+    scored: n,
+    none,
+    dist,
+  };
+}
+
+/** Совокупная готовность ДЦ/АА по клиентам (среднее + распределение баллов). */
+function summarizeReadiness(scored: ScoredLead[]): ClientsReadinessSummary {
+  return {
+    dc: summarizeSide(scored, (s) => s.dc.latest),
+    aa: summarizeSide(scored, (s) => s.aa.latest),
   };
 }
 
