@@ -51,29 +51,37 @@ interface FreshnessRow {
   ageSec: number | null;
 }
 
+// Возраст считаем В SQL (now() - col), а не в JS: колонки analytics.* — это
+// `timestamp without time zone` с UTC-наивными значениями, их ::text не несёт
+// зоны, и new Date("YYYY-MM-DD HH:MM:SS") в контейнере с TZ=Europe/Berlin
+// парсил их как берлинские → возраст завышался ровно на +2ч и проба ВСЕГДА
+// отвечала stale/503 (Sentry-шум каждые 30 мин). Сессия Neon работает в UTC,
+// поэтому now()-col в Postgres даёт честный возраст.
 async function latestTimestamp(
   source: string,
   table: string,
   column: string,
 ): Promise<FreshnessRow> {
-  const res = await analyticsDb.execute<{ latest_at: string | null }>(sql`
-    SELECT MAX(${sql.raw(column)})::text AS latest_at
+  const res = await analyticsDb.execute<{ latest_at: string | null; age_sec: string | number | null }>(sql`
+    SELECT MAX(${sql.raw(column)})::text AS latest_at,
+           EXTRACT(EPOCH FROM (now() - MAX(${sql.raw(column)})))::int AS age_sec
     FROM ${sql.raw(table)}
   `);
-  const latestAt = res.rows[0]?.latest_at ?? null;
-  const ageSec = latestAt
-    ? Math.floor((Date.now() - new Date(latestAt).getTime()) / 1000)
-    : null;
+  const row = res.rows[0];
+  const latestAt = row?.latest_at ?? null;
+  const ageSec = row?.age_sec == null ? null : Number(row.age_sec);
   return { source, latestAt, ageSec };
 }
 
 async function fetchHeartbeat(): Promise<{ ageSec: number | null; lastCompletedAt: string | null }> {
+  // Возраст — в SQL по той же причине, что в latestTimestamp (UTC-naive
+  // timestamp + берлинская TZ контейнера ломали JS-парсинг на +2ч).
   const res = await analyticsDb.execute<{
     last_completed_at: string | null;
-    acquired_at: string | null;
+    age_sec: string | number | null;
   }>(sql`
     SELECT last_completed_at::text AS last_completed_at,
-           acquired_at::text       AS acquired_at
+           EXTRACT(EPOCH FROM (now() - last_completed_at))::int AS age_sec
     FROM analytics.etl_locks
     WHERE name = 'cron'
   `);
@@ -81,10 +89,10 @@ async function fetchHeartbeat(): Promise<{ ageSec: number | null; lastCompletedA
   if (!row || !row.last_completed_at) {
     return { ageSec: null, lastCompletedAt: null };
   }
-  const ageSec = Math.floor(
-    (Date.now() - new Date(row.last_completed_at).getTime()) / 1000,
-  );
-  return { ageSec, lastCompletedAt: row.last_completed_at };
+  return {
+    ageSec: row.age_sec == null ? null : Number(row.age_sec),
+    lastCompletedAt: row.last_completed_at,
+  };
 }
 
 export async function GET(): Promise<NextResponse> {
