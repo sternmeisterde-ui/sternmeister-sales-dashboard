@@ -83,19 +83,30 @@ export async function GET(
     );
     const gfJson = (await gfRes.json()) as {
       ok: boolean;
+      description?: string;
       result?: { file_path?: string };
     };
     const filePath = gfJson.result?.file_path;
     if (!gfJson.ok || !filePath) {
+      // Диагностика: частая причина — токен НЕ того бота, что получил голосовое
+      // (file_id привязан к боту). Пишем описание Telegram в лог.
+      console.error(
+        `[Voice feedback audio] getFile failed (source=${source}): ${gfJson.description ?? "unknown"} — проверьте токен бота (${source === "ai" ? "D1" : "OKK"}_TELEGRAM_BOT_TOKEN)`,
+      );
       return NextResponse.json(
         { error: "Voice file not available in Telegram" },
         { status: 404 },
       );
     }
 
-    // 2) stream file (Telegram voice = OGG/Opus)
+    // 2) stream file (Telegram voice = OGG/Opus). Форвардим Range (перемотка +
+    // Safari требует 206 на Range-запрос) и отдаём upstream-статус, как okk/audio.
+    const fetchHeaders: Record<string, string> = {};
+    const range = request.headers.get("Range");
+    if (range) fetchHeaders["Range"] = range;
     const upstream = await fetch(
       `https://api.telegram.org/file/bot${token}/${filePath}`,
+      { headers: fetchHeaders },
     );
     if (!upstream.ok || !upstream.body) {
       return NextResponse.json(
@@ -107,13 +118,15 @@ export async function GET(
       upstream.headers.get("content-type") ||
       (filePath.endsWith(".oga") || filePath.endsWith(".ogg") ? "audio/ogg" : "audio/mpeg");
     const contentLength = upstream.headers.get("content-length");
+    const contentRange = upstream.headers.get("Content-Range");
     const headers: Record<string, string> = {
       "Content-Type": contentType,
       "Cache-Control": "private, max-age=3600",
       "Accept-Ranges": "bytes",
     };
     if (contentLength) headers["Content-Length"] = contentLength;
-    return new NextResponse(upstream.body, { status: 200, headers });
+    if (contentRange) headers["Content-Range"] = contentRange;
+    return new NextResponse(upstream.body, { status: upstream.status, headers });
   } catch (error) {
     console.error("[Voice feedback audio] proxy error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

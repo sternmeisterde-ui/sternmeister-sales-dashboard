@@ -5,7 +5,7 @@
 //
 // Батч (без N+1): по списку call_id — как feedbackByCall в queries-existing.ts.
 
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkVoiceFeedback, okkWorstCalls } from "@/lib/db/schema-okk";
 
@@ -54,10 +54,12 @@ export async function getOkkVoiceVerdicts(
       .where(inArray(okkVoiceFeedback.callId, callIds)),
   ]);
 
-  // Вердикт = самый свежий worst_calls по call_id (сортировка DESC выше).
-  const verdictByCall = new Map<string, boolean | null>();
+  // Вердикт = самый свежий ОЦЕНЁННЫЙ worst_calls (response_adequate не null).
+  // Строки DESC по createdAt; берём первый non-null, чтобы новая «ожидающая»
+  // (null) строка того же звонка не маскировала уже выставленный вердикт.
+  const verdictByCall = new Map<string, boolean>();
   for (const r of worstRows) {
-    if (r.callId && !verdictByCall.has(r.callId)) {
+    if (r.callId && r.responseAdequate != null && !verdictByCall.has(r.callId)) {
       verdictByCall.set(r.callId, r.responseAdequate);
     }
   }
@@ -97,7 +99,9 @@ export async function getOkkVoiceDetail(
       .select({ responseAdequate: okkWorstCalls.responseAdequate })
       .from(okkWorstCalls)
       .where(eq(okkWorstCalls.callId, callId))
-      .orderBy(desc(okkWorstCalls.createdAt))
+      // Оценённые строки (response_adequate не null) — раньше, потом свежие,
+      // чтобы вердикт не терялся из-за более новой «ожидающей» строки.
+      .orderBy(sql`${okkWorstCalls.responseAdequate} IS NOT NULL DESC`, desc(okkWorstCalls.createdAt))
       .limit(1),
   ]);
 
