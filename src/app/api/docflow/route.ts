@@ -12,9 +12,10 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * GET /api/docflow?from=YYYY-MM-DD&to=YYYY-MM-DD
  * Статистика сервиса BGS DocFlow (автоматизация откликов на вакансии
- * учеников, B2G). Только admin. from/to фильтруют отклики по sent_at
- * (берлинская гражд. дата); роспись клиентов (всего/в работе/завершили) —
- * снимок по всему времени, периодом не режется.
+ * учеников, B2G). Только admin. from/to — берлинская гражд. дата:
+ *   • клиенты + воронка когортятся по ДАТЕ СОЗДАНИЯ сделки (Бух Бератер) в периоде;
+ *   • отклики (график/итоги) фильтруются по sent_at в периоде;
+ *   • без to — открытый верхний край («с from и далее», режим одной даты).
  * Нет DOCFLOW_DATABASE_URL / БД недоступна → available:false (graceful).
  */
 export async function GET(req: NextRequest) {
@@ -24,14 +25,15 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
   const from = sp.get("from");
-  const to = sp.get("to");
-  if (!from || !to || !DATE_RE.test(from) || !DATE_RE.test(to)) {
+  const to = sp.get("to"); // опционально: без него — открытый верхний край («с from и далее»)
+  if (!from || !DATE_RE.test(from) || (to !== null && !DATE_RE.test(to))) {
     return NextResponse.json({ error: "bad range" }, { status: 400 });
   }
   const vertical = parseVertical(sp.get("vertical"));
+  const manager = sp.get("manager")?.trim() || undefined;
 
   try {
-    const stats = await getDocflowStats({ from, to, vertical });
+    const stats = await getDocflowStats({ from, to: to ?? undefined, vertical, manager });
     return NextResponse.json(stats, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     console.error("[/api/docflow] failed:", e);
