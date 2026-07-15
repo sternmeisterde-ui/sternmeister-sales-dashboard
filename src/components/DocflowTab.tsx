@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CartesianGrid,
   Cell,
@@ -14,7 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Briefcase, ChevronDown, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { Briefcase, Check, ChevronDown, ExternalLink, Loader2, RefreshCw, Users } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import DrillModal from "@/components/DrillModal";
@@ -27,6 +27,7 @@ interface DayPoint {
   day: string;
   sent: number;
   replied: number;
+  uniqueClients: number;
 }
 interface ApplicationRow {
   sentAt: string;
@@ -50,6 +51,7 @@ interface ClientUsageRow {
   leadId: number | null;
   leadName: string | null;
   sentCount: number;
+  /** Завершил путь: термин сделки (АА, иначе ДЦ) уже прошёл. */
   done: boolean;
   terminDate: string | null;
   bucket: UsageBucketKey;
@@ -59,6 +61,7 @@ interface FunnelRow {
   leadName: string | null;
   filledAnketa: boolean;
   responded: boolean;
+  terminDate: string | null;
 }
 interface Funnel {
   label: string;
@@ -70,9 +73,15 @@ interface Funnel {
 interface DocflowStats {
   available: boolean;
   clients: { total: number; inProgress: number; done: number };
+  managers: string[];
   usage: UsageBuckets;
   clientsList: ClientUsageRow[];
-  applications: { sent: number; replied: number; responseRate: number | null };
+  applications: {
+    sent: number;
+    replied: number;
+    responseRate: number | null;
+    uniqueClients: number;
+  };
   days: DayPoint[];
   applicationsList: ApplicationRow[];
   applicationsTruncated: boolean;
@@ -445,7 +454,7 @@ function FunnelPanel({
       key: "accepted",
       label: "Принято от 1-й линии",
       count: funnel.acceptedFromFirst,
-      hint: "Лиды, переданные на 2-ю линию (первое попадание в пайплайн Бератер) за период",
+      hint: "Сделки Бух Бератер, созданные (принятые на 2-ю линию) в периоде. Включаются только сделки с датой термина.",
       predicate: () => true,
     },
     {
@@ -472,6 +481,7 @@ function FunnelPanel({
           Воронка · {funnel.label}
         </h3>
         <span className="text-[11px] text-blue-300/80">нажмите на ступень</span>
+        <div className="text-[10px] text-slate-500">включаются только сделки с датой термина</div>
       </div>
       <div className="flex flex-1 flex-col justify-center gap-1.5">
         {steps.map((s, i) => {
@@ -548,6 +558,7 @@ function FunnelListModal({
           <thead className="sticky top-0 z-10">
             <tr className="border-b border-white/10 bg-slate-900 text-left text-xs text-slate-400">
               <th className="px-3 py-2 font-medium">Лид</th>
+              <th className="px-3 py-2 font-medium">Термин</th>
               <th className="px-3 py-2 font-medium">Анкета</th>
               <th className="px-3 py-2 font-medium">Отклик</th>
             </tr>
@@ -569,6 +580,9 @@ function FunnelListModal({
                     <ExternalLink className="h-3 w-3 opacity-70" />
                   </a>
                 </td>
+                <td className="whitespace-nowrap px-3 py-1.5 text-xs text-slate-400">
+                  {fmtTerminDate(r.terminDate)}
+                </td>
                 <td className="px-3 py-1.5 text-xs text-slate-400">
                   {r.filledAnketa ? "✓" : "—"}
                 </td>
@@ -584,6 +598,74 @@ function FunnelListModal({
   );
 }
 
+/** Стилизованный single-select фильтр по менеджеру линии (визуально как
+ *  ManagerMultiSelect в других вкладках: кнопка с иконкой + дропдаун). */
+function ManagerFilter({
+  managers,
+  value,
+  onChange,
+}: {
+  managers: string[];
+  value: string;
+  onChange: (m: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const options = ["", ...managers];
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 rounded-lg border border-white/5 bg-slate-800/50 px-3 py-2 text-xs text-slate-300 transition-all hover:bg-slate-800"
+      >
+        <Users className="h-3.5 w-3.5" />
+        <span className="max-w-[10rem] truncate">{value || "Все менеджеры"}</span>
+        <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute left-0 z-30 mt-1 flex max-h-72 w-60 flex-col overflow-hidden rounded-xl border border-white/10 bg-slate-900 shadow-2xl">
+          <div className="flex-1 overflow-y-auto px-2 py-2">
+            {options.map((m) => {
+              const active = m === value;
+              return (
+                <button
+                  key={m || "__all"}
+                  type="button"
+                  onClick={() => {
+                    onChange(m);
+                    setOpen(false);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs hover:bg-white/5"
+                >
+                  <span
+                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
+                      active ? "border-blue-500 bg-blue-500" : "border-slate-600"
+                    }`}
+                  >
+                    {active && <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />}
+                  </span>
+                  <span className={`truncate ${active ? "text-blue-300" : "text-slate-200"}`}>
+                    {m || "Все менеджеры"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DocflowTab({
   vertical,
 }: {
@@ -595,24 +677,26 @@ export default function DocflowTab({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<DateRange>(defaultRange);
+  const [manager, setManager] = useState<string>(""); // "" = все менеджеры линии
   const [clientsModal, setClientsModal] = useState<ClientsModalSelection | null>(null);
   const [appsModal, setAppsModal] = useState<AppsModalSelection | null>(null);
   const [funnelModal, setFunnelModal] = useState<FunnelModalSelection | null>(null);
 
-  const load = useCallback(async (r: DateRange) => {
+  const load = useCallback(async (r: DateRange, mgr: string) => {
     const start = r.start ?? todayBerlinDate();
-    const end = r.end ?? start;
+    // Одна дата (нет end или end совпадает с start) = «с этой даты и далее»:
+    // верхнюю границу не шлём, бэкенд отдаёт всё >= from (сделки и отклики).
+    const openEnded = !r.end || fmtLocalDate(r.end) === fmtLocalDate(start);
     setLoading(true);
     setError(null);
     setClientsModal(null);
     setAppsModal(null);
     setFunnelModal(null);
     try {
-      const params = new URLSearchParams({
-        from: fmtLocalDate(start),
-        to: fmtLocalDate(end),
-      });
+      const params = new URLSearchParams({ from: fmtLocalDate(start) });
+      if (!openEnded && r.end) params.set("to", fmtLocalDate(r.end));
       if (vertical) params.set("vertical", vertical);
+      if (mgr) params.set("manager", mgr);
       const res = await fetch(`/api/docflow?${params}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setStats((await res.json()) as DocflowStats);
@@ -624,14 +708,23 @@ export default function DocflowTab({
   }, [vertical]);
 
   // Первичная загрузка + перезагрузка при смене вертикали (тоггл в шапке).
+  // Список менеджеров зависит от вертикали → сбрасываем выбранного менеджера.
   useEffect(() => {
-    load(range);
+    setManager("");
+    load(range, "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vertical]);
 
   const onRangeChange = (r: DateRange) => {
     setRange(r);
-    if (r.start && r.end) load(r);
+    // Грузим как только выбрана начальная дата: одиночный день (end===start или
+    // без end) = открытый верхний край, диапазон — обе даты.
+    if (r.start) load(r, manager);
+  };
+
+  const onManagerChange = (mgr: string) => {
+    setManager(mgr);
+    load(range, mgr);
   };
 
   const clientsModalRows = useMemo(() => {
@@ -658,6 +751,15 @@ export default function DocflowTab({
 
   const unavailable = !stats || !stats.available;
 
+  // Пояснение справа от фильтра: режим одиночной даты («с … и далее») vs период.
+  const filterHint = (() => {
+    if (!range.start) return null;
+    const openEnded = !range.end || fmtLocalDate(range.start) === fmtLocalDate(range.end);
+    return openEnded
+      ? `Показаны сделки, созданные с ${fmtTerminDate(fmtLocalDate(range.start))} и далее — без верхней границы`
+      : "Клиенты и воронка — по дате создания (Бух Бератер); отклики — по дате отправки";
+  })();
+
   return (
     <div className="flex flex-col gap-6 fade-in">
       <div className="flex flex-wrap items-center gap-3">
@@ -674,8 +776,18 @@ export default function DocflowTab({
           maxDate={todayBerlinDate()}
         />
 
+        {stats && stats.managers.length > 0 && (
+          <ManagerFilter managers={stats.managers} value={manager} onChange={onManagerChange} />
+        )}
+
+        {filterHint && (
+          <span className="max-w-[22rem] text-[11px] leading-tight text-slate-400">
+            {filterHint}
+          </span>
+        )}
+
         <button
-          onClick={() => load(range)}
+          onClick={() => load(range, manager)}
           disabled={loading}
           className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-300 hover:border-white/20 disabled:opacity-50"
         >
@@ -708,20 +820,21 @@ export default function DocflowTab({
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="rounded-lg border border-white/10 bg-slate-900/40 p-4">
               <h3 className="mb-3 text-xs uppercase tracking-wider text-slate-500">
-                Клиенты (всё время)
+                Клиенты BGS DocFlow · создан в периоде
               </h3>
               <div className="grid grid-cols-3 gap-2">
                 <MiniStat
                   label="Всего"
                   value={String(stats.clients.total)}
                   accent="text-blue-300"
+                  title="Клиенты BGS DocFlow, чья сделка (линия Бератер выбранной вертикали) создана в период и имеет термин"
                   onClick={() => setClientsModal({ title: "Все клиенты", predicate: () => true })}
                 />
                 <MiniStat
                   label="В работе"
                   value={String(stats.clients.inProgress)}
                   accent="text-emerald-300"
-                  title="Термин ещё не наступил, не привязан или не найден в аналитике"
+                  title="Актуальные: термин сделки (АА, иначе ДЦ) назначен, но ещё не прошёл"
                   onClick={() =>
                     setClientsModal({ title: "В работе", predicate: (c) => !c.done })
                   }
@@ -740,9 +853,9 @@ export default function DocflowTab({
 
             <div className="rounded-lg border border-white/10 bg-slate-900/40 p-4">
               <h3 className="mb-3 text-xs uppercase tracking-wider text-slate-500">
-                Отклики за период
+                Отклики BGS DocFlow за период
               </h3>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 <MiniStat
                   label="Отправлено"
                   value={String(stats.applications.sent)}
@@ -754,6 +867,12 @@ export default function DocflowTab({
                       expectedCount: stats.applications.sent,
                     })
                   }
+                />
+                <MiniStat
+                  label="Уник. клиентов"
+                  value={String(stats.applications.uniqueClients)}
+                  accent="text-cyan-300"
+                  title="Сколько разных учеников отправили хотя бы один отклик за период"
                 />
                 <MiniStat
                   label="Получили ответ"
@@ -798,7 +917,7 @@ export default function DocflowTab({
             <div className="flex flex-col rounded-lg border border-white/10 bg-slate-900/40 p-4">
               <div className="mb-3">
                 <h3 className="text-xs uppercase tracking-wider text-slate-500">
-                  Использование (всё время)
+                  Использование · создан в периоде
                 </h3>
                 <span className="text-[11px] text-blue-300/80">нажмите на сегмент</span>
               </div>
@@ -869,8 +988,8 @@ export default function DocflowTab({
                     />
                     <Line
                       type="monotone"
-                      dataKey="replied"
-                      name="Получили ответ"
+                      dataKey="uniqueClients"
+                      name="Уник. клиентов"
                       stroke="#34d399"
                       strokeWidth={2}
                       dot={{ r: 2.5, fill: "#34d399" }}

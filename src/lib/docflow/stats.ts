@@ -23,7 +23,8 @@
 import { sql } from "drizzle-orm";
 import { getDocflowDb } from "@/lib/db/docflow-db";
 import { analyticsDb } from "@/lib/db/analytics";
-import { B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeline-config";
+import { getDeptManagerWhitelist } from "@/lib/daily/dept-manager-whitelist";
+import { B2G_PIPELINES, getBeraterPipelineIds, type Vertical } from "@/lib/kommo/pipeline-config";
 
 /** Локальный распаковщик результата neon-http (массив либо {rows:[]}). */
 function rows<T>(result: unknown): T[] {
@@ -42,6 +43,7 @@ export interface DocflowDayPoint {
   day: string; // YYYY-MM-DD (берлинская гражданская дата)
   sent: number;
   replied: number;
+  uniqueClients: number; // сколько РАЗНЫХ клиентов отправляли отклики в этот день
 }
 
 export interface DocflowApplicationRow {
@@ -63,11 +65,12 @@ export interface DocflowUsageBuckets {
 
 export type DocflowUsageBucket = "unused" | "one" | "many";
 
-/** Строка клиента для drill-модалки бублика — снимок по всему времени. */
+/** Строка клиента для drill-модалки — когорта «создан в периоде». */
 export interface DocflowClientUsageRow {
   leadId: number | null;
   leadName: string | null;
   sentCount: number;
+  /** Завершил путь: термин сделки (АА, иначе ДЦ) уже прошёл. */
   done: boolean;
   /** YYYY-MM-DD (берлинская дата) — термин сделки в Kommo (АА, иначе ДЦ), либо null. */
   terminDate: string | null;
@@ -80,6 +83,7 @@ export interface DocflowFunnelRow {
   leadName: string | null;
   filledAnketa: boolean; // завёл клиента в BGS DocFlow (= заполнил анкету)
   responded: boolean; // хотя бы один отправленный отклик
+  terminDate: string | null; // YYYY-MM-DD (берлинская) — термин сделки (АА, иначе ДЦ)
 }
 
 /**
@@ -100,11 +104,15 @@ export interface DocflowFunnel {
 
 export interface DocflowStats {
   available: boolean;
-  range: { from: string; to: string };
+  /** to=null → открытый верхний край (одиночная дата: «с from и далее»). */
+  range: { from: string; to: string | null };
+  /** Когорта «сделка создана в периоде». done = термин уже прошёл (завершил путь). */
   clients: { total: number; inProgress: number; done: number };
+  /** Менеджеры линии Бератер (для фильтра). Distinct по leads_cohort.manager. */
+  managers: string[];
   usage: DocflowUsageBuckets;
   clientsList: DocflowClientUsageRow[];
-  applications: { sent: number; replied: number; responseRate: number | null };
+  applications: { sent: number; replied: number; responseRate: number | null; uniqueClients: number };
   days: DocflowDayPoint[];
   applicationsList: DocflowApplicationRow[];
   applicationsTruncated: boolean;
@@ -114,14 +122,15 @@ export interface DocflowStats {
   funnels: DocflowFunnel[];
 }
 
-function emptyStats(range: { from: string; to: string }): DocflowStats {
+function emptyStats(range: { from: string; to: string | null }): DocflowStats {
   return {
     available: false,
     range,
     clients: { total: 0, inProgress: 0, done: 0 },
+    managers: [],
     usage: { unused: 0, one: 0, many: 0 },
     clientsList: [],
-    applications: { sent: 0, replied: 0, responseRate: null },
+    applications: { sent: 0, replied: 0, responseRate: null, uniqueClients: 0 },
     days: [],
     applicationsList: [],
     applicationsTruncated: false,
@@ -135,43 +144,73 @@ function bucketFor(sentCount: number): DocflowUsageBucket {
   return "many";
 }
 
-export interface LeadTerminInfo {
-  terminDate: string | null; // YYYY-MM-DD (берлинская дата)
-  done: boolean; // термин уже прошёл
+export interface LeadInfo {
+  /** YYYY-MM-DD (берлинская дата) — дата создания сделки (ось когорты). */
+  createdDate: string | null;
+  /** YYYY-MM-DD (берлинская дата) — термин (АА, иначе ДЦ), для показа + признака done. */
+  terminDate: string | null;
+  /** Термин уже прошёл (завершил путь). */
+  done: boolean;
+  /** Имя ответственного менеджера (leads_cohort.manager) — для фильтра по линии. */
+  manager: string | null;
 }
 
-/** Термин (АА, иначе ДЦ) по каждому лиду — дата + прошёл ли уже, одним запросом. */
-async function resolveTerminInfo(leadIds: number[]): Promise<Map<number, LeadTerminInfo>> {
-  const out = new Map<number, LeadTerminInfo>();
+/**
+ * По каждому лиду: дата создания (ось когорты), термин + done, менеджер — одним
+ * запросом. Скоупим лид к пайплайну(ам) вертикали Бератер и отсекаем
+ * `exclude_from_analytics`/`is_deleted` — те же фильтры, что у воронки, иначе
+ * клиентская когорта считалась бы по другой популяции (удалённые/чужая вертикаль
+ * текли бы в карточку и не сходились с воронкой).
+ *
+ * НЕ проглатывает сбой запроса: бросает наверх, чтобы getDocflowStats вернул
+ * `available:false` («Данные недоступны»), а не тихо обнулил карточку клиентов.
+ */
+async function resolveLeadInfo(
+  leadIds: number[],
+  pipelineIds: number[],
+): Promise<Map<number, LeadInfo>> {
+  const out = new Map<number, LeadInfo>();
   const ids = Array.from(new Set(leadIds.filter((n) => Number.isInteger(n) && n > 0)));
   if (ids.length === 0) return out;
-  try {
-    const idList = sql.join(ids.map((id) => sql`${id}`), sql`, `);
-    const data = rows<{ lead_id: string | number; termin_date: string | null; is_done: boolean }>(
-      await analyticsDb.execute(sql`
+  const idList = sql.join(ids.map((id) => sql`${id}`), sql`, `);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const data = rows<{
+    lead_id: string | number;
+    created_date: string | null;
+    termin_date: string | null;
+    is_done: boolean;
+    manager: string | null;
+  }>(
+    await analyticsDb.execute(sql`
+      SELECT lead_id,
+             to_char(created_ts, 'YYYY-MM-DD') AS created_date,
+             to_char(termin, 'YYYY-MM-DD') AS termin_date,
+             COALESCE(termin::date < ((now() AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date, false) AS is_done,
+             manager
+      FROM (
         SELECT lead_id,
-               to_char(termin, 'YYYY-MM-DD') AS termin_date,
-               COALESCE(termin::date < ((now() AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date, false) AS is_done
-        FROM (
-          SELECT lead_id,
-                 (MAX(COALESCE(aa_termin_date, termin_date)) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' AS termin
-          FROM analytics.leads_cohort
-          WHERE lead_id IN (${idList})
-          GROUP BY lead_id
-        ) t
-      `),
-    );
-    for (const r of data) {
-      const id = Number(r.lead_id);
-      if (Number.isInteger(id)) {
-        out.set(id, { terminDate: r.termin_date, done: Boolean(r.is_done) });
-      }
+               (MIN(created_at) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' AS created_ts,
+               (MAX(COALESCE(aa_termin_date, termin_date)) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' AS termin,
+               MAX(manager) AS manager
+        FROM analytics.leads_cohort
+        WHERE lead_id IN (${idList})
+          AND pipeline_id IN (${pipelineList})
+          AND exclude_from_analytics = FALSE
+          AND is_deleted = FALSE
+        GROUP BY lead_id
+      ) t
+    `),
+  );
+  for (const r of data) {
+    const id = Number(r.lead_id);
+    if (Number.isInteger(id)) {
+      out.set(id, {
+        createdDate: r.created_date,
+        terminDate: r.termin_date,
+        done: Boolean(r.is_done),
+        manager: r.manager ?? null,
+      });
     }
-  } catch (e) {
-    console.error(
-      "[docflow] resolveTerminInfo failed (non-fatal, treated as none done):",
-      e instanceof Error ? e.message : e,
-    );
   }
   return out;
 }
@@ -207,20 +246,51 @@ async function resolveLeadNames(leadIds: number[]): Promise<Map<number, string>>
   return out;
 }
 
+/** Список менеджеров линии Бератер для фильтра. = менеджеры на Бератер-лидах
+ *  (leads_cohort.manager) ∩ whitelist b2g-ростера (getDeptManagerWhitelist —
+ *  единый источник: master_managers, роли manager/teamlead/rop+line, active,
+ *  алиасы имён). Пересечение убирает чужих (реассайны / другой отдел / legacy).
+ *  Graceful: пусто при сбое. */
+async function docflowManagerList(pipelineIds: number[]): Promise<string[]> {
+  try {
+    const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+    const [cohortRaw, whitelist] = await Promise.all([
+      analyticsDb.execute(sql`
+        SELECT DISTINCT manager
+        FROM analytics.leads_cohort
+        WHERE pipeline_id IN (${pipelineList})
+          AND exclude_from_analytics = FALSE
+          AND is_deleted = FALSE
+          AND manager IS NOT NULL AND manager <> ''
+      `),
+      getDeptManagerWhitelist("b2g"),
+    ]);
+    const acceptable = new Set(whitelist.names);
+    return rows<{ manager: string }>(cohortRaw)
+      .map((r) => String(r.manager))
+      .filter((n) => acceptable.has(n))
+      .sort((a, b) => a.localeCompare(b, "ru"));
+  } catch (e) {
+    console.error(
+      "[docflow] docflowManagerList failed (non-fatal):",
+      e instanceof Error ? e.message : e,
+    );
+    return [];
+  }
+}
+
 /**
- * Воронка по когорте лидов, переданных на 2-ю линию (пайплайны `pipelineIds`,
- * Бератер) за берлинский период [from, to]. Из этой когорты считаем, сколько
- * завели анкету в BGS DocFlow и сколько откликнулись. Для вертикали «Все»
+ * Воронка по когорте Бератер-лидов, СОЗДАННЫХ в берлинский период [from, to]
+ * (пайплайны `pipelineIds`, опц. фильтр по менеджеру). Из этой когорты считаем,
+ * сколько завели анкету в BGS DocFlow и сколько откликнулись. Для вертикали «Все»
  * передаётся несколько пайплайнов (Бух + Мед) — когорта объединённая, одна воронка.
  *
- * «Принято от первой линии» = СОЗДАНИЕ Бератер-сделки (leads_cohort.created_at)
- * в периоде — так же, как это считает вкладка Воронка (overview.ts, bl.createdAt).
- * Событие статуса RECEIVED_FROM_FIRST (93860331) для этого НЕ годится: при
- * автопереходе из «Термин ДЦ» Kommo создаёт Бератер-сделку сразу в этом статусе
- * и события смены статуса не пишет — 63 лида в lead_status_changes отсутствуют
- * вовсе, а у остальных первое событие («Доведение») сдвигает дату. Сверено на
- * 2026-06-11..07-10: created_at даёт 243 (как Воронка) против 247 по event_at.
- * Уважаем те же фильтры аналитики, что и Воронка (exclude_from_analytics/is_deleted).
+ * Ось когорты = ДАТА СОЗДАНИЯ сделки `created_at` в периоде (= «принят на 2-ю
+ * линию»), как во вкладке Воронка. Решение юзера 2026-07-15: когортим по дате
+ * создания в Бух Бератер, а НЕ по термину. В когорту включаем ТОЛЬКО сделки, у
+ * которых есть дата термина (COALESCE(АА,ДЦ) IS NOT NULL) — как и в карточке
+ * клиентов. Первая ступень в UI — «Принято от 1-й линии». Уважаем те же фильтры
+ * аналитики, что и Воронка (exclude_from_analytics/is_deleted).
  *
  * `sentByLeadId` — карта kommo_lead_id → число отправленных откликов (за всё
  * время), собранная из уже загруженных clients (переиспользуем, чтобы не
@@ -231,8 +301,9 @@ async function computeFunnel(
   label: string,
   pipelineIds: number[],
   from: string,
-  to: string,
+  to: string | undefined,
   sentByLeadId: Map<number, number>,
+  manager?: string,
 ): Promise<DocflowFunnel> {
   const empty: DocflowFunnel = {
     label,
@@ -243,21 +314,33 @@ async function computeFunnel(
   };
   try {
     const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-    const cohortRaw = rows<{ lead_id: string | number }>(
+    // Открытый верхний край (одиночная дата) → без ограничения «< to».
+    const upperCreated = to
+      ? sql` AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)`
+      : sql``;
+    // Фильтр по менеджеру линии (если выбран).
+    const managerClause = manager ? sql` AND manager = ${manager}` : sql``;
+    // В когорту только сделки с термином (как в карточке клиентов).
+    const cohortRaw = rows<{ lead_id: string | number; termin_date: string | null }>(
       await analyticsDb.execute(sql`
-        SELECT lead_id
+        SELECT lead_id,
+               to_char((COALESCE(aa_termin_date, termin_date) AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS termin_date
         FROM analytics.leads_cohort
         WHERE pipeline_id IN (${pipelineList})
           AND exclude_from_analytics = FALSE
           AND is_deleted = FALSE
-          AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date
-          AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)
+          AND COALESCE(aa_termin_date, termin_date) IS NOT NULL
+          AND (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date${upperCreated}${managerClause}
       `),
     );
     const leadIds: number[] = [];
+    const terminByLead = new Map<number, string | null>();
     for (const r of cohortRaw) {
       const id = Number(r.lead_id);
-      if (Number.isInteger(id) && id > 0) leadIds.push(id);
+      if (Number.isInteger(id) && id > 0) {
+        leadIds.push(id);
+        terminByLead.set(id, r.termin_date);
+      }
     }
     if (leadIds.length === 0) return empty;
 
@@ -274,6 +357,7 @@ async function computeFunnel(
         leadName: names.get(leadId) ?? null,
         filledAnketa: hasClient,
         responded: didRespond,
+        terminDate: terminByLead.get(leadId) ?? null,
       };
     });
 
@@ -294,29 +378,40 @@ async function computeFunnel(
 }
 
 export interface GetDocflowStatsArgs {
-  /** YYYY-MM-DD включительно (берлинская гражд. дата). Фильтрует sent_at откликов. */
+  /** YYYY-MM-DD включительно (берлинская гражд. дата). */
   from: string;
-  to: string;
+  /** YYYY-MM-DD включительно. Не задан → открытый верхний край: «с from и далее»
+   *  (режим одиночной даты в фильтре). Применяется и к термин-когорте, и к откликам. */
+  to?: string;
   /** Вертикаль b2g (Бух/Мед/Все) — какие воронки Бератер показать. Дефолт buh.
    *  «all» → обе воронки ОТДЕЛЬНЫМИ блоками, цифры не суммируются. */
   vertical?: Vertical;
+  /** Фильтр по менеджеру линии Бератер (leads_cohort.manager). Пусто → все. */
+  manager?: string;
 }
 
 export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<DocflowStats> {
-  const { from, to, vertical = "buh" } = args;
-  const range = { from, to };
+  const { from, to, vertical = "buh", manager } = args;
+  const range = { from, to: to ?? null };
   const db = getDocflowDb();
   if (!db) return emptyStats(range);
 
   // Период применяется к sent_at по берлинской гражд. дате (CLAUDE.md #1: TZ везде).
-  const inBerlinPeriod = sql`(sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date
-      AND (sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)`;
+  // Открытый верхний край (одиночная дата) → без ограничения «< to».
+  const upperSent = to
+    ? sql` AND (sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' < (${to}::date + 1)`
+    : sql``;
+  const inBerlinPeriod = sql`(sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin' >= ${from}::date${upperSent}`;
+
+  // Пайплайн(ы) Бератер выбранной вертикали — скоупят и список менеджеров, и
+  // клиентскую когорту (resolveLeadInfo), чтобы карточка реагировала на тоггл.
+  const beraterPipelineIds = getBeraterPipelineIds(vertical);
 
   try {
-    const [clientsRaw, dayRaw, appListRaw] = await Promise.all([
-      // Роспись клиентов — снимок по всему времени (не period-scoped), как
-      // "здоровье доставки"/"сводка подписок" в Рассылке: это lifecycle-состояние.
-      // sent_cnt — сколько откликов клиент отправил за всё время (для бублика).
+    // Фаза 1: клиенты сервиса (все, lifetime sent_cnt для бублика) + список
+    // менеджеров линии Бератер (для фильтра). Отклики грузим в Фазе 3, т.к. их
+    // фильтр по менеджеру зависит от карты client→lead→manager.
+    const [clientsRaw, managers] = await Promise.all([
       db.execute(sql`
         SELECT c.id, c.kommo_lead_id,
                count(a.id) FILTER (WHERE a.sent_at IS NOT NULL) AS sent_cnt
@@ -324,24 +419,7 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
         LEFT JOIN applications a ON a.client_id = c.id
         GROUP BY c.id, c.kommo_lead_id
       `),
-      db.execute(sql`
-        SELECT to_char((sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
-               count(*) AS sent,
-               count(*) FILTER (WHERE status = 'replied') AS replied
-        FROM applications
-        WHERE sent_at IS NOT NULL AND ${inBerlinPeriod}
-        GROUP BY 1
-        ORDER BY 1
-      `),
-      db.execute(sql`
-        SELECT a.sent_at,
-               to_char((a.sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
-               a.status, a.company, a.position, a.client_id
-        FROM applications a
-        WHERE a.sent_at IS NOT NULL AND ${inBerlinPeriod}
-        ORDER BY a.sent_at DESC
-        LIMIT ${APPLICATIONS_CAP + 1}
-      `),
+      docflowManagerList(beraterPipelineIds),
     ]);
 
     const clientRows = rows<{
@@ -365,11 +443,11 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       }
     }
 
-    // Воронка «принят от 1-й линии → анкета → отклик» по выбранной вертикали.
+    // Фаза 2: инфо по лидам (создание/термин/менеджер) + имена + воронка.
     // «all» → ОДНА общая воронка по объединённой когорте Бух + Мед Бератер.
     const funnelTask =
       vertical === "med"
-        ? computeFunnel("Мед Бератер", [B2G_PIPELINES.MED_BERATER], from, to, sentByLeadId)
+        ? computeFunnel("Мед Бератер", [B2G_PIPELINES.MED_BERATER], from, to, sentByLeadId, manager)
         : vertical === "all"
           ? computeFunnel(
               "Бух + Мед Бератер",
@@ -377,49 +455,116 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
               from,
               to,
               sentByLeadId,
+              manager,
             )
-          : computeFunnel("Бух Бератер", [B2G_PIPELINES.BERATER], from, to, sentByLeadId);
+          : computeFunnel("Бух Бератер", [B2G_PIPELINES.BERATER], from, to, sentByLeadId, manager);
 
-    const [terminByLeadId, names, funnel] = await Promise.all([
-      resolveTerminInfo(allLeadIds),
+    const [leadInfo, names, funnel] = await Promise.all([
+      resolveLeadInfo(allLeadIds, beraterPipelineIds),
       resolveLeadNames(allLeadIds),
       funnelTask,
     ]);
     const funnels = [funnel];
 
-    const total = clientRows.length;
-    let done = 0;
-    for (const leadId of leadByClientId.values()) {
-      if (terminByLeadId.get(leadId)?.done) done++;
-    }
-    const inProgress = total - done;
+    // client_id клиентов выбранного менеджера — для фильтра откликов (Фаза 3).
+    // null → фильтр не активен (все клиенты).
+    const allowedClientIds: number[] | null = manager
+      ? clientRows
+          .filter((r) => {
+            const leadId = leadByClientId.get(Number(r.id));
+            return leadId != null && leadInfo.get(leadId)?.manager === manager;
+          })
+          .map((r) => Number(r.id))
+      : null;
+    // IN-список (не ANY(array): drizzle-sql сериализует JS-массив как кортеж).
+    // Пустой список (менеджер без клиентов) → отклики пусты (AND false).
+    const clientFilter = !allowedClientIds
+      ? sql``
+      : allowedClientIds.length === 0
+        ? sql` AND false`
+        : sql` AND client_id IN (${sql.join(allowedClientIds.map((id) => sql`${id}`), sql`, `)})`;
+
+    // Фаза 3: отклики (график по дням + список + итоги), с учётом фильтра менеджера.
+    // Вторая линия графика = уникальные клиенты, делавшие отклики в этот день.
+    const [dayRaw, appListRaw, uniqueRaw] = await Promise.all([
+      db.execute(sql`
+        SELECT to_char((sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
+               count(*) AS sent,
+               count(*) FILTER (WHERE status = 'replied') AS replied,
+               count(DISTINCT client_id) AS unique_clients
+        FROM applications
+        WHERE sent_at IS NOT NULL AND ${inBerlinPeriod}${clientFilter}
+        GROUP BY 1
+        ORDER BY 1
+      `),
+      db.execute(sql`
+        SELECT a.sent_at,
+               to_char((a.sent_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
+               a.status, a.company, a.position, a.client_id
+        FROM applications a
+        WHERE a.sent_at IS NOT NULL AND ${inBerlinPeriod}${clientFilter}
+        ORDER BY a.sent_at DESC
+        LIMIT ${APPLICATIONS_CAP + 1}
+      `),
+      // Уникальные клиенты за весь период (distinct, не сумма по дням).
+      db.execute(sql`
+        SELECT count(DISTINCT client_id)::int AS n
+        FROM applications
+        WHERE sent_at IS NOT NULL AND ${inBerlinPeriod}${clientFilter}
+      `),
+    ]);
+
+    // Когорта = клиенты, чья сделка СОЗДАНА в периоде, У КОТОРОЙ ЕСТЬ ТЕРМИН (и
+    // менеджер совпадает, если выбран). Решение юзера 2026-07-15: лиды без термина
+    // из выборки исключаем (иначе они падали в «В работе» без осмысленного статуса).
+    // Клиенты без лида / вне периода / без термина / чужого менеджера выпадают.
+    const inPeriod = (leadId: number | null): boolean => {
+      if (leadId == null) return false;
+      const info = leadInfo.get(leadId);
+      if (!info || info.createdDate == null) return false;
+      if (info.terminDate == null) return false; // без термина — не в когорте
+      if (manager && info.manager !== manager) return false;
+      // to == null → открытый верхний край (одиночная дата: «с from и далее»).
+      return info.createdDate >= from && (to == null || info.createdDate <= to);
+    };
 
     const usage: DocflowUsageBuckets = { unused: 0, one: 0, many: 0 };
-    const clientsList: DocflowClientUsageRow[] = clientRows.map((r) => {
+    const clientsList: DocflowClientUsageRow[] = [];
+    let done = 0;
+    for (const r of clientRows) {
       const leadId = leadByClientId.get(Number(r.id)) ?? null;
+      if (!inPeriod(leadId)) continue; // вне когорты «создан в периоде»
       const sentCount = Number(r.sent_cnt) || 0;
       const bucket = bucketFor(sentCount);
       usage[bucket]++;
-      const termin = leadId != null ? terminByLeadId.get(leadId) : undefined;
-      return {
+      const isDone = leadId != null && (leadInfo.get(leadId)?.done ?? false);
+      if (isDone) done++;
+      clientsList.push({
         leadId,
         leadName: leadId != null ? names.get(leadId) ?? null : null,
         sentCount,
-        done: termin?.done ?? false,
-        terminDate: termin?.terminDate ?? null,
+        done: isDone,
+        terminDate: leadId != null ? leadInfo.get(leadId)?.terminDate ?? null : null,
         bucket,
-      };
-    });
+      });
+    }
+    const total = clientsList.length;
+    const inProgress = total - done;
 
-    // Итоги за период — сумма по дням (dayRaw уже посчитан с тем же WHERE-фильтром
-    // по sent_at; отдельный агрегирующий запрос на totals был бы дублем — #efficiency review).
-    const dayRows = rows<{ day: string; sent: string | number; replied: string | number }>(dayRaw);
+    // Итоги за период — сумма по дням (dayRaw уже посчитан с тем же WHERE-фильтром).
+    const dayRows = rows<{
+      day: string;
+      sent: string | number;
+      replied: string | number;
+      unique_clients: string | number;
+    }>(dayRaw);
     let sent = 0;
     let replied = 0;
     for (const r of dayRows) {
       sent += Number(r.sent) || 0;
       replied += Number(r.replied) || 0;
     }
+    const uniqueClients = Number(rows<{ n: number }>(uniqueRaw)[0]?.n) || 0;
 
     const appListRows = rows<{
       sent_at: string;
@@ -436,17 +581,20 @@ export async function getDocflowStats(args: GetDocflowStatsArgs): Promise<Docflo
       available: true,
       range,
       clients: { total, inProgress, done },
+      managers,
       usage,
       clientsList,
       applications: {
         sent,
         replied,
         responseRate: sent > 0 ? replied / sent : null,
+        uniqueClients,
       },
       days: dayRows.map((r) => ({
         day: String(r.day),
         sent: Number(r.sent) || 0,
         replied: Number(r.replied) || 0,
+        uniqueClients: Number(r.unique_clients) || 0,
       })),
       applicationsList: capped.map((r) => {
         const leadId = leadByClientId.get(Number(r.client_id)) ?? null;
