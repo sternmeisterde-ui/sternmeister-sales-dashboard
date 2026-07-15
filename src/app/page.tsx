@@ -151,7 +151,7 @@ const NAV_ITEMS: NavItem[] = [
   // Статистика внешнего сервиса BGS DocFlow (репо BGS_DocFlow, отдельный Neon):
   // отклики на вакансии учеников школы (Bildungsgutschein). Только Гос — сервис
   // работает только с учениками B2G.
-  { id: "docflow", icon: Briefcase, label: "BGS DocFlow", adminOnly: true, departments: ["b2g"] },
+  { id: "docflow", icon: Briefcase, label: "BGS DocFlow", adminOnly: true, adminOnlyByDept: { b2g: false }, departments: ["b2g"] },
   { id: "real_calls", icon: Phone, label: "ОКК", adminOnly: false },
   // Только Госники: у Коммерсов ролевки разбираются внутри «Оценки критериев»
   // (toggle OKK/Ролевки в analytics), отдельная вкладка не нужна — убрана 2026-06-19.
