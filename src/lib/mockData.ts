@@ -46,6 +46,9 @@ export interface ManagerCall {
         aiResponse?: string;
         durationSeconds?: number | null;
         createdAt?: string | null;
+        /** Telegram file_id голосового разбора — для проигрывания через прокси
+         *  /api/voice-feedback/[callId]/audio. null/пусто = аудио нет. */
+        voiceFileId?: string | null;
     } | null;
 }
 

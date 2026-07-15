@@ -2130,6 +2130,18 @@ export default function Dashboard() {
                       )}
                     </div>
 
+                    {/* ▶ Прослушать голосовой разбор — прокси через Telegram Bot API */}
+                    {selectedCall.voiceFeedback.voiceFileId && (
+                      <audio
+                        controls
+                        preload="none"
+                        className="w-full h-9"
+                        src={`/api/voice-feedback/${selectedCall.id}/audio?source=${activeTab === "real_calls" ? "okk" : "ai"}`}
+                      >
+                        Ваш браузер не поддерживает воспроизведение аудио.
+                      </audio>
+                    )}
+
                     {/* Транскрипция разбора менеджера */}
                     <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 shadow-inner flex flex-col gap-3">
                       <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
