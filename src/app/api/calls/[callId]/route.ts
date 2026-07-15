@@ -71,6 +71,7 @@ export async function GET(
       aiResponse: string;
       durationSeconds: number | null;
       createdAt: string | null;
+      voiceFileId: string | null;
     } | null = null;
     if (department === "b2g") {
       const fbRows = await db
@@ -80,6 +81,7 @@ export async function GET(
           aiResponse: d1VoiceFeedback.aiResponse,
           durationSeconds: d1VoiceFeedback.durationSeconds,
           createdAt: d1VoiceFeedback.createdAt,
+          voiceFileId: d1VoiceFeedback.voiceFileId,
         })
         .from(d1VoiceFeedback)
         .where(eq(d1VoiceFeedback.callId, callId))
@@ -93,6 +95,7 @@ export async function GET(
           aiResponse: fb.aiResponse || "",
           durationSeconds: fb.durationSeconds,
           createdAt: fb.createdAt ? new Date(fb.createdAt).toISOString() : null,
+          voiceFileId: fb.voiceFileId ?? null,
         };
       }
     }

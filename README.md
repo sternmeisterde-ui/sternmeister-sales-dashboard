@@ -76,6 +76,13 @@ drizzle.analytics.config.ts analytics.* схема (отдельный config)
 
 Dokploy → Docker Compose → Traefik (TLS). См. [`docs/DOCKER.md`](./docs/DOCKER.md) и [`mcp-server/README.md`](./mcp-server/README.md).
 
+> Проигрывание голосовых «Разборов ОС» (вкладки ОКК/AI Ролевки, b2g) требует
+> токенов ботов: `OKK_TELEGRAM_BOT_TOKEN` (реальные звонки, D2) и
+> `D1_TELEGRAM_BOT_TOKEN` (AI Ролевки, D1). Прокси `/api/voice-feedback/[callId]/audio`
+> качает файл из Telegram по `voice_file_id` (на диск не сохраняет). Если это те
+> же боты, что `TELEGRAM_OKK_BOT_TOKEN`/`TELEGRAM_BOT_TOKEN`, задавать не
+> обязательно — код фолбэчит на них. См. `.env.example`.
+
 Production URLs: `dashboard.sternmeister.online` (app), `mcp.sternmeister.online` (MCP).
 
 ## License

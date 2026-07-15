@@ -111,6 +111,12 @@ services:
       - TELEGRAM_SESSION=${TELEGRAM_SESSION}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_OKK_BOT_TOKEN=${TELEGRAM_OKK_BOT_TOKEN}
+      # Проигрывание голосовых «Разборов ОС» — прокси качает файл через Bot API.
+      # OKK-бот (реальные звонки, D2) / D1-бот (AI Ролевки). Если совпадают с
+      # ботами выше — можно не задавать: код фолбэчит на TELEGRAM_OKK_BOT_TOKEN /
+      # TELEGRAM_BOT_TOKEN соответственно.
+      - OKK_TELEGRAM_BOT_TOKEN=${OKK_TELEGRAM_BOT_TOKEN}
+      - D1_TELEGRAM_BOT_TOKEN=${D1_TELEGRAM_BOT_TOKEN}
 
       # Discord webhook for user-submitted bug reports ("Сообщить об ошибке").
       # Must be set in Dokploy; the server only sends to Discord if present.

@@ -654,6 +654,11 @@ export default function Dashboard() {
   const activeCalls = activeTab === "real_calls" ? realCalls : aiCalls;
   const activeManagers = activeTab === "real_calls" ? realManagers : aiManagers;
   const isLoadingCalls = activeTab === "real_calls" ? isLoadingReal : isLoadingAI;
+  // Колонка/вкладка «Разбор ОС»: AI Ролевки (b2g/b2b) ИЛИ реальные звонки ОКК
+  // ТОЛЬКО b2g (D2). Для b2b в ОКК не рендерим вовсе (данных нет, и не показываем).
+  const showFeedbackCol =
+    activeTab === "ai_calls" ||
+    (activeTab === "real_calls" && activeDepartment === "b2g");
 
   // Dashboard stats for calls tabs (managers only, no ROPs/admins).
   // Mirrors `filteredManagers` line-filter logic: B2B uses prompt_type → server
@@ -1782,7 +1787,7 @@ export default function Dashboard() {
                         <th className="px-5 py-3 font-semibold text-center">CRM</th>
                       )}
                       <th className="px-5 py-3 font-semibold text-center">AI Оценка</th>
-                      {activeTab === "ai_calls" && (
+                      {showFeedbackCol && (
                         <th className="px-5 py-3 font-semibold text-center">Разбор ОС</th>
                       )}
                       {activeTab === "real_calls" && (
@@ -1793,7 +1798,7 @@ export default function Dashboard() {
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs">
                     {isLoadingCalls ? (
-                      <tr><td colSpan={activeTab === "real_calls" ? 8 : 7} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
+                      <tr><td colSpan={activeTab === "real_calls" ? (showFeedbackCol ? 10 : 9) : 7} className="text-center py-8 text-slate-400">Загрузка данных...</td></tr>
                     ) : filteredCalls.map((call) => (
                       <tr key={call.id} className="hover:bg-white/[0.02] transition-colors group">
                         <td className="px-5 py-3 whitespace-nowrap">
@@ -1856,7 +1861,7 @@ export default function Dashboard() {
                             </button>
                           </div>
                         </td>
-                        {activeTab === "ai_calls" && (
+                        {showFeedbackCol && (
                           <td className="px-5 py-3 text-center">
                             {call.voiceFeedback ? (
                               <button
@@ -2015,7 +2020,7 @@ export default function Dashboard() {
               >
                 AI Анализ (Скоринг)
               </button>
-              {activeTab === "ai_calls" && selectedCall.voiceFeedback && (
+              {showFeedbackCol && selectedCall.voiceFeedback && (
                 <button
                   onClick={() => setCallModalType("feedback")}
                   className={`text-sm font-bold uppercase tracking-wider px-4 py-2 rounded-lg transition-colors ${callModalType === "feedback" ? "bg-emerald-500/20 text-emerald-400" : "text-slate-500 hover:text-slate-300"}`}
@@ -2124,6 +2129,18 @@ export default function Dashboard() {
                         </span>
                       )}
                     </div>
+
+                    {/* ▶ Прослушать голосовой разбор — прокси через Telegram Bot API */}
+                    {selectedCall.voiceFeedback.voiceFileId && (
+                      <audio
+                        controls
+                        preload="none"
+                        className="w-full h-9"
+                        src={`/api/voice-feedback/${selectedCall.id}/audio?source=${activeTab === "real_calls" ? "okk" : "ai"}`}
+                      >
+                        Ваш браузер не поддерживает воспроизведение аудио.
+                      </audio>
+                    )}
 
                     {/* Транскрипция разбора менеджера */}
                     <div className="bg-slate-900/50 rounded-2xl p-5 border border-white/5 shadow-inner flex flex-col gap-3">

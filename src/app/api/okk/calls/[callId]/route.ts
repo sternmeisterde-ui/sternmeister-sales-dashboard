@@ -3,6 +3,7 @@ import { getOkkDbForDepartment } from "@/lib/db/okk";
 import { okkCalls, okkEvaluations, TranscriptSpeakerSegment } from "@/lib/db/schema-okk";
 import { eq, desc, sql } from "drizzle-orm";
 import { formatCallDate, fmtLocalDate, addDaysCivil, APP_TZ } from "@/lib/utils/date";
+import { getOkkVoiceDetail } from "@/lib/db/okk-feedback";
 
 // Kommo custom field «Категория лида» (A/B/C). Аккаунт один на оба отдела
 // (sternmeister.kommo.com), id стабилен; ключи в kommo_custom_fields имеют
@@ -234,6 +235,11 @@ export async function GET(
 
     const row = rows[0];
 
+    // ── Разбор ОС (голосовая работа над ошибками) — ТОЛЬКО b2g (D2). ──────────
+    // Транскрипт + ответ AI + вердикт (worst_calls.response_adequate). null = нет.
+    const voiceFeedback =
+      department === "b2g" ? await getOkkVoiceDetail(db, callId) : null;
+
     // ── Duration formatting ───────────────────────────────────
     const dSec = row.durationSeconds || 0;
     const mins = Math.floor(dSec / 60);
@@ -394,6 +400,7 @@ export async function GET(
       blocks,
       clientScoring,
       meta,
+      voiceFeedback,
     };
 
     return NextResponse.json({ success: true, data: callData });

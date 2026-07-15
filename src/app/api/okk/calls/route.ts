@@ -5,6 +5,7 @@ import { eq, and, gte, lte, desc, sql, inArray } from "drizzle-orm";
 import { cached } from "@/lib/kommo/cache";
 import { formatCallDate, parseDateBoundary } from "@/lib/utils/date";
 import { promptTypeForLine, verticalPromptTypes } from "@/lib/config/tenant";
+import { getOkkVoiceVerdicts, type OkkVoiceVerdict } from "@/lib/db/okk-feedback";
 
 // ─── GET handler ─────────────────────────────────────────────
 // Returns data in the SAME shape as /api/calls:
@@ -223,6 +224,14 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
       }
     }
 
+    // ── Разборы ОС (голосовая работа над ошибками) — ТОЛЬКО b2g (D2). ─────────
+    // Батч по списку call_id (без N+1), как feedbackByCall в queries-existing.
+    // Для b2b — пустая карта (колонка/вкладка на клиенте не рендерятся).
+    const voiceVerdicts =
+      department === "b2g"
+        ? await getOkkVoiceVerdicts(db, uniqueRows.map((r) => r.id))
+        : new Map<string, OkkVoiceVerdict>();
+
     // ── Convert to ManagerCall[] format (server-side, like queries-existing) ──
     const calls = uniqueRows.map((row) => {
       const chain = row.pairRole === "continuation" ? chainAggByTail.get(row.id) : undefined;
@@ -274,6 +283,9 @@ async function buildOkkResponse(department: "b2g" | "b2b", sp: URLSearchParams) 
         evalSummary: "",
         blocks,
         clientScoring,
+        // Разбор ОС: null = менеджер не записывал. LIGHT — только вердикт
+        // (транскрипт/ответ AI подгружаются в карточке через /api/okk/calls/[id]).
+        voiceFeedback: voiceVerdicts.get(row.id) ?? null,
       };
     });
 

@@ -35,7 +35,8 @@ export interface ManagerCall {
         criteria: { id: number; name: string; score: number; maxScore: number; feedback: string; quote: string }[];
     }[];
     clientScoring?: { urgency: number; solvency?: number; need: number; total: number };
-    /** Голосовой разбор («работа над ошибками») после ролевки — только AI Ролевки b2g.
+    /** Голосовой разбор («работа над ошибками») — AI Ролевки (d1_voice_feedback) и
+     *  реальные звонки ОКК b2g (D2 voice_feedback + worst_calls.response_adequate).
      *  null = менеджер разбор не записывал. В списке приходит LIGHT (только adequate);
      *  transcript/aiResponse подгружаются вместе с деталями звонка. */
     voiceFeedback?: {
@@ -45,6 +46,9 @@ export interface ManagerCall {
         aiResponse?: string;
         durationSeconds?: number | null;
         createdAt?: string | null;
+        /** Telegram file_id голосового разбора — для проигрывания через прокси
+         *  /api/voice-feedback/[callId]/audio. null/пусто = аудио нет. */
+        voiceFileId?: string | null;
     } | null;
 }
 
