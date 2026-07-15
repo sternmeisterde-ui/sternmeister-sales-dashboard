@@ -21,7 +21,11 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (session.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  // Admin — везде; менеджеры — только своего отдела (вкладка b2g-only). B2B
+  // менеджеры (и любой не-b2g non-admin) отсекаются. См. tracking/route.ts.
+  if (session.role !== "admin" && session.department !== "b2g") {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
 
   const sp = req.nextUrl.searchParams;
   const from = sp.get("from");
