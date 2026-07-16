@@ -16,9 +16,54 @@
  */
 
 import { createSign } from "node:crypto";
+import { request as httpsRequest } from "node:https";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+
+/**
+ * IPv4-pinned HTTPS request via node:https (NOT global fetch/undici).
+ *
+ * На прод-хосте (self-hosted Dokploy) глобальный `fetch` (встроенный undici)
+ * для `sheets.googleapis.com` садится на домен-парковочный сервер и возвращает
+ * `HTTP 400 <ppConfig>` вместо ответа Google — из-за битой/перехваченной
+ * IPv6/Happy-Eyeballs маршрутизации контейнера. Проверено прямо в контейнере:
+ * `https.get({host:"sheets.googleapis.com", family:4})` → 200/404 настоящий
+ * Google, а `fetch(...)` → парковка. Ни `ipv4first`/`autoSelectFamily` в
+ * instrumentation.ts, ни `disable_ipv6` в контейнере это не чинят (undici
+ * игнорирует net-дефолты). Поэтому eNPS-клиент ходит через node:https с явным
+ * `family:4` — единственный доказанно рабочий транспорт здесь. undici как
+ * отдельный модуль не резолвится, так что кастомный dispatcher невозможен.
+ */
+function ipv4Request(
+  url: string,
+  opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpsRequest(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || 443,
+        path: u.pathname + u.search,
+        method: opts.method ?? "GET",
+        headers: opts.headers,
+        family: 4, // force IPv4 — see block comment above
+        servername: u.hostname, // SNI for TLS
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on("error", reject);
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
 
 interface ServiceAccountKey {
   client_email: string;
@@ -70,19 +115,18 @@ async function getAccessToken(sa: ServiceAccountKey): Promise<string> {
   const signature = b64url(signer.sign(sa.private_key));
   const assertion = `${header}.${claims}.${signature}`;
 
-  const res = await fetch(TOKEN_URL, {
+  const res = await ipv4Request(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion,
-    }),
+    }).toString(),
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Google token exchange failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Google token exchange failed: HTTP ${res.status} ${res.body.slice(0, 200)}`);
   }
-  const json = (await res.json()) as { access_token: string; expires_in: number };
+  const json = JSON.parse(res.body) as { access_token: string; expires_in: number };
   cachedToken = {
     token: json.access_token,
     expiresAt: Date.now() + json.expires_in * 1000,
@@ -106,11 +150,10 @@ export async function fetchEnpsSheetRows(): Promise<string[][]> {
   const url =
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}` +
     `/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Sheets values read failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+  const res = await ipv4Request(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Sheets values read failed: HTTP ${res.status} ${res.body.slice(0, 200)}`);
   }
-  const json = (await res.json()) as { values?: string[][] };
+  const json = JSON.parse(res.body) as { values?: string[][] };
   return json.values ?? [];
 }
