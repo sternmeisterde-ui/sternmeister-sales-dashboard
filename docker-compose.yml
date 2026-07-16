@@ -238,6 +238,36 @@ services:
     networks:
       - sternmeister-network
 
+  # eNPS cron — синкает Google-таблицу (Typeform → Sheets) в D1 раз в час.
+  # Без него eNPS обновляется только при открытии вкладки (фоновый on-GET
+  # триггер, throttle 30 мин/процесс) — данные подтухают и падения не видны.
+  # Раз в час достаточно: ~десяток ответов в неделю. Ошибки синка попадают в
+  # лог этого сервиса (http!=200), так что проблему видно сразу.
+  enps-cron:
+    image: curlimages/curl:8.7.1
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      - CRON_SECRET=${CRON_SECRET}
+      - ENPS_SYNC_INTERVAL_SECONDS=${ENPS_SYNC_INTERVAL_SECONDS:-3600}
+      - ENPS_START_DELAY_SECONDS=${ENPS_START_DELAY_SECONDS:-45}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[enps-cron] starting, interval=$${ENPS_SYNC_INTERVAL_SECONDS}s";
+        sleep "$${ENPS_START_DELAY_SECONDS}";
+        while true; do
+          ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)";
+          http_status="$$(curl -sS -o /tmp/enps.out -w '%{http_code}' --max-time 60 \
+            -H "x-cron-secret: $${CRON_SECRET}" \
+            http://app:3008/api/analytics/sync/enps || echo '000')";
+          echo "[enps-cron] $${ts} http=$${http_status} body=$$(head -c 200 /tmp/enps.out)";
+          sleep "$${ENPS_SYNC_INTERVAL_SECONDS}";
+        done
+    networks:
+      - sternmeister-network
+
   # Optional: Local PostgreSQL for development
   # Uncomment if you want to use local database instead of Neon
   # postgres:
