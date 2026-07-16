@@ -188,6 +188,15 @@ function tabAllowedInDept(tabId: TabId, dept: DepartmentId): boolean {
   return !item?.departments || item.departments.includes(dept);
 }
 
+/** Домашняя вкладка менеджера по отделу. У Коммерцов «ОКК» (real_calls) —
+ *  давно только заголовок-аккордеон без своего контента (см. рендер сайдбара
+ *  ниже), реальный список звонков менеджер там не увидит — дефолт для b2b
+ *  «Оценка критериев» (analytics, не admin-only у Коммерцов). У Госников
+ *  real_calls по-прежнему полноценная вкладка — дефолт не меняем. */
+function defaultManagerTab(dept: DepartmentId): TabId {
+  return dept === "b2b" ? "analytics" : "real_calls";
+}
+
 function readTabFromHash(): TabId | null {
   if (typeof window === "undefined") return null;
   const raw = window.location.hash.replace(/^#/, "");
@@ -287,8 +296,9 @@ export default function Dashboard() {
   // (#funnel и т.д.) применяется в useEffect ПОСЛЕ монтирования (см. ниже).
   // Читать hash прямо в инициализаторе нельзя: на сервере window нет → "dashboard",
   // на клиенте #funnel → "funnel", и деревья SSR/гидрации расходятся (hydration
-  // error). После загрузки сессии таб может перебиться на "real_calls" для
-  // manager-роли (manager не попадает в admin-таб даже по прямой ссылке).
+  // error). После загрузки сессии таб может перебиться на домашнюю вкладку
+  // manager-роли — см. defaultManagerTab (manager не попадает в admin-таб
+  // даже по прямой ссылке).
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
   // True после того, как на клиенте прочитан URL hash и выбран реальный таб.
   // До этого контент дефолтного "dashboard"-таба НЕ рендерим (см. ниже и render):
@@ -315,10 +325,10 @@ export default function Dashboard() {
             // Менеджер привязан к своему отделу — выбор не восстанавливаем и не храним.
             setActiveDepartment(data.department);
             // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
-            // fallback на "real_calls".
+            // fallback на домашнюю вкладку менеджера (см. defaultManagerTab).
             const fromHash = readTabFromHash();
             if (!fromHash || tabAdminOnly(fromHash, data.department)) {
-              setActiveTab("real_calls");
+              setActiveTab(defaultManagerTab(data.department));
             }
           } else {
             // Админ: восстанавливаем ранее выбранный отдел (переживает F5),
@@ -379,12 +389,13 @@ export default function Dashboard() {
   // Safety net: если активная вкладка недоступна в текущем отделе (deep-link
   // #funnel при B2B-сессии, ручная правка hash, смена отдела) — сбрасываем на
   // безопасную вкладку, чтобы активная вкладка и URL-hash оставались согласованными.
-  // Цель сброса role-aware: админ → dashboard, менеджер → real_calls (dashboard ему
-  // недоступен). Сам render вкладок тоже гейтится по отделу (ниже), поэтому неверный
-  // контент не покажется даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
+  // Цель сброса role-aware: админ → dashboard, менеджер → домашняя вкладка своего
+  // отдела (см. defaultManagerTab; dashboard менеджеру недоступен). Сам render
+  // вкладок тоже гейтится по отделу (ниже), поэтому неверный контент не покажется
+  // даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
   useEffect(() => {
     if (!tabAllowedInDept(activeTab, activeDepartment)) {
-      setActiveTab(isAdmin ? "dashboard" : "real_calls");
+      setActiveTab(isAdmin ? "dashboard" : defaultManagerTab(activeDepartment));
     }
   }, [activeDepartment, activeTab, isAdmin]);
   // dailyFilter moved to DailyTab component
