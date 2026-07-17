@@ -16,65 +16,93 @@
  */
 
 import { createSign } from "node:crypto";
-import { request as httpsRequest } from "node:https";
-import { resolve4 } from "node:dns/promises";
+import { connect as tlsConnect } from "node:tls";
+import { lookup } from "node:dns/promises";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 
 /**
- * IPv4-pinned HTTPS request that connects to a LITERAL IPv4 address.
+ * HTTPS request over a RAW TLS socket (node:tls), bypassing the http/https
+ * module entirely.
  *
- * Почему так, а не global fetch и даже не `https.request({family:4})`:
- * на прод-хосте (self-hosted Dokploy) глобальный `fetch` (встроенный undici)
- * для `sheets.googleapis.com` садится на домен-парковочный сервер (`HTTP 400
- * <ppConfig>`) вместо ответа Google. Раскопали пошагово:
- *   • `fetch(...)` → парковка;
- *   • raw `https.get({host, family:4})` в чистом `node -e` → настоящий Google;
- *   • но ТО ЖЕ `https.request({hostname, family:4})` ВНУТРИ приложения → снова
- *     парковка. Разница — рантайм Next: `Sentry.init()` через OpenTelemetry
- *     инструментирует http/https и теряет опцию `family`, запрос уходит
- *     dual-stack и попадает на перехваченный IPv6.
- * Поэтому резолвим хост в литеральный IPv4 сами и коннектимся прямо к IP —
- * тогда никакой family/dual-stack развилки не остаётся, инструментировать
- * нечего. SNI (`servername`) и заголовок `Host` держат TLS/маршрутизацию на
- * реальном имени. undici отдельным модулем не резолвится, dispatcher невозможен.
+ * Долгая история. На прод-хосте (self-hosted Dokploy) любой запрос к
+ * `sheets.googleapis.com` ИЗ ПРОЦЕССА ПРИЛОЖЕНИЯ приходит на домен-парковочный
+ * сервер (`HTTP 400 <ppConfig>`) вместо ответа Google. Раскопали до дна:
+ *   • global `fetch` (undici) → парковка;
+ *   • `https.request({hostname, family:4})` → тоже парковка;
+ *   • `https.request` к ЛИТЕРАЛЬНОМУ гугловому IPv4 → ВСЁ РАВНО парковка;
+ *   • НО тот же `https.get` к тому же IP из чистого `node -e` → настоящий
+ *     Google (403/401). Все 8 A-адресов Google из контейнера сырым сокетом
+ *     дают настоящий Google — перехвата по IP/DNS/family НЕТ.
+ * Значит перехватывает рантайм приложения на уровне модуля http/https
+ * (Sentry/OpenTelemetry инструментируют именно http/https). `tls.connect` они
+ * НЕ трогают — поэтому говорим HTTP/1.1 руками поверх сырого TLS к литеральному
+ * IPv4. `servername` = SNI + валидация сертификата на реальное имя, заголовок
+ * `Host` — маршрутизация Google. undici как модуль не резолвится (Node-internal),
+ * так что кастомный dispatcher невозможен — это самый низкий доступный уровень.
  */
 async function ipv4Request(
   url: string,
   opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<{ status: number; body: string }> {
   const u = new URL(url);
-  const ips = await resolve4(u.hostname);
-  if (ips.length === 0) throw new Error(`No A record for ${u.hostname}`);
-  const ip = ips[0];
+  const { address: ip } = await lookup(u.hostname, { family: 4 });
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      {
-        host: ip, // literal IPv4 — no family/dual-stack decision to strip
-        port: u.port || 443,
-        path: u.pathname + u.search,
-        method: opts.method ?? "GET",
-        headers: { ...(opts.headers ?? {}), Host: u.hostname },
-        servername: u.hostname, // SNI + cert validation against the real name
-      },
-      (res) => {
-        let data = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          // Diagnostic: which peer did we actually reach? (real Google vs parked)
-          console.log(
-            `[enps] ${u.hostname} → ${res.socket?.remoteAddress} (${res.socket?.remoteFamily}) HTTP ${res.statusCode}`,
-          );
-          resolve({ status: res.statusCode ?? 0, body: data });
-        });
+    const socket = tlsConnect(
+      { host: ip, port: Number(u.port) || 443, servername: u.hostname },
+      () => {
+        const cert = socket.getPeerCertificate();
+        console.log(
+          `[enps] TLS ${u.hostname} → ${socket.remoteAddress} authorized=${socket.authorized} CN=${cert?.subject?.CN ?? "?"}`,
+        );
+        const headers: Record<string, string> = {
+          Host: u.hostname,
+          Connection: "close",
+          "Accept-Encoding": "identity",
+          ...(opts.headers ?? {}),
+        };
+        if (opts.body) headers["Content-Length"] = String(Buffer.byteLength(opts.body));
+        const head =
+          `${opts.method ?? "GET"} ${u.pathname + u.search} HTTP/1.1\r\n` +
+          Object.entries(headers)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join("\r\n") +
+          "\r\n\r\n";
+        socket.write(head);
+        if (opts.body) socket.write(opts.body);
       },
     );
-    req.on("error", reject);
-    if (opts.body) req.write(opts.body);
-    req.end();
+    const chunks: Buffer[] = [];
+    socket.on("data", (d) => chunks.push(d));
+    socket.on("error", reject);
+    socket.on("end", () => {
+      const raw: Buffer = Buffer.concat(chunks);
+      const sep = raw.indexOf("\r\n\r\n");
+      if (sep < 0) return reject(new Error("Malformed HTTP response (no header terminator)"));
+      const headText = raw.subarray(0, sep).toString("latin1");
+      const rawBody = raw.subarray(sep + 4) as Buffer;
+      const body = /^transfer-encoding:\s*chunked/im.test(headText) ? dechunk(rawBody) : rawBody;
+      const status = Number(headText.match(/^HTTP\/\d\.\d (\d{3})/)?.[1] ?? 0);
+      resolve({ status, body: body.toString("utf8") });
+    });
   });
+}
+
+/** Decode HTTP/1.1 chunked transfer-encoding into the raw body bytes. */
+function dechunk(buf: Buffer): Buffer {
+  const out: Buffer[] = [];
+  let i = 0;
+  while (i < buf.length) {
+    const nl = buf.indexOf("\r\n", i);
+    if (nl < 0) break;
+    const size = parseInt(buf.subarray(i, nl).toString("latin1").trim(), 16);
+    if (!Number.isFinite(size) || size <= 0) break;
+    const start = nl + 2;
+    out.push(buf.subarray(start, start + size) as Buffer);
+    i = start + size + 2; // skip the chunk's trailing CRLF
+  }
+  return Buffer.concat(out);
 }
 
 interface ServiceAccountKey {
