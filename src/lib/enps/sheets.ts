@@ -17,46 +17,58 @@
 
 import { createSign } from "node:crypto";
 import { request as httpsRequest } from "node:https";
+import { resolve4 } from "node:dns/promises";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 
 /**
- * IPv4-pinned HTTPS request via node:https (NOT global fetch/undici).
+ * IPv4-pinned HTTPS request that connects to a LITERAL IPv4 address.
  *
- * На прод-хосте (self-hosted Dokploy) глобальный `fetch` (встроенный undici)
- * для `sheets.googleapis.com` садится на домен-парковочный сервер и возвращает
- * `HTTP 400 <ppConfig>` вместо ответа Google — из-за битой/перехваченной
- * IPv6/Happy-Eyeballs маршрутизации контейнера. Проверено прямо в контейнере:
- * `https.get({host:"sheets.googleapis.com", family:4})` → 200/404 настоящий
- * Google, а `fetch(...)` → парковка. Ни `ipv4first`/`autoSelectFamily` в
- * instrumentation.ts, ни `disable_ipv6` в контейнере это не чинят (undici
- * игнорирует net-дефолты). Поэтому eNPS-клиент ходит через node:https с явным
- * `family:4` — единственный доказанно рабочий транспорт здесь. undici как
- * отдельный модуль не резолвится, так что кастомный dispatcher невозможен.
+ * Почему так, а не global fetch и даже не `https.request({family:4})`:
+ * на прод-хосте (self-hosted Dokploy) глобальный `fetch` (встроенный undici)
+ * для `sheets.googleapis.com` садится на домен-парковочный сервер (`HTTP 400
+ * <ppConfig>`) вместо ответа Google. Раскопали пошагово:
+ *   • `fetch(...)` → парковка;
+ *   • raw `https.get({host, family:4})` в чистом `node -e` → настоящий Google;
+ *   • но ТО ЖЕ `https.request({hostname, family:4})` ВНУТРИ приложения → снова
+ *     парковка. Разница — рантайм Next: `Sentry.init()` через OpenTelemetry
+ *     инструментирует http/https и теряет опцию `family`, запрос уходит
+ *     dual-stack и попадает на перехваченный IPv6.
+ * Поэтому резолвим хост в литеральный IPv4 сами и коннектимся прямо к IP —
+ * тогда никакой family/dual-stack развилки не остаётся, инструментировать
+ * нечего. SNI (`servername`) и заголовок `Host` держат TLS/маршрутизацию на
+ * реальном имени. undici отдельным модулем не резолвится, dispatcher невозможен.
  */
-function ipv4Request(
+async function ipv4Request(
   url: string,
   opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<{ status: number; body: string }> {
+  const u = new URL(url);
+  const ips = await resolve4(u.hostname);
+  if (ips.length === 0) throw new Error(`No A record for ${u.hostname}`);
+  const ip = ips[0];
   return new Promise((resolve, reject) => {
-    const u = new URL(url);
     const req = httpsRequest(
       {
-        protocol: u.protocol,
-        hostname: u.hostname,
+        host: ip, // literal IPv4 — no family/dual-stack decision to strip
         port: u.port || 443,
         path: u.pathname + u.search,
         method: opts.method ?? "GET",
-        headers: opts.headers,
-        family: 4, // force IPv4 — see block comment above
-        servername: u.hostname, // SNI for TLS
+        headers: { ...(opts.headers ?? {}), Host: u.hostname },
+        servername: u.hostname, // SNI + cert validation against the real name
       },
       (res) => {
         let data = "";
         res.setEncoding("utf8");
         res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+        res.on("end", () => {
+          // Diagnostic: which peer did we actually reach? (real Google vs parked)
+          console.log(
+            `[enps] ${u.hostname} → ${res.socket?.remoteAddress} (${res.socket?.remoteFamily}) HTTP ${res.statusCode}`,
+          );
+          resolve({ status: res.statusCode ?? 0, body: data });
+        });
       },
     );
     req.on("error", reject);
