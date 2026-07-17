@@ -125,20 +125,6 @@ services:
       # Without this whitelist entry the var is invisible in the container and
       # error-report/route.ts falls back to a hardcoded URL (to be removed).
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
-    # ───────────────────────────────────────────────────────────────
-    # Kill IPv6 inside this container. This host's container IPv6 is broken:
-    # some Google IPv6 are ENETUNREACH (Neon used to hang ~10s per query),
-    # others are HIJACKED — a parking server answers on a Google IPv6 and
-    # returns an HTTP 400 "ppConfig" page, which broke the eNPS Google Sheets
-    # sync (sheets.googleapis.com → 2001:4860:4846:400::). undici's Happy
-    # Eyeballs races to that fast-answering parked IPv6 and ignores the
-    # ipv4first hint in instrumentation.ts, so the only robust fix is to remove
-    # IPv6 from the container entirely — every outbound then uses the clean
-    # IPv4 route. All our upstreams (Neon, Kommo, Google, telephony, Telegram)
-    # have A records, so IPv4-only is safe.
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=1
-      - net.ipv6.conf.default.disable_ipv6=1
     restart: unless-stopped
     networks:
       - sternmeister-network
