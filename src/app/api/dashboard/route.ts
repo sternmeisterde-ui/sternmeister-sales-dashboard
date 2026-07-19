@@ -37,7 +37,7 @@ import {
   getManagersWithKommoForPeriod,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
-  getAnalyticsCabinetWaitSeconds,
+  getAnalyticsUnansweredWaitSeconds,
   getAnalyticsSlaFirstCallMinutes,
   getAnalyticsSlaFirstCallMinutesByManager,
   getAnalyticsLostCallsByManager,
@@ -546,7 +546,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, cabinetWait, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -595,16 +595,15 @@ async function buildDashboardResponse(
             return null;
           })
         : Promise.resolve(null),
-      // B2B-only KPI tiles: answer-wait по формулам кабинетов телефоний
-      // (CloudTalk — очередь входящих, CallGear — все звонки с недозвонами;
-      // см. getAnalyticsCabinetWaitSeconds) and time-to-first-call SLA (min).
-      // Cheap dept-wide aggregates; skipped on B2G (tiles aren't shown there).
+      // B2B-only KPI tiles: «Ожидание» = среднее время гудков в неотвеченных
+      // исходящих (см. getAnalyticsUnansweredWaitSeconds) and time-to-first-
+      // call SLA (min). Cheap dept-wide aggregates; skipped on B2G.
       department === "b2b"
-        ? getAnalyticsCabinetWaitSeconds(allManagers, department, from, to).catch((e) => {
-            console.error("[Dashboard] cabinet wait failed:", e);
-            return { cloudtalkSec: null, callgearSec: null };
+        ? getAnalyticsUnansweredWaitSeconds(allManagers, department, from, to).catch((e) => {
+            console.error("[Dashboard] unanswered wait failed:", e);
+            return null;
           })
-        : Promise.resolve({ cloudtalkSec: null, callgearSec: null }),
+        : Promise.resolve(null),
       department === "b2b"
         ? getAnalyticsSlaFirstCallMinutes(department, from, to).catch((e) => {
             console.error("[Dashboard] sla first-call failed:", e);
@@ -719,6 +718,10 @@ async function buildDashboardResponse(
           // B2B per-manager columns.
           outgoingConnected: cm?.outgoingConnected ?? 0,
           avgWaitSeconds: cm?.avgWaitSeconds ?? 0,
+          // Веса/среднее для клиентского пересчёта плитки «Ожидание»
+          // (неотвеченные исходящие) при фильтре «Менеджеры».
+          unansweredWaitSeconds: cm?.unansweredWaitSeconds ?? 0,
+          unansweredOutCount: cm?.unansweredOutCount ?? 0,
           slaFirstCallMin: slaByManager.get(mgr.id)?.avgMin ?? 0,
           // Веса для клиентского пересчёта плиток при фильтре «Менеджеры»:
           // SLA — взвешенное среднее по числу лидов, Потерянные — сумма.
@@ -809,11 +812,10 @@ async function buildDashboardResponse(
         outgoingTotal: todaySummary.outgoingTotal,
         // Outgoing answered + answer-wait + first-call SLA drive the B2B
         // 7-tile layout. outgoingConnected sums fine across managers;
-        // «Ожидание» — две цифры по формулам кабинетов телефоний
-        // (см. getAnalyticsCabinetWaitSeconds); null на B2G и в пустых периодах.
+        // «Ожидание» = среднее гудков в неотвеченных исходящих
+        // (см. getAnalyticsUnansweredWaitSeconds); null на B2G и без недозвонов.
         outgoingConnected: todaySummary.outgoingConnected ?? 0,
-        avgWaitCloudtalkSec: cabinetWait.cloudtalkSec,
-        avgWaitCallgearSec: cabinetWait.callgearSec,
+        unansweredWaitSec,
         slaFirstCallMin,
         lostCalls: lostCallsRes.total,
         overdueTasks: totalOverdue,
