@@ -86,23 +86,52 @@ function touchKind(t: ClientTouch): { label: string; Icon: typeof Phone } {
   return { label: t.type || "Касание", Icon: Activity };
 }
 
+// Маркеры проведённых, но НЕ оценённых ролевок (score=null). Причина — в tooltip.
+const NOT_SCORED_MARK: Record<
+  "insufficient" | "degenerate",
+  { ch: string; cls: string; title: string }
+> = {
+  insufficient: {
+    ch: "○",
+    cls: "text-slate-500",
+    title:
+      "Ролевка проведена, но оценить не удалось: мало материала — клиент дал мало самостоятельных немецких ответов, недостаточно для оценки по 6 критериям.",
+  },
+  degenerate: {
+    ch: "⚠",
+    cls: "text-amber-500",
+    title:
+      "Ролевка проведена, но сбой авто-оценки — автооценка не сработала (Grok вернул пустой результат после ретраев). Стоит перепроверить.",
+  },
+};
+
 function SideDynamics({ label, side }: { label: string; side: ClientSideReadiness }) {
+  const total = side.attempts.length + side.notScored.length;
   return (
     <div className="flex items-center justify-between text-sm py-1.5">
       <span className="text-slate-400">Ролевка {label}</span>
-      {side.attempts.length === 0 ? (
+      {total === 0 ? (
         <span className="text-slate-600">нет</span>
       ) : (
         <span className="inline-flex items-center gap-1.5 tabular-nums">
           {side.attempts.map((s, i) => (
-            <span key={i} className="inline-flex items-center gap-1.5">
+            <span key={`s${i}`} className="inline-flex items-center gap-1.5">
               {i > 0 && <span className="text-slate-600">→</span>}
               <span className={`font-semibold ${scoreColor(s)}`}>{s}</span>
             </span>
           ))}
-          <span className="text-[11px] text-slate-500 ml-1">
-            (попыток: {side.attempts.length})
-          </span>
+          {side.notScored.map((kind, j) => {
+            const m = NOT_SCORED_MARK[kind];
+            return (
+              <span key={`n${j}`} className="inline-flex items-center gap-1.5">
+                {side.attempts.length + j > 0 && <span className="text-slate-600">→</span>}
+                <span className={`font-semibold cursor-help ${m.cls}`} title={m.title}>
+                  {m.ch}
+                </span>
+              </span>
+            );
+          })}
+          <span className="text-[11px] text-slate-500 ml-1">(попыток: {total})</span>
         </span>
       )}
     </div>

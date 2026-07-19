@@ -6,7 +6,10 @@
  * Grok оценивает КЛИЕНТА в ролевке внутри звонков d2_berater / d2_berater2 →
  * score_5 (1..5) + breakdown. См. dev_docs/funnel/02-ЧТО-СДЕЛАНО-ЧТО-НУЖНО.md §3.4.
  *
- * Зеркалим ТОЛЬКО roleplay_present=true (реально оценённые ролевки).
+ * Зеркалим roleplay_present=true (оценённые) И roleplay_present=false, где ролевка
+ * РЕАЛЬНО была, но балл не выставлен (insufficient — мало материала / degenerate —
+ * сбой авто-оценки). Исключаем только «ролевка не проведена» (нечего показывать).
+ * У не-оценённых score_5/score_percent = null, различаем по gate_reason.
  * Окно — по `client_evaluations.created_at` (когда ОКК записал оценку, ~через 2ч
  * после звонка), НЕ по дате звонка: иначе инкрементальный тик пропустил бы
  * оценки, появившиеся позже своего звонка.
@@ -59,7 +62,12 @@ export async function syncClientRoleplays(
       ce.gate_reason                                              AS gate_reason
     FROM client_evaluations ce
     JOIN calls c ON c.id = ce.call_id
-    WHERE ce.roleplay_present = true
+    WHERE (
+        ce.roleplay_present = true
+        -- ролевка была, но не оценена (мало материала / degenerate) — показываем с причиной;
+        -- «ролевка не проведена» (менеджерский pre-gate) исключаем — показывать нечего.
+        OR (ce.roleplay_present = false AND ce.gate_reason NOT ILIKE '%не проведена%')
+      )
       AND ce.created_at >= ${fromDate}
       AND ce.created_at <= ${toDate}
   `);

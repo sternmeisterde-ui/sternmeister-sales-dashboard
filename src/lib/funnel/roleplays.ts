@@ -5,8 +5,7 @@
  * client_evaluations из ОКК). Здесь — только чтение + агрегаты «готовности»
  * клиента по сторонам ДЦ (dc) / АА (aa), как требует ТЗ §7.4 / §8.
  *
- * Готовность НЕ предиктор гутшайна (калибровка ОКК AUC~0.51) — это индикатор
- * подготовленности клиента. См. dev_docs/funnel/02-ЧТО-СДЕЛАНО-ЧТО-НУЖНО.md §3.4.
+ * Индикатор подготовленности клиента. См. dev_docs/funnel/02-ЧТО-СДЕЛАНО-ЧТО-НУЖНО.md §3.4.
  */
 
 import { sql } from "drizzle-orm";
@@ -18,6 +17,9 @@ export interface RoleplayAttempt {
   score5: number | null;
   scorePercent: number | null;
   at: string | null; // ISO/text дата звонка-ролевки
+  // Для не-оценённых (score5=null): почему балла нет. «Degenerate…» = сбой
+  // авто-оценки; иначе (напр. «Недостаточно ролевки…») = мало материала.
+  gateReason: string | null;
 }
 
 export interface SideReadiness {
@@ -41,6 +43,7 @@ type RoleplayRow = {
   score_5: number | null;
   score_percent: number | null;
   roleplay_at: string | null;
+  gate_reason: string | null;
 };
 
 function emptySide(): SideReadiness {
@@ -67,7 +70,7 @@ export async function getRoleplaysForLeads(
   const rows = unwrapRows<RoleplayRow>(
     await analyticsDb.execute(sql`
       SELECT lead_id, side, attempt, score_5, score_percent,
-             roleplay_at::text AS roleplay_at
+             roleplay_at::text AS roleplay_at, gate_reason
       FROM analytics.client_roleplays
       WHERE lead_id IN (${sql.raw(ids.join(","))})
       ORDER BY lead_id, side, attempt NULLS LAST, roleplay_at
@@ -87,6 +90,7 @@ export async function getRoleplaysForLeads(
       score5: r.score_5,
       scorePercent: r.score_percent,
       at: r.roleplay_at,
+      gateReason: r.gate_reason,
     });
   }
 

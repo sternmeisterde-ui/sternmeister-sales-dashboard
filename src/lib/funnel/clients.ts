@@ -85,6 +85,11 @@ export interface ClientSideReadiness {
   latest: number | null;
   avg: number | null;
   attempts: number[];
+  /** Ролевки, которые ПРОВЕДЕНЫ, но не оценены (score=null), по причине:
+   *  'insufficient' — мало материала (мало самост. нем. ответов),
+   *  'degenerate'   — сбой авто-оценки (Grok вернул пусто после ретраев).
+   *  В карточке рисуются серым маркером после баллов. Порядок = как в attempts. */
+  notScored: Array<"insufficient" | "degenerate">;
 }
 
 export interface ClientRow {
@@ -477,16 +482,27 @@ function normalizeBucket(raw: string | null): LanguageBucket {
 
 function sideReadiness(
   side:
-    | { latestScore5: number | null; avgScore5: number | null; attempts: Array<{ score5: number | null }> }
+    | {
+        latestScore5: number | null;
+        avgScore5: number | null;
+        attempts: Array<{ score5: number | null; gateReason?: string | null }>;
+      }
     | undefined
 ): ClientSideReadiness {
-  if (!side) return { latest: null, avg: null, attempts: [] };
+  if (!side) return { latest: null, avg: null, attempts: [], notScored: [] };
   return {
     latest: side.latestScore5,
     avg: side.avgScore5,
     attempts: side.attempts
       .map((a) => a.score5)
       .filter((s): s is number => s !== null),
+    notScored: side.attempts
+      .filter((a) => a.score5 === null)
+      .map((a) =>
+        (a.gateReason ?? "").toLowerCase().includes("degenerate")
+          ? "degenerate"
+          : "insufficient",
+      ),
   };
 }
 
