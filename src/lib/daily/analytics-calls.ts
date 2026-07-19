@@ -960,52 +960,100 @@ async function fetchB2bTileDetails(
   };
 }
 
-export async function getAnalyticsAvgWaitSeconds(
+/** Плитка «Ожидание» — по формулам КАБИНЕТОВ телефоний (сверяемость 1в1). */
+export interface CabinetWaitSeconds {
+  /** CloudTalk Analytics «Avg. waiting time»: очередь ВХОДЯЩИХ (включая
+   *  неотвеченные) на линиях отдела. null = входящих в периоде не было. */
+  cloudtalkSec: number | null;
+  /** CallGear «Время ожидания ответа»: среднее по ВСЕМ звонкам агентов
+   *  отдела, включая недозвоны (там wait = вся длительность гудков). */
+  callgearSec: number | null;
+}
+
+/**
+ * Ожидание ответа по определениям кабинетов телефоний — запрос Рузанны
+ * «сделать как в CallGear и CloudTalk» (2026-07-20): РОП сверяет плитку с
+ * их дашбордами, поэтому формулы скопированы, а не унифицированы.
+ *
+ * Реверс-инжиниринг (сверено по сырым CDR и кабинетам за 14.07 и 19.07):
+ *   • CloudTalk «Avg. waiting time» считает ТОЛЬКО входящие (включая
+ *     неотвеченные — у них ждал клиент); фильтр Call direction на виджет
+ *     не действует, скоуп группы аппроксимируем линиями KOM%/GOS%.
+ *     14.07: наши 10.1с vs кабинет 10s; 19.07: 8.0с vs 9s (±1с — группа
+ *     очереди ≠ строго линии).
+ *   • CallGear «Время ожидания ответа» — среднее по всем звонкам агентов,
+ *     включая недозвоны. 14.07: наши 30.2с vs кабинет 31s.
+ * Прежняя метрика (avg по отвеченным звонкам менеджеров) осталась только
+ * в per-manager колонке таблицы (fetchCallMetricsByMaster.avg_wait).
+ */
+export async function getAnalyticsCabinetWaitSeconds(
   managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
-): Promise<number> {
+): Promise<CabinetWaitSeconds> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(managers, fromTs, toTs));
+  const cacheKey = `cabinet-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v1`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchCabinetWaitSeconds(managers, dept, fromTs, toTs));
 }
 
-async function fetchAvgWaitSeconds(
+async function fetchCabinetWaitSeconds(
   managers: Array<{ id: string; name: string }>,
+  dept: "b2g" | "b2b",
   fromTs: number,
   toTs: number,
-): Promise<number> {
+): Promise<CabinetWaitSeconds> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
+  const linePrefix = dept === "b2b" ? "KOM%" : "GOS%";
   const names: string[] = [];
   for (const m of managers) {
     names.push(m.name);
     for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
   }
-  if (names.length === 0) return 0;
-  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
-  const result = await (analyticsDb as unknown as {
+  const db = analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ avg_wait: string | number | null }>(sql`
+  };
+
+  const ctPromise = db.execute<{ avg_wait: string | number | null }>(sql`
     WITH deduped AS (
-      SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, duration, wait_seconds
+      SELECT DISTINCT ON (communication_id) communication_id, wait_seconds
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        AND manager IN (${nameList})
+        AND communication_id LIKE 'ct:%'
+        AND communication_type = 'call_in'
+        AND line_name ILIKE ${linePrefix}
       ORDER BY communication_id, lead_id NULLS LAST
     )
-    SELECT AVG(wait_seconds)::float AS avg_wait
-    FROM deduped
-    WHERE communication_type LIKE 'call%' AND duration >= 1
+    SELECT AVG(wait_seconds)::float AS avg_wait FROM deduped
   `);
 
-  const v = result.rows[0]?.avg_wait;
-  return v == null ? 0 : Math.round(Number(v));
+  const cgPromise = names.length === 0
+    ? Promise.resolve({ rows: [{ avg_wait: null }] })
+    : db.execute<{ avg_wait: string | number | null }>(sql`
+        WITH deduped AS (
+          SELECT DISTINCT ON (communication_id) communication_id, wait_seconds
+          FROM analytics.communications
+          WHERE created_at >= ${fromDate}
+            AND created_at <= ${toDate}
+            AND communication_id LIKE 'cg-leg:%'
+            AND communication_type LIKE 'call%'
+            AND manager IN (${sql.join(names.map((n) => sql`${n}`), sql`, `)})
+          ORDER BY communication_id, lead_id NULLS LAST
+        )
+        SELECT AVG(wait_seconds)::float AS avg_wait FROM deduped
+      `);
+
+  const [ct, cg] = await Promise.all([ctPromise, cgPromise]);
+  const toSec = (v: string | number | null | undefined) =>
+    v == null ? null : Math.round(Number(v));
+  return {
+    cloudtalkSec: toSec(ct.rows[0]?.avg_wait),
+    callgearSec: toSec(cg.rows[0]?.avg_wait),
+  };
 }
 
 /**

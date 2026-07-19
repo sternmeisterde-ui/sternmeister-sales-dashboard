@@ -45,7 +45,11 @@ interface TodayMetrics {
   outgoingTotal: number;
   // B2B tile additions (0 / absent on B2G).
   outgoingConnected?: number;
-  avgWaitSeconds?: number;
+  // «Ожидание» — по формулам кабинетов телефоний (sync-запрос Рузанны):
+  // CloudTalk = очередь входящих KOM-линий (вкл. неотвеченные),
+  // CallGear = все звонки агентов вкл. недозвоны. null = данных нет.
+  avgWaitCloudtalkSec?: number | null;
+  avgWaitCallgearSec?: number | null;
   slaFirstCallMin?: number;
   lostCalls?: number;
   overdueTasks: number;
@@ -624,13 +628,14 @@ export default function DashboardTab({
           const answeredOut = sub === null ? m.outgoingConnected ?? 0 : sub.reduce((s, r) => s + r.outgoingConnected, 0);
           const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
           const totalMinutes = sub === null ? m.totalMinutes : sub.reduce((s, r) => s + r.totalMinutes, 0);
-          let waitSec = m.avgWaitSeconds ?? 0;
+          // «Ожидание» — формулы кабинетов, НЕ пересчитывается фильтром
+          // «Менеджеры»: очередь входящих CloudTalk не принадлежит менеджеру
+          // (трубку никто не взял), а CG-цифра сверяется с кабинетом только
+          // целиком по отделу. Показ: «CT / CG».
+          const fmtWait = (v: number | null | undefined) => (v == null ? "—" : `${v}с`);
+          const waitValue = `${fmtWait(m.avgWaitCloudtalkSec)} / ${fmtWait(m.avgWaitCallgearSec)}`;
           let slaMin = m.slaFirstCallMin ?? 0;
           if (sub !== null) {
-            const waitWeight = sub.reduce((s, r) => s + r.callsConnected, 0);
-            waitSec = waitWeight > 0
-              ? Math.round(sub.reduce((s, r) => s + r.avgWaitSeconds * r.callsConnected, 0) / waitWeight)
-              : 0;
             const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
             slaMin = slaWeight > 0
               ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
@@ -668,9 +673,10 @@ export default function DashboardTab({
                 tip="Суммарная длительность по всем звонкам, как её считают кабинеты телефоний: CloudTalk — время разговора, CallGear — полное время звонка."
               />
               <CallMetricTile
-                icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
+                icon={Timer} label="Ожидание" color="blue" totalValue={waitValue}
+                totalCaption="CloudTalk / CallGear" rows={null}
                 onClick={() => openTileDetail("wait")}
-                tip="Сколько в среднем ждали ответа: время от набора до снятия трубки, по отвеченным звонкам менеджеров отдела. Клик — разбивка по платформам и менеджерам."
+                tip="Как в кабинетах телефоний. CloudTalk — среднее ожидание по входящим на KOM-линии, включая неотвеченные (их виджет «Avg. waiting time» считает только входящие). CallGear — среднее «время ожидания ответа» по всем звонкам агентов, включая недозвоны. На фильтр «Менеджеры» не реагирует — цифры сверяются с кабинетами целиком по отделу. Клик — разбивка дозвона исходящих по платформам и менеджерам."
               />
               <CallMetricTile
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
@@ -1159,6 +1165,14 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
   if (kind === "wait") {
     return (
       <div className="flex flex-col gap-5">
+        {/* Плитка показывает формулы КАБИНЕТОВ (CT — очередь входящих,
+            CG — все звонки с недозвонами), а эта разбивка — внутреннюю
+            метрику дозвона исходящих; поясняем, чтобы числа не сверяли лоб в лоб. */}
+        <p className="text-xs text-slate-500">
+          Здесь — сколько ждали ответа в <span className="text-slate-300">отвеченных</span> звонках
+          менеджеров (внутренняя метрика дозвона). Цифры на плитке считаются иначе — по формулам
+          кабинетов CloudTalk/CallGear, поэтому могут не совпадать с этой разбивкой.
+        </p>
         <div>
           <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">По платформам</h4>
           <div className="grid grid-cols-2 gap-2">
