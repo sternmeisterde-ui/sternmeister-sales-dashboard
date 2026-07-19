@@ -16,7 +16,7 @@ import type {
 } from "@/lib/funnel/clients";
 import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
 import InfoPopover from "@/components/funnel/InfoPopover";
-import ClientDrawer from "@/components/funnel/ClientDrawer";
+import ClientDrawer, { NOT_SCORED_MARK } from "@/components/funnel/ClientDrawer";
 import FilterSelect from "@/components/funnel/FilterSelect";
 
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
@@ -79,14 +79,26 @@ function okkColor(okk: number): string {
 }
 
 function SideCell({ side }: { side: ClientSideReadiness }) {
-  if (side.attempts.length === 0) return <span className="text-slate-600">—</span>;
-  const last = side.attempts[side.attempts.length - 1];
+  // Прочерк только когда ролевок не было вовсе. Проведённые, но НЕ оценённые
+  // (score=null) показываем маркером ○/⚠ — иначе такой клиент выглядел бы как
+  // «ролевки не было» (см. 104 лида только-с-неоценёнными).
+  if (side.attempts.length === 0 && side.notScored.length === 0)
+    return <span className="text-slate-600">—</span>;
+  const last = side.attempts.length > 0 ? side.attempts[side.attempts.length - 1] : null;
   return (
     <span className="inline-flex items-center gap-1 tabular-nums">
-      <span className={`font-semibold ${scoreColor(last)}`}>{last}</span>
+      {last !== null && <span className={`font-semibold ${scoreColor(last)}`}>{last}</span>}
       {side.attempts.length > 1 && (
         <span className="text-[10px] text-slate-500">[{side.attempts.join("→")}]</span>
       )}
+      {side.notScored.map((kind, j) => {
+        const m = NOT_SCORED_MARK[kind];
+        return (
+          <span key={`n${j}`} className={`cursor-help ${m.cls}`} title={m.title}>
+            {m.ch}
+          </span>
+        );
+      })}
     </span>
   );
 }

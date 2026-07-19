@@ -87,7 +87,8 @@ function touchKind(t: ClientTouch): { label: string; Icon: typeof Phone } {
 }
 
 // Маркеры проведённых, но НЕ оценённых ролевок (score=null). Причина — в tooltip.
-const NOT_SCORED_MARK: Record<
+// Экспортируется — тот же маркер рисуется в компактной ячейке списка (ClientsView).
+export const NOT_SCORED_MARK: Record<
   "insufficient" | "degenerate",
   { ch: string; cls: string; title: string }
 > = {

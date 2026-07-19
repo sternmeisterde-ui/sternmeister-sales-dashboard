@@ -110,6 +110,12 @@ export interface UserCallMetrics {
   // Optional: analytics-sourced per-manager path only. Drives the B2B
   // per-manager «Ожидание» column. Not summed (it's an average).
   avgWaitSeconds?: number;
+  // «Ожидание» B2B-плитки (переопределение 2026-07-20): среднее время гудков
+  // в НЕОТВЕЧЕННЫХ исходящих этого менеджера + их количество (вес для
+  // клиентского пересчёта при фильтре «Менеджеры»). Optional: только
+  // analytics-путь. Среднее не суммируется — только взвешенно.
+  unansweredWaitSeconds?: number;
+  unansweredOutCount?: number;
 }
 
 export interface UserLeadMetrics {

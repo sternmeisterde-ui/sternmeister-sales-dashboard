@@ -37,7 +37,7 @@ import {
   getManagersWithKommoForPeriod,
   getAnalyticsTeamCallMetricsByPipeline,
   getAnalyticsDailyTrendByPipeline,
-  getAnalyticsAvgWaitSeconds,
+  getAnalyticsUnansweredWaitSeconds,
   getAnalyticsSlaFirstCallMinutes,
   getAnalyticsSlaFirstCallMinutesByManager,
   getAnalyticsLostCallsByManager,
@@ -475,7 +475,9 @@ export async function GET(req: NextRequest) {
     // v13 cache-key bump (2026-07-14): perManager rows grew slaLeadCount +
     // lostCalls (веса для клиентского фильтра «Менеджеры») — v12-кэш отдавал
     // бы строки без этих полей. (v12, 2026-04-29: Berlin boundaries.)
-    const cacheKey = `dashboard-response:v13:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    // v14 (2026-07-20): avgWaitSeconds → avgWaitCloudtalkSec/avgWaitCallgearSec
+    // (формулы кабинетов телефоний) — v13-кэш отдавал бы старый shape.
+    const cacheKey = `dashboard-response:v14:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
       buildDashboardResponse(department, vertical, period, dateStr, fromStr, toStr)
     );
@@ -544,7 +546,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, avgWaitSeconds, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -593,15 +595,15 @@ async function buildDashboardResponse(
             return null;
           })
         : Promise.resolve(null),
-      // B2B-only KPI tiles: average answer-wait (sec) and time-to-first-call
-      // SLA (min). Cheap dept-wide aggregates; skipped on B2G (those tiles
-      // aren't shown there).
+      // B2B-only KPI tiles: «Ожидание» = среднее время гудков в неотвеченных
+      // исходящих (см. getAnalyticsUnansweredWaitSeconds) and time-to-first-
+      // call SLA (min). Cheap dept-wide aggregates; skipped on B2G.
       department === "b2b"
-        ? getAnalyticsAvgWaitSeconds(allManagers, department, from, to).catch((e) => {
-            console.error("[Dashboard] avg wait failed:", e);
-            return 0;
+        ? getAnalyticsUnansweredWaitSeconds(allManagers, department, from, to).catch((e) => {
+            console.error("[Dashboard] unanswered wait failed:", e);
+            return null;
           })
-        : Promise.resolve(0),
+        : Promise.resolve(null),
       department === "b2b"
         ? getAnalyticsSlaFirstCallMinutes(department, from, to).catch((e) => {
             console.error("[Dashboard] sla first-call failed:", e);
@@ -716,6 +718,10 @@ async function buildDashboardResponse(
           // B2B per-manager columns.
           outgoingConnected: cm?.outgoingConnected ?? 0,
           avgWaitSeconds: cm?.avgWaitSeconds ?? 0,
+          // Веса/среднее для клиентского пересчёта плитки «Ожидание»
+          // (неотвеченные исходящие) при фильтре «Менеджеры».
+          unansweredWaitSeconds: cm?.unansweredWaitSeconds ?? 0,
+          unansweredOutCount: cm?.unansweredOutCount ?? 0,
           slaFirstCallMin: slaByManager.get(mgr.id)?.avgMin ?? 0,
           // Веса для клиентского пересчёта плиток при фильтре «Менеджеры»:
           // SLA — взвешенное среднее по числу лидов, Потерянные — сумма.
@@ -806,9 +812,10 @@ async function buildDashboardResponse(
         outgoingTotal: todaySummary.outgoingTotal,
         // Outgoing answered + answer-wait + first-call SLA drive the B2B
         // 7-tile layout. outgoingConnected sums fine across managers;
-        // avgWaitSeconds / slaFirstCallMin are dept-wide averages (0 on B2G).
+        // «Ожидание» = среднее гудков в неотвеченных исходящих
+        // (см. getAnalyticsUnansweredWaitSeconds); null на B2G и без недозвонов.
         outgoingConnected: todaySummary.outgoingConnected ?? 0,
-        avgWaitSeconds,
+        unansweredWaitSec,
         slaFirstCallMin,
         lostCalls: lostCallsRes.total,
         overdueTasks: totalOverdue,

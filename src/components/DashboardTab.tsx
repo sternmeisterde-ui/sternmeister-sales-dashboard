@@ -45,7 +45,9 @@ interface TodayMetrics {
   outgoingTotal: number;
   // B2B tile additions (0 / absent on B2G).
   outgoingConnected?: number;
-  avgWaitSeconds?: number;
+  // «Ожидание» (переопределение 2026-07-20): среднее время гудков в
+  // НЕОТВЕЧЕННЫХ исходящих менеджеров отдела, обе платформы. null = нет данных.
+  unansweredWaitSec?: number | null;
   slaFirstCallMin?: number;
   lostCalls?: number;
   overdueTasks: number;
@@ -79,6 +81,9 @@ interface PerManagerRow {
   // B2B per-manager columns.
   outgoingConnected: number;
   avgWaitSeconds: number;
+  // Плитка «Ожидание» (недозвоны): среднее гудков + вес для пересчёта фильтром.
+  unansweredWaitSeconds?: number;
+  unansweredOutCount?: number;
   slaFirstCallMin: number;
   // Веса для пересчёта плиток при фильтре «Менеджеры» (см. selectedManagers):
   // SLA — взвешенное среднее по slaLeadCount, Потерянные — сумма lostCalls.
@@ -141,8 +146,9 @@ interface B2bTileDetails {
   platforms: Array<{ platform: string; outgoing: number; connected: number; talkSeconds: number }>;
   managerPlatforms: Array<{ manager: string; platform: string; outgoing: number; connected: number }>;
   hourly: Array<{ hour: number; outgoing: number; connected: number }>;
-  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; answered: number }>;
-  waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
+  // Ожидание — среднее гудков в НЕОТВЕЧЕННЫХ исходящих (метрика плитки).
+  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; unanswered: number }>;
+  waitManagers: Array<{ manager: string; avgWaitSec: number; unanswered: number }>;
 }
 
 const SLA_STATUS_LABEL: Record<string, { label: string; cls: string }> = {
@@ -624,13 +630,16 @@ export default function DashboardTab({
           const answeredOut = sub === null ? m.outgoingConnected ?? 0 : sub.reduce((s, r) => s + r.outgoingConnected, 0);
           const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
           const totalMinutes = sub === null ? m.totalMinutes : sub.reduce((s, r) => s + r.totalMinutes, 0);
-          let waitSec = m.avgWaitSeconds ?? 0;
+          // «Ожидание» = среднее гудков в неотвеченных исходящих. При фильтре
+          // «Менеджеры» — взвешенное среднее по выбранным (вес = количество
+          // их недозвонов).
+          let waitSec: number | null = m.unansweredWaitSec ?? null;
           let slaMin = m.slaFirstCallMin ?? 0;
           if (sub !== null) {
-            const waitWeight = sub.reduce((s, r) => s + r.callsConnected, 0);
-            waitSec = waitWeight > 0
-              ? Math.round(sub.reduce((s, r) => s + r.avgWaitSeconds * r.callsConnected, 0) / waitWeight)
-              : 0;
+            const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
+            waitSec = unansWeight > 0
+              ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
+              : null;
             const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
             slaMin = slaWeight > 0
               ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
@@ -668,9 +677,11 @@ export default function DashboardTab({
                 tip="Суммарная длительность по всем звонкам, как её считают кабинеты телефоний: CloudTalk — время разговора, CallGear — полное время звонка."
               />
               <CallMetricTile
-                icon={Timer} label="Ожидание" color="blue" totalValue={`${waitSec}с`} rows={null}
+                icon={Timer} label="Ожидание" color="blue"
+                totalValue={waitSec == null ? "—" : `${waitSec}с`}
+                totalCaption="по недозвонам" rows={null}
                 onClick={() => openTileDetail("wait")}
-                tip="Сколько в среднем ждали ответа: время от набора до снятия трубки, по отвеченным звонкам менеджеров отдела. Клик — разбивка по платформам и менеджерам."
+                tip="Сколько в среднем ждём гудков в НЕОТВЕЧЕННЫХ исходящих, прежде чем сбросить. Обе платформы (CloudTalk + CallGear). Показатель настойчивости дозвона: слишком маленькое значение — сбрасываем слишком рано. Клик — разбивка ожидания по платформам и менеджерам."
               />
               <CallMetricTile
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
@@ -1159,6 +1170,11 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
   if (kind === "wait") {
     return (
       <div className="flex flex-col gap-5">
+        <p className="text-xs text-slate-500">
+          Сколько в среднем ждём гудков в <span className="text-slate-300">неотвеченных</span> исходящих,
+          прежде чем сбросить. Маленькое среднее у менеджера — вероятно, сбрасывает слишком рано и
+          недобирает дозвон.
+        </p>
         <div>
           <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">По платформам</h4>
           <div className="grid grid-cols-2 gap-2">
@@ -1166,7 +1182,7 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
               <div key={p.platform} className="rounded-xl border border-white/5 bg-slate-950/50 p-3">
                 <div className="text-xs text-slate-400">{p.platform}</div>
                 <div className="text-xl font-black text-slate-100 mt-0.5">{fmtSec(p.avgWaitSec)}</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">макс {fmtSec(p.maxWaitSec)} · {p.answered} отвеч.</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">макс {fmtSec(p.maxWaitSec)} · {p.unanswered} недозв.</div>
               </div>
             ))}
           </div>
@@ -1178,7 +1194,7 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
               <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
                 <th className="py-1.5 pr-3 font-medium">Менеджер</th>
                 <th className="py-1.5 pr-3 font-medium text-right">Ср. ожидание</th>
-                <th className="py-1.5 font-medium text-right">Отвеченных</th>
+                <th className="py-1.5 font-medium text-right">Недозвонов</th>
               </tr>
             </thead>
             <tbody>
@@ -1186,15 +1202,16 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
                 <tr key={m.manager} className="border-b border-white/5">
                   <td className="py-1.5 pr-3 text-slate-200">{m.manager}</td>
                   <td className="py-1.5 pr-3 text-right tabular-nums text-slate-300">{fmtSec(m.avgWaitSec)}</td>
-                  <td className="py-1.5 text-right tabular-nums text-slate-400">{m.answered}</td>
+                  <td className="py-1.5 text-right tabular-nums text-slate-400">{m.unanswered}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
         <p className="text-[11px] text-slate-600">
-          Ожидание = от набора до снятия трубки, по отвеченным звонкам. CloudTalk и CallGear
-          регистрируют момент ответа по-разному — сравнение платформ показывает эту разницу.
+          Ожидание недозвона: CloudTalk — поле waiting_time; CallGear — вся длительность
+          безответного звонка (гудки). В кабинетах телефоний такой метрики нет — их виджеты
+          «ожидания» считают другое (очередь входящих / все звонки).
         </p>
       </div>
     );

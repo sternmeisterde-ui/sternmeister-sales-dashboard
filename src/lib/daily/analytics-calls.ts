@@ -57,6 +57,8 @@ interface AnalyticsRow {
   missed_incoming: string | number;
   total_duration_s: string | number;
   avg_wait_seconds: string | number | null;
+  avg_wait_unanswered: string | number | null;
+  unanswered_out: string | number;
 }
 
 // Что суммировать в «Длительность / На линии».
@@ -169,7 +171,9 @@ async function fetchCallMetricsByMaster(
       COUNT(*) FILTER (WHERE communication_type = 'call_in')                                        AS incoming_total,
       COUNT(*) FILTER (WHERE communication_type = 'call_in' AND (duration IS NULL OR duration < 1)) AS missed_incoming,
       COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type LIKE 'call%'), 0)        AS total_duration_s,
-      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)            AS avg_wait_seconds
+      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)            AS avg_wait_seconds,
+      AVG(wait_seconds) FILTER (WHERE communication_type = 'call_out' AND duration < 1)             AS avg_wait_unanswered,
+      COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration < 1)                      AS unanswered_out
     FROM deduped
     GROUP BY manager
   `);
@@ -192,6 +196,8 @@ async function fetchCallMetricsByMaster(
       outgoingTotal: Number(row.outgoing_total),
       outgoingConnected: Number(row.outgoing_connected),
       avgWaitSeconds: row.avg_wait_seconds == null ? 0 : Math.round(Number(row.avg_wait_seconds)),
+      unansweredWaitSeconds: row.avg_wait_unanswered == null ? 0 : Math.round(Number(row.avg_wait_unanswered)),
+      unansweredOutCount: Number(row.unanswered_out ?? 0),
     });
   }
 
@@ -801,10 +807,11 @@ export interface B2bTileDetails {
   managerPlatforms: Array<{ manager: string; platform: string; outgoing: number; connected: number }>;
   /** Почасовка по Берлину: наборы/принятые за каждый час с активностью. */
   hourly: Array<{ hour: number; outgoing: number; connected: number }>;
-  /** Ожидание ответа по платформам (по отвеченным звонкам). */
-  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; answered: number }>;
-  /** Ожидание по менеджерам (канонические имена). */
-  waitManagers: Array<{ manager: string; avgWaitSec: number; answered: number }>;
+  /** Ожидание по платформам — среднее гудков в НЕОТВЕЧЕННЫХ исходящих
+   *  (метрика плитки «Ожидание», переопределение 2026-07-20). */
+  waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; unanswered: number }>;
+  /** То же по менеджерам (канонические имена). */
+  waitManagers: Array<{ manager: string; avgWaitSec: number; unanswered: number }>;
 }
 
 // B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
@@ -824,7 +831,8 @@ export async function getAnalyticsB2bTileDetails(
   toTs: number,
 ): Promise<B2bTileDetails> {
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `b2b-tile-details:${fromTs}:${toTs}:${managerIds}`;
+  // :v2 — wait-разбивка переехала с отвеченных на недозвоны (answered → unanswered).
+  const cacheKey = `b2b-tile-details:${fromTs}:${toTs}:${managerIds}:v2`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchB2bTileDetails(managers, fromTs, toTs));
 }
 
@@ -859,7 +867,7 @@ async function fetchB2bTileDetails(
   const result = await exec.execute<{
     platform: string; manager: string; hour: number;
     outgoing: string; connected: string; talk_s: string;
-    answered: string; avg_wait: string | number | null; max_wait: string | number | null;
+    unanswered: string; avg_wait: string | number | null; max_wait: string | number | null;
   }>(sql`
     WITH deduped AS (
       SELECT DISTINCT ON (communication_id)
@@ -877,9 +885,9 @@ async function fetchB2bTileDetails(
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                    AS outgoing,
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                  AS connected,
       COALESCE(SUM(${durationExpr("b2b")}) FILTER (WHERE communication_type = 'call_out' AND duration >= 1), 0) AS talk_s,
-      COUNT(*) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)                  AS answered,
-      AVG(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS avg_wait,
-      MAX(wait_seconds) FILTER (WHERE communication_type LIKE 'call%' AND duration >= 1)         AS max_wait
+      COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration < 1)                   AS unanswered,
+      AVG(wait_seconds) FILTER (WHERE communication_type = 'call_out' AND duration < 1)          AS avg_wait,
+      MAX(wait_seconds) FILTER (WHERE communication_type = 'call_out' AND duration < 1)          AS max_wait
     FROM deduped
     GROUP BY 1, 2, 3
   `);
@@ -888,8 +896,8 @@ async function fetchB2bTileDetails(
   const pf = new Map<string, { outgoing: number; connected: number; talkSeconds: number }>();
   const mp = new Map<string, { manager: string; platform: string; outgoing: number; connected: number }>();
   const hr = new Map<number, { outgoing: number; connected: number }>();
-  const wpf = new Map<string, { sumWait: number; maxWait: number; answered: number }>();
-  const wmg = new Map<string, { sumWait: number; answered: number }>();
+  const wpf = new Map<string, { sumWait: number; maxWait: number; unanswered: number }>();
+  const wmg = new Map<string, { sumWait: number; unanswered: number }>();
 
   for (const r of result.rows) {
     const platform = r.platform;
@@ -897,7 +905,7 @@ async function fetchB2bTileDetails(
     const outgoing = Number(r.outgoing);
     const connected = Number(r.connected);
     const talkS = Number(r.talk_s);
-    const answered = Number(r.answered);
+    const unanswered = Number(r.unanswered);
     const avgWait = r.avg_wait == null ? null : Number(r.avg_wait);
     const maxWait = r.max_wait == null ? null : Number(r.max_wait);
 
@@ -918,18 +926,18 @@ async function fetchB2bTileDetails(
       hr.set(r.hour, h);
     }
 
-    if (answered > 0 && avgWait != null) {
+    if (unanswered > 0 && avgWait != null) {
       if (KNOWN_PLATFORMS.has(platform)) {
-        const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, answered: 0 };
-        wp.sumWait += avgWait * answered;
+        const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, unanswered: 0 };
+        wp.sumWait += avgWait * unanswered;
         wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
-        wp.answered += answered;
+        wp.unanswered += unanswered;
         wpf.set(platform, wp);
       }
 
-      const wm = wmg.get(mgr) ?? { sumWait: 0, answered: 0 };
-      wm.sumWait += avgWait * answered;
-      wm.answered += answered;
+      const wm = wmg.get(mgr) ?? { sumWait: 0, unanswered: 0 };
+      wm.sumWait += avgWait * unanswered;
+      wm.unanswered += unanswered;
       wmg.set(mgr, wm);
     }
   }
@@ -945,38 +953,51 @@ async function fetchB2bTileDetails(
     waitPlatforms: [...wpf.entries()]
       .map(([platform, v]) => ({
         platform,
-        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
+        avgWaitSec: v.unanswered > 0 ? Math.round(v.sumWait / v.unanswered) : 0,
         maxWaitSec: Math.round(v.maxWait),
-        answered: v.answered,
+        unanswered: v.unanswered,
       }))
-      .sort((a, b) => b.answered - a.answered),
+      .sort((a, b) => b.unanswered - a.unanswered),
     waitManagers: [...wmg.entries()]
       .map(([manager, v]) => ({
         manager,
-        avgWaitSec: v.answered > 0 ? Math.round(v.sumWait / v.answered) : 0,
-        answered: v.answered,
+        avgWaitSec: v.unanswered > 0 ? Math.round(v.sumWait / v.unanswered) : 0,
+        unanswered: v.unanswered,
       }))
       .sort((a, b) => b.avgWaitSec - a.avgWaitSec),
   };
 }
 
-export async function getAnalyticsAvgWaitSeconds(
+/**
+ * «Ожидание» B2B-плитки (переопределение Рузанны 2026-07-20): среднее время
+ * гудков в НЕОТВЕЧЕННЫХ исходящих менеджеров отдела — «сколько мы ждём,
+ * прежде чем сбросить недозвон». Обе платформы вместе (CloudTalk waiting_time;
+ * CallGear duration−talk = у безответного звонка это вся длительность гудков).
+ * «Неотвеченный» = duration < 1 (duration в зеркале = чистый разговор).
+ *
+ * История: до этого плитка считала ожидание по отвеченным звонкам, затем
+ * один заход — по формулам кабинетов (CloudTalk-виджет считает очередь
+ * входящих и игнорирует направление; точная сверка невозможна — их
+ * группировка по очереди не отдаётся в CDR API). Итоговое решение — своя
+ * честная метрика по недозвонам. null = недозвонов в периоде не было.
+ */
+export async function getAnalyticsUnansweredWaitSeconds(
   managers: Array<{ id: string; name: string }>,
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
-): Promise<number> {
+): Promise<number | null> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `avg-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchAvgWaitSeconds(managers, fromTs, toTs));
+  const cacheKey = `unanswered-wait:${dept}:${fromTs}:${toTs}:${managerIds}:v1`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchUnansweredWaitSeconds(managers, fromTs, toTs));
 }
 
-async function fetchAvgWaitSeconds(
+async function fetchUnansweredWaitSeconds(
   managers: Array<{ id: string; name: string }>,
   fromTs: number,
   toTs: number,
-): Promise<number> {
+): Promise<number | null> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const names: string[] = [];
@@ -984,28 +1005,26 @@ async function fetchAvgWaitSeconds(
     names.push(m.name);
     for (const alias of NAME_ALIASES[m.name] ?? []) names.push(alias);
   }
-  if (names.length === 0) return 0;
-  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
+  if (names.length === 0) return null;
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ avg_wait: string | number | null }>(sql`
     WITH deduped AS (
-      SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, duration, wait_seconds
+      SELECT DISTINCT ON (communication_id) communication_id, wait_seconds
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
-        AND manager IN (${nameList})
+        AND communication_type = 'call_out'
+        AND duration < 1
+        AND manager IN (${sql.join(names.map((n) => sql`${n}`), sql`, `)})
       ORDER BY communication_id, lead_id NULLS LAST
     )
-    SELECT AVG(wait_seconds)::float AS avg_wait
-    FROM deduped
-    WHERE communication_type LIKE 'call%' AND duration >= 1
+    SELECT AVG(wait_seconds)::float AS avg_wait FROM deduped
   `);
 
   const v = result.rows[0]?.avg_wait;
-  return v == null ? 0 : Math.round(Number(v));
+  return v == null ? null : Math.round(Number(v));
 }
 
 /**
