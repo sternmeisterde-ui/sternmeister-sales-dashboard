@@ -14,14 +14,21 @@
  * месяцы, отсутствующие в файле, синк не трогает, поэтому перезапись блока
  * не стирает прошлое.
  *
- * Защита истории: месяцы РАНЬШЕ текущего (Berlin) из файла игнорируются —
- * иначе, если РОП при смене месяца сначала перепишет ячейки и лишь потом
- * заголовок, августовские смены легли бы поверх июльских дат. Правка
- * прошлого задним числом — осознанное действие: scripts/sync-b2b-schedule.ts
- * --allow-past. Изменения ТЕКУЩЕГО месяца подхватываются полной перезаписью:
- * для каждой пары (менеджер, месяц) строки месяца удаляются и вставляются
- * заново — в т.ч. очищая стёртые в файле ячейки. Строк других менеджеров
- * (b2g, Дейли-календарь) синк не касается.
+ * Защита истории (двухслойная):
+ *   1. Месяцы РАНЬШЕ текущего (Berlin) из файла игнорируются — иначе, если
+ *      РОП при смене месяца сначала перепишет ячейки и лишь потом заголовок,
+ *      августовские смены легли бы поверх июльских дат.
+ *   2. В ПОСЛЕДНИЕ 5 дней месяца замораживается и ТЕКУЩИЙ месяц — РОП обычно
+ *      готовит график нового месяца в конце старого, переписывая тот же блок;
+ *      без заморозки заготовка августа при заголовке «Июль» затёрла бы июль.
+ *      Будущие месяцы (после смены заголовка) пишутся всегда.
+ * Правка замороженного/прошлого — осознанное действие:
+ * scripts/sync-b2b-schedule.ts --allow-past (+ recompute-sla за период).
+ *
+ * Изменения текущего месяца (вне заморозки) подхватываются полной
+ * перезаписью: для каждой пары (менеджер, месяц) строки месяца удаляются и
+ * вставляются заново — в т.ч. очищая стёртые в файле ячейки. Строк других
+ * менеджеров (b2g, Дейли-календарь) синк не касается.
  *
  * Пишем: is_on_line (смена/выходной) + shift_start_time/shift_end_time +
  * schedule_value («8» = смена, «-» = выходной) — те же коды, что прежний
@@ -66,13 +73,25 @@ export interface B2bScheduleSyncResult {
   rowsWritten: number;
 }
 
-/** Текущий месяц по Берлину, YYYY-MM. */
-function currentBerlinMonth(): string {
+/** Сегодняшняя берлинская civil-дата, YYYY-MM-DD. */
+function todayBerlin(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Berlin",
     year: "numeric",
     month: "2-digit",
+    day: "2-digit",
   }).format(new Date());
+}
+
+// За сколько дней до конца месяца замораживать перезапись текущего месяца.
+const MONTH_END_FREEZE_DAYS = 5;
+
+/** Текущий месяц заморожен? Да, если до конца месяца осталось < N дней. */
+function isCurrentMonthFrozen(today: string): boolean {
+  const y = Number(today.slice(0, 4));
+  const m = Number(today.slice(5, 7));
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return lastDay - Number(today.slice(8, 10)) < MONTH_END_FREEZE_DAYS;
 }
 
 export async function syncB2bSchedule(
@@ -144,8 +163,11 @@ export async function syncB2bSchedule(
     .where(eq(masterManagers.department, "b2b"));
   const idByNorm = new Map(masters.map((m) => [normName(m.name), m.id]));
 
-  // Защита истории: прошедшие месяцы не переписываем (см. шапку файла).
-  const curMonth = currentBerlinMonth();
+  // Защита истории: прошедшие месяцы не переписываем; в последние 5 дней
+  // месяца заморожен и текущий (см. шапку файла).
+  const today = todayBerlin();
+  const curMonth = today.slice(0, 7);
+  const frozenCurrent = isCurrentMonthFrozen(today);
   const skippedPast = new Set<string>();
 
   let rowsWritten = 0;
@@ -165,7 +187,7 @@ export async function syncB2bSchedule(
       byMonth.get(mo)!.push(d);
     }
     for (const [mo, days] of byMonth) {
-      if (!opts.allowPastMonths && mo < curMonth) {
+      if (!opts.allowPastMonths && (mo < curMonth || (mo === curMonth && frozenCurrent))) {
         skippedPast.add(mo);
         continue;
       }
@@ -196,7 +218,9 @@ export async function syncB2bSchedule(
     console.warn(`[ETL] sync-b2b-schedule: не сматчены с master_managers: ${unmatched.join("; ")}`);
   }
   if (skippedPast.size > 0) {
-    console.log(`[ETL] sync-b2b-schedule: прошедшие месяцы пропущены (история в базе): ${[...skippedPast].join(", ")}`);
+    console.log(
+      `[ETL] sync-b2b-schedule: месяцы пропущены защитой (прошедшие/заморозка конца месяца): ${[...skippedPast].join(", ")}`,
+    );
   }
   console.log(
     `[ETL] sync-b2b-schedule: месяцы [${[...months].join(", ")}], менеджеров ${byManager.size - unmatched.length}/${byManager.size}, строк ${rowsWritten}`,
