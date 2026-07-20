@@ -83,6 +83,59 @@ export function calendarSeconds(startUtc: Date, endUtc: Date): number {
   return Math.max(0, Math.floor((endUtc.getTime() - startUtc.getTime()) / 1000));
 }
 
+/** Рабочий интервал одного берлинского дня в секундах от полуночи. */
+export interface DayWorkInterval {
+  startSec: number; // напр. 9*3600 для 09:00
+  endSec: number;   // напр. 18*3600 для 18:00
+}
+
+/**
+ * Рабочие секунды между двумя UTC-моментами по ПРОИЗВОЛЬНОМУ дневному графику:
+ * `dayInterval(ymd, isSunday)` возвращает рабочее окно конкретного берлинского
+ * дня или null (нерабочий). Той же итерацией по дням, что businessHoursSeconds
+ * (та функция — частный случай с константным окном Пн–Сб 09–18).
+ *
+ * Введена для «своего» SLA B2B (2026-07-20): рабочее время = график смен
+ * ответственного менеджера из файла РОПа (manager_schedule), с fallback на
+ * Пн–Сб 09–18 для дней вне графика — резолвер собирается в compute-sla.
+ */
+export function scheduleBusinessSeconds(
+  startUtc: Date,
+  endUtc: Date,
+  dayInterval: (ymd: string, isSunday: boolean) => DayWorkInterval | null,
+): number {
+  if (endUtc <= startUtc) return 0;
+
+  const startYMD = berlinYMD(startUtc);
+  const endYMD = berlinYMD(endUtc);
+
+  let total = 0;
+  let cur = new Date(startUtc);
+  let lastDay = "";
+  let guard = 1500; // ~4 года открытого лида — с запасом
+
+  while (guard-- > 0) {
+    const dayYMD = berlinYMD(cur);
+    if (dayYMD > endYMD) break;
+
+    if (dayYMD !== lastDay) {
+      lastDay = dayYMD;
+      const interval = dayInterval(dayYMD, !berlinIsWorkday(cur));
+      if (interval) {
+        const lo = dayYMD === startYMD ? berlinSecondOfDay(startUtc) : 0;
+        const hi = dayYMD === endYMD ? berlinSecondOfDay(endUtc) : 86400;
+        const s = Math.max(lo, interval.startSec);
+        const e = Math.min(hi, interval.endSec);
+        if (s < e) total += e - s;
+      }
+    }
+
+    cur = new Date(cur.getTime() + 24 * 3600 * 1000);
+  }
+
+  return total;
+}
+
 /**
  * Returns the UTC timestamp of `startHour`:00 Berlin on the Berlin calendar date of `d`.
  * Handles DST automatically (CEST=UTC+2, CET=UTC+1).
