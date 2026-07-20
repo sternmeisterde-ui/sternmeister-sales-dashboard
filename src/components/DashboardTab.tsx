@@ -687,7 +687,31 @@ export default function DashboardTab({
                 icon={Gauge} label="SLA" color="blue" totalValue={`${slaMin}м`} rows={null}
                 onClick={toggleSlaDetail}
                 tipAlign="right"
-                tip="Рабочее время от входа лида в статус «Новый лид» (Бух Комм) до первого звонка. Рабочие часы — по графику смен ответственного менеджера из файла РОПа; дни вне графика — Пн–Сб 09:00–18:00 (Берлин). Открытый лид без звонка — до текущего момента; закрытый без звонка не считается. Не учитываются: флаг «Исключить из аналитики» и причины Спам, Неквал, Гос. клиент, Неправильный контакт, Предложение сотрудничества, дубли. Клик — детализация по сделкам."
+                tipWide
+                tip={
+                  <div className="flex flex-col gap-1.5 text-left">
+                    <p>
+                      <span className="text-slate-100 font-semibold">Рабочее время</span> от входа лида
+                      в статус «Новый лид» (Бух Комм) до первого звонка по лиду.
+                    </p>
+                    <p>Рабочее время — по графику смен ответственного менеджера (файл РОПа).</p>
+                    <div>
+                      <p className="text-slate-100 font-semibold mb-0.5">Корнер-кейсы:</p>
+                      <ul className="list-disc pl-4 space-y-0.5">
+                        <li>лид не попадал в «Новый лид» — не считается;</li>
+                        <li>звонок раньше или в момент входа — SLA = 0;</li>
+                        <li>звонка нет, лид закрыт — не считается;</li>
+                        <li>звонка нет, лид открыт — от входа до текущего момента.</li>
+                      </ul>
+                    </div>
+                    <p>
+                      Не считаются лиды с флагом «Исключить из аналитики» и с причинами отказа:
+                      Спам, Неквал лид, Гос. клиент, Неправильный контакт, Предложение
+                      сотрудничества, Дубль госник, Бух дубль, Мед дубль.
+                    </p>
+                    <p className="text-slate-500">Клик — детализация по сделкам.</p>
+                  </div>
+                }
               />
               <CallMetricTile
                 icon={PhoneOff}
@@ -1307,6 +1331,7 @@ function CallMetricTile({
   color,
   rows,
   tip,
+  tipWide = false,
   tipAlign = "left",
   onClick,
 }: {
@@ -1317,7 +1342,10 @@ function CallMetricTile({
   color: "blue" | "emerald" | "amber" | "rose";
   rows: TileRow[] | null;
   // Optional hover explanation, glass-panel styled. Shown below the tile.
-  tip?: string;
+  // ReactNode — для структурированных подсказок (список корнер-кейсов SLA).
+  tip?: React.ReactNode;
+  // Широкий поповер (w-72) для структурированных подсказок; default w-52.
+  tipWide?: boolean;
   // Which edge the tooltip anchors to — "right" opens leftward so the
   // rightmost tiles don't clip past the viewport. Default "left".
   tipAlign?: "left" | "right";
@@ -1353,7 +1381,7 @@ function CallMetricTile({
         {tip && (
           <div
             role="tooltip"
-            className={`pointer-events-none absolute ${tipAlign === "right" ? "right-0" : "left-0"} top-full mt-2 z-30 w-52 max-w-[80vw] rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur px-2.5 py-2 text-[11px] leading-snug text-slate-300 shadow-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
+            className={`pointer-events-none absolute ${tipAlign === "right" ? "right-0" : "left-0"} top-full mt-2 z-30 ${tipWide ? "w-72" : "w-52"} max-w-[80vw] rounded-lg border border-white/10 bg-slate-900/95 backdrop-blur px-2.5 py-2 text-[11px] leading-snug text-slate-300 shadow-xl opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
           >
             {tip}
           </div>
