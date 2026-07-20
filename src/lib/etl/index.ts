@@ -36,6 +36,7 @@ import { syncClientRoleplays } from "./sync-client-roleplays";
 import { syncBotRoleplays, syncBotUsers } from "./sync-bot-roleplays";
 import { syncTasks, syncTasksIncremental } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
+import { syncB2bSchedule } from "./sync-b2b-schedule";
 import { detectWonExports } from "./detect-won-exports";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
 import { syncForeignCallNotes } from "./sync-foreign-calls";
@@ -80,7 +81,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "foreign_calls" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "foreign_calls" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports" | "b2b-schedule")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -452,6 +453,18 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
         stepErrors.push({ step: "enrich-telephony-leads:collect-linked-ids", message });
       }
     }
+  }
+
+  // График смен B2B из Google-файла РОПа → manager_schedule (D1). Перед
+  // compute-sla, чтобы SLA этого же тика видел свежие смены. Non-fatal +
+  // graceful no-op без GOOGLE_OAUTH_JSON — SLA тогда живёт на fallback.
+  if (!skip.has("b2b-schedule")) {
+    await runStep(
+      "sync-b2b-schedule",
+      () => syncB2bSchedule(),
+      { months: [], monthsSkippedPast: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 },
+      stepErrors,
+    );
   }
 
   // SLA last — sees both Kommo-source rows AND newly enriched telephony

@@ -18,16 +18,33 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { cached } from "@/lib/kommo/cache";
 import {
-  OWN_SLA_EXCLUDED_REASON_ENUM_IDS,
-  OWN_SLA_EXCLUDED_LOSS_REASONS,
-} from "@/lib/etl/compute-sla";
-import {
   B2B_PIPELINES,
   COMMERCIAL_STATUSES,
   MEDICAL_COMM_STATUSES,
 } from "@/lib/kommo/pipeline-config";
 
 const CACHE_TTL = 5 * 60 * 1000;
+
+// Исключаемые причины закрытия (поле 876383) — сет ЭТОЙ вкладки, сверен 1в1
+// с эталонными выгрузками Kommo (июнь 459, март 500). НЕ путать с сетом SLA
+// в compute-sla.ts: тот шире (+ Гос. клиент, Неправильный контакт по решению
+// Рузанны 2026-07-20) — с 2026-07-20 списки НАМЕРЕННО разные.
+const EXCLUDED_REASON_ENUM_IDS = new Set([
+  740593, // Спам
+  740587, // Неквал лид
+  740595, // Предложение сотрудничества
+  752414, // Дубль, госник
+  753716, // Бух дубль
+  753718, // Мед дубль
+]);
+const EXCLUDED_LOSS_REASONS = new Set([
+  "Спам",
+  "Неквал лид",
+  "Предложение сотрудничества",
+  "Дубль, госник",
+  "Бух дубль",
+  "Мед дубль",
+]);
 
 export type CategoryFunnel = "buh" | "med" | "all";
 
@@ -85,11 +102,11 @@ async function fetchDays(
     sql`, `,
   );
   const excludedEnumList = sql.join(
-    [...OWN_SLA_EXCLUDED_REASON_ENUM_IDS].map((id) => sql`${id}`),
+    [...EXCLUDED_REASON_ENUM_IDS].map((id) => sql`${id}`),
     sql`, `,
   );
   const excludedReasonList = sql.join(
-    [...OWN_SLA_EXCLUDED_LOSS_REASONS].map((r) => sql`${r}`),
+    [...EXCLUDED_LOSS_REASONS].map((r) => sql`${r}`),
     sql`, `,
   );
 

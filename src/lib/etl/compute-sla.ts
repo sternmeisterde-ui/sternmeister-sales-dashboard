@@ -18,7 +18,13 @@ import { db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { leadsCohort, sla } from "@/lib/db/schema-analytics";
 import { and, gte, lte, sql, inArray } from "drizzle-orm";
-import { businessHoursSeconds, secondsFromShiftStart, calendarSeconds } from "./business-hours";
+import {
+  businessHoursSeconds,
+  secondsFromShiftStart,
+  calendarSeconds,
+  scheduleBusinessSeconds,
+  type DayWorkInterval,
+} from "./business-hours";
 import { withDbRetry } from "@/lib/db/with-retry";
 
 // ─── «Свой» SLA (Бух Комм / B2B) — спека Рузанны ─────────────
@@ -36,29 +42,34 @@ const NEW_LEAD_STATUSES = INCLUDE_NEW_LEAD_23
   : ["Новый лид"];
 const OWN_SLA_PIPELINE = "Бух Комм";
 // Причины закрытия, исключающие лид из «своего» SLA — список Рузанны
-// (2026-07-02): Спам, Неквал, Предложение сотрудничества, Дубль госник,
-// Бух дубль, Мед дубль. Первичный матч — по enum_id поля 876383 («Причина
+// (расширен 2026-07-20: + Гос. клиент, Неправильный контакт к шести из
+// созвона 02.07). Первичный матч — по enum_id поля 876383 («Причина
 // закрытия» b2b; менеджеры заполняют его, стандартный loss_reason чаще
 // NULL — сверено по прод-данным diag-b2b-close-reasons.ts). Текстовый сет —
-// фолбэк для строк без enum. Id получены из Kommo (diag-b2b-reason-enums).
-// Exported: тот же сет фильтрует «правильное количество лидов» вкладки
-// «Динамика категорий» (src/lib/category-dynamics) — единая точка, чтобы
-// SLA и категории не разъехались при изменении списка причин.
-export const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
+// фолбэк для строк без enum. Id получены из Kommo (поле 876383).
+//
+// NB: у «Динамики категорий» СВОЙ, более узкий сет из 6 причин (без
+// Гос. клиента и Неправильного контакта) — он живёт в
+// src/lib/category-dynamics/data.ts и сверен с эталонной выгрузкой Kommo.
+const OWN_SLA_EXCLUDED_REASON_ENUM_IDS = new Set([
   740593, // Спам
   740587, // Неквал лид
   740595, // Предложение сотрудничества
   752414, // Дубль, госник
   753716, // Бух дубль
   753718, // Мед дубль
+  744322, // Гос. клиент
+  740585, // Неправильный контакт
 ]);
-export const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
+const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
   "Спам",
   "Неквал лид",
   "Предложение сотрудничества",
   "Дубль, госник",
   "Бух дубль",
   "Мед дубль",
+  "Гос. клиент",
+  "Неправильный контакт",
 ]);
 // Kommo «успешно/закрыт» статусы — для корнер-кейса «звонка нет + лид закрыт».
 const CLOSED_STATUS_IDS = new Set([142, 143]);
@@ -126,7 +137,9 @@ export async function computeSla(
   const scheduleRows = await db.select({
     userId: managerSchedule.userId,
     scheduleDate: managerSchedule.scheduleDate,
+    isOnLine: managerSchedule.isOnLine,
     shiftStartTime: managerSchedule.shiftStartTime,
+    shiftEndTime: managerSchedule.shiftEndTime,
   }).from(managerSchedule);
 
   // Key: `${managerId}|${YYYY-MM-DD}` → hour
@@ -135,6 +148,41 @@ export async function computeSla(
     const h = parseHour(r.shiftStartTime);
     if (h !== null) scheduleShiftHour.set(`${r.userId}|${r.scheduleDate}`, h);
   }
+
+  // ── «Свой» SLA: график смен из файла РОПа (синк sync-b2b-schedule) ──
+  // `${managerId}|${YYYY-MM-DD}` → рабочее окно дня или null (🌴/выходной).
+  // Отсутствие ключа = день не заполнен в файле → fallback Пн–Сб 09–18.
+  const parseHM = (s: string | null): number | null => {
+    if (!s) return null;
+    const m = s.match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return Number(m[1]) * 3600 + Number(m[2]) * 60;
+  };
+  const scheduleDayInterval = new Map<string, DayWorkInterval | null>();
+  for (const r of scheduleRows) {
+    const key = `${r.userId}|${r.scheduleDate}`;
+    if (!r.isOnLine) {
+      scheduleDayInterval.set(key, null); // выходной по графику
+      continue;
+    }
+    const start = parseHM(r.shiftStartTime);
+    const end = parseHM(r.shiftEndTime);
+    // Смена без валидных часов (напр. b2g-строки Дейли-календаря без времени)
+    // не даёт информации об окне — НЕ кладём ключ, сработает fallback.
+    if (start !== null && end !== null && end > start) {
+      scheduleDayInterval.set(key, { startSec: start, endSec: end });
+    }
+  }
+  const FALLBACK_INTERVAL: DayWorkInterval = { startSec: 9 * 3600, endSec: 18 * 3600 };
+  /** Рабочее окно дня для менеджера: график из файла → fallback Пн–Сб 09–18. */
+  const dayIntervalFor = (managerId: string | null) =>
+    (ymd: string, isSunday: boolean): DayWorkInterval | null => {
+      if (managerId) {
+        const rec = scheduleDayInterval.get(`${managerId}|${ymd}`);
+        if (rec !== undefined) return rec; // смена или явный выходной
+      }
+      return isSunday ? null : FALLBACK_INTERVAL;
+    };
 
   // Neon HTTP returns `timestamp` (no-tz) columns as bare strings ("2026-04-22 18:17:15").
   // new Date() parses those as LOCAL time on the server. Force UTC by appending Z.
@@ -376,7 +424,12 @@ export async function computeSla(
     // ── «Свой» SLA (Бух Комм / B2B) ──────────────────────────
     // Считается ТОЛЬКО для лидов, у которых есть вход в «Новый лид» в Бух Комм
     // (ownAnchor) — для остальных остаётся NULL. Корнер-кейсы и исключения —
-    // ровно по спеке Рузанны.
+    // спека Рузанны, редакция 2026-07-20:
+    //   • рабочее время = график смен ОТВЕТСТВЕННОГО менеджера из файла РОПа
+    //     (manager_schedule ← sync-b2b-schedule); день без графика — Пн–Сб
+    //     09–18, день-🌴 — нерабочий;
+    //   • закрытый без звонка — НЕ считается (раньше копил часы до closed_at);
+    //   • открытый без звонка — тикает до текущего момента.
     let slaOwnSeconds: number | null = null;
     let slaOwnStatus: string | null = null;
     const ownAnchor = ownAnchorByLead.get(lead.leadId);
@@ -385,6 +438,9 @@ export async function computeSla(
         || (lead.b2bCloseReasonEnumId != null
           && OWN_SLA_EXCLUDED_REASON_ENUM_IDS.has(Number(lead.b2bCloseReasonEnumId)))
         || (lead.lossReason != null && OWN_SLA_EXCLUDED_LOSS_REASONS.has(lead.lossReason));
+      const ownDayInterval = dayIntervalFor(
+        lead.manager ? managerIdByName.get(lead.manager) ?? null : null,
+      );
       if (excludedByReason) {
         slaOwnStatus = "excluded";                 // значение остаётся NULL
       } else if (comms.firstCallOutAt) {
@@ -392,22 +448,17 @@ export async function computeSla(
           slaOwnSeconds = 0;                        // звонок раньше/в момент входа
           slaOwnStatus = "instant";
         } else {
-          slaOwnSeconds = businessHoursSeconds(ownAnchor, comms.firstCallOutAt);
+          slaOwnSeconds = scheduleBusinessSeconds(ownAnchor, comms.firstCallOutAt, ownDayInterval);
           slaOwnStatus = "measured";
         }
       } else {
-        // Звонка нет. Раньше ЛЮБОЙ закрытый без звонка исключался — по
-        // правке Рузанны (список причин, 2026-07-02) исключают только
-        // причины из списка (отсечены excludedByReason выше). Закрытый без
-        // звонка по «обычной» причине — провал SLA: рабочие часы от входа
-        // до закрытия (closed_at; если пуст — до «сейчас»). Открытый без
-        // звонка — как раньше, тикает до текущего момента.
         const isClosed = lead.statusId != null && CLOSED_STATUS_IDS.has(lead.statusId);
         if (isClosed) {
-          slaOwnSeconds = businessHoursSeconds(ownAnchor, lead.closedAt ?? nowUtc);
+          // Закрыт без звонка — в SLA не участвует (спека 2026-07-20);
+          // статус сохраняем для drill-down, значение NULL.
           slaOwnStatus = "closed_no_call";
         } else {
-          slaOwnSeconds = businessHoursSeconds(ownAnchor, nowUtc);
+          slaOwnSeconds = scheduleBusinessSeconds(ownAnchor, nowUtc, ownDayInterval);
           slaOwnStatus = "pending";
         }
       }

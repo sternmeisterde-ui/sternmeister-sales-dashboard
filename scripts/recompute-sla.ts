@@ -10,6 +10,14 @@
 
 import { config } from "dotenv";
 import { resolve } from "node:path";
+import dns from "node:dns";
+import net from "node:net";
+
+// IPv4-first как в src/instrumentation.ts: на сетях с битым IPv6 Neon-драйвер
+// иначе виснет на AAAA-адресе до таймаута (см. memory neon-ipv6-hang).
+dns.setDefaultResultOrder("ipv4first");
+net.setDefaultAutoSelectFamily(true);
+net.setDefaultAutoSelectFamilyAttemptTimeout(500);
 
 config({ path: resolve(process.cwd(), ".env.local") });
 
