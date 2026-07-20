@@ -462,7 +462,7 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await runStep(
       "sync-b2b-schedule",
       () => syncB2bSchedule(),
-      { months: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 },
+      { months: [], monthsSkippedPast: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 },
       stepErrors,
     );
   }

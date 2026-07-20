@@ -8,12 +8,20 @@
  *   «HH:MM-HH:MM» (смена) или 🌴/другое непустое (выходной); пустая ячейка =
  *   данных нет (день остаётся под fallback-правилом SLA).
  *
- * РОП добавляет новый месяц новым блоком ниже — парсер сканирует весь лист и
- * подхватывает все блоки автоматически. Изменения текущего графика
- * подхватываются полной перезаписью: для каждой пары (менеджер, месяц из
- * файла) строки месяца в manager_schedule удаляются и вставляются заново —
- * в т.ч. очищая дни, стёртые в файле. Строк других менеджеров (b2g,
- * Дейли-календарь) синк не касается.
+ * Воркфлоу РОПа: в новом месяце ПЕРЕПИСЫВАЕТСЯ тот же блок (заголовок
+ * «Июль 2026» → «Август 2026» + новые ячейки), а не добавляется новый ниже
+ * (хотя блоки ниже парсер тоже поддерживает). База — накопительная история:
+ * месяцы, отсутствующие в файле, синк не трогает, поэтому перезапись блока
+ * не стирает прошлое.
+ *
+ * Защита истории: месяцы РАНЬШЕ текущего (Berlin) из файла игнорируются —
+ * иначе, если РОП при смене месяца сначала перепишет ячейки и лишь потом
+ * заголовок, августовские смены легли бы поверх июльских дат. Правка
+ * прошлого задним числом — осознанное действие: scripts/sync-b2b-schedule.ts
+ * --allow-past. Изменения ТЕКУЩЕГО месяца подхватываются полной перезаписью:
+ * для каждой пары (менеджер, месяц) строки месяца удаляются и вставляются
+ * заново — в т.ч. очищая стёртые в файле ячейки. Строк других менеджеров
+ * (b2g, Дейли-календарь) синк не касается.
  *
  * Пишем: is_on_line (смена/выходной) + shift_start_time/shift_end_time +
  * schedule_value («8» = смена, «-» = выходной) — те же коды, что прежний
@@ -52,15 +60,27 @@ const normName = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
 
 export interface B2bScheduleSyncResult {
   months: string[];         // YYYY-MM, найденные в файле
+  monthsSkippedPast: string[]; // прошедшие месяцы, проигнорированные защитой
   managersMatched: number;
   managersUnmatched: string[];
   rowsWritten: number;
 }
 
-export async function syncB2bSchedule(): Promise<B2bScheduleSyncResult> {
+/** Текущий месяц по Берлину, YYYY-MM. */
+function currentBerlinMonth(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+  }).format(new Date());
+}
+
+export async function syncB2bSchedule(
+  opts: { allowPastMonths?: boolean } = {},
+): Promise<B2bScheduleSyncResult> {
   if (!googleSheetsConfigured()) {
     // Graceful no-op: без кредов SLA продолжает жить на fallback-правиле.
-    return { months: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 };
+    return { months: [], monthsSkippedPast: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 };
   }
 
   const rows = await readSheetRange(SPREADSHEET_ID, SHEET_RANGE);
@@ -124,6 +144,10 @@ export async function syncB2bSchedule(): Promise<B2bScheduleSyncResult> {
     .where(eq(masterManagers.department, "b2b"));
   const idByNorm = new Map(masters.map((m) => [normName(m.name), m.id]));
 
+  // Защита истории: прошедшие месяцы не переписываем (см. шапку файла).
+  const curMonth = currentBerlinMonth();
+  const skippedPast = new Set<string>();
+
   let rowsWritten = 0;
   const unmatched: string[] = [];
   for (const [key, entry] of byManager) {
@@ -141,6 +165,10 @@ export async function syncB2bSchedule(): Promise<B2bScheduleSyncResult> {
       byMonth.get(mo)!.push(d);
     }
     for (const [mo, days] of byMonth) {
+      if (!opts.allowPastMonths && mo < curMonth) {
+        skippedPast.add(mo);
+        continue;
+      }
       const [y, m] = [Number(mo.slice(0, 4)), Number(mo.slice(5, 7))];
       const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
       const allDates = Array.from({ length: lastDay }, (_, i) => `${mo}-${String(i + 1).padStart(2, "0")}`);
@@ -167,11 +195,15 @@ export async function syncB2bSchedule(): Promise<B2bScheduleSyncResult> {
   if (unmatched.length > 0) {
     console.warn(`[ETL] sync-b2b-schedule: не сматчены с master_managers: ${unmatched.join("; ")}`);
   }
+  if (skippedPast.size > 0) {
+    console.log(`[ETL] sync-b2b-schedule: прошедшие месяцы пропущены (история в базе): ${[...skippedPast].join(", ")}`);
+  }
   console.log(
     `[ETL] sync-b2b-schedule: месяцы [${[...months].join(", ")}], менеджеров ${byManager.size - unmatched.length}/${byManager.size}, строк ${rowsWritten}`,
   );
   return {
     months: [...months].sort(),
+    monthsSkippedPast: [...skippedPast].sort(),
     managersMatched: byManager.size - unmatched.length,
     managersUnmatched: unmatched,
     rowsWritten,

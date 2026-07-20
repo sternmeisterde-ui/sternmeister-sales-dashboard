@@ -3,7 +3,13 @@
 // отладки после правок файла.
 //
 // Run from repo root:
-//   npx tsx scripts/sync-b2b-schedule.ts
+//   npx tsx scripts/sync-b2b-schedule.ts                # текущий+будущие месяцы
+//   npx tsx scripts/sync-b2b-schedule.ts --allow-past   # + переписать прошлые месяцы из файла
+//
+// --allow-past нужен для осознанной ретро-правки истории (обычный синк
+// прошедшие месяцы игнорирует, защищая базу от воркфлоу «РОП переписывает
+// тот же блок под новый месяц»). После ретро-правки прошлых месяцев не
+// забудь recompute-sla за тот период.
 //
 // Requires .env.local: DATABASE_URL, GOOGLE_OAUTH_JSON
 // (+ опционально B2B_SCHEDULE_SPREADSHEET_ID).
@@ -23,7 +29,7 @@ config({ path: resolve(process.cwd(), ".env.local") });
 
 import { syncB2bSchedule } from "../src/lib/etl/sync-b2b-schedule";
 
-syncB2bSchedule()
+syncB2bSchedule({ allowPastMonths: process.argv.includes("--allow-past") })
   .then((res) => {
     console.log("Готово:", JSON.stringify(res, null, 2));
     process.exit(0);
