@@ -15,9 +15,10 @@
  * в т.ч. очищая дни, стёртые в файле. Строк других менеджеров (b2g,
  * Дейли-календарь) синк не касается.
  *
- * Пишем: is_on_line (смена/выходной) + shift_start_time/shift_end_time.
- * schedule_value НЕ трогаем (его коды — механика табеля b2g; пустое значение
- * в payroll игнорируется).
+ * Пишем: is_on_line (смена/выходной) + shift_start_time/shift_end_time +
+ * schedule_value («8» = смена, «-» = выходной) — те же коды, что прежний
+ * ручной xlsx-импорт (scripts/import-b2b-schedule-from-json.ts), чтобы табель
+ * (computePayroll) продолжал считать дни b2b.
  *
  * Потребитель: compute-sla (рабочее время ответственного менеджера) + бонусом
  * выходные в графике «Динамика звонков» и Дейли-календарь b2b.
@@ -152,6 +153,7 @@ export async function syncB2bSchedule(): Promise<B2bScheduleSyncResult> {
             userId: managerId,
             scheduleDate: d.date,
             isOnLine: d.isOnLine,
+            scheduleValue: d.isOnLine ? "8" : "-",
             shiftStartTime: d.start,
             shiftEndTime: d.end,
             updatedAt: new Date(),
