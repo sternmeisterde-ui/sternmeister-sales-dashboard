@@ -130,14 +130,17 @@ export default function CalendarPicker({
 
   const isActive = !!(value.start && (effectiveMode === "single" || value.end));
 
+  // min/max нормализуются к берлинской полуночи их civil-дня (сами пропсы
+  // могут быть произвольным моментом суток). НЕ getFullYear/getMonth/getDate —
+  // это браузерная зона, west-of-Berlin браузер сдвигал границу на день.
   const isDayDisabled = (date: Date): boolean => {
     if (minDate) {
-      const min = new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate());
-      if (date < min) return true;
+      const c = berlinCivilComponents(minDate);
+      if (date < berlinDayOfMonth(c.y, c.m, c.d)) return true;
     }
     if (maxDate) {
-      const max = new Date(maxDate.getFullYear(), maxDate.getMonth(), maxDate.getDate());
-      if (date > max) return true;
+      const c = berlinCivilComponents(maxDate);
+      if (date > berlinDayOfMonth(c.y, c.m, c.d)) return true;
     }
     return false;
   };
@@ -332,7 +335,11 @@ export default function CalendarPicker({
                   <ChevronLeft className="w-4 h-4 text-slate-400" />
                 </button>
                 <span className="text-xs font-bold text-white capitalize flex-1 text-center">
-                  {month.toLocaleDateString("ru-RU", { month: "long", year: "numeric" })}
+                  {/* timeZone обязателен: month — берлинская полночь 1-го числа
+                      (напр. 1 авг = 31.07 22:00 UTC); без него west-of-Berlin
+                      браузер подписывал сетку ПРЕДЫДУЩИМ месяцем, и юзер кликал
+                      «июльские» числа, реально выбирая август. */}
+                  {month.toLocaleDateString("ru-RU", { month: "long", year: "numeric", timeZone: "Europe/Berlin" })}
                 </span>
                 <button
                   onClick={() => { if (!nextDisabled) setMonth(nextMonth); }}
@@ -413,18 +420,19 @@ export default function CalendarPicker({
             })()}
           </div>
 
-          {/* Range preview */}
+          {/* Range preview — timeZone обязателен по той же причине, что у
+              заголовка месяца: без него превью показывало «−1 день». */}
           {effectiveMode === "range" && (
             <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-800/50 rounded-lg px-3 py-2 mb-3">
               <span>
                 {draft.start
-                  ? draft.start.toLocaleDateString("ru-RU")
+                  ? draft.start.toLocaleDateString("ru-RU", { timeZone: "Europe/Berlin" })
                   : "Начало"}
               </span>
               <span className="text-slate-600 mx-2">→</span>
               <span>
                 {draft.end
-                  ? draft.end.toLocaleDateString("ru-RU")
+                  ? draft.end.toLocaleDateString("ru-RU", { timeZone: "Europe/Berlin" })
                   : draft.start
                   ? "Нажмите для одного дня"
                   : "Конец"}
