@@ -705,9 +705,9 @@ export default function DashboardTab({
                       </ul>
                     </div>
                     <p>
-                      Не считаются лиды с флагом «Исключить из аналитики» и с причинами отказа:
-                      Спам, Неквал лид, Гос. клиент, Неправильный контакт, Предложение
-                      сотрудничества, Дубль госник, Бух дубль, Мед дубль.
+                      Не считаются лиды категории D, с флагом «Исключить из аналитики» и с
+                      причинами отказа: Спам, Неквал лид, Гос. клиент, Неправильный контакт,
+                      Предложение сотрудничества, Дубль госник, Бух дубль, Мед дубль.
                     </p>
                     <p className="text-slate-500">Клик — детализация по сделкам.</p>
                   </div>
@@ -959,13 +959,15 @@ export default function DashboardTab({
                                   return (
                                     <tr key={it.leadId} className="border-b border-white/5 hover:bg-white/[0.02]">
                                       <td className="py-1.5 pr-3">
+                                        {/* Текст ссылки = сам URL (просьба Рузанны 2026-07-20):
+                                            РОП копирует ссылки из детализации в переписку. */}
                                         <a
                                           href={kommoLeadUrl(it.leadId)}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          className="text-blue-400 hover:text-blue-300 hover:underline"
+                                          className="text-blue-400 hover:text-blue-300 hover:underline font-mono text-xs break-all"
                                         >
-                                          #{it.leadId} ↗
+                                          {kommoLeadUrl(it.leadId)}
                                         </a>
                                       </td>
                                       <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>

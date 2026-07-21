@@ -437,7 +437,10 @@ export async function computeSla(
       const excludedByReason = lead.excludeFromAnalytics === true
         || (lead.b2bCloseReasonEnumId != null
           && OWN_SLA_EXCLUDED_REASON_ENUM_IDS.has(Number(lead.b2bCloseReasonEnumId)))
-        || (lead.lossReason != null && OWN_SLA_EXCLUDED_LOSS_REASONS.has(lead.lossReason));
+        || (lead.lossReason != null && OWN_SLA_EXCLUDED_LOSS_REASONS.has(lead.lossReason))
+        // Категория D (CFV CATEGORY) исключена из SLA — просьба Рузанны
+        // 2026-07-20. Категория — текущий снапшот поля, как и причины.
+        || (lead.category ?? "").trim().toUpperCase() === "D";
       const ownDayInterval = dayIntervalFor(
         lead.manager ? managerIdByName.get(lead.manager) ?? null : null,
       );
