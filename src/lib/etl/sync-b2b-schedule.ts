@@ -8,27 +8,27 @@
  *   «HH:MM-HH:MM» (смена) или 🌴/другое непустое (выходной); пустая ячейка =
  *   данных нет (день остаётся под fallback-правилом SLA).
  *
- * Воркфлоу РОПа: в новом месяце ПЕРЕПИСЫВАЕТСЯ тот же блок (заголовок
- * «Июль 2026» → «Август 2026» + новые ячейки), а не добавляется новый ниже
- * (хотя блоки ниже парсер тоже поддерживает). База — накопительная история:
- * месяцы, отсутствующие в файле, синк не трогает, поэтому перезапись блока
- * не стирает прошлое.
+ * Воркфлоу РОПа (уточнён 2026-07-20): под последним блоком КОПИРУЕТСЯ
+ * текущий, заголовок меняется на новый месяц, значения переписываются;
+ * строки старых месяцев скрываются (hidden-строки Sheets API всё равно
+ * отдаёт — парсер их видит, это нормально). База — накопительная история:
+ * месяцы, отсутствующие в файле, синк не трогает.
  *
  * Защита истории (двухслойная):
- *   1. Месяцы РАНЬШЕ текущего (Berlin) из файла игнорируются — иначе, если
- *      РОП при смене месяца сначала перепишет ячейки и лишь потом заголовок,
- *      августовские смены легли бы поверх июльских дат.
- *   2. В ПОСЛЕДНИЕ 5 дней месяца замораживается и ТЕКУЩИЙ месяц — РОП обычно
- *      готовит график нового месяца в конце старого, переписывая тот же блок;
- *      без заморозки заготовка августа при заголовке «Июль» затёрла бы июль.
- *      Будущие месяцы (после смены заголовка) пишутся всегда.
- * Правка замороженного/прошлого — осознанное действие:
+ *   1. Месяцы РАНЬШЕ текущего (Berlin) из файла игнорируются — их история
+ *      уже в базе; случайная правка старого блока ничего не затрёт.
+ *   2. Дубликат месяца (два блока с одним заголовком) — ПЕРВЫЙ сверху
+ *      выигрывает, остальные игнорируются с warning. Это переходное
+ *      состояние копипасты: скопированный вниз блок с ещё не переименованным
+ *      заголовком «Июль» не затирает настоящий июль выше; после смены
+ *      заголовка на «Август» блок перестаёт быть дублем и пишется.
+ * Ретро-правка прошлого — осознанное действие:
  * scripts/sync-b2b-schedule.ts --allow-past (+ recompute-sla за период).
  *
- * Изменения текущего месяца (вне заморозки) подхватываются полной
- * перезаписью: для каждой пары (менеджер, месяц) строки месяца удаляются и
- * вставляются заново — в т.ч. очищая стёртые в файле ячейки. Строк других
- * менеджеров (b2g, Дейли-календарь) синк не касается.
+ * Изменения текущего и будущих месяцев подхватываются полной перезаписью:
+ * для каждой пары (менеджер, месяц) строки месяца удаляются и вставляются
+ * заново — в т.ч. очищая стёртые в файле ячейки. Строк других менеджеров
+ * (b2g, Дейли-календарь) синк не касается.
  *
  * Пишем: is_on_line (смена/выходной) + shift_start_time/shift_end_time +
  * schedule_value («8» = смена, «-» = выходной) — те же коды, что прежний
@@ -73,25 +73,13 @@ export interface B2bScheduleSyncResult {
   rowsWritten: number;
 }
 
-/** Сегодняшняя берлинская civil-дата, YYYY-MM-DD. */
-function todayBerlin(): string {
+/** Текущий берлинский месяц, YYYY-MM. */
+function currentBerlinMonth(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Berlin",
     year: "numeric",
     month: "2-digit",
-    day: "2-digit",
   }).format(new Date());
-}
-
-// За сколько дней до конца месяца замораживать перезапись текущего месяца.
-const MONTH_END_FREEZE_DAYS = 5;
-
-/** Текущий месяц заморожен? Да, если до конца месяца осталось < N дней. */
-function isCurrentMonthFrozen(today: string): boolean {
-  const y = Number(today.slice(0, 4));
-  const m = Number(today.slice(5, 7));
-  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  return lastDay - Number(today.slice(8, 10)) < MONTH_END_FREEZE_DAYS;
 }
 
 export async function syncB2bSchedule(
@@ -109,15 +97,26 @@ export async function syncB2bSchedule(
   const byManager = new Map<string, { rawName: string; days: Map<string, ParsedDay> }>();
   const months = new Set<string>();
 
-  let cur: { y: number; m: number; dayCols: Array<{ col: number; day: number }> } | null = null;
+  // Дубликат месяца: первый блок сверху выигрывает (см. шапку файла) —
+  // блоки с уже виденным заголовком помечаются duplicate и не парсятся.
+  const seenMonthBlocks = new Set<string>();
+  const duplicateMonths = new Set<string>();
+
+  let cur: { y: number; m: number; dayCols: Array<{ col: number; day: number }>; duplicate: boolean } | null = null;
   for (const row of rows) {
     const a = (row[0] ?? "").trim();
     const headerMatch = a.match(/^([А-Яа-яЁё]+)\s+(20\d\d)/);
     if (headerMatch && MONTH_BY_NAME[headerMatch[1].toLowerCase()]) {
-      cur = { y: Number(headerMatch[2]), m: MONTH_BY_NAME[headerMatch[1].toLowerCase()], dayCols: [] };
+      const y = Number(headerMatch[2]);
+      const m = MONTH_BY_NAME[headerMatch[1].toLowerCase()];
+      const mo = `${y}-${String(m).padStart(2, "0")}`;
+      const duplicate = seenMonthBlocks.has(mo);
+      if (duplicate) duplicateMonths.add(mo);
+      else seenMonthBlocks.add(mo);
+      cur = { y, m, dayCols: [], duplicate };
       continue;
     }
-    if (!cur) continue;
+    if (!cur || cur.duplicate) continue;
     if (a === "№") {
       // строка с номерами дней месяца
       cur.dayCols = [];
@@ -163,11 +162,8 @@ export async function syncB2bSchedule(
     .where(eq(masterManagers.department, "b2b"));
   const idByNorm = new Map(masters.map((m) => [normName(m.name), m.id]));
 
-  // Защита истории: прошедшие месяцы не переписываем; в последние 5 дней
-  // месяца заморожен и текущий (см. шапку файла).
-  const today = todayBerlin();
-  const curMonth = today.slice(0, 7);
-  const frozenCurrent = isCurrentMonthFrozen(today);
+  // Защита истории: прошедшие месяцы не переписываем (см. шапку файла).
+  const curMonth = currentBerlinMonth();
   const skippedPast = new Set<string>();
 
   let rowsWritten = 0;
@@ -187,7 +183,7 @@ export async function syncB2bSchedule(
       byMonth.get(mo)!.push(d);
     }
     for (const [mo, days] of byMonth) {
-      if (!opts.allowPastMonths && (mo < curMonth || (mo === curMonth && frozenCurrent))) {
+      if (!opts.allowPastMonths && mo < curMonth) {
         skippedPast.add(mo);
         continue;
       }
@@ -219,7 +215,12 @@ export async function syncB2bSchedule(
   }
   if (skippedPast.size > 0) {
     console.log(
-      `[ETL] sync-b2b-schedule: месяцы пропущены защитой (прошедшие/заморозка конца месяца): ${[...skippedPast].join(", ")}`,
+      `[ETL] sync-b2b-schedule: прошедшие месяцы пропущены (история в базе): ${[...skippedPast].join(", ")}`,
+    );
+  }
+  if (duplicateMonths.size > 0) {
+    console.warn(
+      `[ETL] sync-b2b-schedule: дубли месяцев в файле, взят первый блок сверху: ${[...duplicateMonths].join(", ")} (обычно это скопированный вниз блок с ещё не переименованным заголовком)`,
     );
   }
   console.log(
