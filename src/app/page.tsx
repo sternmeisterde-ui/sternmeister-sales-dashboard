@@ -184,12 +184,6 @@ function tabAdminOnly(tabId: TabId, dept: DepartmentId): boolean {
 /** Доступна ли вкладка в данном отделе (по NAV_ITEMS — единый источник правды).
  *  Вкладки без записи в NAV_ITEMS считаем доступными — их гейтит VALID_TABS. */
 function tabAllowedInDept(tabId: TabId, dept: DepartmentId): boolean {
-  // У Коммерсов real_calls (старая вкладка «ОКК») ЗАПРЕЩЕНА как контент —
-  // новые менеджеры попадали на неё по hash-ссылке (#real_calls из закладок/
-  // онбординг-ссылок), хотя их место — «Оценка критериев» (спека 2026-07-22).
-  // Спец-правило вместо departments в NAV_ITEMS: сам nav-item в b2b нужен
-  // живым — из него строится заголовок-аккордеон группы «ОКК» в сайдбаре.
-  if (tabId === "real_calls" && dept === "b2b") return false;
   const item = NAV_ITEMS.find((i) => i.id === tabId);
   return !item?.departments || item.departments.includes(dept);
 }
@@ -330,15 +324,10 @@ export default function Dashboard() {
           if (data.role === "manager") {
             // Менеджер привязан к своему отделу — выбор не восстанавливаем и не храним.
             setActiveDepartment(data.department);
-            // Пробуем сохранить таб из URL hash. Если он admin-only, запрещён
-            // в отделе (напр. #real_calls у Коммерсов) или не задан — fallback
-            // на домашнюю вкладку менеджера (см. defaultManagerTab).
+            // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
+            // fallback на домашнюю вкладку менеджера (см. defaultManagerTab).
             const fromHash = readTabFromHash();
-            if (
-              !fromHash ||
-              tabAdminOnly(fromHash, data.department) ||
-              !tabAllowedInDept(fromHash, data.department)
-            ) {
+            if (!fromHash || tabAdminOnly(fromHash, data.department)) {
               setActiveTab(defaultManagerTab(data.department));
             }
           } else {
@@ -390,7 +379,6 @@ export default function Dashboard() {
       const tab = readTabFromHash();
       if (tab && tab !== activeTab) {
         if (!isAdmin && tabAdminOnly(tab, activeDepartment)) return; // запрещаем manager-у admin-таб
-        if (!tabAllowedInDept(tab, activeDepartment)) return; // вкладка недоступна в отделе (напр. #real_calls у b2b)
         setActiveTab(tab);
       }
     };
@@ -1263,12 +1251,8 @@ export default function Dashboard() {
             она сама попадёт в сайдбар и VALID_TABS. Не удалять как «мёртвый». */}
         {activeTab === "audit" && <AuditTab department={activeDepartment} />}
 
-        {/* --------------------- CALLS VIEW (Real / AI) ---------------------
-             Гейт по отделу обязателен: у Коммерсов real_calls запрещён
-             (tabAllowedInDept), и до срабатывания safety-net-эффекта сброса
-             вкладки старый контент не должен мигать даже на один кадр. */}
-        {(activeTab === "real_calls" || activeTab === "ai_calls") &&
-          tabAllowedInDept(activeTab, activeDepartment) && (
+        {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
+        {(activeTab === "real_calls" || activeTab === "ai_calls") && (
           <div className="flex flex-col gap-4 fade-in flex-1">
 
             {/* Top Managers List Row */}
