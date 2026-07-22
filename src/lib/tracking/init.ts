@@ -58,24 +58,5 @@ export async function ensureTrackingSchema(): Promise<void> {
     ADD COLUMN IF NOT EXISTS filter_version INTEGER DEFAULT 0
   `;
 
-  // Ручные статусы менеджеров (обед/встреча/завершил день) — Активность b2g,
-  // просьба Лилии 2026-07-22. ended_at NULL = статус активен.
-  await sql`
-    CREATE TABLE IF NOT EXISTS manager_status_intervals (
-      id BIGSERIAL PRIMARY KEY,
-      department TEXT NOT NULL,
-      manager_id TEXT NOT NULL,
-      status TEXT NOT NULL,
-      started_at TIMESTAMPTZ NOT NULL,
-      ended_at TIMESTAMPTZ,
-      created_by TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS manager_status_lookup
-      ON manager_status_intervals (department, manager_id, started_at)
-  `;
-
   initialized = true;
 }

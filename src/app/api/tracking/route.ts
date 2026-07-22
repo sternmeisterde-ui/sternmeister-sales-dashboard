@@ -1,15 +1,15 @@
 // GET /api/tracking?department=b2g&from=2026-04-24&to=2026-04-24&types=a,b,c
 // Returns per-manager timelines for a department over the given date range.
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, gte, lt, inArray, asc, or, isNull, isNotNull, notInArray } from "drizzle-orm";
+import { and, eq, gte, lt, inArray, asc, or, isNotNull, notInArray } from "drizzle-orm";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
-import { trackingEvents, trackingSyncState, managerStatusIntervals } from "@/lib/db/schema-tracking";
+import { trackingEvents, trackingSyncState } from "@/lib/db/schema-tracking";
 import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
-import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type DialerCall, type StatusInterval } from "@/lib/tracking/timeline";
+import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type DialerCall } from "@/lib/tracking/timeline";
 import { getAnalyticsCallEventsByMaster, getDialerCallEventsByMaster, getManagerNamesWithComms } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
@@ -455,65 +455,9 @@ export async function GET(req: NextRequest) {
         eventType: c.eventType,
         createdAt: c.createdAt,
         durationSec: c.durationSec,
-        waitSec: c.waitSec,
         entityType: null,
       });
     }
-
-    // Ручные статусы менеджеров (обед/встреча/завершил день) — b2g. Красятся
-    // поверх простоя, обед вычитается из простоя максимум на 60 мин/день.
-    const statusRows =
-      department === "b2g"
-        ? await trackingDb
-            .select()
-            .from(managerStatusIntervals)
-            .where(
-              and(
-                eq(managerStatusIntervals.department, department),
-                inArray(managerStatusIntervals.managerId, managerIds),
-                lt(managerStatusIntervals.startedAt, rangeEnd),
-                or(
-                  isNull(managerStatusIntervals.endedAt),
-                  gte(managerStatusIntervals.endedAt, rangeStart),
-                ),
-              ),
-            )
-        : [];
-    const statusesByManager = new Map<string, typeof statusRows>();
-    for (const s of statusRows) {
-      const list = statusesByManager.get(s.managerId) ?? [];
-      list.push(s);
-      statusesByManager.set(s.managerId, list);
-    }
-    // Clip интервал к конкретному Berlin-дню. Открытые интервалы (ended_at
-    // NULL) красятся ТОЛЬКО в день своего старта: обед/встреча — до «сейчас»,
-    // day_end — до конца этого дня; иначе забытый статус мазал бы все
-    // последующие дни.
-    const nowMs = Date.now();
-    const statusesForDay = (
-      managerId: string,
-      dayStartMs: number,
-      dayEndMs: number,
-    ): StatusInterval[] => {
-      const out: StatusInterval[] = [];
-      for (const s of statusesByManager.get(managerId) ?? []) {
-        if (s.status !== "lunch" && s.status !== "meeting" && s.status !== "day_end") continue;
-        const sMs = s.startedAt.getTime();
-        let eMs: number;
-        if (s.endedAt) {
-          eMs = s.endedAt.getTime();
-        } else {
-          if (sMs < dayStartMs || sMs >= dayEndMs) continue; // открытый — только день старта
-          eMs = s.status === "day_end" ? dayEndMs : Math.min(nowMs, dayEndMs);
-        }
-        const startClip = Math.max(sMs, dayStartMs);
-        const endClip = Math.min(eMs, dayEndMs);
-        if (endClip > startClip) {
-          out.push({ status: s.status, startMs: startClip, endMs: endClip });
-        }
-      }
-      return out;
-    };
 
     // Build timelines
     const result = managers.map((m) => ({
@@ -539,14 +483,12 @@ export async function GET(req: NextRequest) {
         // be CET (60) or CEST (120) depending on the date.
         const dayUtc = new Date(`${date}T00:00:00Z`);
         const dayOffset = berlinOffsetMin(dayUtc);
-        const dayStartMs = dayUtc.getTime() - dayOffset * 60_000;
         const tl = buildTimeline({
           scheduleRow: effectiveSched,
           dateISO: date,
           tzOffsetMinutes: dayOffset,
           events: eventsForDay,
           selectedCrmTypes,
-          statuses: statusesForDay(m.id, dayStartMs, dayStartMs + 1440 * 60_000),
         });
         return { date, ...tl };
       }),

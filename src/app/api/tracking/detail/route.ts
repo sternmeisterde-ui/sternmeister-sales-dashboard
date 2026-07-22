@@ -9,15 +9,15 @@
 // segment math client-side.
 
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, gte, lt, asc, or, isNull } from "drizzle-orm";
+import { and, eq, gte, lt, asc } from "drizzle-orm";
 import { db as d1Db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { trackingDb } from "@/lib/db/tracking-db";
-import { trackingEvents, managerStatusIntervals } from "@/lib/db/schema-tracking";
+import { trackingEvents } from "@/lib/db/schema-tracking";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS, EVENT_TYPE_MAP, normalizeEventType } from "@/lib/tracking/event-types";
-import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type StatusInterval } from "@/lib/tracking/timeline";
-import { getDialerCallEventsByMaster, getAnalyticsCallEventsByMaster } from "@/lib/daily/analytics-calls";
+import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow } from "@/lib/tracking/timeline";
+import { getDialerCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
 
@@ -207,11 +207,8 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Pull CRM events for this manager-day from tracking_events. Calls come
-    // SEPARATELY from analytics.communications (same source as the parent
-    // view) — since tracking v12 tracking_events holds no call rows, so
-    // without this merge the modal timeline rendered call-free and diverged
-    // from the main bar.
+    // Pull all events for this manager-day. Calls always included; CRM
+    // events filtered by `types` so the modal matches the parent view.
     const rows = await trackingDb
       .select({
         eventId: trackingEvents.eventId,
@@ -235,83 +232,22 @@ export async function GET(req: NextRequest) {
 
     const isCallType = (t: string) => t === "incoming_call" || t === "outgoing_call";
 
-    const callEvents = await getAnalyticsCallEventsByMaster(
-      [{ id: manager.id, name: manager.name }],
-      department,
-      Math.floor(dayStart.getTime() / 1000),
-      Math.floor(dayEnd.getTime() / 1000),
-    );
-
-    // Ручные статусы этого дня (b2g): для покраски таймлайна + список в ответ
-    // (админ может удалять/добавлять интервалы задним числом).
-    const statusRows =
-      department === "b2g"
-        ? await trackingDb
-            .select()
-            .from(managerStatusIntervals)
-            .where(
-              and(
-                eq(managerStatusIntervals.department, department),
-                eq(managerStatusIntervals.managerId, managerId),
-                lt(managerStatusIntervals.startedAt, dayEnd),
-                or(
-                  isNull(managerStatusIntervals.endedAt),
-                  gte(managerStatusIntervals.endedAt, dayStart),
-                ),
-              ),
-            )
-            .orderBy(asc(managerStatusIntervals.startedAt))
-        : [];
-    const nowMs = Date.now();
-    const dayStartMs = dayStart.getTime();
-    const dayEndMs = dayEnd.getTime();
-    const statuses: StatusInterval[] = [];
-    for (const s of statusRows) {
-      if (s.status !== "lunch" && s.status !== "meeting" && s.status !== "day_end") continue;
-      const sMs = s.startedAt.getTime();
-      let eMs: number;
-      if (s.endedAt) {
-        eMs = s.endedAt.getTime();
-      } else {
-        // Открытый интервал красится только в день своего старта (см. /api/tracking).
-        if (sMs < dayStartMs || sMs >= dayEndMs) continue;
-        eMs = s.status === "day_end" ? dayEndMs : Math.min(nowMs, dayEndMs);
-      }
-      const startClip = Math.max(sMs, dayStartMs);
-      const endClip = Math.min(eMs, dayEndMs);
-      if (endClip > startClip) statuses.push({ status: s.status, startMs: startClip, endMs: endClip });
-    }
-
     // Pre-build the timeline so the modal can paint identical segments
     // without recomputing — also gives the modal segment.startMin/endMin
-    // bounds it needs to bucket events for hover. Legacy call rows (if any
-    // linger in tracking_events) are dropped — analytics is the source.
-    const timelineEvents: TimelineEvent[] = rows
-      .filter((r) => !isCallType(r.eventType))
-      .map((r) => ({
-        eventId: r.eventId,
-        eventType: r.eventType,
-        createdAt: new Date(r.createdAt),
-        durationSec: r.durationSec ?? 0,
-        entityType: r.entityType,
-      }));
-    for (const c of callEvents) {
-      timelineEvents.push({
-        eventId: c.eventId,
-        eventType: c.eventType,
-        createdAt: c.createdAt,
-        durationSec: c.durationSec,
-        waitSec: c.waitSec,
-        entityType: null,
-      });
-    }
+    // bounds it needs to bucket events for hover.
+    const timelineEvents: TimelineEvent[] = rows.map((r) => ({
+      eventId: r.eventId,
+      eventType: r.eventType,
+      createdAt: new Date(r.createdAt),
+      durationSec: r.durationSec ?? 0,
+      entityType: r.entityType,
+    }));
     const timeline = buildTimeline({
       scheduleRow,
       dateISO,
       tzOffsetMinutes: offset,
       events: timelineEvents,
       selectedCrmTypes,
-      statuses,
     });
 
     // Per-event detail. Filter to selected types + calls so the modal
@@ -321,8 +257,7 @@ export async function GET(req: NextRequest) {
     // entity_linked rows where entity_type='lead').
     const detail: DetailEvent[] = rows
       .filter((r) => {
-        // Legacy tracking_events call rows dropped — analytics calls appended below.
-        if (isCallType(r.eventType)) return false;
+        if (isCallType(r.eventType)) return true;
         const directKey = normalizeEventType(r.eventType);
         if (selectedCrmTypes.has(directKey)) return true;
         if (
@@ -355,44 +290,12 @@ export async function GET(req: NextRequest) {
         };
       });
 
-    // Append analytics calls to the detail list (same rows the timeline uses).
-    for (const c of callEvents) {
-      const localMs = c.createdAt.getTime() + offset * 60_000;
-      const local = new Date(localMs);
-      const hh = String(local.getUTCHours()).padStart(2, "0");
-      const mm = String(local.getUTCMinutes()).padStart(2, "0");
-      detail.push({
-        eventId: c.eventId,
-        eventType: c.eventType,
-        label: c.eventType === "incoming_call" ? "Входящий звонок" : "Исходящий звонок",
-        group: "Звонки",
-        createdAt: c.createdAt.toISOString(),
-        timeBerlin: `${hh}:${mm}`,
-        durationSec: c.durationSec,
-        entityType: null,
-        entityId: null,
-        // waitSec in raw switches EventRow to the разговор/дозвон/недозвон
-        // labels — only meaningful when we actually track wait (b2g).
-        raw: c.waitSec > 0 ? { waitSec: c.waitSec } : null,
-      });
-    }
-    detail.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
     return NextResponse.json({
       department,
       manager: { id: manager.id, name: manager.name, line: manager.line },
       date: dateISO,
       timeline,
       events: detail,
-      // Сырые интервалы статусов дня — для секции «Статусы» в модалке
-      // (админ добавляет/удаляет задним числом через /api/tracking/status).
-      statusIntervals: statusRows.map((s) => ({
-        id: s.id,
-        status: s.status,
-        startedAt: s.startedAt.toISOString(),
-        endedAt: s.endedAt ? s.endedAt.toISOString() : null,
-        createdBy: s.createdBy,
-      })),
     });
   } catch (err) {
     console.error("[tracking/detail] error:", err);

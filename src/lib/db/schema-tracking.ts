@@ -52,29 +52,6 @@ export const trackingSyncState = pgTable("tracking_sync_state", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
 
-// ==================== MANAGER STATUS INTERVALS ====================
-// Ручные статусы менеджеров для Активности (просьба Лилии, b2g, 2026-07-22):
-// обед / встреча / завершил день. Менеджер включает статус кнопкой в шапке
-// вкладки (только «в моменте»); админ может добавлять/удалять задним числом.
-// ended_at NULL = статус активен сейчас (day_end — до конца дня).
-export const managerStatusIntervals = pgTable(
-  "manager_status_intervals",
-  {
-    id: bigserial("id", { mode: "number" }).primaryKey(),
-    department: text("department").notNull(),        // 'b2g' | 'b2b'
-    managerId: text("manager_id").notNull(),         // master_managers.id
-    status: text("status").notNull(),                // 'lunch' | 'meeting' | 'day_end'
-    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
-    endedAt: timestamp("ended_at", { withTimezone: true }),
-    createdBy: text("created_by"),                   // 'self' | 'admin:<name>' — аудит
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-  },
-  (t) => ({
-    lookup: index("manager_status_lookup").on(t.department, t.managerId, t.startedAt),
-  }),
-);
-
 export type TrackingEvent = typeof trackingEvents.$inferSelect;
 export type NewTrackingEvent = typeof trackingEvents.$inferInsert;
 export type TrackingSyncState = typeof trackingSyncState.$inferSelect;
-export type ManagerStatusInterval = typeof managerStatusIntervals.$inferSelect;

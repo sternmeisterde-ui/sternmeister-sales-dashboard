@@ -228,11 +228,6 @@ export interface AnalyticsCallEvent {
   eventType: "incoming_call" | "outgoing_call";
   createdAt: Date;
   durationSec: number;      // 0 for missed/unanswered
-  // Ring/dial seconds before pickup (communications.wait_seconds). Populated
-  // for b2g only — Лилия's «total время в телефоне» ask (2026-07-22): dialing
-  // time counts as work. b2b keeps its durationExpr semantics untouched
-  // (wait already folded into duration for cg-leg there) → 0.
-  waitSec: number;
 }
 
 /**
@@ -307,18 +302,13 @@ async function fetchCallEventsByMaster(
     communication_type: string;
     manager: string;
     duration: string | number | null;
-    wait_seconds: string | number | null;
     created_at: string;
   }>(sql`
     -- durationExpr, а не голый duration: для CallGear (cg-leg) добавляем дозвон
     -- (wait), как в «Длительности» Звонков (fetchCallMetricsByMaster). Иначе
     -- «Звонок» в Активности занижен на время дозвона CG (расхождение у Лигай).
-    -- b2g: duration остаётся чистым разговором, а дозвон идёт ОТДЕЛЬНОЙ
-    -- колонкой wait_seconds — timeline красит телефон как wait+talk и
-    -- показывает «в диалоге» отдельно (задача Лилии 2026-07-22).
     SELECT DISTINCT ON (communication_id)
-      communication_id, communication_type, manager, ${durationExpr(dept)} AS duration,
-      wait_seconds, created_at
+      communication_id, communication_type, manager, ${durationExpr(dept)} AS duration, created_at
     FROM analytics.communications
     WHERE created_at >= ${fromDate}
       AND created_at <= ${toDate}
@@ -340,9 +330,6 @@ async function fetchCallEventsByMaster(
       eventType: direction,
       createdAt: new Date(row.created_at),
       durationSec: Number(row.duration ?? 0),
-      // b2b: 0 — там wait для cg-leg уже внутри duration (durationExpr), и
-      // семантику Коммерсов в этом чате не меняем.
-      waitSec: dept === "b2g" ? Number(row.wait_seconds ?? 0) : 0,
     });
   }
   return out;
@@ -642,58 +629,6 @@ export async function getDialerLeadTouches(
       periodManualTouches: Number(r.period_manual ?? 0),
       lastTouchAt: r.last_touch_at ? new Date(r.last_touch_at).toISOString() : null,
       callers: (r.callers ?? []).map((c) => ({ name: c.name, n: Number(c.n) })),
-    }));
-  });
-}
-
-// Per-campaign dialer stats for the «Кампании дайлера» tiles in the dialer
-// view. Source: analytics.dialer_call_attribution (dialer channel only) —
-// campaign linkage is exact, so дозвон/разговор are billing-grade.
-export interface DialerCampaignStats {
-  campaignId: number | null;
-  campaignName: string;
-  calls: number;       // dial attempts within the period
-  answered: number;    // billsec > 0
-  talkSec: number;     // total talk seconds
-  avgTalkSec: number;  // среди дозвонов; 0 если дозвонов нет
-}
-
-/** Campaign stats over [periodStart, asOfEnd] (dialer channel only). */
-export async function getDialerCampaignStats(
-  periodStart: Date,
-  asOfEnd: Date,
-): Promise<DialerCampaignStats[]> {
-  const cacheKey = `dialer-campaigns:${periodStart.getTime()}:${asOfEnd.getTime()}`;
-  return cached(cacheKey, ANALYTICS_TTL, async () => {
-    const result = await (analyticsDb as unknown as {
-      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-    }).execute<{
-      campaign_id: string | number | null;
-      campaign_name: string | null;
-      calls: string | number;
-      answered: string | number;
-      talk_sec: string | number;
-      avg_talk_sec: string | number | null;
-    }>(sql`
-      SELECT campaign_id, campaign_name,
-        count(*)::int AS calls,
-        count(*) FILTER (WHERE billsec > 0)::int AS answered,
-        COALESCE(sum(billsec), 0)::int AS talk_sec,
-        COALESCE(round(avg(billsec) FILTER (WHERE billsec > 0)), 0)::int AS avg_talk_sec
-      FROM analytics.dialer_call_attribution
-      WHERE channel = 'dialer'
-        AND started_at >= ${periodStart}
-        AND started_at <= ${asOfEnd}
-      GROUP BY 1, 2
-      ORDER BY calls DESC
-    `);
-    return result.rows.map((r) => ({
-      campaignId: r.campaign_id == null ? null : Number(r.campaign_id),
-      campaignName: r.campaign_name ?? "—",
-      calls: Number(r.calls ?? 0),
-      answered: Number(r.answered ?? 0),
-      talkSec: Number(r.talk_sec ?? 0),
-      avgTalkSec: Number(r.avg_talk_sec ?? 0),
     }));
   });
 }

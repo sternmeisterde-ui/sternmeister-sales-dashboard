@@ -5,7 +5,7 @@
 // from lead_status_changes intervals), with call-touch counts split by
 // attribution channel — cumulative to that date AND within [from, to].
 import { NextRequest, NextResponse } from "next/server";
-import { getDialerLeadTouches, getDialerCampaignStats } from "@/lib/daily/analytics-calls";
+import { getDialerLeadTouches } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
 
@@ -49,11 +49,8 @@ export async function GET(req: NextRequest) {
       toUtc.getTime() + (24 * 60 - tzOffsetMinutes(toUtc, "Europe/Berlin")) * 60_000,
     );
 
-    const [leads, campaigns] = await Promise.all([
-      getDialerLeadTouches(periodStart, asOfEnd),
-      getDialerCampaignStats(periodStart, asOfEnd),
-    ]);
-    return NextResponse.json({ department, from: fromISO, to: toISO, leads, campaigns });
+    const leads = await getDialerLeadTouches(periodStart, asOfEnd);
+    return NextResponse.json({ department, from: fromISO, to: toISO, leads });
   } catch (err) {
     console.error("[tracking/dialer-leads] failed:", err);
     return NextResponse.json(
