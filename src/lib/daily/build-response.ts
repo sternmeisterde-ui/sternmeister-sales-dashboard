@@ -869,13 +869,11 @@ export async function buildDailyResponse(department: string, period: string, dat
     "buh_avgCheck_p", "med_avgCheck_p", "total_avgCheck_p",
     "buh_ql2p_p", "med_ql2p_p", "total_ql2p_p",
     "buh_l2p_p", "med_l2p_p",
-    // Звонки — константы
-    "calls_managersOnLine_p",
+    // Звонки — константы (calls_managersOnLine_p / calls_avgWait_p /
+    // calls_sla_p убраны 2026-07-22: больше не планы, а константы 30/25)
     "calls_managersOnLine_f",   // Excel вводится руками как "5" — не сумма
-    "calls_avgWait_p",
-    "calls_avgWait_f",           // ручной ввод из Callgear
+    "calls_avgWait_f",           // ручной ввод в минутах
     "calls_dialPercent_p",
-    "calls_sla_p",
     // ОКК — проценты
     "okk_buh1_p", "okk_buh2_p", "okk_med1_p", "okk_avg_p",
     // B2G roleplay / окк константы
@@ -1210,7 +1208,6 @@ export async function buildDailyResponse(department: string, period: string, dat
             okkBuh1, okkBuh2, okkMed,
             slaShiftSeconds: slaShiftSecondsB2B,
             avgWaitSeconds: avgWaitSecondsB2B,
-            frozenLeadsTotal,
           });
         } else {
           fact = plan;
@@ -1235,7 +1232,6 @@ export async function buildDailyResponse(department: string, period: string, dat
           okkMed,
           slaShiftSeconds: slaShiftSecondsB2B,
           avgWaitSeconds: avgWaitSecondsB2B,
-          frozenLeadsTotal,
         });
       } else if (section.key === "funnel") {
         fact = getFunnelFact(metric.key, funnelCounts, managersOnLineCount, snapshotLeads, line1ManagerCount, safeTermsWonLeads, from, to, safeNewLeadsInPeriod, safeTermAACount, hasSnapshotData, reconstructedActiveDeals, flPipes, brPipes, dateStr, flStatus, brStatus);
@@ -1381,11 +1377,11 @@ export async function buildDailyResponse(department: string, period: string, dat
               else if (metric.key === "calls_totalMinutes_f") fact = String(mgrCallMetrics?.totalMinutes ?? 0);
               else if (metric.key === "calls_dialPercent_p") fact = "65";
               else if (metric.key === "calls_dialPercent_f") fact = String(mgrCallMetrics?.dialPercent ?? 0);
-              else if (metric.key === "calls_avgWait_p") fact = "35";
-              else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(avgWaitSecondsB2B) : null;
+              else if (metric.key === "calls_avgWait_p") fact = "30";
+              // Ожидание/SLA — в МИНУТАХ (ТЗ 2026-07-22); источники держат секунды.
+              else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(Math.round(avgWaitSecondsB2B / 60 * 10) / 10) : null;
               else if (metric.key === "calls_sla_p") fact = "25";
-              else if (metric.key === "calls_sla_f") fact = slaShiftSecondsB2B != null ? String(slaShiftSecondsB2B) : null;
-              else if (metric.key === "calls_frozenLeads_f") fact = String(frozenLeadsMap.get(mgr.id) ?? 0);
+              else if (metric.key === "calls_sla_f") fact = slaShiftSecondsB2B != null ? String(Math.round(slaShiftSecondsB2B / 60 * 10) / 10) : null;
               // ОКК per-manager — берём из общей окк-выборки (ETL пишет manager_id)
               else if (metric.key === "okk_avg_f") {
                 const v = okkPerManagerB2B.get(mgr.id);
@@ -1789,11 +1785,10 @@ interface B2BFactContext {
   okkBuh1: number | null;
   okkBuh2: number | null;
   okkMed: number | null;
-  /** SLA "from-shift" в СЕКУНДАХ (не минутах — имя выровнено с UI
-   *  DURATION_SEC_KEYS, которое рендерит calls_sla_f как HH:MM:SS). */
+  /** SLA "from-shift" в СЕКУНДАХ — источник хранит секунды; в минуты
+   *  конвертируется на выдаче calls_sla_f (ТЗ 2026-07-22: факт в минутах). */
   slaShiftSeconds: number | null;
   avgWaitSeconds: number | null;
-  frozenLeadsTotal: number | null;
 }
 
 /** Safe integer percent = Math.round(num/den * 100); 0 when den is 0. */
@@ -1813,11 +1808,14 @@ function pct(num: number, den: number): number {
 // same conversion in DailyTab.getTrafficLightClass). Now both agree.
 //
 // Keep this set in sync with DailyTab DURATION_SEC_KEYS / DURATION_MIN_KEYS.
+// NB: b2b-ключей (calls_sla_f/calls_sla_p) здесь больше нет — с 2026-07-22
+// их план и факт оба в минутах, конвертация не нужна. Секунды остались
+// только у Гос (sla_f/sla_shift_f/tlt_f ↔ sla_p).
 const FACT_KEYS_IN_SECONDS = new Set<string>([
-  "sla_f", "sla_shift_f", "tlt_f", "calls_sla_f",
+  "sla_f", "sla_shift_f", "tlt_f",
 ]);
 const PLAN_KEYS_IN_MINUTES = new Set<string>([
-  "sla_p", "calls_sla_p",
+  "sla_p",
 ]);
 
 /**
@@ -2001,18 +1999,19 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
   // ========== 4. ЗВОНКИ + ОКК (R53-R72) ==========
   if (sectionKey === "calls") {
     switch (key) {
-      case "calls_managersOnLine_f": return String(managersOnLineCount);      // R54
+      case "calls_managersOnLine_f": return String(managersOnLineCount);      // R54 — из Графика (manager_schedule)
       case "calls_total_p":          return String(managersOnLineCount * 80); // R55
       case "calls_total_f":          return String(summaryCallMetrics.callsTotal); // R56
       case "calls_totalMinutes_p":   return String(managersOnLineCount * 160);// R57
       case "calls_totalMinutes_f":   return String(summaryCallMetrics.totalMinutes); // R58
-      // R59/R61/R63/R65/R67/R69 plan rows: hasPlan:true → picked up via plan
-      // lookup in the outer render loop (see build-response.ts fact = plan path).
-      // Defaults (ТЗ): 35 sec wait, 65 % dial, 25 min SLA, 85 % OKK.
-      case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(ctx.avgWaitSeconds) : null; // R60
+      // Оставшиеся plan rows (звонки/дозвон/ОКК): hasPlan:true → plan lookup
+      // in the outer render loop. Константы ожидания/SLA — здесь (ТЗ 2026-07-22).
+      case "calls_avgWait_p":        return "30";
+      // Ожидание/SLA факты — в МИНУТАХ (1 знак), источники держат секунды.
+      case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(Math.round(ctx.avgWaitSeconds / 60 * 10) / 10) : null; // R60
       case "calls_dialPercent_f":    return String(summaryCallMetrics.dialPercent); // R62
-      case "calls_sla_f":            return ctx.slaShiftSeconds != null ? String(ctx.slaShiftSeconds) : null; // R64 — секунды (UI рендерит HH:MM:SS)
-      case "calls_frozenLeads_f":    return ctx.frozenLeadsTotal != null ? String(ctx.frozenLeadsTotal) : null;
+      case "calls_sla_p":            return "25";
+      case "calls_sla_f":            return ctx.slaShiftSeconds != null ? String(Math.round(ctx.slaShiftSeconds / 60 * 10) / 10) : null; // R64
       // OKK facts: prefer OKK DB; fall back to stored daily_plans for dates
       // before OKK launch (≈ 2026-03-04) where Excel has the only record.
       case "okk_buh1_f":             return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : (ctx.getPlan("calls", null, "okk_buh1_f") ?? null);

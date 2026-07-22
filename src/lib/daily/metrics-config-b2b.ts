@@ -87,22 +87,27 @@ const salesMedMetrics: MetricDef[] = [
 ];
 
 // ====================== 4. ЗВОНКИ + ОКК (R53–R72) ======================
+// Переделка 2026-07-22 (ТЗ Рузанны): строка «Менеджеров на линии план» и
+// «Замороженные лиды» убраны; план ожидания/SLA — константы 30/25 (не
+// редактируются); факты ожидания и SLA — в МИНУТАХ (не HH:MM:SS).
 const callsMetrics: MetricDef[] = [
-  { key: "calls_managersOnLine_p", label: "Менеджеров на линии план", hasPlan: true, hasFact: false, unit: "", factSource: "manual" },
-  // Факт: unique managers on_line в период из manager_schedule.
-  { key: "calls_managersOnLine_f", label: "Менеджеров на линии факт", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
+  // Факт: количество менеджеров из Графика (manager_schedule ← Google-файл
+  // РОПа, синк sync-b2b-schedule): day — on_line на дату, week/month —
+  // unique on_line за период.
+  { key: "calls_managersOnLine_f", label: "Менеджеров на линии", hasPlan: false, hasFact: true, unit: "", factSource: "db" },
   { key: "calls_total_p", label: "Количество звонков план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
   { key: "calls_total_f", label: "Количество звонков факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "calls_totalMinutes_p", label: "Всего на линии (минут) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
   { key: "calls_totalMinutes_f", label: "Всего на линии (минут) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
-  { key: "calls_avgWait_p", label: "Среднее время ожидания ответа (сек) план", hasPlan: true, hasFact: false, unit: "сек", factSource: "manual" },
-  // Факт ожидания — ручной ввод (source Callgear, пока не подключён).
-  { key: "calls_avgWait_f", label: "Среднее время ожидания ответа (сек) факт", hasPlan: true, hasFact: false, unit: "сек", factSource: "manual" },
+  // План — константа 30 (как avgWait_p у Гос), не редактируется.
+  { key: "calls_avgWait_p", label: "Среднее время ожидания ответа (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
+  // Факт ожидания — ручной ввод В МИНУТАХ (source Callgear, пока не подключён).
+  { key: "calls_avgWait_f", label: "Среднее время ожидания ответа (мин) факт", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
   { key: "calls_dialPercent_p", label: "% дозвона план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "calls_dialPercent_f", label: "% дозвона факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
-  { key: "calls_sla_p", label: "SLA (мин) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
+  // План — константа 25, не редактируется.
+  { key: "calls_sla_p", label: "SLA (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
   { key: "calls_sla_f", label: "SLA (мин) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
-  { key: "calls_frozenLeads_f", label: "Замороженные лиды (без первого звонка)", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "okk_buh1_p", label: "ОКК Бух 1 план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "okk_buh1_f", label: "ОКК Бух 1 факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   { key: "okk_buh2_p", label: "ОКК Бух 2 план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
@@ -140,10 +145,9 @@ export const B2B_FIXED_PLAN_DEFAULTS: Record<string, number> = {
   // view lands on Excel's per-day figures (16 Бух, 6.66 Мед for Apr 2026).
   buh_komLeads_p: 480,   // Excel row54 = 16/day × 30 days ≈ 480/month
   med_komLeads_p: 200,   // Excel row73 = 6.66/day × 30 ≈ 200/month
-  // Звонки / ОКК (per ТЗ defaults)
-  calls_avgWait_p: 35,
+  // Звонки / ОКК (per ТЗ defaults). calls_avgWait_p / calls_sla_p здесь
+  // больше нет: с 2026-07-22 это константы 30/25 в getB2BFact, не планы.
   calls_dialPercent_p: 65,
-  calls_sla_p: 25,
   okk_buh1_p: 85,
   okk_buh2_p: 85,
   okk_med1_p: 85,
