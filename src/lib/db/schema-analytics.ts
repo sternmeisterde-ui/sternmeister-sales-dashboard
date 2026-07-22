@@ -85,6 +85,14 @@ export const leadsCohort = analyticsSchema.table(
     // — Свободно...". Используется Funnel Dashboard для раскладки когорт по
     // уровню языка. Добавлено в 0019_leads_cohort_language_level.sql.
     languageLevel: text("language_level"),
+    // Ответы анкеты сайта (b2b) — сырой текст трёх CFV Kommo (869932
+    // START_DATE, 869936 STATUS, 869938 INCOME); textarea-дубли этих полей
+    // мёртвые. Нормализация корзин — на чтении (category-dynamics/data.ts):
+    // форматы значений исторически дрейфуют. Суффикс _answer, потому что
+    // status/income конфликтуют со статусом сделки. Миграция 0034.
+    startDateAnswer: text("start_date_answer"),
+    statusAnswer: text("status_answer"),
+    incomeAnswer: text("income_answer"),
     // Kommo CFV 887458 ("Исключить из аналитики"). Если TRUE, лид выпадает
     // из всех расчётов Funnel. Добавлено в 0020_leads_cohort_funnel_extras.sql.
     excludeFromAnalytics: boolean("exclude_from_analytics").default(false).notNull(),

@@ -6,19 +6,23 @@
 // идёт ПО КОЛОНКАМ, а метрики — по строкам: динамика категории читается слева
 // направо, как график. Колонки — подпериоды выбранного окна (год → месяцы,
 // месяц → недели, неделя → дни; всегда ≤13 колонок — вся картина одним
-// взглядом) + «Итого». Строки — секции метрик как в excel: Доля лидов (по
-// категориям, с микро-баром цвета категории), Продажи, Конверсия от общего,
-// Конверсия категории (свёрнута по умолчанию). Drill-down — клик по заголовку
-// колонки (зум в подпериод) с хлебной крошкой назад.
+// взглядом) + «Итого». Строки — секции метрик как в excel: Лиды категории,
+// % от общего, Продажи, Конверсия от общего, Конверсия категории.
+// Drill-down — клик по заголовку колонки (зум в подпериод) с крошкой назад.
 //
-// Цвета категорий — валидированная категориальная палитра (dataviz-skill,
-// dark surface #0f172a): A…E — фиксированные слоты, «Без метки» — нейтральный
-// серый (отсутствие категории, а не серия). Текст всегда в text-токенах,
-// цвет несут только марки (точки и микро-бары).
+// Помимо категорий CATEGORY — четыре такие же таблицы по ответам анкеты
+// сайта (START_DATE / INCOME / STATUS / LANGUAGE_LEVEL), стеком ниже; общий
+// период/воронка/зум на все таблицы. Корзины нормализует сервер
+// (src/lib/category-dynamics/data.ts) — клиент только раскладывает и делит.
 //
-// «Правильное количество лидов» и «продажа» определены на сервере
-// (src/lib/category-dynamics/data.ts) — сверено 1в1 с выгрузками Kommo за
-// июнь (459/27) и март (500/24).
+// Цвета — валидированная палитра (dataviz-skill, dark surface #0f172a):
+// категории и ответы — фиксированные категориальные слоты, LANGUAGE_LEVEL —
+// порядковая синяя шкала (уровни языка упорядочены A1→C2), «Без метки»/«Без
+// ответа» — нейтральный серый (отсутствие значения, а не серия). Текст всегда
+// в text-токенах, цвет несут только марки (точки у заголовков колонок).
+//
+// «Правильное количество лидов» и «продажа» определены на сервере — сверено
+// 1в1 с выгрузками Kommo за июнь (459/27) и март (500/24).
 
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, Undo2 } from "lucide-react";
@@ -35,20 +39,22 @@ import {
 
 // ==================== Types ====================
 
-const CATEGORY_KEYS = ["A", "B", "C", "D", "E", ""] as const;
-type CategoryKey = (typeof CATEGORY_KEYS)[number];
+// Ключи измерений — зеркало DIMENSION_KEYS сервера (data.ts).
+type DimKey = "category" | "startDate" | "income" | "status" | "language";
 
 interface DayRow {
   date: string;
-  category: CategoryKey;
+  bucket: string;
   leads: number;
   sales: number;
 }
 
+type DimsDays = Record<DimKey, DayRow[]>;
+
 interface ApiResponse {
   success?: boolean;
   error?: string;
-  days: DayRow[];
+  dims: DimsDays;
 }
 
 type Funnel = "buh" | "med" | "all";
@@ -59,20 +65,99 @@ const FUNNEL_LABEL: Record<Funnel, string> = {
   all: "Обе воронки",
 };
 
-// Категориальная палитра (валидирована validate_palette.js, dark #0f172a).
-// «Без метки» — нейтральный серый: отсутствие категории, не серия.
-const CAT_COLOR: Record<CategoryKey, string> = {
-  A: "#3987e5",
-  B: "#199e70",
-  C: "#c98500",
-  D: "#008300",
-  E: "#9085e9",
-  "": "#64748b",
-};
+// ==================== Dimensions ====================
 
-const CAT_LABEL: Record<CategoryKey, string> = {
-  A: "A", B: "B", C: "C", D: "D", E: "E", "": "Без метки",
-};
+interface BucketDef {
+  /** Ключ корзины с сервера (DIM_BUCKETS в data.ts); "" = без метки/ответа. */
+  key: string;
+  /** Полный текст ответа — тултипы и методика. */
+  label: string;
+  /** Короткая подпись колонки. */
+  short: string;
+  color: string;
+}
+
+interface DimDef {
+  key: DimKey;
+  title: string;
+  buckets: BucketDef[];
+}
+
+// Палитра — dark-слоты валидированного категориального порядка (dataviz):
+// blue, orange, aqua, yellow, magenta, green. Первые 4/6 слотов подряд =
+// валидированная смежность. Прогнано validate_palette.js на #0f172a.
+const SLOT = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"];
+const NONE_COLOR = "#64748b"; // «Без метки»/«Без ответа» — не серия
+// Порядковая синяя шкала для LANGUAGE_LEVEL (уровни упорядочены A1→C2);
+// светлый конец → тёмный, валидирована с --ordinal на #0f172a.
+const LANG_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95"];
+
+// Цвета категорий A–E — исторические слоты вкладки, НЕ перекрашивать
+// (цвет следует за сущностью: A всюду синий и т.д.).
+const DIMENSIONS: DimDef[] = [
+  {
+    key: "category",
+    title: "Категории",
+    buckets: [
+      { key: "A", label: "A", short: "A", color: "#3987e5" },
+      { key: "B", label: "B", short: "B", color: "#199e70" },
+      { key: "C", label: "C", short: "C", color: "#c98500" },
+      { key: "D", label: "D", short: "D", color: "#008300" },
+      { key: "E", label: "E", short: "E", color: "#9085e9" },
+      { key: "", label: "Без метки", short: "Без", color: NONE_COLOR },
+    ],
+  },
+  {
+    key: "startDate",
+    title: "Когда планируют начать",
+    buckets: [
+      { key: "now", label: "Прямо сейчас", short: "Сейчас", color: SLOT[0] },
+      { key: "2w", label: "Через 2 недели", short: "2 нед.", color: SLOT[1] },
+      { key: "1m", label: "Через месяц", short: "Месяц", color: SLOT[2] },
+      { key: "later", label: "Не планирую в ближайшее время", short: "Не план.", color: SLOT[3] },
+      { key: "", label: "Без ответа", short: "Без отв.", color: NONE_COLOR },
+    ],
+  },
+  {
+    key: "income",
+    title: "Доход",
+    buckets: [
+      { key: "lt2", label: "До 2 000 €", short: "До 2к", color: SLOT[0] },
+      { key: "2to3", label: "2 000 – 3 000 €", short: "2–3к", color: SLOT[1] },
+      { key: "3to5", label: "3 000 – 5 000 €", short: "3–5к", color: SLOT[2] },
+      { key: "gt5", label: "Выше 5 000 €", short: "5к+", color: SLOT[3] },
+      { key: "", label: "Без ответа", short: "Без отв.", color: NONE_COLOR },
+    ],
+  },
+  {
+    key: "status",
+    title: "Занятость",
+    buckets: [
+      { key: "de_job", label: "Работаю в Германии", short: "Раб. DE", color: SLOT[0] },
+      { key: "spouse", label: "Не работаю, но муж/жена работает", short: "Муж/жена", color: SLOT[1] },
+      { key: "freelance", label: "Фриланс", short: "Фриланс", color: SLOT[2] },
+      { key: "no_job", label: "Не работаю, не получаю пособие", short: "Не раб.", color: SLOT[3] },
+      { key: "job_abroad", label: "Работаю не в Германии", short: "Раб. не DE", color: SLOT[4] },
+      { key: "benefit", label: "Получаю пособие, не работаю", short: "Пособие", color: SLOT[5] },
+      { key: "", label: "Без ответа", short: "Без отв.", color: NONE_COLOR },
+    ],
+  },
+  {
+    key: "language",
+    title: "Уровень языка",
+    buckets: [
+      { key: "A1", label: "A1 (Начальный уровень)", short: "A1", color: LANG_RAMP[0] },
+      { key: "A2", label: "A2 (Базовый уровень)", short: "A2", color: LANG_RAMP[1] },
+      { key: "B1", label: "B1 (Средний уровень)", short: "B1", color: LANG_RAMP[2] },
+      { key: "B2", label: "B2 (Выше среднего)", short: "B2", color: LANG_RAMP[3] },
+      { key: "C1", label: "C1 (Продвинутый уровень)", short: "C1", color: LANG_RAMP[4] },
+      { key: "C2", label: "C2 (Свободное владение)", short: "C2", color: LANG_RAMP[5] },
+      { key: "", label: "Без ответа", short: "Без отв.", color: NONE_COLOR },
+    ],
+  },
+];
+
+const CATEGORY_DIM = DIMENSIONS[0];
 
 // ==================== Aggregation ====================
 
@@ -82,50 +167,48 @@ interface CatAgg {
 }
 
 interface RangeAgg {
-  byCat: Record<CategoryKey, CatAgg>;
+  byBucket: Record<string, CatAgg>;
   totalLeads: number;
   totalSales: number;
 }
 
-type DayMap = Map<string, Partial<Record<CategoryKey, CatAgg>>>;
+type DayMap = Map<string, Partial<Record<string, CatAgg>>>;
 
 function buildDayMap(days: DayRow[]): DayMap {
   const map: DayMap = new Map();
   for (const r of days) {
-    let byCat = map.get(r.date);
-    if (!byCat) { byCat = {}; map.set(r.date, byCat); }
-    const agg = byCat[r.category] ?? { leads: 0, sales: 0 };
+    let byBucket = map.get(r.date);
+    if (!byBucket) { byBucket = {}; map.set(r.date, byBucket); }
+    const agg = byBucket[r.bucket] ?? { leads: 0, sales: 0 };
     agg.leads += r.leads;
     agg.sales += r.sales;
-    byCat[r.category] = agg;
+    byBucket[r.bucket] = agg;
   }
   return map;
 }
 
-function emptyByCat(): Record<CategoryKey, CatAgg> {
-  return Object.fromEntries(
-    CATEGORY_KEYS.map((k) => [k, { leads: 0, sales: 0 }]),
-  ) as Record<CategoryKey, CatAgg>;
+function emptyByBucket(buckets: BucketDef[]): Record<string, CatAgg> {
+  return Object.fromEntries(buckets.map((b) => [b.key, { leads: 0, sales: 0 }]));
 }
 
 /** Суммирует дневные агрегаты по civil-диапазону [from, to]. */
-function aggregateRange(dayMap: DayMap, from: string, to: string): RangeAgg {
-  const byCat = emptyByCat();
+function aggregateRange(dayMap: DayMap, buckets: BucketDef[], from: string, to: string): RangeAgg {
+  const byBucket = emptyByBucket(buckets);
   let totalLeads = 0;
   let totalSales = 0;
   for (let d = from; d <= to; d = addDaysCivil(d, 1)) {
     const day = dayMap.get(d);
     if (!day) continue;
-    for (const k of CATEGORY_KEYS) {
-      const v = day[k];
+    for (const b of buckets) {
+      const v = day[b.key];
       if (!v) continue;
-      byCat[k].leads += v.leads;
-      byCat[k].sales += v.sales;
+      byBucket[b.key].leads += v.leads;
+      byBucket[b.key].sales += v.sales;
       totalLeads += v.leads;
       totalSales += v.sales;
     }
   }
-  return { byCat, totalLeads, totalSales };
+  return { byBucket, totalLeads, totalSales };
 }
 
 // 0=Пн … 6=Вс (civil-дата, TZ не участвует).
@@ -214,21 +297,21 @@ function fmtPct(num: number, den: number): string {
   return `${Number.isInteger(one) ? one.toFixed(0) : one.toFixed(1)}%`;
 }
 
-/** Тултип ячейки категории: все числа за раз. */
-function cellTitle(catLabel: string, cat: CatAgg, totalLeads: number): string {
+/** Тултип ячейки корзины: все числа за раз. */
+function cellTitle(bucketLabel: string, agg: CatAgg, totalLeads: number): string {
   return [
-    `${catLabel}: ${cat.leads} лидов (${fmtPct(cat.leads, totalLeads)} от общего)`,
-    `Продажи: ${cat.sales}`,
-    `Конверсия категории: ${fmtPct(cat.sales, cat.leads)}`,
-    `Конверсия от общего: ${fmtPct(cat.sales, totalLeads)}`,
+    `${bucketLabel}: ${agg.leads} лидов (${fmtPct(agg.leads, totalLeads)} от общего)`,
+    `Продажи: ${agg.sales}`,
+    `Конверсия категории: ${fmtPct(agg.sales, agg.leads)}`,
+    `Конверсия от общего: ${fmtPct(agg.sales, totalLeads)}`,
   ].join("\n");
 }
 
 // ==================== Small pieces ====================
 
-/** Точка-марка категории рядом с текстом (текст всегда в text-токенах). */
-function CatDot({ k }: { k: CategoryKey }) {
-  return <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: CAT_COLOR[k] }} />;
+/** Точка-марка корзины рядом с текстом (текст всегда в text-токенах). */
+function BucketDot({ color }: { color: string }) {
+  return <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />;
 }
 
 /** KPI-плитка: label · value · delta к сравнительному периоду. */
@@ -271,7 +354,7 @@ function ppDelta(curNum: number, curDen: number, refNum: number, refDen: number)
   return { text: `${rounded >= 0 ? "+" : ""}${rounded} п.п.`, good: rounded >= 0 };
 }
 
-// ==================== Excel-калька: группы колонок = периоды, внутри — категории ====================
+// ==================== Excel-калька: группы колонок = периоды, внутри — корзины ====================
 
 // Строки метрик — 1в1 порядок excel «Конверсия по категориям». Строка
 // «Всего лидов» сюда не входит: она merged на всю группу (одно число на
@@ -286,8 +369,8 @@ const METRIC_ROWS: Array<{ id: MetricRowId; label: string }> = [
   { id: "convCat", label: "Конверсия категории" },
 ];
 
-function metricCell(id: MetricRowId, k: CategoryKey, agg: RangeAgg): string {
-  const v = agg.byCat[k];
+function metricCell(id: MetricRowId, bucketKey: string, agg: RangeAgg): string {
+  const v = agg.byBucket[bucketKey];
   if (agg.totalLeads === 0) return "—";
   switch (id) {
     case "leads": return String(v.leads);
@@ -298,8 +381,8 @@ function metricCell(id: MetricRowId, k: CategoryKey, agg: RangeAgg): string {
   }
 }
 
-function metricMuted(id: MetricRowId, k: CategoryKey, agg: RangeAgg): boolean {
-  const v = agg.byCat[k];
+function metricMuted(id: MetricRowId, bucketKey: string, agg: RangeAgg): boolean {
+  const v = agg.byBucket[bucketKey];
   if (agg.totalLeads === 0) return true;
   if (id === "leads" || id === "share") return v.leads === 0;
   return v.sales === 0;
@@ -312,8 +395,9 @@ function metricMuted(id: MetricRowId, k: CategoryKey, agg: RangeAgg): boolean {
 // остался бы тёмной полосой на светлом фоне.
 const STICKY_CELL = "sticky left-0 z-10 bg-slate-900";
 
-function GroupsTable({ title, days, from, to, onZoom }: {
+function GroupsTable({ title, dim, days, from, to, onZoom }: {
   title: string;
+  dim: DimDef;
   days: DayRow[];
   from: string;
   to: string;
@@ -324,12 +408,15 @@ function GroupsTable({ title, days, from, to, onZoom }: {
   const spanDays = diffDaysCivil(to, from) + 1;
   const unit = unitForSpan(spanDays);
   const groups = useMemo(
-    () => sliceRange(from, to, unit).map((c) => ({ ...c, agg: aggregateRange(dayMap, c.from, c.to) })),
-    [dayMap, from, to, unit],
+    () => sliceRange(from, to, unit).map((c) => ({ ...c, agg: aggregateRange(dayMap, dim.buckets, c.from, c.to) })),
+    [dayMap, dim.buckets, from, to, unit],
   );
-  const totals = useMemo(() => aggregateRange(dayMap, from, to), [dayMap, from, to]);
+  const totals = useMemo(
+    () => aggregateRange(dayMap, dim.buckets, from, to),
+    [dayMap, dim.buckets, from, to],
+  );
   const zoomable = unit !== "day";
-  const nCats = CATEGORY_KEYS.length;
+  const nBuckets = dim.buckets.length;
 
   // «Итого» — первая группа слева, чтобы сводка была видна без скролла;
   // дальше подпериоды слева направо (свайп вправо — как листание excel).
@@ -352,13 +439,13 @@ function GroupsTable({ title, days, from, to, onZoom }: {
       <div className="overflow-x-auto">
         <table className="text-sm border-collapse">
           <thead>
-            {/* Строка 1: периоды (merged на ширину группы категорий). */}
+            {/* Строка 1: периоды (merged на ширину группы корзин). */}
             <tr className="text-[11px]">
               <th className={`${STICKY_CELL} min-w-[170px]`} />
               {allGroups.map((g) => (
                 <th
                   key={g.key}
-                  colSpan={nCats}
+                  colSpan={nBuckets}
                   className="py-2 px-4 text-center font-semibold text-slate-200 border-l border-white/10 bg-white/[0.03] whitespace-nowrap"
                 >
                   {g.zoom ? (
@@ -375,18 +462,19 @@ function GroupsTable({ title, days, from, to, onZoom }: {
                 </th>
               ))}
             </tr>
-            {/* Строка 2: категории внутри каждой группы. */}
+            {/* Строка 2: корзины внутри каждой группы. */}
             <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-white/10">
               <th className={`${STICKY_CELL} text-left py-1.5 px-2 font-medium`}>Метрика</th>
               {allGroups.map((g) =>
-                CATEGORY_KEYS.map((k, i) => (
+                dim.buckets.map((b, i) => (
                   <th
-                    key={`${g.key}:${k || "none"}`}
+                    key={`${g.key}:${b.key || "__none__"}`}
+                    title={b.label}
                     className={`py-1.5 px-4 text-right font-medium whitespace-nowrap ${i === 0 ? "border-l border-white/10" : ""}`}
                   >
                     <span className="inline-flex items-center gap-1">
-                      <CatDot k={k} />
-                      {k === "" ? "Без" : k}
+                      <BucketDot color={b.color} />
+                      {b.short}
                     </span>
                   </th>
                 )),
@@ -402,7 +490,7 @@ function GroupsTable({ title, days, from, to, onZoom }: {
               {allGroups.map((g) => (
                 <td
                   key={g.key}
-                  colSpan={nCats}
+                  colSpan={nBuckets}
                   className="py-1.5 px-2 text-center text-white font-semibold tabular-nums border-l border-white/10"
                 >
                   {g.agg.totalLeads}
@@ -415,15 +503,15 @@ function GroupsTable({ title, days, from, to, onZoom }: {
                   {row.label}
                 </td>
                 {allGroups.map((g) =>
-                  CATEGORY_KEYS.map((k, i) => {
-                    const muted = metricMuted(row.id, k, g.agg);
+                  dim.buckets.map((b, i) => {
+                    const muted = metricMuted(row.id, b.key, g.agg);
                     return (
                       <td
-                        key={`${g.key}:${k || "none"}`}
+                        key={`${g.key}:${b.key || "__none__"}`}
                         className={`py-2 px-4 text-right tabular-nums cursor-help whitespace-nowrap ${i === 0 ? "border-l border-white/10" : ""} ${muted ? "text-slate-600" : "text-slate-200"}`}
-                        title={cellTitle(CAT_LABEL[k], g.agg.byCat[k], g.agg.totalLeads)}
+                        title={cellTitle(b.label, g.agg.byBucket[b.key], g.agg.totalLeads)}
                       >
-                        {metricCell(row.id, k, g.agg)}
+                        {metricCell(row.id, b.key, g.agg)}
                       </td>
                     );
                   }),
@@ -443,7 +531,7 @@ function useCategoryDays(funnel: Funnel, from: string | null, to: string | null)
   // Ответ хранится с ключом запроса: пока ключ не совпадает с параметрами,
   // наружу отдаётся null — данные другого окна не мелькают, и не нужен
   // синхронный сброс state в эффекте (react-hooks/set-state-in-effect).
-  const [result, setResult] = useState<{ key: string; days: DayRow[] } | null>(null);
+  const [result, setResult] = useState<{ key: string; dims: DimsDays } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const key = from && to ? `${funnel}:${from}:${to}` : null;
@@ -458,7 +546,7 @@ function useCategoryDays(funnel: Funnel, from: string | null, to: string | null)
         const r = await fetch(`/api/category-dynamics?funnel=${funnel}&from=${from}&to=${to}`, { signal: ac.signal });
         if (!r.ok) throw new Error(`API error ${r.status}: ${await r.text()}`);
         const j = (await r.json()) as ApiResponse;
-        setResult({ key, days: j.days ?? [] });
+        setResult({ key, dims: j.dims });
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
         setError(String(e));
@@ -472,11 +560,11 @@ function useCategoryDays(funnel: Funnel, from: string | null, to: string | null)
 
   return {
     // data — только свежий ответ текущих параметров; lastData — последний
-    // успешный (любого окна): им рендерим таблицу во время подгрузки, чтобы
+    // успешный (любого окна): им рендерим таблицы во время подгрузки, чтобы
     // листание периода не схлопывало вкладку в полноэкранный лоадер
     // (stale-while-revalidate, как на Звонках).
-    data: result && result.key === key ? result.days : null,
-    lastData: result?.days ?? null,
+    data: result && result.key === key ? result.dims : null,
+    lastData: result?.dims ?? null,
     loading,
     error,
   };
@@ -515,31 +603,33 @@ export default function CategoryDynamicsTab() {
 
   const a = useCategoryDays(funnel, fromA, toA);
   // Сравнительный период всегда загружен: без «Сравнить» он кормит KPI-дельты
-  // (vs предыдущее окно), со «Сравнить» — таблицу B (тот же запрос).
+  // (vs предыдущее окно), со «Сравнить» — таблицы B (тот же запрос).
   const b = useCategoryDays(funnel, fromB, toB);
 
   // Во время подгрузки нового окна показываем предыдущие данные (см. lastData).
-  const aDays = a.data ?? a.lastData;
-  const bDays = b.data ?? b.lastData;
+  const aDims = a.data ?? a.lastData;
+  const bDims = b.data ?? b.lastData;
 
+  // KPI считаем по измерению категорий: итоги (всего лидов/продаж) у всех
+  // измерений совпадают — это одна и та же выборка лидов.
   const totalsA = useMemo(
-    () => (aDays ? aggregateRange(buildDayMap(aDays), fromA, toA) : null),
-    [aDays, fromA, toA],
+    () => (aDims ? aggregateRange(buildDayMap(aDims.category), CATEGORY_DIM.buckets, fromA, toA) : null),
+    [aDims, fromA, toA],
   );
   const totalsB = useMemo(
-    () => (bDays ? aggregateRange(buildDayMap(bDays), fromB, toB) : null),
-    [bDays, fromB, toB],
+    () => (bDims ? aggregateRange(buildDayMap(bDims.category), CATEGORY_DIM.buckets, fromB, toB) : null),
+    [bDims, fromB, toB],
   );
 
   // Топ-категория периода A (среди размеченных; «Без метки» — не категория).
   const topCat = useMemo(() => {
     if (!totalsA || totalsA.totalLeads === 0) return null;
-    let best: CategoryKey | null = null;
-    for (const k of CATEGORY_KEYS) {
-      if (k === "") continue;
-      if (!best || totalsA.byCat[k].leads > totalsA.byCat[best].leads) best = k;
+    let best: string | null = null;
+    for (const bucket of CATEGORY_DIM.buckets) {
+      if (bucket.key === "") continue;
+      if (!best || totalsA.byBucket[bucket.key].leads > totalsA.byBucket[best].leads) best = bucket.key;
     }
-    return best && totalsA.byCat[best].leads > 0 ? best : null;
+    return best && totalsA.byBucket[best].leads > 0 ? best : null;
   }, [totalsA]);
 
   const applyRange = (start: Date, end: Date) => {
@@ -621,9 +711,9 @@ export default function CategoryDynamicsTab() {
     });
   };
 
-  if (a.loading && !aDays) return <DinoLoader />;
+  if (a.loading && !aDims) return <DinoLoader />;
 
-  if (a.error && !aDays) {
+  if (a.error && !aDims) {
     return (
       <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center">
         <AlertTriangle className="w-10 h-10 text-red-400 mx-auto mb-3" />
@@ -739,11 +829,11 @@ export default function CategoryDynamicsTab() {
           <div className="glass-panel rounded-2xl p-4 border border-white/5 min-w-0">
             <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Топ категория по лидам</p>
             <div className="flex items-baseline gap-2 flex-wrap">
-              {topCat && <CatDot k={topCat} />}
+              {topCat && <BucketDot color={CATEGORY_DIM.buckets.find((x) => x.key === topCat)!.color} />}
               <span className="text-2xl font-semibold text-white">{topCat ?? "—"}</span>
               {topCat && (
                 <span className="text-xs text-slate-400">
-                  {fmtPct(totalsA.byCat[topCat].leads, totalsA.totalLeads)} лидов · конв. {fmtPct(totalsA.byCat[topCat].sales, totalsA.byCat[topCat].leads)}
+                  {fmtPct(totalsA.byBucket[topCat].leads, totalsA.totalLeads)} лидов · конв. {fmtPct(totalsA.byBucket[topCat].sales, totalsA.byBucket[topCat].leads)}
                 </span>
               )}
             </div>
@@ -775,31 +865,43 @@ export default function CategoryDynamicsTab() {
         )}
       </div>
 
-      {/* ── Таблицы ──────────────────────────────────────────────
-           При сравнении B встаёт ПОД A: таблицы широкие (группы периодов по
-           горизонтали), а колонки категорий обеих таблиц выравниваются
+      {/* ── Таблицы: 5 измерений стеком ──────────────────────────
+           Одна и та же выборка лидов, разрезанная по-разному: категории,
+           затем 4 ответа анкеты. При сравнении таблица B каждого измерения
+           встаёт СРАЗУ ПОД его таблицей A: таблицы широкие (группы периодов
+           по горизонтали), а колонки корзин обеих таблиц выравниваются
            вертикально — сравнивать одну и ту же метрику проще. */}
       <div className="flex flex-col gap-4">
-        <GroupsTable
-          title={compareOn ? "Период A" : `Категории — ${FUNNEL_LABEL[funnel]}`}
-          days={aDays ?? []}
-          from={fromA}
-          to={toA}
-          onZoom={zoomInto}
-        />
-        {compareOn && (
-          b.error ? (
-            <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center text-red-400 text-sm">{b.error}</div>
-          ) : (
-            <GroupsTable
-              title="Период B"
-              days={bDays ?? []}
-              from={fromB}
-              to={toB}
-              onZoom={(f, t) => setRangeB({ start: berlinCivilDate(f), end: berlinCivilDate(t) })}
-            />
-          )
-        )}
+        {DIMENSIONS.map((dim) => {
+          const aDays = aDims?.[dim.key] ?? [];
+          const bDays = bDims?.[dim.key] ?? [];
+          return (
+            <div key={dim.key} className="flex flex-col gap-4">
+              <GroupsTable
+                title={compareOn ? `${dim.title} — период A` : `${dim.title} — ${FUNNEL_LABEL[funnel]}`}
+                dim={dim}
+                days={aDays}
+                from={fromA}
+                to={toA}
+                onZoom={zoomInto}
+              />
+              {compareOn && (
+                b.error ? (
+                  <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center text-red-400 text-sm">{b.error}</div>
+                ) : (
+                  <GroupsTable
+                    title={`${dim.title} — период B`}
+                    dim={dim}
+                    days={bDays}
+                    from={fromB}
+                    to={toB}
+                    onZoom={(f, t) => setRangeB({ start: berlinCivilDate(f), end: berlinCivilDate(t) })}
+                  />
+                )
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* ── Методика ────────────────────────────────────────────── */}
@@ -808,8 +910,9 @@ export default function CategoryDynamicsTab() {
           <span className="text-slate-300 font-medium">Лиды</span> — по дате создания сделки (Berlin), воронка {FUNNEL_LABEL[funnel]}, без этапа Incoming leads и без причин закрытия
           «Неквал», «Спам», «Предложение сотрудничества», «Дубль госник», «Бух дубль», «Мед дубль» (поле «Причина закрытия — обязательное»).
           {" "}<span className="text-slate-300 font-medium">Продажа</span> — заполнена «Факт. Дата 1-го платежа»; относится к периоду создания лида, даже если платёж пришёл позже.
-          {" "}<span className="text-slate-300 font-medium">Без метки</span> = всего − (A+B+C+D+E).
-          {" "}Клик по заголовку колонки открывает период подробнее (месяц → недели → дни); наведение на ячейку — все числа категории за колонку.
+          {" "}<span className="text-slate-300 font-medium">Без метки / Без ответа</span> — поле пустое (категория не проставлена, вопрос анкеты не отвечен).
+          {" "}Таблицы «Когда планируют начать», «Доход», «Занятость», «Уровень языка» — те же лиды, разрезанные по ответам анкеты сайта; исторические варианты написания («До 2000 евро», «мужжена», «B1 (Средний уровень)…») сведены в единые корзины.
+          {" "}Клик по заголовку колонки открывает период подробнее (месяц → недели → дни); наведение на ячейку — все числа корзины за колонку.
         </p>
       </div>
     </div>
