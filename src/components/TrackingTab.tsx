@@ -13,7 +13,9 @@ import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
-type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
+type SegmentType =
+  | "call" | "crm" | "idle" | "dialer" | "manual"
+  | "lunch" | "meeting" | "dayend";
 
 interface Segment {
   type: SegmentType;
@@ -35,8 +37,15 @@ interface DayTimeline {
   // `dialer`/`manual` are populated only by the dialer view; general leaves
   // them undefined. `dialer` = time in dialer-campaign calls, `manual` = time
   // in CloudTalk calls outside the dialer; `idle` there = no calls.
+  // `talk` — general view: чистое время в диалоге (call там = в телефоне,
+  // т.е. разговор + дозвон исходящих; для b2b совпадает с talk).
+  // `lunch`/`meeting` — минуты ручных статусов (b2g).
   pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
-  minutes: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  minutes: {
+    call: number; crm: number; idle: number;
+    talk?: number; lunch?: number; meeting?: number;
+    dialer?: number; manual?: number;
+  };
   // Dialer view only: per-channel call counts for the day.
   counts?: { dialer: number; manual: number };
 }
@@ -167,6 +176,23 @@ export default function TrackingTab({ department }: TrackingTabProps) {
     date: string;
   } | null>(null);
 
+  // Ручные статусы (b2g): кто мы (manager self / admin) и активный статус.
+  // Managers получают плашку «Мой статус», админ — ретро-правку в модалке.
+  const [statusInfo, setStatusInfo] = useState<StatusInfoDto | null>(null);
+  useEffect(() => {
+    if (department !== "b2g") return;
+    let cancelled = false;
+    fetch(`/api/tracking/status?department=b2g`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: StatusInfoDto | null) => {
+        if (!cancelled && j) setStatusInfo(j);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [department]);
+
   // Reset manager filter when switching department — the manager IDs from
   // b2g aren't valid for b2b and would just show "no data" until cleared.
   useEffect(() => {
@@ -275,6 +301,17 @@ export default function TrackingTab({ department }: TrackingTabProps) {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* ── Плашка «Мой статус» — только менеджерская сессия b2g. ── */}
+      {department === "b2g" && statusInfo?.self && (
+        <MyStatusBar
+          active={statusInfo.active}
+          onChanged={(active) => {
+            setStatusInfo((prev) => (prev ? { ...prev, active } : prev));
+            fetchData({ background: true });
+          }}
+        />
+      )}
+
       {/* ── Control bar ──────────────────────────────────────────── */}
       <div className="glass-panel rounded-2xl p-4 flex flex-wrap items-center gap-3 border border-white/5">
         {department === "b2g" && (
@@ -332,8 +369,14 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             </>
           ) : (
             <>
-              <LegendDot color="bg-blue-500" label="Звонок" />
+              <LegendDot color="bg-blue-500" label="Телефон" />
               <LegendDot color="bg-emerald-500" label="CRM" />
+              {department === "b2g" && (
+                <>
+                  <LegendDot color="bg-yellow-400/80" label="Обед" />
+                  <LegendDot color="bg-violet-500/80" label="Встреча" />
+                </>
+              )}
               <LegendDot color="bg-rose-500" label="Простой" />
             </>
           )}
@@ -393,10 +436,20 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           <ul className="flex flex-col gap-2">
             <li>
               <b className="text-slate-300">Полоска дня</b> — рабочий день менеджера с 09:00 до 20:00 (или шире, если он звонил/работал раньше или позже).{" "}
-              <span className="text-blue-400 font-semibold">Синий</span> — время в звонках,{" "}
+              <span className="text-blue-400 font-semibold">Синий</span> — время в телефоне,{" "}
               <span className="text-emerald-400 font-semibold">зелёный</span> — работа в CRM,{" "}
               <span className="text-rose-400 font-semibold">красный</span> — простой.
             </li>
+            {department === "b2g" && (
+              <li>
+                <b className="text-slate-300">«В телефоне» и «в диалоге».</b> В синее время входит и дозвон: набор номера и гудки по исходящим — это тоже работа, в том числе когда клиент не взял трубку. Чистое время разговора показано отдельно строкой «в диалоге».
+              </li>
+            )}
+            {department === "b2g" && (
+              <li>
+                <b className="text-slate-300">Статусы менеджера.</b> Менеджер отмечает в шапке вкладки: <span className="text-yellow-400 font-semibold">обед</span> (не считается простоем до 60 мин/день), <span className="text-violet-400 font-semibold">встреча</span> (рабочее время) и «завершил день». Статус ставится только в моменте; задним числом интервалы правит админ через лупу дня.
+              </li>
+            )}
             <li>
               <b className="text-slate-300">Простой</b> считается от нормы 8 рабочих часов: 8 часов минус время активности (звонки + работа в CRM).
             </li>
@@ -408,6 +461,11 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             </li>
           </ul>
         </div>
+      )}
+
+      {/* Сводная таблица общего вида — пофамильные итоги за период. */}
+      {!isDialer && data?.view === "general" && data.managers.length > 0 && (
+        <GeneralSummaryTable managers={data.managers} department={department} />
       )}
 
       {/* Касания по лидам (Новый лид / Недозвон): этапы — на конец выбранного
@@ -453,6 +511,7 @@ export default function TrackingTab({ department }: TrackingTabProps) {
           view={view}
           target={detailTarget}
           typesParam={typesParam}
+          canEditStatuses={department === "b2g" && statusInfo?.role === "admin"}
           onClose={() => setDetailTarget(null)}
         />
       )}
@@ -687,6 +746,35 @@ interface DialerLeadTouchRowDto {
 const NEW_LEAD_STATUS_ID = 83873491; // FIRST_LINE_STATUSES.NEW_LEAD (Бух Гос)
 const KOMMO_LEADS_BASE = "https://sternmeister.kommo.com/leads/detail";
 
+// ── Ручные статусы менеджеров (b2g) ──
+interface StatusIntervalDto {
+  id: number;
+  status: string; // 'lunch' | 'meeting' | 'day_end'
+  startedAt: string;
+  endedAt: string | null;
+  createdBy?: string | null;
+}
+interface StatusInfoDto {
+  role: string | null;
+  self: { managerId: string; name: string } | null;
+  active: StatusIntervalDto | null;
+}
+const STATUS_LABELS: Record<string, string> = {
+  lunch: "Обед",
+  meeting: "Встреча",
+  day_end: "Завершил день",
+};
+
+// Per-campaign dialer stats (analytics.dialer_call_attribution, точная привязка).
+interface DialerCampaignDto {
+  campaignId: number | null;
+  campaignName: string;
+  calls: number;
+  answered: number;
+  talkSec: number;
+  avgTalkSec: number;
+}
+
 function fmtBerlinDateTime(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("ru-RU", {
@@ -708,6 +796,7 @@ function DialerLeadTouchesPanel({
   toISO: string;
 }) {
   const [rows, setRows] = useState<DialerLeadTouchRowDto[] | null>(null);
+  const [campaigns, setCampaigns] = useState<DialerCampaignDto[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   // NB: no synchronous setState here (react-hooks/set-state-in-effect) — on a
@@ -720,9 +809,10 @@ function DialerLeadTouchesPanel({
         if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
         return res.json();
       })
-      .then((json: { leads: DialerLeadTouchRowDto[] }) => {
+      .then((json: { leads: DialerLeadTouchRowDto[]; campaigns?: DialerCampaignDto[] }) => {
         if (cancelled) return;
         setRows(json.leads);
+        setCampaigns(json.campaigns ?? []);
         setErr(null);
       })
       .catch((e) => {
@@ -742,6 +832,36 @@ function DialerLeadTouchesPanel({
     fromISO === toISO ? formatRussianDate(fromISO) : `${formatRussianDate(fromISO)} — ${formatRussianDate(toISO)}`;
 
   return (
+    <>
+      {/* Кампании дайлера за период — точные метрики из истории кампаний CloudTalk. */}
+      {campaigns && campaigns.length > 0 && (
+        <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4">
+          <div className="flex items-baseline gap-2 mb-3">
+            <span className="text-sm font-semibold text-white">Кампании дайлера</span>
+            <span className="text-[11px] text-slate-500">за период {periodLabel} · CloudTalk</span>
+          </div>
+          <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+            {campaigns.map((c) => {
+              const pctAnswered = c.calls > 0 ? Math.round((c.answered / c.calls) * 100) : 0;
+              return (
+                <div key={`${c.campaignId ?? c.campaignName}`} className="rounded-lg bg-slate-800/40 border border-white/5 px-3 py-2">
+                  <div className="text-[11px] text-slate-300 font-semibold truncate" title={c.campaignName}>
+                    {c.campaignName}
+                  </div>
+                  <div className="mt-1 font-mono tabular-nums text-[12px] text-white">
+                    {c.calls} зв. · <span className="text-emerald-400">дозвон {c.answered}</span>
+                    <span className="text-slate-500"> ({pctAnswered}%)</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 font-mono tabular-nums">
+                    разговор {fmtHm(Math.round(c.talkSec / 60))} · средний {c.avgTalkSec} сек
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
     <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4">
       <div className="flex items-baseline gap-2 mb-1 flex-wrap">
         <span className="text-sm font-semibold text-white">Касания по лидам</span>
@@ -869,6 +989,7 @@ function DialerLeadTouchesPanel({
         </div>
       )}
     </div>
+    </>
   );
 }
 
@@ -894,7 +1015,10 @@ function TimelineBar({ day, dialerView }: { day: DayTimeline; dialerView?: boole
   // not minutes — a lone 20-second call rounds to 0 minutes but is activity.
   const isFullyIdle = dialerView
     ? (day.counts?.dialer ?? 0) === 0 && (day.counts?.manual ?? 0) === 0
-    : day.minutes.call === 0 && day.minutes.crm === 0;
+    : day.minutes.call === 0 &&
+      day.minutes.crm === 0 &&
+      (day.minutes.lunch ?? 0) === 0 &&
+      (day.minutes.meeting ?? 0) === 0;
   if (isFullyIdle) {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
@@ -923,11 +1047,17 @@ function TimelineBar({ day, dialerView }: { day: DayTimeline; dialerView?: boole
                 ? "bg-emerald-500"
                 : s.type === "manual"
                   ? "bg-rose-500"
-                  // idle: gray (base bar) in the dialer view — «без звонков»
-                  // is not the same accusation as general-view «простой».
-                  : dialerView
-                    ? "bg-transparent"
-                    : "bg-rose-500/70";
+                  : s.type === "lunch"
+                    ? "bg-yellow-400/80"
+                    : s.type === "meeting"
+                      ? "bg-violet-500/80"
+                      : s.type === "dayend"
+                        ? "bg-slate-600/60"
+                        // idle: gray (base bar) in the dialer view — «без звонков»
+                        // is not the same accusation as general-view «простой».
+                        : dialerView
+                          ? "bg-transparent"
+                          : "bg-rose-500/70";
           const text = s.label ?? "";
           return (
             <div
@@ -975,6 +1105,224 @@ function fmtHm(mins: number): string {
   return `${h}ч ${m}м`;
 }
 
+// ==================== Плашка «Мой статус» (менеджер b2g) ====================
+// Статус ставится только «в моменте» (решение 2026-07-22): Обед / Встреча /
+// Завершил день; «Вернулся к работе» закрывает активный. Задним числом правит
+// только админ (в модалке дня).
+function MyStatusBar({
+  active,
+  onChanged,
+}: {
+  active: StatusIntervalDto | null;
+  onChanged: (active: StatusIntervalDto | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const post = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/tracking/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ department: "b2g", ...body }),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      const json = (await res.json()) as { active: StatusIntervalDto | null };
+      onChanged(json.active ?? null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sinceLabel = active
+    ? new Date(active.startedAt).toLocaleTimeString("ru-RU", {
+        timeZone: "Europe/Berlin",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  const btnCls =
+    "px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50";
+
+  return (
+    <div className="glass-panel rounded-2xl p-3 border border-white/5 flex flex-wrap items-center gap-2">
+      <span className="text-xs text-slate-400 mr-1">Мой статус:</span>
+      {active ? (
+        <>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
+              active.status === "lunch"
+                ? "bg-yellow-400/15 text-yellow-300 border border-yellow-400/30"
+                : active.status === "meeting"
+                  ? "bg-violet-500/15 text-violet-300 border border-violet-500/30"
+                  : "bg-slate-600/20 text-slate-300 border border-slate-500/30"
+            }`}
+          >
+            {STATUS_LABELS[active.status] ?? active.status} · с {sinceLabel}
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => post({ action: "stop" })}
+            className={`${btnCls} bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25`}
+          >
+            Вернулся к работе
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => post({ action: "start", status: "lunch" })}
+            className={`${btnCls} bg-yellow-400/10 text-yellow-300 border-yellow-400/30 hover:bg-yellow-400/20`}
+          >
+            Обед
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => post({ action: "start", status: "meeting" })}
+            className={`${btnCls} bg-violet-500/10 text-violet-300 border-violet-500/30 hover:bg-violet-500/20`}
+          >
+            Встреча
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => post({ action: "start", status: "day_end" })}
+            className={`${btnCls} bg-slate-600/20 text-slate-300 border-slate-500/30 hover:bg-slate-600/40`}
+          >
+            Завершил день
+          </button>
+        </>
+      )}
+      <span className="text-[10px] text-slate-500 ml-auto">
+        Обед не считается простоем до 60 мин/день; встречи — рабочее время
+      </span>
+      {err && <span className="text-[10px] text-rose-300 w-full">{err}</span>}
+    </div>
+  );
+}
+
+// ==================== Сводная таблица (общий вид) ====================
+// Пофамильные итоги за выбранный период, цифрами (просьба Лилии/Дмитрия,
+// 2026-07-22): телефон / диалог / CRM / простой / утилизация. Считается на
+// клиенте из уже загруженных дней — отдельного API не нужно.
+function GeneralSummaryTable({
+  managers,
+  department,
+}: {
+  managers: ManagerTimeline[];
+  department: "b2g" | "b2b";
+}) {
+  const rows = managers
+    .map((m) => {
+      let workDays = 0;
+      let call = 0;
+      let talk = 0;
+      let crm = 0;
+      let idle = 0;
+      let lunch = 0;
+      let meeting = 0;
+      let hasTalk = false;
+      for (const d of m.days) {
+        if (d.mode !== "working") continue;
+        workDays++;
+        call += d.minutes.call;
+        crm += d.minutes.crm;
+        idle += d.minutes.idle;
+        lunch += d.minutes.lunch ?? 0;
+        meeting += d.minutes.meeting ?? 0;
+        if (d.minutes.talk != null) {
+          hasTalk = true;
+          talk += d.minutes.talk;
+        }
+      }
+      const denom = call + crm + idle;
+      const util = denom > 0 ? Math.round(((call + crm) / denom) * 100) : 0;
+      return { id: m.id, name: m.name, line: m.line, workDays, call, talk, hasTalk, crm, idle, lunch, meeting, util };
+    })
+    .filter((r) => r.workDays > 0)
+    .sort((a, b) => b.util - a.util || b.call - a.call);
+
+  if (rows.length === 0) return null;
+  // «в диалоге» показываем, только если по отделу реально трекается дозвон
+  // (b2g); для b2b колонка дублировала бы «в телефоне».
+  const showTalk = department === "b2g" && rows.some((r) => r.hasTalk && r.talk !== r.call);
+  // Колонки статусов — когда они вообще используются.
+  const showStatuses = department === "b2g" && rows.some((r) => r.lunch > 0 || r.meeting > 0);
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4">
+      <div className="flex items-baseline gap-2 mb-3">
+        <span className="text-sm font-semibold text-white">Итоги за период</span>
+        <span className="text-[11px] text-slate-500">
+          суммы по рабочим дням · утилизация = (телефон + CRM) от нормы 8 ч/день
+        </span>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-white/5">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-900">
+            <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500">
+              <th className="px-3 py-2 font-medium">Менеджер</th>
+              <th className="px-3 py-2 font-medium text-right">Раб. дней</th>
+              <th className="px-3 py-2 font-medium text-right" title="Разговоры + дозвон исходящих">В телефоне</th>
+              {showTalk && <th className="px-3 py-2 font-medium text-right" title="Чистое время разговора">В диалоге</th>}
+              <th className="px-3 py-2 font-medium text-right">В CRM</th>
+              {showStatuses && (
+                <>
+                  <th className="px-3 py-2 font-medium text-right" title="До 60 мин/день не считается простоем">Обед</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Вычитаются из простоя">Встречи</th>
+                </>
+              )}
+              <th className="px-3 py-2 font-medium text-right">Простой</th>
+              <th className="px-3 py-2 font-medium text-right" title="(телефон + CRM) / (телефон + CRM + простой)">Утилизация</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {rows.map((r) => (
+              <tr key={r.id} className="hover:bg-slate-800/40">
+                <td className="px-3 py-1.5 text-slate-200 max-w-[220px] truncate" title={r.name}>
+                  {r.name}
+                  {r.line && <span className="text-slate-500 text-[10px]"> · Л{r.line}</span>}
+                </td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-slate-400">{r.workDays}</td>
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-blue-400">{fmtHm(r.call)}</td>
+                {showTalk && (
+                  <td className="px-3 py-1.5 text-right font-mono tabular-nums text-blue-300/80">
+                    {r.hasTalk ? fmtHm(r.talk) : "—"}
+                  </td>
+                )}
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-emerald-400">{fmtHm(r.crm)}</td>
+                {showStatuses && (
+                  <>
+                    <td className="px-3 py-1.5 text-right font-mono tabular-nums text-yellow-400/90">
+                      {r.lunch > 0 ? fmtHm(r.lunch) : "—"}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono tabular-nums text-violet-400/90">
+                      {r.meeting > 0 ? fmtHm(r.meeting) : "—"}
+                    </td>
+                  </>
+                )}
+                <td className="px-3 py-1.5 text-right font-mono tabular-nums text-rose-400">{fmtHm(r.idle)}</td>
+                <td className={`px-3 py-1.5 text-right font-mono tabular-nums ${r.util >= 60 ? "text-emerald-300" : r.util >= 40 ? "text-amber-300" : "text-rose-300"}`}>
+                  {r.util}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function PctSummary({ day }: { day: DayTimeline }) {
   if (day.mode === "off") {
     return <span className="text-[10px] text-slate-500">—</span>;
@@ -989,12 +1337,30 @@ function PctSummary({ day }: { day: DayTimeline }) {
         <span className="tracking-idle">{day.pct.idle}%</span>
       </div>
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="tracking-call">{fmtHm(day.minutes.call)}</span>
+        <span className="tracking-call" title="В телефоне: разговоры + дозвон">{fmtHm(day.minutes.call)}</span>
         <span className="text-slate-600">/</span>
         <span className="tracking-crm">{fmtHm(day.minutes.crm)}</span>
         <span className="text-slate-600">/</span>
         <span className="tracking-idle">{fmtHm(day.minutes.idle)}</span>
       </div>
+      {/* Чистое время разговора — показываем только когда отличается от
+          «в телефоне» (b2g с трекингом дозвона); иначе строка — шум. */}
+      {day.minutes.talk != null && day.minutes.talk !== day.minutes.call && (
+        <div className="text-[10px] text-slate-500">в диалоге {fmtHm(day.minutes.talk)}</div>
+      )}
+      {((day.minutes.lunch ?? 0) > 0 || (day.minutes.meeting ?? 0) > 0) && (
+        <div className="text-[10px]">
+          {(day.minutes.lunch ?? 0) > 0 && (
+            <span className="text-yellow-400/90">обед {fmtHm(day.minutes.lunch!)}</span>
+          )}
+          {(day.minutes.lunch ?? 0) > 0 && (day.minutes.meeting ?? 0) > 0 && (
+            <span className="text-slate-600"> · </span>
+          )}
+          {(day.minutes.meeting ?? 0) > 0 && (
+            <span className="text-violet-400/90">встречи {fmtHm(day.minutes.meeting!)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1323,6 +1689,7 @@ interface DetailResponse {
   date: string;
   timeline: DayTimeline;
   events: DetailEvent[];
+  statusIntervals?: StatusIntervalDto[];
 }
 
 function DetailModal({
@@ -1330,12 +1697,14 @@ function DetailModal({
   view,
   target,
   typesParam,
+  canEditStatuses,
   onClose,
 }: {
   department: "b2g" | "b2b";
   view: "general" | "dialer";
   target: { managerId: string; managerName: string; line: string | null; date: string };
   typesParam: string;
+  canEditStatuses?: boolean;
   onClose: () => void;
 }) {
   const isDialer = view === "dialer";
@@ -1343,6 +1712,8 @@ function DetailModal({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [hoverSeg, setHoverSeg] = useState<Segment | null>(null);
+  // Бамп после админ-правки статусов → рефетч дня (таймлайн + список).
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Lazy-load detail when modal mounts
   useEffect(() => {
@@ -1373,7 +1744,7 @@ function DetailModal({
     return () => {
       cancelled = true;
     };
-  }, [department, view, target.managerId, target.date, typesParam]);
+  }, [department, view, target.managerId, target.date, typesParam, reloadKey]);
 
   // Esc to close
   useEffect(() => {
@@ -1470,12 +1841,33 @@ function DetailModal({
                   </>
                 ) : (
                   <>
-                    <StatTile color="bg-blue-500" label="На звонках" minutes={timeline.minutes.call} pct={timeline.pct.call} />
+                    <StatTile
+                      color="bg-blue-500"
+                      label="В телефоне"
+                      minutes={timeline.minutes.call}
+                      pct={timeline.pct.call}
+                      sub={
+                        timeline.minutes.talk != null && timeline.minutes.talk !== timeline.minutes.call
+                          ? `в диалоге ${Math.floor(timeline.minutes.talk / 60)}ч ${timeline.minutes.talk % 60}м`
+                          : undefined
+                      }
+                    />
                     <StatTile color="bg-emerald-500" label="В CRM" minutes={timeline.minutes.crm} pct={timeline.pct.crm} />
                     <StatTile color="bg-rose-500/70" label="Простой" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
                   </>
                 )}
               </div>
+
+              {/* Статусы дня (b2g, общий вид): список + ретро-правка админа. */}
+              {!isDialer && department === "b2g" && (
+                <DayStatusSection
+                  statuses={data?.statusIntervals ?? []}
+                  canEdit={!!canEditStatuses}
+                  managerId={target.managerId}
+                  dateISO={target.date}
+                  onChanged={() => setReloadKey((k) => k + 1)}
+                />
+              )}
 
               {hoverSeg ? (
                 <SegmentEventList
@@ -1493,6 +1885,144 @@ function DetailModal({
       </div>
     </div>,
     document.body,
+  );
+}
+
+// ==================== Статусы дня в модалке ====================
+// Список ручных статусов менеджера за день; админ может удалить интервал или
+// добавить задним числом (время — Berlin, наивные строки парсит сервер).
+function DayStatusSection({
+  statuses,
+  canEdit,
+  managerId,
+  dateISO,
+  onChanged,
+}: {
+  statuses: StatusIntervalDto[];
+  canEdit: boolean;
+  managerId: string;
+  dateISO: string;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [addStatus, setAddStatus] = useState("lunch");
+  const [addFrom, setAddFrom] = useState("13:00");
+  const [addTo, setAddTo] = useState("14:00");
+
+  if (statuses.length === 0 && !canEdit) return null;
+
+  const fmtT = (iso: string | null) =>
+    iso
+      ? new Date(iso).toLocaleTimeString("ru-RU", {
+          timeZone: "Europe/Berlin",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "…";
+
+  const post = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/tracking/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ department: "b2g", ...body }),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
+      <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
+        Статусы дня
+        {canEdit && (
+          <span className="text-slate-500 normal-case tracking-normal ml-2">(правка задним числом — только админ)</span>
+        )}
+      </div>
+      {statuses.length === 0 ? (
+        <div className="text-xs text-slate-500 py-1">Статусы не выставлялись</div>
+      ) : (
+        <ul className="flex flex-col divide-y divide-white/5">
+          {statuses.map((s) => (
+            <li key={s.id} className="flex items-center gap-2 py-1.5 text-xs">
+              <span
+                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  s.status === "lunch" ? "bg-yellow-400" : s.status === "meeting" ? "bg-violet-500" : "bg-slate-500"
+                }`}
+              />
+              <span className="text-slate-200">{STATUS_LABELS[s.status] ?? s.status}</span>
+              <span className="text-slate-500 font-mono tabular-nums">
+                {fmtT(s.startedAt)}–{fmtT(s.endedAt)}
+              </span>
+              {s.createdBy && s.createdBy !== "self" && (
+                <span className="text-[10px] text-slate-600">{s.createdBy}</span>
+              )}
+              {canEdit && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => post({ action: "delete", id: s.id })}
+                  className="ml-auto text-[10px] text-rose-400/80 hover:text-rose-300 disabled:opacity-50"
+                >
+                  удалить
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {canEdit && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <select
+            value={addStatus}
+            onChange={(e) => setAddStatus(e.target.value)}
+            className="bg-slate-800 border border-white/10 rounded-md px-2 py-1 text-xs text-slate-200"
+          >
+            <option value="lunch">Обед</option>
+            <option value="meeting">Встреча</option>
+            <option value="day_end">Завершил день</option>
+          </select>
+          <input
+            type="time"
+            value={addFrom}
+            onChange={(e) => setAddFrom(e.target.value)}
+            className="bg-slate-800 border border-white/10 rounded-md px-2 py-1 text-xs text-slate-200"
+          />
+          <span className="text-slate-600">—</span>
+          <input
+            type="time"
+            value={addTo}
+            onChange={(e) => setAddTo(e.target.value)}
+            className="bg-slate-800 border border-white/10 rounded-md px-2 py-1 text-xs text-slate-200"
+          />
+          <button
+            type="button"
+            disabled={busy || !addFrom || !addTo}
+            onClick={() =>
+              post({
+                action: "add",
+                managerId,
+                status: addStatus,
+                from: `${dateISO}T${addFrom}`,
+                to: `${dateISO}T${addTo}`,
+              })
+            }
+            className="px-2.5 py-1 rounded-md bg-slate-700 hover:bg-slate-600 border border-white/10 text-slate-200 disabled:opacity-50"
+          >
+            Добавить
+          </button>
+          {err && <span className="text-[10px] text-rose-300 w-full">{err}</span>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1534,9 +2064,15 @@ function DetailTimelineBar({
               ? "bg-emerald-500"
               : s.type === "manual"
                 ? "bg-rose-500"
-                : dialerView
-                  ? "bg-transparent"
-                  : "bg-rose-500/70";
+                : s.type === "lunch"
+                  ? "bg-yellow-400/80"
+                  : s.type === "meeting"
+                    ? "bg-violet-500/80"
+                    : s.type === "dayend"
+                      ? "bg-slate-600/60"
+                      : dialerView
+                        ? "bg-transparent"
+                        : "bg-rose-500/70";
         return (
           <div
             key={`${s.type}-${s.startMin}-${i}`}
@@ -1595,11 +2131,13 @@ function StatTile({
   label,
   minutes,
   pct,
+  sub,
 }: {
   color: string;
   label: string;
   minutes: number;
   pct: number;
+  sub?: string; // optional second line, e.g. «в диалоге 1ч 23м»
 }) {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
@@ -1613,6 +2151,7 @@ function StatTile({
         <span className="text-base text-white">{h}ч {m}м</span>
         <span className="text-[11px] text-slate-500 ml-1.5">{pct}%</span>
       </div>
+      {sub && <div className="text-[10px] text-slate-500 font-mono tabular-nums mt-0.5">{sub}</div>}
     </div>
   );
 }
@@ -1633,7 +2172,7 @@ function SegmentEventList({
   return (
     <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
       <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
-        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "dialer" ? "В дайлере" : seg.type === "manual" ? "Вне дайлера" : dialerView ? "Без звонков в CloudTalk" : "Простой"}
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "dialer" ? "В дайлере" : seg.type === "manual" ? "Вне дайлера" : seg.type === "lunch" ? "Обед" : seg.type === "meeting" ? "Встреча" : seg.type === "dayend" ? "День завершён" : dialerView ? "Без звонков в CloudTalk" : "Простой"}
         <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
           {segStart}–{segEnd}
         </span>
