@@ -26,13 +26,35 @@ import { CALL_TYPES, normalizeEventType } from "./event-types";
 // them. Kept in the shared union so TimelineBar/Segment render both views from
 // one component. "dialer" = a CloudTalk campaign (dialer) call is in progress;
 // "manual" = a CloudTalk call outside the dialer (hand-dialed / incoming).
-export type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
+// "lunch" / "meeting" / "dayend" — ручные статусы менеджера (Лилия, b2g):
+// обед (жёлтый), встреча (фиолетовый), «завершил день» (серый остаток).
+export type SegmentType =
+  | "call" | "crm" | "idle" | "dialer" | "manual"
+  | "lunch" | "meeting" | "dayend";
+
+// Ручной статус менеджера, уже приведённый к UTC-миллисекундам вызывающей
+// стороной. endMs — конец интервала; для «активен сейчас» и day_end caller
+// передаёт min(now, конец дня) / конец дня соответственно.
+export interface StatusInterval {
+  status: "lunch" | "meeting" | "day_end";
+  startMs: number;
+  endMs: number;
+}
 
 export interface TimelineEvent {
   eventId: string;
   eventType: string;
   createdAt: Date;
   durationSec: number;
+  /**
+   * Call events only: ring/dial seconds before pickup. When > 0 (b2g), an
+   * OUTGOING call occupies the line for waitSec + durationSec («в телефоне»),
+   * with durationSec alone reported as «в диалоге»; an unanswered outgoing
+   * call (durationSec 0, waitSec > 0) still counts as phone work — дозвон
+   * это работа (Лилия, 2026-07-22). Incoming calls ignore it (ringing is
+   * the CLIENT waiting, not the manager working). Absent/0 → old behavior.
+   */
+  waitSec?: number;
   /**
    * Kommo entity scope: "lead" | "contact" | "company" | "task" | null.
    * Needed for filtering: Kommo emits one generic `entity_linked` /
@@ -63,8 +85,15 @@ export interface TimelineResult {
   // timeline leaves them undefined (treated as 0 by consumers). `dialer` = time
   // in dialer-campaign calls, `manual` = time in CloudTalk calls outside the
   // dialer; `idle` in the dialer view = no CloudTalk calls at all.
+  // `talk` — general view only: чистое время в диалоге; `call` там = total
+  // время в телефоне (разговор + дозвон исходящих, если события несут waitSec).
+  // `lunch` / `meeting` — минуты в ручных статусах (general view, b2g).
   pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
-  minutes: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  minutes: {
+    call: number; crm: number; idle: number;
+    talk?: number; lunch?: number; meeting?: number;
+    dialer?: number; manual?: number;
+  };
   // Dialer view only: how many calls of each channel landed that day (counted
   // pre-clipping, so calls outside the 09:00–20:00 window are still counted).
   counts?: { dialer: number; manual: number };
@@ -157,11 +186,12 @@ function fmtSegmentTime(start: { h: number; m: number }, offsetMin: number): str
   return `${pad2(h)}:${pad2(m)}`;
 }
 
-function labelForCall(eventType: string, durationSec: number): string {
+function labelForCall(eventType: string, talkSec: number, waitSec: number): string {
+  const fmtSec = (s: number) => (s >= 60 ? `${Math.round(s / 60)} мин` : `${s} сек`);
+  if (talkSec <= 0) return `Недозвон · гудки ${fmtSec(waitSec)}`;
   const dir = eventType === "incoming_call" ? "Входящий звонок" : "Исходящий звонок";
-  const mins = Math.round(durationSec / 60);
-  if (mins >= 1) return `${dir} · ${mins} мин`;
-  return `${dir} · ${durationSec} сек`;
+  const wait = waitSec > 0 ? ` · дозвон ${fmtSec(waitSec)}` : "";
+  return `${dir} · разговор ${fmtSec(talkSec)}${wait}`;
 }
 
 /**
@@ -173,8 +203,9 @@ export function buildTimeline(params: {
   tzOffsetMinutes: number;    // offset of the dashboard's display TZ from UTC
   events: TimelineEvent[];    // ALL events for this manager on this date (already filtered by DB)
   selectedCrmTypes: Set<string>;
+  statuses?: StatusInterval[]; // ручные статусы этого дня (обед/встреча/завершил)
 }): TimelineResult {
-  const { scheduleRow, dateISO, tzOffsetMinutes, events, selectedCrmTypes } = params;
+  const { scheduleRow, dateISO, tzOffsetMinutes, events, selectedCrmTypes, statuses = [] } = params;
   const window = deriveShiftWindow(scheduleRow);
 
   if (!window) {
@@ -204,13 +235,25 @@ export function buildTimeline(params: {
   // звонки (напр. 06:00) больше не режутся окном — «Звонок» в Активности
   // сходится со «Звонками». Минимум окна остаётся 09:00–20:00. Границы
   // выравниваем по минуте (floor/ceil) для чистой сетки.
+  // Call phone-occupancy split: outgoing calls occupy the line for
+  // дозвон + разговор (waitSec counts as work — manager is dialing);
+  // incoming — разговор only (ringing is the client waiting, not work).
+  // Events without waitSec (b2b, Kommo note: rows) degrade to old behavior.
+  const callSpan = (ev: TimelineEvent): { waitSec: number; talkSec: number; spanSec: number } => {
+    const talkSec = Math.max(0, ev.durationSec ?? 0);
+    const waitSec = ev.eventType === "outgoing_call" ? Math.max(0, ev.waitSec ?? 0) : 0;
+    return { waitSec, talkSec, spanSec: waitSec + talkSec };
+  };
+
   let firstActionMs = Infinity;
   let lastActionMs = -Infinity;
   for (const ev of events) {
     const isCallEv = CALL_TYPES.has(ev.eventType);
-    if (isCallEv && (!ev.durationSec || ev.durationSec <= 0)) continue; // пропущенный звонок — не действие
+    // Звонок — действие, если занимал линию (разговор ИЛИ гудки исходящего);
+    // пропущенный входящий — не действие.
+    if (isCallEv && callSpan(ev).spanSec <= 0) continue;
     const evMs = ev.createdAt.getTime();
-    const evEndMs = isCallEv ? evMs + ev.durationSec * 1000 : evMs;
+    const evEndMs = isCallEv ? evMs + callSpan(ev).spanSec * 1000 : evMs;
     if (evMs < firstActionMs) firstActionMs = evMs;
     if (evEndMs > lastActionMs) lastActionMs = evEndMs;
   }
@@ -232,14 +275,17 @@ export function buildTimeline(params: {
   // Allocate per-minute array: 0 = idle, 1 = crm, 2 = call (highest priority)
   const grid = new Uint8Array(total);
   // Track tooltip providers per minute (call dominates).
-  const callAt = new Array<{ start: number; end: number; type: string; dur: number } | null>(total).fill(null);
+  const callAt = new Array<{ start: number; end: number; type: string; talk: number; wait: number } | null>(total).fill(null);
   // CRM event starts (for labels / cluster merging)
   const crmStarts: Array<{ minute: number; type: string }> = [];
   // EXACT seconds on the line within the shift window. Sums each call's
-  // clipped duration in seconds, never the minute-grid count. Used as the
+  // clipped span in seconds, never the minute-grid count. Used as the
   // canonical "сколько на линии" metric — the minute grid below has a 1-min
   // floor for visibility and would over-count a barrage of <60s calls.
-  let callSecExact = 0;
+  //   • phoneSecExact — «в телефоне»: дозвон + разговор (span);
+  //   • talkSecExact — «в диалоге»: только разговор.
+  let phoneSecExact = 0;
+  let talkSecExact = 0;
 
   for (const ev of events) {
     const evMs = ev.createdAt.getTime();
@@ -248,23 +294,26 @@ export function buildTimeline(params: {
     const isCall = CALL_TYPES.has(ev.eventType);
 
     if (isCall) {
-      // Only render non-missed calls — duration > 0 is how we detect a real call.
-      // (Missed calls show up with duration = 0.)
-      if (!ev.durationSec || ev.durationSec <= 0) continue;
+      const { waitSec, talkSec, spanSec } = callSpan(ev);
+      // Nothing occupied the line (missed incoming, or empty row) → skip.
+      if (spanSec <= 0) continue;
 
-      // Exact metric: seconds inside the shift window (clipped at both ends).
+      // Exact metrics: seconds inside the shift window (clipped at both ends).
       // A 19:55→20:30 call contributes 5 min, an 08:55→09:05 call contributes 5 min.
-      const callStartMs = Math.max(evMs, shiftStartUtcMs);
-      const callEndMs = Math.min(evMs + ev.durationSec * 1000, shiftEndUtcMs);
-      if (callEndMs > callStartMs) {
-        callSecExact += (callEndMs - callStartMs) / 1000;
-      }
+      const clip = (aMs: number, bMs: number) => {
+        const s = Math.max(aMs, shiftStartUtcMs);
+        const e = Math.min(bMs, shiftEndUtcMs);
+        return e > s ? (e - s) / 1000 : 0;
+      };
+      const talkStartMs = evMs + waitSec * 1000; // разговор начинается после дозвона
+      phoneSecExact += clip(evMs, evMs + spanSec * 1000);
+      talkSecExact += clip(talkStartMs, talkStartMs + talkSec * 1000);
 
       // Visual grid: round-to-minute with 1-min floor so a 10s call still
       // shows as a tick. Over-counts call MINUTES, but pct/minutes math below
-      // ignores the grid and uses callSecExact instead.
+      // ignores the grid and uses the exact-seconds counters instead.
       const startMinFloat = (evMs - shiftStartUtcMs) / 60_000;
-      const durationMin = Math.max(1, Math.round(ev.durationSec / 60));
+      const durationMin = Math.max(1, Math.round(spanSec / 60));
       let startMin = Math.max(0, Math.floor(startMinFloat));
       const endMin = Math.min(total, startMin + durationMin);
 
@@ -277,7 +326,7 @@ export function buildTimeline(params: {
 
       for (let i = startMin; i < endMin; i++) grid[i] = 2;
       // Record tooltip source (use first minute as anchor)
-      callAt[startMin] = { start: startMin, end: endMin, type: ev.eventType, dur: ev.durationSec };
+      callAt[startMin] = { start: startMin, end: endMin, type: ev.eventType, talk: talkSec, wait: waitSec };
     } else {
       // CRM event — only count if selected by filter. Three matching paths:
       //   1. direct: eventType matches a selected key (most events)
@@ -342,6 +391,18 @@ export function buildTimeline(params: {
     closeSession(sessionStart, sessionLast);
   }
 
+  // Ручные статусы: красим только поверх ПРОСТОЯ (grid==0) — звонок или CRM
+  // во время «обеда» остаются работой (менеджер реально работал). Значения:
+  // 3=обед, 4=встреча, 5=день завершён.
+  for (const st of statuses) {
+    const val = st.status === "lunch" ? 3 : st.status === "meeting" ? 4 : 5;
+    const sMin = Math.max(0, Math.floor((st.startMs - shiftStartUtcMs) / 60_000));
+    const eMin = Math.min(total, Math.ceil((st.endMs - shiftStartUtcMs) / 60_000));
+    for (let i = sMin; i < eMin; i++) {
+      if (grid[i] === 0) grid[i] = val;
+    }
+  }
+
   // Collapse into segments
   const segments: TimelineSegment[] = [];
   let cursor = 0;
@@ -350,7 +411,13 @@ export function buildTimeline(params: {
     let end = cursor + 1;
     while (end < total && grid[end] === v) end++;
 
-    const type: SegmentType = v === 2 ? "call" : v === 1 ? "crm" : "idle";
+    const type: SegmentType =
+      v === 2 ? "call"
+      : v === 1 ? "crm"
+      : v === 3 ? "lunch"
+      : v === 4 ? "meeting"
+      : v === 5 ? "dayend"
+      : "idle";
     const seg: TimelineSegment = {
       type,
       startMin: cursor,
@@ -362,7 +429,7 @@ export function buildTimeline(params: {
       // Find the call tooltip anchor falling inside this segment
       for (let i = cursor; i < end; i++) {
         if (callAt[i]) {
-          seg.label = labelForCall(callAt[i]!.type, callAt[i]!.dur);
+          seg.label = labelForCall(callAt[i]!.type, callAt[i]!.talk, callAt[i]!.wait);
           break;
         }
       }
@@ -379,6 +446,12 @@ export function buildTimeline(params: {
       const endHm = fmtSegmentTime(startLocal, end);
       const evWord = evCount === 1 ? "событие" : evCount < 5 ? "события" : "событий";
       seg.label = `Работа в CRM · ${startHm}–${endHm} · ${evCount} ${evWord}`;
+    } else if (type === "lunch") {
+      seg.label = `Обед · ${seg.durationMin} мин`;
+    } else if (type === "meeting") {
+      seg.label = `Встреча · ${seg.durationMin} мин`;
+    } else if (type === "dayend") {
+      seg.label = `День завершён`;
     } else {
       seg.label = `Простой · ${seg.durationMin} мин`;
     }
@@ -396,10 +469,25 @@ export function buildTimeline(params: {
   //   Проценты — от базы call+crm+idle (= max(8ч, активность)), чтобы в сумме
   //   давали 100% и не переполнялись, если активность > 8ч.
   const SHIFT_NORM_MIN = 8 * 60;
-  const callMin = Math.round(callSecExact / 60);
+  // call = «в телефоне» (дозвон + разговор); talk = «в диалоге» (чистый
+  // разговор). Простой считается от телефонного времени — гудки не простой.
+  const callMin = Math.round(phoneSecExact / 60);
+  const talkMin = Math.round(talkSecExact / 60);
   let crmMin = 0;
-  for (let i = 0; i < total; i++) if (grid[i] === 1) crmMin++;
-  const idleMin = Math.max(0, SHIFT_NORM_MIN - callMin - crmMin);
+  let lunchMin = 0;
+  let meetingMin = 0;
+  for (let i = 0; i < total; i++) {
+    if (grid[i] === 1) crmMin++;
+    else if (grid[i] === 3) lunchMin++;
+    else if (grid[i] === 4) meetingMin++;
+  }
+  // Простой от 8-часовой нормы. Ручные статусы вычитаются: встречи — целиком
+  // (рабочее время), обед — максимум 60 мин/день (Лилия: «отходил свой час —
+  // остальное реальный простой»). «Завершил день» на простой НЕ влияет —
+  // только визуально гасит остаток шкалы.
+  const LUNCH_CREDIT_MIN = 60;
+  const lunchCredit = Math.min(lunchMin, LUNCH_CREDIT_MIN);
+  const idleMin = Math.max(0, SHIFT_NORM_MIN - callMin - crmMin - meetingMin - lunchCredit);
   const denom = callMin + crmMin + idleMin;
   const pct = {
     call: denom > 0 ? Math.round((callMin / denom) * 100) : 0,
@@ -414,7 +502,10 @@ export function buildTimeline(params: {
     totalMinutes: total,
     segments,
     pct,
-    minutes: { call: callMin, crm: crmMin, idle: idleMin },
+    minutes: {
+      call: callMin, talk: talkMin, crm: crmMin, idle: idleMin,
+      lunch: lunchMin, meeting: meetingMin,
+    },
   };
 }
 
