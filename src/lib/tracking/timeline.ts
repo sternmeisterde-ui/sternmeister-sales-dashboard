@@ -22,11 +22,11 @@ import { CALL_TYPES, normalizeEventType } from "./event-types";
 //   - Events outside the shift window are clipped to the window.
 //   - If a call overruns the shift end, we clip at shift end.
 
-// "wait" and "dialer" are dialer-only; the general timeline never emits them.
-// Kept in the shared union so TimelineBar/Segment render both views from one
-// component. "dialer" = inside a dialing window but between calls (the pause/
-// ring-of-next that still counts as "active in the dialer").
-export type SegmentType = "call" | "crm" | "idle" | "wait" | "dialer";
+// "dialer" and "manual" are dialer-view-only; the general timeline never emits
+// them. Kept in the shared union so TimelineBar/Segment render both views from
+// one component. "dialer" = a CloudTalk campaign (dialer) call is in progress;
+// "manual" = a CloudTalk call outside the dialer (hand-dialed / incoming).
+export type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
 
 export interface TimelineEvent {
   eventId: string;
@@ -59,11 +59,15 @@ export interface TimelineResult {
   shiftEnd?: string;               // "HH:MM"
   totalMinutes: number;            // 0 if off
   segments: TimelineSegment[];
-  // `wait` and `dialer` are populated only by buildDialerTimeline; the general
+  // `dialer`/`manual` are populated only by buildDialerTimeline; the general
   // timeline leaves them undefined (treated as 0 by consumers). `dialer` = time
-  // inside a dialing window but between calls; "в дайлере всего" = call+wait+dialer.
-  pct: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
-  minutes: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
+  // in dialer-campaign calls, `manual` = time in CloudTalk calls outside the
+  // dialer; `idle` in the dialer view = no CloudTalk calls at all.
+  pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  minutes: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  // Dialer view only: how many calls of each channel landed that day (counted
+  // pre-clipping, so calls outside the 09:00–20:00 window are still counted).
+  counts?: { dialer: number; manual: number };
 }
 
 export interface ScheduleRow {
@@ -415,37 +419,31 @@ export function buildTimeline(params: {
 }
 
 // ==================== Dialer timeline builder ====================
-// Same 09:00–20:00 Berlin grid as buildTimeline, but reconstructs «время в
-// дайлере» from the actual call stream (no presence flag — that only tells
-// "logged into CloudTalk", not "dialing"). Logic:
-//   • each call lays «ожидание/дозвон» (wait) then «разговор» (talk) stripes;
-//   • consecutive calls (gap ≤ DIALER_WINDOW_GAP_MIN) form one DIALING WINDOW;
-//     the within-window pauses between calls count as «в дайлере» (segment
-//     "dialer") — that's the wrap-up + ring-of-next + short pauses;
-//   • everything outside windows is «вне дайлера» (idle);
-//   • calls that rang longer than the campaign's answer limit
-//     (waitSec > DIALER_MAX_RING_SEC) can't be from the dialer → dropped as manual.
-// «В дайлере всего» = call + wait + dialer. Produces a TimelineResult so the UI
-// renders it with the shared TimelineBar.
-
-// Gap (minutes) between calls that ends a dialing window. The dialer auto-dials
-// every ~1–3 min, so a >10-min gap is a clear session break. Tune on real data.
-const DIALER_WINDOW_GAP_MIN = 10;
-// Campaign answer-wait cap (CloudTalk «Бух Гос» = 60s). A call ringing longer
-// than this couldn't be the dialer (it would have given up) → manual, excluded.
-const DIALER_MAX_RING_SEC = 60;
+// Same 09:00–20:00 Berlin grid as buildTimeline, painting each CloudTalk call
+// as an event on the gray scale. No heuristics: the channel comes per call
+// from analytics.dialer_call_attribution (ground truth — dialer-sync matches
+// every outgoing CDR against CloudTalk campaign history).
+//   • channel="dialer" → green stripe «В дайлере» for the call's full span
+//     (ring + talk);
+//   • channel="manual" → red stripe «Вне дайлера» (hand-dialed / incoming);
+//   • no call at that minute → gray (base bar) «Без звонков».
+// Produces a TimelineResult so the UI renders it with the shared TimelineBar.
 
 export interface DialerCall {
   startedAt: Date;   // CloudTalk Cdr.started_at (ring start)
   talkSec: number;   // talking_time
   waitSec: number;   // waiting_time (ring/queue before pickup)
+  // Attribution verdict: "dialer" = campaign call, "manual" = everything else
+  // (hand-dialed, incoming, unattributed history).
+  channel: "dialer" | "manual";
 }
 
 function labelForDialerSeg(type: SegmentType, durationMin: number): string {
-  if (type === "call") return `Разговор · ${durationMin} мин`;
-  if (type === "wait") return `Ожидание/дозвон · ${durationMin} мин`;
-  if (type === "dialer") return `В дайлере (между звонками) · ${durationMin} мин`;
-  return `Вне дайлера · ${durationMin} мин`;
+  if (type === "dialer") return `В дайлере · ${durationMin} мин`;
+  if (type === "manual") return `Вне дайлера (звонки не из дайлера) · ${durationMin} мин`;
+  // «в CloudTalk» matters: the manager may well be calling via other channels
+  // (CallGear, Kommo PBX) during this stretch — this view only sees CloudTalk.
+  return `Без звонков в CloudTalk · ${durationMin} мин`;
 }
 
 export function buildDialerTimeline(params: {
@@ -463,8 +461,9 @@ export function buildDialerTimeline(params: {
       offReason: offReasonFor(scheduleRow),
       totalMinutes: 0,
       segments: [],
-      pct: { call: 0, crm: 0, idle: 0, wait: 0, dialer: 0 },
-      minutes: { call: 0, crm: 0, idle: 0, wait: 0, dialer: 0 },
+      pct: { call: 0, crm: 0, idle: 0, dialer: 0, manual: 0 },
+      minutes: { call: 0, crm: 0, idle: 0, dialer: 0, manual: 0 },
+      counts: { dialer: 0, manual: 0 },
     };
   }
 
@@ -475,24 +474,12 @@ export function buildDialerTimeline(params: {
     tzOffsetMinutes * 60_000;
   const shiftEndUtcMs = shiftStartUtcMs + total * 60_000;
 
-  // Drop calls that rang longer than the dialer's answer cap — they're manual.
-  // Sort by start so windowing and segment marking are deterministic.
-  const dialerCalls = calls
-    .filter((c) => Math.max(0, c.waitSec) <= DIALER_MAX_RING_SEC)
-    .map((c) => {
-      const start = c.startedAt.getTime();
-      return {
-        start,
-        waitEnd: start + Math.max(0, c.waitSec) * 1000,
-        end: start + (Math.max(0, c.waitSec) + Math.max(0, c.talkSec)) * 1000,
-      };
-    })
-    .sort((a, b) => a.start - b.start);
-
-  // grid cell: 0 idle(=вне дайлера), 1 wait, 2 talk, 3 dialer(within-window gap).
+  // grid cell: 0 = no call (gray), 1 = manual call (red), 2 = dialer call
+  // (green — wins over manual on the same minute).
   const grid = new Uint8Array(total);
-  let talkSecExact = 0;
-  let waitSecExact = 0;
+  let dialerSecExact = 0;
+  let manualSecExact = 0;
+  const counts = { dialer: 0, manual: 0 };
 
   const clipSec = (aMs: number, bMs: number): number => {
     const s = Math.max(aMs, shiftStartUtcMs);
@@ -506,35 +493,19 @@ export function buildDialerTimeline(params: {
     for (let i = sMin; i < eMin; i++) if (grid[i] < val) grid[i] = val;
   };
 
-  // 1) Fill dialing windows (cell=3) so within-call pauses count as «в дайлере».
-  const gapMs = DIALER_WINDOW_GAP_MIN * 60_000;
-  let winStart: number | null = null;
-  let winEnd = 0;
-  const flushWindow = () => {
-    if (winStart === null) return;
-    mark(winStart, winEnd, 3);
-    winStart = null;
-  };
-  for (const c of dialerCalls) {
-    if (winStart === null) {
-      winStart = c.start;
-      winEnd = c.end;
-    } else if (c.start - winEnd <= gapMs) {
-      winEnd = Math.max(winEnd, c.end);
+  for (const c of calls) {
+    const start = c.startedAt.getTime();
+    // Full call span = ring + talk; an unanswered call is still activity.
+    const end = start + (Math.max(0, c.waitSec) + Math.max(0, c.talkSec)) * 1000;
+    if (c.channel === "dialer") {
+      counts.dialer++;
+      dialerSecExact += clipSec(start, end);
+      mark(start, end, 2);
     } else {
-      flushWindow();
-      winStart = c.start;
-      winEnd = c.end;
+      counts.manual++;
+      manualSecExact += clipSec(start, end);
+      mark(start, end, 1);
     }
-  }
-  flushWindow();
-
-  // 2) Overlay wait (1) and talk (2) — they win over the dialer-gap fill.
-  for (const c of dialerCalls) {
-    waitSecExact += clipSec(c.start, c.waitEnd);
-    talkSecExact += clipSec(c.waitEnd, c.end);
-    mark(c.start, c.waitEnd, 1);
-    mark(c.waitEnd, c.end, 2);
   }
 
   // Collapse grid into contiguous segments.
@@ -544,8 +515,7 @@ export function buildDialerTimeline(params: {
     const v = grid[cursor];
     let end = cursor + 1;
     while (end < total && grid[end] === v) end++;
-    const type: SegmentType =
-      v === 2 ? "call" : v === 1 ? "wait" : v === 3 ? "dialer" : "idle";
+    const type: SegmentType = v === 2 ? "dialer" : v === 1 ? "manual" : "idle";
     const durationMin = end - cursor;
     segments.push({
       type,
@@ -557,19 +527,18 @@ export function buildDialerTimeline(params: {
     cursor = end;
   }
 
-  // «В дайлере всего» = all window cells (1+2+3). talk/wait use exact seconds;
-  // the gap is the remainder so the three sum back to the window total.
-  let inDialerCells = 0;
-  for (let i = 0; i < total; i++) if (grid[i] >= 1) inDialerCells++;
-  const callMin = Math.round(talkSecExact / 60);
-  const waitMin = Math.round(waitSecExact / 60);
-  const dialerGapMin = Math.max(0, inDialerCells - callMin - waitMin);
-  const idleMin = Math.max(0, total - inDialerCells);
+  // Minutes from exact call seconds (not grid cells — a 30s call shouldn't
+  // report as a full minute); idle is the grid remainder.
+  let activeCells = 0;
+  for (let i = 0; i < total; i++) if (grid[i] >= 1) activeCells++;
+  const dialerMin = Math.round(dialerSecExact / 60);
+  const manualMin = Math.round(manualSecExact / 60);
+  const idleMin = Math.max(0, total - activeCells);
   const pct = {
-    call: total > 0 ? Math.round((callMin / total) * 100) : 0,
-    wait: total > 0 ? Math.round((waitMin / total) * 100) : 0,
-    dialer: total > 0 ? Math.round((dialerGapMin / total) * 100) : 0,
+    call: 0,
     crm: 0,
+    dialer: total > 0 ? Math.round((dialerMin / total) * 100) : 0,
+    manual: total > 0 ? Math.round((manualMin / total) * 100) : 0,
     idle: total > 0 ? Math.round((idleMin / total) * 100) : 0,
   };
 
@@ -580,6 +549,7 @@ export function buildDialerTimeline(params: {
     totalMinutes: total,
     segments,
     pct,
-    minutes: { call: callMin, wait: waitMin, dialer: dialerGapMin, crm: 0, idle: idleMin },
+    minutes: { call: 0, crm: 0, dialer: dialerMin, manual: manualMin, idle: idleMin },
+    counts,
   };
 }

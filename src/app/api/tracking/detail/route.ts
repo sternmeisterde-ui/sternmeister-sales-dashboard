@@ -171,6 +171,7 @@ export async function GET(req: NextRequest) {
           startedAt: e.createdAt,
           talkSec: e.talkSec,
           waitSec: e.waitSec,
+          channel: e.channel,
         })),
       });
 
@@ -185,13 +186,14 @@ export async function GET(req: NextRequest) {
             eventId: e.eventId,
             eventType: e.direction === "incoming" ? "incoming_call" : "outgoing_call",
             label: e.direction === "incoming" ? "Входящий звонок" : "Исходящий звонок",
-            group: "Дайлер",
+            // Right-hand tag in the modal row: attribution channel.
+            group: e.channel === "dialer" ? "Дайлер" : "Вне дайлера",
             createdAt: e.createdAt.toISOString(),
             timeBerlin: `${hh}:${mm}`,
             durationSec: e.talkSec,
             entityType: null,
             entityId: null,
-            raw: { phone: e.phone, waitSec: e.waitSec },
+            raw: { phone: e.phone, waitSec: e.waitSec, channel: e.channel },
           };
         });
 

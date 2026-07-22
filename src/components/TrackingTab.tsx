@@ -13,7 +13,7 @@ import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
-type SegmentType = "call" | "crm" | "idle" | "wait" | "dialer";
+type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
 
 interface Segment {
   type: SegmentType;
@@ -32,10 +32,13 @@ interface DayTimeline {
   shiftEnd?: string;
   totalMinutes: number;
   segments: Segment[];
-  // `wait`/`dialer` are populated only by the dialer view; general leaves them
-  // undefined. `dialer` = within-window pause; «в дайлере всего» = call+wait+dialer.
-  pct: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
-  minutes: { call: number; crm: number; idle: number; wait?: number; dialer?: number };
+  // `dialer`/`manual` are populated only by the dialer view; general leaves
+  // them undefined. `dialer` = time in dialer-campaign calls, `manual` = time
+  // in CloudTalk calls outside the dialer; `idle` there = no calls.
+  pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  minutes: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
+  // Dialer view only: per-channel call counts for the day.
+  counts?: { dialer: number; manual: number };
 }
 
 interface ManagerTimeline {
@@ -67,8 +70,9 @@ interface TrackingResponse {
 
 // ── Dialer view (CloudTalk) ──
 // Same per-manager/day timeline shape as the general view (DayTimeline with
-// segments), so it renders through the shared TimelineBar. Segments are
-// dialer-native: «разговор» (call) / «ожидание-дозвон» (wait) / «простой» (idle).
+// segments), so it renders through the shared TimelineBar. Segments mark
+// CloudTalk call events by attribution channel: «в дайлере» (dialer, green) /
+// «вне дайлера» (manual, red) / «без звонков» (idle, gray).
 interface DialerResponse {
   department: string;
   view: "dialer";
@@ -316,10 +320,15 @@ export default function TrackingTab({ department }: TrackingTabProps) {
         <div className="ml-auto flex items-center gap-3 text-[11px] text-slate-400">
           {isDialer ? (
             <>
-              <LegendDot color="bg-blue-500" label="Разговор" />
-              <LegendDot color="bg-amber-500/80" label="Дозвон" />
-              <LegendDot color="bg-sky-500/30" label="В дайлере (пауза)" />
+              <span
+                className="px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-sky-300 text-[10px] font-semibold uppercase tracking-wider"
+                title="Раздел построен на данных телефонии CloudTalk: каждый звонок сверен с историей кампаний дайлера"
+              >
+                CloudTalk
+              </span>
+              <LegendDot color="bg-emerald-500" label="В дайлере" />
               <LegendDot color="bg-rose-500" label="Вне дайлера" />
+              <LegendDot color="bg-slate-600" label="Без звонков в CloudTalk" />
             </>
           ) : (
             <>
@@ -396,6 +405,43 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             </li>
             <li>
               <b className="text-slate-300">Пометка «CallGear · ~7ч».</b> У части менеджеров звонки идут через CallGear, и их данные приходят с задержкой около 7 часов. Это ограничение самого сервиса CallGear, а не ошибка: если менеджер позвонил сейчас, звонок появится в отчёте через несколько часов.
+            </li>
+          </ul>
+        </div>
+      )}
+
+      {/* Касания по лидам (Новый лид / Недозвон): этапы — на конец выбранного
+          периода (прошлые даты реконструируются по истории), касания —
+          накопительно + за период, разбивка в дайлере / вне дайлера. */}
+      {isDialer && data?.view === "dialer" && dates.length > 0 && (
+        <DialerLeadTouchesPanel
+          department={department}
+          fromISO={dates[0]}
+          toISO={dates[dates.length - 1]}
+        />
+      )}
+
+      {/* Инфо-блок для дайлер-вида: что значат цвета и откуда данные. */}
+      {isDialer && data && data.managers.length > 0 && (
+        <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4 text-[12px] text-slate-400 leading-relaxed">
+          <div className="flex items-center gap-2 mb-2.5 text-slate-300 font-semibold">
+            <Info className="w-4 h-4 text-sky-400 shrink-0" /> Как читать этот раздел
+          </div>
+          <ul className="flex flex-col gap-2">
+            <li>
+              <b className="text-slate-300">Полоска дня</b> — звонки менеджера в CloudTalk с 09:00 до 20:00.{" "}
+              <span className="text-emerald-400 font-semibold">Зелёный</span> — звонок из дайлера (кампании автообзвона),{" "}
+              <span className="text-rose-400 font-semibold">красный</span> — звонок вне дайлера (ручной набор или входящий),{" "}
+              серый — без звонков в CloudTalk.
+            </li>
+            <li>
+              <b className="text-slate-300">Источник — телефония CloudTalk.</b> Каждый исходящий звонок сверяется с историей кампаний дайлера в CloudTalk, поэтому «в дайлере / вне дайлера» — точная привязка, а не оценка по косвенным признакам. Привязка ведётся с 1 июля 2026 — более ранние дни целиком показываются как «вне дайлера».
+            </li>
+            <li>
+              <b className="text-slate-300">Входящие звонки</b> всегда относятся к «вне дайлера»: дайлер делает только исходящие.
+            </li>
+            <li>
+              <b className="text-slate-300">Менеджеры.</b> В разделе показана только 1-я линия — дайлер обзванивает именно её базу.
             </li>
           </ul>
         </div>
@@ -517,9 +563,10 @@ function ManagerList({
 
 // ==================== Dialer view ====================
 // Reuses the general TimelineBar (same 09:00–20:00 segmented axis) — the dialer
-// response is the same DayTimeline shape, with segments coloured разговор /
-// ожидание-дозвон / простой. Only the side-panel summary differs (talk/wait/
-// idle instead of call/crm/idle), so the loupe/detail modal is omitted here.
+// response is the same DayTimeline shape, with segments coloured green
+// («в дайлере» — dialer-campaign calls) / red («вне дайлера» — CloudTalk calls
+// outside the dialer) / gray (no calls). Channel is per-call ground truth from
+// analytics.dialer_call_attribution, not a heuristic.
 
 function DialerList({
   managers,
@@ -566,7 +613,7 @@ function DialerList({
                 {multiDay && (
                   <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
                 )}
-                <TimelineBar day={day} />
+                <TimelineBar day={day} dialerView />
                 <button
                   type="button"
                   onClick={() => onOpenDetail(m.id, m.name, m.line, day.date)}
@@ -586,35 +633,246 @@ function DialerList({
   );
 }
 
-// Side-panel for the dialer view. Leads with «В дайлере всего» (the headline
-// metric = active dialing time = call+wait+dialer), then the breakdown
-// разговор / дозвон / пауза. `wait`/`dialer` are dialer-only.
+// Side-panel for the dialer view: time + call count per channel. «В дайлере»
+// (green) = dialer-campaign calls, «Вне дайлера» (red) = CloudTalk calls
+// outside the dialer. Times are in-call time (ring + talk) within the shift.
 function DialerSummary({ day }: { day: DayTimeline }) {
   if (day.mode === "off") {
     return <span className="text-[10px] text-slate-500">—</span>;
   }
-  const wait = day.minutes.wait ?? 0;
-  const dialerGap = day.minutes.dialer ?? 0;
-  const inDialer = day.minutes.call + wait + dialerGap;
-  const inDialerPct = day.totalMinutes > 0 ? Math.round((inDialer / day.totalMinutes) * 100) : 0;
+  const dialer = day.minutes.dialer ?? 0;
+  const manual = day.minutes.manual ?? 0;
+  const nDialer = day.counts?.dialer ?? 0;
+  const nManual = day.counts?.manual ?? 0;
+  // No calls at all → the bar already says «Без звонков»; a column of zeros
+  // here would just add noise.
+  if (nDialer + nManual === 0) {
+    return <span className="text-[10px] text-slate-500">—</span>;
+  }
   return (
     <div className="flex flex-col items-end font-mono tabular-nums leading-tight gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px]">
-        <span className="text-sky-300">В дайлере {fmtHm(inDialer)}</span>
-        <span className="text-slate-500">{inDialerPct}%</span>
+        <span className="text-emerald-400">В дайлере {fmtHm(dialer)}</span>
+        <span className="text-slate-500">{nDialer} зв.</span>
       </div>
-      <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-        <span className="text-blue-400">разг {fmtHm(day.minutes.call)}</span>
-        <span className="text-slate-600">·</span>
-        <span className="text-amber-400">дозв {fmtHm(wait)}</span>
-        <span className="text-slate-600">·</span>
-        <span className="text-sky-300/80">пауза {fmtHm(dialerGap)}</span>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-rose-400">Вне дайлера {fmtHm(manual)}</span>
+        <span className="text-slate-500">{nManual} зв.</span>
       </div>
     </div>
   );
 }
 
-function TimelineBar({ day }: { day: DayTimeline }) {
+// ── Касания по лидам (дайлер-вид) ──
+// Leads that were on Новый лид / Недозвон of Бух Гос as of the end of the
+// selected period (today → live mirror; past dates → reconstructed from
+// lead_status_changes intervals), with call touches split в дайлере / вне
+// дайлера — cumulative to that date and within the period.
+// Data: /api/tracking/dialer-leads.
+
+interface DialerLeadTouchRowDto {
+  leadId: number;
+  statusId: number;
+  contactName: string | null;
+  manager: string | null;
+  leadCreatedAt: string | null;
+  dialerTouches: number;
+  manualTouches: number;
+  periodDialerTouches: number;
+  periodManualTouches: number;
+  lastTouchAt: string | null;
+  callers: Array<{ name: string; n: number }>;
+}
+
+const NEW_LEAD_STATUS_ID = 83873491; // FIRST_LINE_STATUSES.NEW_LEAD (Бух Гос)
+const KOMMO_LEADS_BASE = "https://sternmeister.kommo.com/leads/detail";
+
+function fmtBerlinDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("ru-RU", {
+    timeZone: "Europe/Berlin",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function DialerLeadTouchesPanel({
+  department,
+  fromISO,
+  toISO,
+}: {
+  department: "b2g" | "b2b";
+  fromISO: string;
+  toISO: string;
+}) {
+  const [rows, setRows] = useState<DialerLeadTouchRowDto[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  // NB: no synchronous setState here (react-hooks/set-state-in-effect) — on a
+  // date change the previous table stays visible until the new fetch lands.
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams({ department, from: fromISO, to: toISO });
+    fetch(`/api/tracking/dialer-leads?${params.toString()}`, { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+        return res.json();
+      })
+      .then((json: { leads: DialerLeadTouchRowDto[] }) => {
+        if (cancelled) return;
+        setRows(json.leads);
+        setErr(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [department, fromISO, toISO]);
+
+  const nNew = rows?.filter((r) => r.statusId === NEW_LEAD_STATUS_ID).length ?? 0;
+  const nNoAnswer = (rows?.length ?? 0) - nNew;
+  const periodDialerSum = rows?.reduce((s, r) => s + r.periodDialerTouches, 0) ?? 0;
+  const periodManualSum = rows?.reduce((s, r) => s + r.periodManualTouches, 0) ?? 0;
+  const isCurrent = toISO >= toLocalISO(berlinToday());
+  const periodLabel =
+    fromISO === toISO ? formatRussianDate(fromISO) : `${formatRussianDate(fromISO)} — ${formatRussianDate(toISO)}`;
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4">
+      <div className="flex items-baseline gap-2 mb-1 flex-wrap">
+        <span className="text-sm font-semibold text-white">Касания по лидам</span>
+        <span className="text-[11px] text-slate-500">
+          «Новый лид» и «Недозвон» (Бух Гос) · этапы {isCurrent ? "на сейчас" : `на конец ${formatRussianDate(toISO)}`} · касания накопительно до этой даты
+        </span>
+        {rows && (
+          <span className="ml-auto text-[11px] text-slate-400 font-mono tabular-nums">
+            Новый лид {nNew} · Недозвон {nNoAnswer}
+          </span>
+        )}
+      </div>
+      {rows && (
+        <div className="text-[11px] text-slate-400 mb-3">
+          Касаний за период ({periodLabel}):{" "}
+          <span className="font-mono tabular-nums text-slate-200">{periodDialerSum + periodManualSum}</span>
+          {" · "}
+          <span className="text-emerald-400 font-mono tabular-nums">в дайлере {periodDialerSum}</span>
+          {" · "}
+          <span className="text-rose-400 font-mono tabular-nums">вне дайлера {periodManualSum}</span>
+        </div>
+      )}
+
+      {err ? (
+        <div className="text-xs text-rose-300">{err}</div>
+      ) : !rows ? (
+        <div className="flex items-center justify-center py-8 text-slate-400">
+          <Loader2 className="w-5 h-5 animate-spin" />
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="text-xs text-slate-500 py-4 text-center">
+          На этих этапах сейчас нет лидов
+        </div>
+      ) : (
+        <div className="max-h-[420px] overflow-y-auto rounded-lg border border-white/5">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 z-10 bg-slate-900">
+              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500">
+                <th className="px-3 py-2 font-medium">Лид</th>
+                <th className="px-3 py-2 font-medium">Этап</th>
+                <th className="px-3 py-2 font-medium">Ответственный</th>
+                <th className="px-3 py-2 font-medium" title="Кто фактически звонил по лиду (число звонков) — не всегда ответственный">Кто звонил</th>
+                <th className="px-3 py-2 font-medium text-right" title="Касания за выбранный период: в дайлере / вне дайлера">За период</th>
+                <th className="px-3 py-2 font-medium text-right" title="Накопительно на конец периода">В дайлере</th>
+                <th className="px-3 py-2 font-medium text-right" title="Накопительно на конец периода">Вне дайлера</th>
+                <th className="px-3 py-2 font-medium text-right" title="Накопительно на конец периода">Всего</th>
+                <th className="px-3 py-2 font-medium text-right">Последнее касание</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/5">
+              {rows.map((r) => {
+                const total = r.dialerTouches + r.manualTouches;
+                const periodTotal = r.periodDialerTouches + r.periodManualTouches;
+                return (
+                  <tr key={r.leadId} className="hover:bg-slate-800/40">
+                    <td className="px-3 py-1.5 max-w-[220px] truncate">
+                      <a
+                        href={`${KOMMO_LEADS_BASE}/${r.leadId}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-blue-400 hover:text-blue-300 hover:underline"
+                        title={`Открыть лид ${r.leadId} в Kommo`}
+                      >
+                        {r.contactName || `Лид ${r.leadId}`}
+                      </a>
+                    </td>
+                    <td className="px-3 py-1.5 text-slate-300 whitespace-nowrap">
+                      {r.statusId === NEW_LEAD_STATUS_ID ? "Новый лид" : "Недозвон"}
+                    </td>
+                    <td className="px-3 py-1.5 text-slate-400 max-w-[160px] truncate" title={r.manager ?? ""}>
+                      {r.manager ?? "—"}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-slate-300 max-w-[200px] truncate"
+                      title={r.callers.map((c) => `${c.name} — ${c.n} зв.`).join("\n")}
+                    >
+                      {r.callers.length === 0 ? (
+                        <span className="text-slate-600">—</span>
+                      ) : (
+                        <>
+                          {r.callers.slice(0, 2).map((c, i) => (
+                            <span key={c.name}>
+                              {i > 0 && <span className="text-slate-600"> · </span>}
+                              {c.name}
+                              <span className="text-slate-500 font-mono tabular-nums"> {c.n}</span>
+                            </span>
+                          ))}
+                          {r.callers.length > 2 && (
+                            <span className="text-slate-500"> +{r.callers.length - 2}</span>
+                          )}
+                        </>
+                      )}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right font-mono tabular-nums whitespace-nowrap"
+                      title={`За период: в дайлере ${r.periodDialerTouches}, вне дайлера ${r.periodManualTouches}`}
+                    >
+                      {periodTotal > 0 ? (
+                        <>
+                          <span className="text-emerald-400">{r.periodDialerTouches}</span>
+                          <span className="text-slate-600"> / </span>
+                          <span className="text-rose-400">{r.periodManualTouches}</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-600">0</span>
+                      )}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-mono tabular-nums ${r.dialerTouches > 0 ? "text-emerald-400" : "text-slate-600"}`}>
+                      {r.dialerTouches}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-mono tabular-nums ${r.manualTouches > 0 ? "text-rose-400" : "text-slate-600"}`}>
+                      {r.manualTouches}
+                    </td>
+                    <td className={`px-3 py-1.5 text-right font-mono tabular-nums ${total > 0 ? "text-slate-200" : "text-amber-400"}`}>
+                      {total > 0 ? total : "0 ⚠"}
+                    </td>
+                    <td className="px-3 py-1.5 text-right text-slate-400 font-mono tabular-nums whitespace-nowrap">
+                      {fmtBerlinDateTime(r.lastTouchAt)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimelineBar({ day, dialerView }: { day: DayTimeline; dialerView?: boolean }) {
   const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
 
   if (day.mode === "off") {
@@ -631,18 +889,17 @@ function TimelineBar({ day }: { day: DayTimeline }) {
   // have been on shift but no calls and no CRM events landed. Showing this
   // as a wall of red rose-500/70 made every fully-idle day pop out and
   // overpower days with real partial idle worth flagging. Render the same
-  // muted grey as scheduled-off days plus a "Нет активности" badge so the
-  // distinction stays (off-day vs no-show vs partial-idle).
-  const isFullyIdle =
-    day.minutes.call === 0 &&
-    day.minutes.crm === 0 &&
-    (day.minutes.wait ?? 0) === 0 &&
-    (day.minutes.dialer ?? 0) === 0;
+  // muted grey as scheduled-off days plus a badge so the distinction stays
+  // (off-day vs no-show vs partial-idle). Dialer view checks call COUNTS,
+  // not minutes — a lone 20-second call rounds to 0 minutes but is activity.
+  const isFullyIdle = dialerView
+    ? (day.counts?.dialer ?? 0) === 0 && (day.counts?.manual ?? 0) === 0
+    : day.minutes.call === 0 && day.minutes.crm === 0;
   if (isFullyIdle) {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
         <div className="absolute inset-0 flex items-center justify-center text-[10px] uppercase tracking-widest text-slate-500">
-          Нет активности
+          {dialerView ? "Без звонков в CloudTalk" : "Нет активности"}
         </div>
       </div>
     );
@@ -662,12 +919,14 @@ function TimelineBar({ day }: { day: DayTimeline }) {
           const bg =
             s.type === "call"
               ? "bg-blue-500"
-              : s.type === "crm"
+              : s.type === "crm" || s.type === "dialer"
                 ? "bg-emerald-500"
-                : s.type === "wait"
-                  ? "bg-amber-500/80"
-                  : s.type === "dialer"
-                    ? "bg-sky-500/30"
+                : s.type === "manual"
+                  ? "bg-rose-500"
+                  // idle: gray (base bar) in the dialer view — «без звонков»
+                  // is not the same accusation as general-view «простой».
+                  : dialerView
+                    ? "bg-transparent"
                     : "bg-rose-500/70";
           const text = s.label ?? "";
           return (
@@ -1194,7 +1453,7 @@ function DetailModal({
             </div>
           ) : (
             <>
-              <DetailTimelineBar timeline={timeline} onHover={setHoverSeg} />
+              <DetailTimelineBar timeline={timeline} dialerView={isDialer} onHover={setHoverSeg} />
 
               <HourGrid
                 shiftStart={timeline.shiftStart!}
@@ -1202,13 +1461,12 @@ function DetailModal({
                 totalMinutes={timeline.totalMinutes}
               />
 
-              <div className={`mt-4 grid gap-3 ${isDialer ? "grid-cols-4" : "grid-cols-3"}`}>
+              <div className="mt-4 grid gap-3 grid-cols-3">
                 {isDialer ? (
                   <>
-                    <StatTile color="bg-sky-500/40" label="В дайлере" minutes={timeline.minutes.call + (timeline.minutes.wait ?? 0) + (timeline.minutes.dialer ?? 0)} pct={timeline.pct.call + (timeline.pct.wait ?? 0) + (timeline.pct.dialer ?? 0)} />
-                    <StatTile color="bg-blue-500" label="Разговор" minutes={timeline.minutes.call} pct={timeline.pct.call} />
-                    <StatTile color="bg-amber-500/80" label="Дозвон" minutes={timeline.minutes.wait ?? 0} pct={timeline.pct.wait ?? 0} />
-                    <StatTile color="bg-rose-500/70" label="Вне дайлера" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
+                    <StatTile color="bg-emerald-500" label="В дайлере" minutes={timeline.minutes.dialer ?? 0} pct={timeline.pct.dialer ?? 0} />
+                    <StatTile color="bg-rose-500" label="Вне дайлера" minutes={timeline.minutes.manual ?? 0} pct={timeline.pct.manual ?? 0} />
+                    <StatTile color="bg-slate-600" label="Без звонков в CloudTalk" minutes={timeline.minutes.idle} pct={timeline.pct.idle} />
                   </>
                 ) : (
                   <>
@@ -1224,6 +1482,7 @@ function DetailModal({
                   seg={hoverSeg}
                   events={segEvents}
                   shiftStart={timeline.shiftStart!}
+                  dialerView={isDialer}
                 />
               ) : (
                 <FullEventList events={events} />
@@ -1256,9 +1515,11 @@ function formatSegmentTime(shiftStart: string, offsetMin: number): string {
 
 function DetailTimelineBar({
   timeline,
+  dialerView,
   onHover,
 }: {
   timeline: DayTimeline;
+  dialerView?: boolean;
   onHover: (seg: Segment | null) => void;
 }) {
   const total = timeline.totalMinutes || 1;
@@ -1269,11 +1530,13 @@ function DetailTimelineBar({
         const bg =
           s.type === "call"
             ? "bg-blue-500"
-            : s.type === "crm"
+            : s.type === "crm" || s.type === "dialer"
               ? "bg-emerald-500"
-              : s.type === "wait"
-                ? "bg-amber-500/80"
-                : "bg-rose-500/70";
+              : s.type === "manual"
+                ? "bg-rose-500"
+                : dialerView
+                  ? "bg-transparent"
+                  : "bg-rose-500/70";
         return (
           <div
             key={`${s.type}-${s.startMin}-${i}`}
@@ -1358,17 +1621,19 @@ function SegmentEventList({
   seg,
   events,
   shiftStart,
+  dialerView,
 }: {
   seg: Segment;
   events: DetailEvent[];
   shiftStart: string;
+  dialerView?: boolean;
 }) {
   const segStart = formatSegmentTime(shiftStart, seg.startMin);
   const segEnd = formatSegmentTime(shiftStart, seg.endMin);
   return (
     <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
       <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
-        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "wait" ? "Ожидание/дозвон" : seg.type === "dialer" ? "В дайлере (между звонками)" : "Простой"}
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "dialer" ? "В дайлере" : seg.type === "manual" ? "Вне дайлера" : dialerView ? "Без звонков в CloudTalk" : "Простой"}
         <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
           {segStart}–{segEnd}
         </span>
@@ -1438,8 +1703,6 @@ function EventRow({ ev }: { ev: DetailEvent }) {
           : ` · ${talkLabel}${ev.durationSec} сек`;
     }
     if (isDialerCall && waitSec! > 0) suffix += ` · дозвон ${waitSec} сек`;
-    // Ring longer than the campaign's 60s cap => couldn't be the dialer (manual).
-    if (isDialerCall && waitSec! > 60) suffix += ` · вне дайлера`;
     const phone = (ev.raw as { phone?: string } | null)?.phone;
     if (phone) suffix += ` · ${phone}`;
   }

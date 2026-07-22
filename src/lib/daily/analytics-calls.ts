@@ -12,7 +12,7 @@
 
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
-import { getPipelineIds, B2G_PIPELINES, type Vertical } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, B2G_PIPELINES, FIRST_LINE_STATUSES, type Vertical } from "@/lib/kommo/pipeline-config";
 
 /**
  * Включать ли строки с `pipeline_id IS NULL` (телефонные звонки, которые
@@ -347,18 +347,28 @@ export interface DialerCallEvent {
   talkSec: number;          // analytics.communications.duration (talkDurationSec)
   waitSec: number;          // analytics.communications.wait_seconds (CloudTalk waiting_time)
   phone: string | null;     // remote party number (for the detail loupe)
+  // Ground-truth channel from analytics.dialer_call_attribution (written hourly
+  // by the dialer-sync service via CloudTalk campaign history): "dialer" =
+  // campaign call; "manual" = everything else — hand-dialed, incoming (the
+  // attribution covers outgoing only), or history before the 2026-07-01
+  // backfill horizon.
+  channel: "dialer" | "manual";
 }
 
 /**
- * Per-call dialer rows for the window. Isolates the dialer by
- * `communication_id LIKE 'ct:%'` — CloudTalk is the B2G dialer telephony, so
- * ct: rows ≈ dialer activity (CallGear `cg-leg:` and Kommo `note:` excluded).
- * Scoping is two-layer:
- * (1) the pipeline filter `pipeline_id IN (10935879) OR pipeline_id IS NULL`
- * keeps ONLY the Бух Гос funnel (the dialer's exclusive target) plus NULL-
- * pipeline phone-fallback rows (pre-enrichment) — Бератер / Medical Gov calls
- * are dropped; and (2) the caller's manager roster drops any row whose
- * `manager` name resolves outside `managers`.
+ * ALL CloudTalk calls for the window (`communication_id LIKE 'ct:%'`; CallGear
+ * `cg-leg:` and Kommo `note:` excluded), each labeled with its channel from
+ * analytics.dialer_call_attribution via LEFT JOIN on cdr_id (`ct:<Cdr.id>` —
+ * same CloudTalk id on both sides). The table is ground truth: dialer-sync
+ * matches every outgoing CDR against CloudTalk campaign history hourly (see
+ * dialer-sync ATTRIBUTION_PLAN.md); backfilled from 2026-07-01.
+ *
+ * channel='dialer' → campaign call («В дайлере»); everything else — attributed
+ * manual, incoming (attribution covers outgoing only), or pre-backfill history
+ * — comes back as 'manual' («Вне дайлера»). No pipeline filter and no ring-cap
+ * heuristics: scoping is by the caller's manager roster, which drops any row
+ * whose `manager` name resolves outside `managers` (that also keeps B2B
+ * CloudTalk calls out — their manager names aren't in the B2G roster).
  *
  * Same DISTINCT ON (communication_id) Pattern-A dedup as
  * getAnalyticsCallEventsByMaster: one CDR fanned out across N leads collapses
@@ -376,30 +386,20 @@ export async function getDialerCallEventsByMaster(
   // Dialer is B2G-only (CloudTalk Power-Dialer campaign «Бух Гос»). No dialer
   // outside B2G → nothing to return.
   if (department !== "b2g") return [];
-  // Scope to the Бух Гос funnel ONLY (10935879), not all B2G pipelines: the
-  // dialer dials that funnel exclusively, so Бератер / Medical Gov CloudTalk
-  // calls are not dialer activity. NULL pipeline is kept (phone-fallback ct:
-  // rows before enrichment).
-  const pipelineIds = [B2G_PIPELINES.FIRST_LINE];
   const managerIds = managers.map((m) => m.id).sort().join(",");
   const cacheKey = `dialer-events:b2g:${fromTs}:${toTs}:${managerIds}`;
   return cached(cacheKey, ANALYTICS_TTL, () =>
-    fetchDialerCallEventsByMaster(managers, pipelineIds, fromTs, toTs),
+    fetchDialerCallEventsByMaster(managers, fromTs, toTs),
   );
 }
 
 async function fetchDialerCallEventsByMaster(
   managers: Array<{ id: string; name: string }>,
-  pipelineIds: number[],
   fromTs: number,
   toTs: number,
 ): Promise<DialerCallEvent[]> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
-  const pipelineList = sql.join(
-    pipelineIds.map((id) => sql`${id}`),
-    sql`, `,
-  );
 
   const nameToMaster = new Map<string, string>();
   for (const m of managers) {
@@ -419,17 +419,25 @@ async function fetchDialerCallEventsByMaster(
     wait_seconds: string | number | null;
     created_at: string;
     phone: string | null;
+    channel: string | null;
   }>(sql`
-    SELECT DISTINCT ON (communication_id)
-      communication_id, communication_type, manager, duration, wait_seconds, phone, created_at
-    FROM analytics.communications
-    WHERE created_at >= ${fromDate}
-      AND created_at <= ${toDate}
-      AND communication_id LIKE 'ct:%'
-      AND communication_type LIKE 'call%'
-      AND (pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)
-      AND manager IS NOT NULL AND manager <> ''
-    ORDER BY communication_id, lead_id NULLS LAST
+    SELECT DISTINCT ON (c.communication_id)
+      c.communication_id, c.communication_type, c.manager, c.duration,
+      c.wait_seconds, c.phone, c.created_at, d.channel
+    FROM analytics.communications c
+    LEFT JOIN analytics.dialer_call_attribution d
+      ON c.communication_id = 'ct:' || d.cdr_id
+      -- started_at bound keeps the join hash small via ix_dca_started; wide
+      -- margin because communications.created_at and dca.started_at are the
+      -- same instant from two APIs (no real skew, margin is just paranoia).
+      AND d.started_at >= ${fromDate}::timestamptz - interval '1 day'
+      AND d.started_at <= ${toDate}::timestamptz + interval '1 day'
+    WHERE c.created_at >= ${fromDate}
+      AND c.created_at <= ${toDate}
+      AND c.communication_id LIKE 'ct:%'
+      AND c.communication_type LIKE 'call%'
+      AND c.manager IS NOT NULL AND c.manager <> ''
+    ORDER BY c.communication_id, c.lead_id NULLS LAST
   `);
 
   const out: DialerCallEvent[] = [];
@@ -444,9 +452,185 @@ async function fetchDialerCallEventsByMaster(
       talkSec: Number(row.duration ?? 0),
       waitSec: Number(row.wait_seconds ?? 0),
       phone: row.phone ?? null,
+      channel: row.channel === "dialer" ? "dialer" : "manual",
     });
   }
   return out;
+}
+
+// One row of the «Касания по лидам» table in the dialer view: a lead sitting
+// on the dialable stages of Бух Гос (Новый лид / Недозвон) as of the selected
+// date, with call-touch counts split by channel — cumulative to that date and
+// within the selected period.
+export interface DialerLeadTouchRow {
+  leadId: number;
+  statusId: number;          // FIRST_LINE_STATUSES.NEW_LEAD | NO_ANSWER
+  contactName: string | null; // main contact name (analytics.contacts)
+  manager: string | null;     // Kommo responsible (leads_cohort.manager, CURRENT)
+  leadCreatedAt: string | null;
+  dialerTouches: number;      // cumulative to asOfEnd: dialer-campaign calls
+  manualTouches: number;      // cumulative to asOfEnd: every other call touch
+  periodDialerTouches: number; // same splits, but within [periodStart, asOfEnd]
+  periodManualTouches: number;
+  lastTouchAt: string | null;
+  // Who actually dialed (communications.manager over the counted touches,
+  // cumulative to asOfEnd) — often NOT the responsible manager. Sorted by
+  // call count desc.
+  callers: Array<{ name: string; n: number }>;
+}
+
+/**
+ * Leads on «Новый лид» / «Недозвон» of the Бух Гос funnel AS OF `asOfEnd`
+ * (end of the selected Berlin day), with call touches cumulative to that
+ * instant plus a second pair of counters for [periodStart, asOfEnd].
+ *
+ * Lead-set resolution is hybrid:
+ * - `asOfEnd` in the future/now (the user is looking at today) → current
+ *   leads_cohort state. Exactly matches the Kommo board.
+ * - historical `asOfEnd` → stage reconstructed from lead_status_changes
+ *   intervals (event_at ≤ t < next_event_at), constrained to leads that the
+ *   cohort mirror knows and that weren't deleted by `t`. The join is required:
+ *   raw intervals carry ~4× phantoms (leads outside the cohort backfill
+ *   horizon + deleted leads keep an open interval — verified 2026-07-22:
+ *   475 raw vs 93 actual). Residual noise after the join is ~8 leads whose
+ *   pipeline transition was never captured — accepted.
+ *
+ * A touch = one call communication linked to the lead (any namespace: ct:,
+ * cg-leg:, note:), counted per (communication_id, lead_id) — the Pattern A
+ * unique key — so a CDR fanned out to two leads counts as a touch on each.
+ * Channel comes from dialer_call_attribution; everything unattributed
+ * (CallGear, incoming, pre-backfill history) is «вне дайлера».
+ */
+export async function getDialerLeadTouches(
+  periodStart: Date,
+  asOfEnd: Date,
+): Promise<DialerLeadTouchRow[]> {
+  const cacheKey = `dialer-lead-touches:${periodStart.getTime()}:${asOfEnd.getTime()}`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const useCurrentState = asOfEnd.getTime() >= Date.now();
+    const stageLeads = useCurrentState
+      ? sql`
+        SELECT lead_id, status_id, manager, created_at
+        FROM analytics.leads_cohort
+        WHERE pipeline_id = ${B2G_PIPELINES.FIRST_LINE}
+          AND status_id IN (${FIRST_LINE_STATUSES.NEW_LEAD}, ${FIRST_LINE_STATUSES.NO_ANSWER})
+          AND is_deleted IS NOT TRUE
+          AND lead_id IS NOT NULL`
+      : sql`
+        SELECT s.lead_id, s.status_id, lc.manager, lc.created_at
+        FROM (
+          SELECT DISTINCT ON (lead_id) lead_id, status_id
+          FROM analytics.lead_status_changes
+          WHERE pipeline_id = ${B2G_PIPELINES.FIRST_LINE}
+            AND event_at <= ${asOfEnd}
+            AND (next_event_at IS NULL OR next_event_at > ${asOfEnd})
+          ORDER BY lead_id, event_at DESC
+        ) s
+        JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+        WHERE s.status_id IN (${FIRST_LINE_STATUSES.NEW_LEAD}, ${FIRST_LINE_STATUSES.NO_ANSWER})
+          AND lc.created_at <= ${asOfEnd}
+          AND NOT (lc.is_deleted AND (lc.deleted_at IS NULL OR lc.deleted_at <= ${asOfEnd}))
+        UNION
+        -- Leads with NO status events at all (created straight onto the stage,
+        -- Kommo never fired lead_status_changed): their current status has
+        -- held since creation, so they were on it at any t ≥ created_at.
+        SELECT lc.lead_id, lc.status_id, lc.manager, lc.created_at
+        FROM analytics.leads_cohort lc
+        WHERE lc.pipeline_id = ${B2G_PIPELINES.FIRST_LINE}
+          AND lc.status_id IN (${FIRST_LINE_STATUSES.NEW_LEAD}, ${FIRST_LINE_STATUSES.NO_ANSWER})
+          AND lc.lead_id IS NOT NULL
+          AND lc.created_at <= ${asOfEnd}
+          AND NOT (lc.is_deleted AND (lc.deleted_at IS NULL OR lc.deleted_at <= ${asOfEnd}))
+          AND NOT EXISTS (
+            SELECT 1 FROM analytics.lead_status_changes s2 WHERE s2.lead_id = lc.lead_id
+          )`;
+
+    const result = await (analyticsDb as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{
+      lead_id: string | number;
+      status_id: string | number;
+      manager: string | null;
+      lead_created_at: string | null;
+      contact_name: string | null;
+      dialer_touches: string | number;
+      manual_touches: string | number;
+      period_dialer: string | number;
+      period_manual: string | number;
+      last_touch_at: string | null;
+      callers: Array<{ name: string; n: number }> | null;
+    }>(sql`
+      WITH stage_leads AS (${stageLeads}),
+      touches AS (
+        SELECT c.lead_id,
+          count(*) FILTER (WHERE d.channel = 'dialer')::int AS dialer_touches,
+          count(*) FILTER (WHERE d.channel IS DISTINCT FROM 'dialer')::int AS manual_touches,
+          count(*) FILTER (WHERE d.channel = 'dialer'
+                             AND c.created_at >= ${periodStart})::int AS period_dialer,
+          count(*) FILTER (WHERE d.channel IS DISTINCT FROM 'dialer'
+                             AND c.created_at >= ${periodStart})::int AS period_manual,
+          max(c.created_at) AS last_touch_at
+        FROM analytics.communications c
+        LEFT JOIN analytics.dialer_call_attribution d
+          ON c.communication_id = 'ct:' || d.cdr_id
+        WHERE c.lead_id IN (SELECT lead_id FROM stage_leads)
+          AND c.communication_type LIKE 'call%'
+          AND c.created_at <= ${asOfEnd}
+        GROUP BY c.lead_id
+      ),
+      -- Who actually dialed each lead (often not the responsible manager).
+      callers AS (
+        SELECT lead_id,
+          jsonb_agg(jsonb_build_object('name', manager, 'n', n) ORDER BY n DESC, manager) AS callers
+        FROM (
+          SELECT c.lead_id, c.manager, count(*)::int AS n
+          FROM analytics.communications c
+          WHERE c.lead_id IN (SELECT lead_id FROM stage_leads)
+            AND c.communication_type LIKE 'call%'
+            AND c.created_at <= ${asOfEnd}
+            AND c.manager IS NOT NULL AND c.manager <> ''
+          GROUP BY c.lead_id, c.manager
+        ) g
+        GROUP BY lead_id
+      )
+      SELECT
+        sl.lead_id, sl.status_id, sl.manager,
+        sl.created_at AS lead_created_at,
+        ct.name AS contact_name,
+        COALESCE(t.dialer_touches, 0) AS dialer_touches,
+        COALESCE(t.manual_touches, 0) AS manual_touches,
+        COALESCE(t.period_dialer, 0) AS period_dialer,
+        COALESCE(t.period_manual, 0) AS period_manual,
+        t.last_touch_at,
+        cl.callers
+      FROM stage_leads sl
+      LEFT JOIN touches t ON t.lead_id = sl.lead_id
+      LEFT JOIN callers cl ON cl.lead_id = sl.lead_id
+      LEFT JOIN LATERAL (
+        SELECT co.name
+        FROM analytics.lead_contact_links l
+        JOIN analytics.contacts co ON co.contact_id = l.contact_id
+        WHERE l.lead_id = sl.lead_id AND l.is_active
+        ORDER BY l.last_seen_at DESC
+        LIMIT 1
+      ) ct ON TRUE
+      ORDER BY sl.status_id, t.last_touch_at DESC NULLS LAST, sl.lead_id
+    `);
+
+    return result.rows.map((r) => ({
+      leadId: Number(r.lead_id),
+      statusId: Number(r.status_id),
+      contactName: r.contact_name ?? null,
+      manager: r.manager ?? null,
+      leadCreatedAt: r.lead_created_at ? new Date(r.lead_created_at).toISOString() : null,
+      dialerTouches: Number(r.dialer_touches ?? 0),
+      manualTouches: Number(r.manual_touches ?? 0),
+      periodDialerTouches: Number(r.period_dialer ?? 0),
+      periodManualTouches: Number(r.period_manual ?? 0),
+      lastTouchAt: r.last_touch_at ? new Date(r.last_touch_at).toISOString() : null,
+      callers: (r.callers ?? []).map((c) => ({ name: c.name, n: Number(c.n) })),
+    }));
+  });
 }
 
 /**

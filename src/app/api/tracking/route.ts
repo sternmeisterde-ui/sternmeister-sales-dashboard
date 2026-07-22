@@ -288,14 +288,20 @@ export async function GET(req: NextRequest) {
     // ===== Dialer view (CloudTalk) =====
     // Same 09:00–20:00 timeline shape as the general view (DayTimeline with
     // segments) so the UI renders it with the same TimelineBar — but segments
-    // are dialer-native: «разговор» (talk) / «ожидание-дозвон» (wait) / «простой».
-    // Sourced from analytics.communications ct: rows. B2G-only: b2b has no
-    // dialer, so every day comes back empty (mode off / no segments).
+    // mark CloudTalk call events by attribution channel: «в дайлере» (dialer
+    // campaign call) / «вне дайлера» (manual/incoming) / gray = no calls.
+    // Sourced from analytics.communications ct: rows joined with
+    // analytics.dialer_call_attribution. B2G-only: b2b has no dialer, so every
+    // day comes back empty (mode off / no segments).
     if (view === "dialer") {
+      // Дайлер — инструмент 1-й линии: кампании обзванивают только её базу.
+      // Вторая/третья линии и РОПы без line в разделе не нужны, поэтому и
+      // ростер, и дропдаун фильтра сужены до line=1.
+      const lineOneManagers = managers.filter((m) => m.line === "1");
       const dialerEvents =
         department === "b2g"
           ? await getDialerCallEventsByMaster(
-              managers.map((m) => ({ id: m.id, name: m.name })),
+              lineOneManagers.map((m) => ({ id: m.id, name: m.name })),
               department,
               Math.floor(rangeStart.getTime() / 1000),
               Math.floor(rangeEnd.getTime() / 1000),
@@ -317,10 +323,15 @@ export async function GET(req: NextRequest) {
           list = [];
           callsByManagerDate.set(key, list);
         }
-        list.push({ startedAt: ev.createdAt, talkSec: ev.talkSec, waitSec: ev.waitSec });
+        list.push({
+          startedAt: ev.createdAt,
+          talkSec: ev.talkSec,
+          waitSec: ev.waitSec,
+          channel: ev.channel,
+        });
       }
 
-      const dialerManagers = managers.map((m) => ({
+      const dialerManagers = lineOneManagers.map((m) => ({
         id: m.id,
         name: m.name,
         line: m.line,
@@ -358,7 +369,9 @@ export async function GET(req: NextRequest) {
         view: "dialer",
         dates,
         managers: dialerManagers,
-        allManagers: visibleManagers.map((m) => ({ id: m.id, name: m.name, line: m.line })),
+        allManagers: visibleManagers
+          .filter((m) => m.line === "1")
+          .map((m) => ({ id: m.id, name: m.name, line: m.line })),
         synced,
         lastSyncedAt: dialerSyncState?.lastSyncedAt ?? null,
         lastError: dialerSyncState?.lastError ?? null,
