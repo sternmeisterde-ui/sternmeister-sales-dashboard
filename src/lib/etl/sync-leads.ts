@@ -51,6 +51,16 @@ const CF = {
    * Драйвит «продажи» вкладки «Динамика категорий» (когортно к created_at).
    */
   FIRST_PAYMENT_FACT: 888296,
+  /**
+   * Ответы анкеты сайта (b2b, text). У каждого вопроса в аккаунте есть
+   * textarea-дубль (869872 «START_DATE.», 869876, 869878) — дубли МЁРТВЫЕ
+   * (0 заполнений), читаем только text-поля. Сырой текст, форматы дрейфуют
+   * («До 2 000» / «До 2000 евро») — нормализация корзин на чтении
+   * (category-dynamics/data.ts). Вкладка «Динамика категорий», миграция 0034.
+   */
+  QS_START_DATE: 869932,
+  QS_STATUS: 869936,
+  QS_INCOME: 869938,
 } as const;
 
 // ---- B2B payment custom-fields (looked up by name, not by id) ----
@@ -325,6 +335,9 @@ export async function syncLeads(
       terminDateFirst,
       aaTerminDateFirst,
       languageLevel: cfVal(lead.custom_fields_values, CF.LANGUAGE_LEVEL),
+      startDateAnswer: cfVal(lead.custom_fields_values, CF.QS_START_DATE),
+      statusAnswer: cfVal(lead.custom_fields_values, CF.QS_STATUS),
+      incomeAnswer: cfVal(lead.custom_fields_values, CF.QS_INCOME),
       excludeFromAnalytics: cfBoolean(
         lead.custom_fields_values,
         CF.EXCLUDE_FROM_ANALYTICS,

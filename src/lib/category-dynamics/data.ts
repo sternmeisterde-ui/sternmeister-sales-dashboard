@@ -1,5 +1,7 @@
 // Данные вкладки «Динамика категорий» (b2b): дневные агрегаты лидов и продаж
-// по категориям CATEGORY (Kommo CFV 866934) из analytics.leads_cohort.
+// по пяти измерениям из analytics.leads_cohort — категория CATEGORY (Kommo
+// CFV 866934) и четыре ответа анкеты сайта (START_DATE 869932, INCOME 869938,
+// STATUS 869936, LANGUAGE_LEVEL 869928).
 //
 // «Правильное количество лидов» — воспроизводит эталонную выгрузку Kommo
 // (dev_docs/kommo_export_leads_2026-07-14 (1).csv, июнь 2026 = 459 лидов,
@@ -14,7 +16,11 @@
 // «Продажа» = заполнена строгая факт-дата 1-го платежа (first_payment_fact_date,
 // CFV 888296), когортно к дате создания лида — сверено с excel «Конверсия по
 // категориям» (июнь: A=1 B=14 C=8 D=0 E=1 без=3).
-import { sql } from "drizzle-orm";
+//
+// Ответы анкеты хранятся сырым текстом (форматы исторически дрейфуют:
+// «До 2 000» / «До 2000 евро» / «До 2 000 €») — корзины нормализуются здесь,
+// в SQL. Пустое/неожиданное значение → корзина "" («Без ответа»).
+import { sql, type SQL } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { cached } from "@/lib/kommo/cache";
 import {
@@ -48,18 +54,45 @@ const EXCLUDED_LOSS_REASONS = new Set([
 
 export type CategoryFunnel = "buh" | "med" | "all";
 
-/** Категории в порядке колонок таблицы. "" = «Без метки». */
-export const CATEGORY_KEYS = ["A", "B", "C", "D", "E", ""] as const;
-export type CategoryKey = (typeof CATEGORY_KEYS)[number];
+/** Измерения вкладки — порядок = порядок таблиц на странице. */
+export const DIMENSION_KEYS = [
+  "category",
+  "startDate",
+  "income",
+  "status",
+  "language",
+] as const;
+export type DimensionKey = (typeof DIMENSION_KEYS)[number];
 
-export interface CategoryDayRow {
+/**
+ * Корзины каждого измерения в порядке колонок таблицы. "" = «Без метки» /
+ * «Без ответа» (пустое поле или неожиданное значение). Подписи и цвета —
+ * на клиенте (CategoryDynamicsTab).
+ */
+export const DIM_BUCKETS: Record<DimensionKey, readonly string[]> = {
+  category: ["A", "B", "C", "D", "E", ""],
+  // NB: ключ "later" (не "none") — "none" сталкивался с fallback-ключом
+  // пустой корзины в React-key таблицы.
+  startDate: ["now", "2w", "1m", "later", ""],
+  income: ["lt2", "2to3", "3to5", "gt5", ""],
+  status: ["de_job", "spouse", "freelance", "no_job", "job_abroad", "benefit", ""],
+  language: ["A1", "A2", "B1", "B2", "C1", "C2", ""],
+};
+
+/** Совместимость: порядок колонок таблицы категорий. */
+export const CATEGORY_KEYS = DIM_BUCKETS.category;
+export type CategoryKey = (typeof DIM_BUCKETS.category)[number];
+
+export interface DimensionDayRow {
   /** Berlin civil date YYYY-MM-DD (по created_at лида). */
   date: string;
-  /** "A".."E" или "" (без метки). */
-  category: CategoryKey;
+  /** Ключ корзины измерения (см. DIM_BUCKETS) или "" (без метки/ответа). */
+  bucket: string;
   leads: number;
   sales: number;
 }
+
+export type CategoryDynamicsDays = Record<DimensionKey, DimensionDayRow[]>;
 
 function pipelineIdsFor(funnel: CategoryFunnel): number[] {
   if (funnel === "buh") return [B2B_PIPELINES.COMMERCIAL];
@@ -78,23 +111,92 @@ const INCOMING_STATUS_IDS = [
 ];
 
 /**
- * Дневные агрегаты категория × день за [fromTs, toTs] (unix-секунды, границы
- * Berlin-дней). Дни/категории без лидов отсутствуют — клиент дополняет нулями.
+ * SQL-выражение корзины измерения. Нормализация — только на чтении, сырые
+ * значения в leads_cohort не трогаем (правила могут уточняться без бэкфилла).
+ */
+function bucketExpr(dim: DimensionKey): SQL {
+  switch (dim) {
+    case "category":
+      return sql`UPPER(COALESCE(NULLIF(TRIM(category), ''), ''))`;
+    case "startDate":
+      // Значения чистые — единственный вопрос без дрейфа форматов.
+      return sql`
+        CASE TRIM(COALESCE(start_date_answer, ''))
+          WHEN 'Прямо сейчас' THEN 'now'
+          WHEN 'Через 2 недели' THEN '2w'
+          WHEN 'Через месяц' THEN '1m'
+          WHEN 'Не планирую в ближайшее время' THEN 'later'
+          ELSE ''
+        END`;
+    case "income":
+      // Форматы дрейфуют: «До 2 000» / «До 2000 евро» / «До 2 000 €»,
+      // «2 000 3 000» / «2000 - 3000 евро» / «2 000 – 3 000 €». Средние
+      // корзины ловим по цифрам (все нецифры вон), крайние — по префиксу.
+      return sql`
+        CASE
+          WHEN COALESCE(TRIM(income_answer), '') = '' THEN ''
+          WHEN TRIM(income_answer) LIKE 'До%' THEN 'lt2'
+          WHEN TRIM(income_answer) LIKE 'Выше%' THEN 'gt5'
+          WHEN regexp_replace(income_answer, '[^0-9]', '', 'g') = '20003000' THEN '2to3'
+          WHEN regexp_replace(income_answer, '[^0-9]', '', 'g') = '30005000' THEN '3to5'
+          ELSE ''
+        END`;
+    case "status":
+      // «муж/жена» и опечатка «мужжена» — один ответ. «Получаю пособие, не
+      // работаю» — реальный ответ анкеты, отсутствующий в исходном списке
+      // Рузанны; по решению 2026-07-21 — отдельная корзина.
+      return sql`
+        CASE
+          WHEN COALESCE(TRIM(status_answer), '') = '' THEN ''
+          WHEN TRIM(status_answer) = 'Работаю в Германии' THEN 'de_job'
+          WHEN TRIM(status_answer) = 'Работаю не в Германии' THEN 'job_abroad'
+          WHEN TRIM(status_answer) = 'Фриланс' THEN 'freelance'
+          WHEN status_answer LIKE '%муж%' THEN 'spouse'
+          WHEN status_answer LIKE 'Получаю пособие%' THEN 'benefit'
+          WHEN status_answer LIKE 'Не работаю, не получаю%' THEN 'no_job'
+          ELSE ''
+        END`;
+    case "language":
+      // Короткие «B1» и длинные «B1 (Средний уровень) — …»; бывает
+      // кириллическая «А» («А1 (Начальный уровень)»). TRANSLATE переводит
+      // кириллицу до UPPER: UPPER в C-locale не трогает не-ASCII.
+      return sql`
+        CASE
+          WHEN UPPER(TRANSLATE(LEFT(TRIM(COALESCE(language_level, '')), 2), 'АВСавс', 'ABCabc'))
+               IN ('A1', 'A2', 'B1', 'B2', 'C1', 'C2')
+            THEN UPPER(TRANSLATE(LEFT(TRIM(language_level), 2), 'АВСавс', 'ABCabc'))
+          ELSE ''
+        END`;
+  }
+}
+
+/**
+ * Дневные агрегаты корзина × день по всем измерениям за [fromTs, toTs]
+ * (unix-секунды, границы Berlin-дней). Дни/корзины без лидов отсутствуют —
+ * клиент дополняет нулями.
  */
 export async function getCategoryDynamicsDays(
   funnel: CategoryFunnel,
   fromTs: number,
   toTs: number,
-): Promise<CategoryDayRow[]> {
-  const cacheKey = `category-dynamics:${funnel}:${fromTs}:${toTs}`;
-  return cached(cacheKey, CACHE_TTL, () => fetchDays(funnel, fromTs, toTs));
+): Promise<CategoryDynamicsDays> {
+  const cacheKey = `category-dynamics:v3:${funnel}:${fromTs}:${toTs}`;
+  return cached(cacheKey, CACHE_TTL, async () => {
+    const perDim = await Promise.all(
+      DIMENSION_KEYS.map((dim) => fetchDays(dim, funnel, fromTs, toTs)),
+    );
+    return Object.fromEntries(
+      DIMENSION_KEYS.map((dim, i) => [dim, perDim[i]]),
+    ) as CategoryDynamicsDays;
+  });
 }
 
 async function fetchDays(
+  dim: DimensionKey,
   funnel: CategoryFunnel,
   fromTs: number,
   toTs: number,
-): Promise<CategoryDayRow[]> {
+): Promise<DimensionDayRow[]> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(
@@ -112,10 +214,10 @@ async function fetchDays(
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
-  }).execute<{ d: string; cat: string; leads: string | number; sales: string | number }>(sql`
+  }).execute<{ d: string; b: string; leads: string | number; sales: string | number }>(sql`
     SELECT
       ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date::text AS d,
-      UPPER(COALESCE(NULLIF(TRIM(category), ''), '')) AS cat,
+      ${bucketExpr(dim)} AS b,
       COUNT(*) AS leads,
       COUNT(*) FILTER (WHERE first_payment_fact_date IS NOT NULL) AS sales
     FROM analytics.leads_cohort
@@ -141,15 +243,14 @@ async function fetchDays(
     ORDER BY 1, 2
   `);
 
-  return result.rows.map((r) => {
-    const cat = (CATEGORY_KEYS as readonly string[]).includes(r.cat)
-      ? (r.cat as CategoryKey)
-      : ""; // неожиданное значение поля → «Без метки»
-    return {
-      date: r.d,
-      category: cat,
-      leads: Number(r.leads),
-      sales: Number(r.sales),
-    };
-  });
+  const allowed = DIM_BUCKETS[dim] as readonly string[];
+  return result.rows.map((r) => ({
+    date: r.d,
+    // Неожиданное значение поля → «Без метки»/«Без ответа» (страховка: SQL
+    // уже отдаёт '' для всего вне корзин, кроме category — там пропускает
+    // любой UPPER-текст).
+    bucket: allowed.includes(r.b) ? r.b : "",
+    leads: Number(r.leads),
+    sales: Number(r.sales),
+  }));
 }

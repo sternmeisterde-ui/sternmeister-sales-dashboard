@@ -1,9 +1,10 @@
 // GET /api/category-dynamics?funnel=buh|med|all&from=YYYY-MM-DD&to=YYYY-MM-DD
 //
 // Вкладка «Динамика категорий» (b2b, admin-only). Отдаёт дневные агрегаты
-// категория × день (лиды + продажи); иерархию (год→месяцы→недели→дни),
-// проценты и сравнение периодов клиент собирает сам из этих же строк —
-// один shape на все режимы.
+// корзина × день (лиды + продажи) по всем измерениям разом — категория +
+// 4 ответа анкеты (dims.category / startDate / income / status / language);
+// иерархию (год→месяцы→недели→дни), проценты и сравнение периодов клиент
+// собирает сам из этих же строк — один shape на все режимы.
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import {
@@ -39,13 +40,13 @@ export async function GET(request: NextRequest) {
     if (!fromDate || !toDate) {
       return NextResponse.json({ error: "Invalid from/to" }, { status: 400 });
     }
-    const days = await getCategoryDynamicsDays(
+    const dims = await getCategoryDynamicsDays(
       funnel,
       Math.floor(fromDate.getTime() / 1000),
       Math.floor(toDate.getTime() / 1000),
     );
 
-    return NextResponse.json({ success: true, funnel, from: fromStr, to: toStr, days });
+    return NextResponse.json({ success: true, funnel, from: fromStr, to: toStr, dims });
   } catch (error) {
     console.error("[Category Dynamics API]", error);
     const msg = error instanceof Error ? error.message : String(error);

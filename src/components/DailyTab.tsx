@@ -168,16 +168,18 @@ function formatCellNumber(value: string | number | null | undefined): string {
 // minutes (admin types "25" → 25 мин SLA target), so they're multiplied by 60
 // before formatting. Keeping the two in different units lets admins type a
 // round number of minutes while the fact keeps seconds precision.
+// NB: b2b-ключи calls_sla_f/calls_sla_p/calls_avgWait_f/calls_avgWait_p
+// отсюда убраны (2026-07-22): у Коммерсов план и факт в МИНУТАХ и рендерятся
+// обычным числом («52.6»), не HH:MM:SS. Секунды остались только у Гос.
 const DURATION_SEC_KEYS = new Set<string>([
   // Facts — raw seconds from the SQL roll-ups.
-  "sla_f", "sla_shift_f", "tlt_f", "calls_sla_f",
+  "sla_f", "sla_shift_f", "tlt_f",
   // Legacy seconds fields (Callgear/Cloudtalk ring time).
   "avgWait_f", "avgWait_p",
-  "calls_avgWait_f", "calls_avgWait_p",
 ]);
 const DURATION_MIN_KEYS = new Set<string>([
   // Plans — admin-entered minute-granular targets.
-  "sla_p", "calls_sla_p",
+  "sla_p",
 ]);
 
 function formatDuration(totalSeconds: number): string {
@@ -256,7 +258,6 @@ function getTrafficLightClass(
 const FACT_TO_PLAN_ALIAS: Record<string, string> = {
   sla_shift_f: "sla_p",
   tlt_f: "sla_p",
-  calls_frozenLeads_f: "",
 };
 
 function planKeyFor(factKey: string): string {
@@ -1265,7 +1266,7 @@ function ManagersCompareView({ snapshot, comparisonDates, monthlyComparisons, de
       "regulationPercent", "callsTotal_p", "totalMinutes_p", "avgWait_p",
       "sla_p", "okk_p", "roleplay_p",
       "calls_sla_p", "calls_total_p", "calls_totalMinutes_p",
-      "calls_avgWait_p", "calls_dialPercent_p", "calls_managersOnLine_p",
+      "calls_avgWait_p", "calls_dialPercent_p",
       "buh_ql2p_p", "med_ql2p_p", "okk_buh1_p", "okk_buh2_p", "okk_med1_p", "okk_avg_p",
       // pipeline-stage counters (team case queue, not individual KPI)
       "beraterReview", "beraterReject", "delayedStart", "appeal",
