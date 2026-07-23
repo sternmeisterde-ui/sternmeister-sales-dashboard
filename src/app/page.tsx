@@ -188,6 +188,17 @@ function tabAllowedInDept(tabId: TabId, dept: DepartmentId): boolean {
   return !item?.departments || item.departments.includes(dept);
 }
 
+/** Можно ли ПОКАЗЫВАТЬ КОНТЕНТ вкладки в отделе. Отличие от tabAllowedInDept:
+ *  у Коммерсов real_calls остаётся в NAV_ITEMS (из него строится заголовок
+ *  аккордеон-группы «ОКК» в сайдбаре), но сам контент старой вкладки (список
+ *  звонков) для b2b запрещён — менеджеры работают в «Оценке критериев».
+ *  ВАЖНО: сайдбар фильтруется по tabAllowedInDept, НЕ по этой функции —
+ *  иначе пропадёт заголовок группы вместе с подпунктами. */
+function tabContentAllowed(tabId: TabId, dept: DepartmentId): boolean {
+  if (tabId === "real_calls" && dept === "b2b") return false;
+  return tabAllowedInDept(tabId, dept);
+}
+
 /** Домашняя вкладка менеджера по отделу. У Коммерцов «ОКК» (real_calls) —
  *  давно только заголовок-аккордеон без своего контента (см. рендер сайдбара
  *  ниже), реальный список звонков менеджер там не увидит — дефолт для b2b
@@ -327,7 +338,7 @@ export default function Dashboard() {
             // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
             // fallback на домашнюю вкладку менеджера (см. defaultManagerTab).
             const fromHash = readTabFromHash();
-            if (!fromHash || tabAdminOnly(fromHash, data.department)) {
+            if (!fromHash || tabAdminOnly(fromHash, data.department) || !tabContentAllowed(fromHash, data.department)) {
               setActiveTab(defaultManagerTab(data.department));
             }
           } else {
@@ -379,6 +390,7 @@ export default function Dashboard() {
       const tab = readTabFromHash();
       if (tab && tab !== activeTab) {
         if (!isAdmin && tabAdminOnly(tab, activeDepartment)) return; // запрещаем manager-у admin-таб
+        if (!tabContentAllowed(tab, activeDepartment)) return; // напр. #real_calls у Коммерсов
         setActiveTab(tab);
       }
     };
@@ -394,7 +406,7 @@ export default function Dashboard() {
   // вкладок тоже гейтится по отделу (ниже), поэтому неверный контент не покажется
   // даже до срабатывания эффекта. См. dev_docs/13-РАЗДЕЛЕНИЕ-B2G-B2B.md §6.1.
   useEffect(() => {
-    if (!tabAllowedInDept(activeTab, activeDepartment)) {
+    if (!tabContentAllowed(activeTab, activeDepartment)) {
       setActiveTab(isAdmin ? "dashboard" : defaultManagerTab(activeDepartment));
     }
   }, [activeDepartment, activeTab, isAdmin]);
@@ -1252,7 +1264,7 @@ export default function Dashboard() {
         {activeTab === "audit" && <AuditTab department={activeDepartment} />}
 
         {/* --------------------- CALLS VIEW (Real / AI) --------------------- */}
-        {(activeTab === "real_calls" || activeTab === "ai_calls") && (
+        {(activeTab === "real_calls" || activeTab === "ai_calls") && tabContentAllowed(activeTab, activeDepartment) && (
           <div className="flex flex-col gap-4 fade-in flex-1">
 
             {/* Top Managers List Row */}
