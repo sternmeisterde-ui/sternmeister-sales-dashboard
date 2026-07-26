@@ -183,19 +183,6 @@ function fmtLostAt(iso: string): string {
 
 type LineFilter = "all" | "1" | "2" | "3";
 
-// B2B pipeline IDs + display labels — match server-side B2B_PIPELINES.
-const B2B_PIPELINE_LABEL: Record<string, { full: string; colorClass: string }> = {
-  "10631243": { full: "Бух Комм", colorClass: "text-emerald-400" },
-  "13209983": { full: "Мед Комм", colorClass: "text-purple-400" },
-};
-
-const LINE_LABEL: Record<LineFilter, string> = {
-  all: "Все линии",
-  "1": "Линия 1 — Квалификатор",
-  "2": "Линия 2 — Бератер",
-  "3": "Линия 3 — Доведение",
-};
-
 const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
   "1": "Квалификация",
   "2": "Бератер",
@@ -222,16 +209,8 @@ export default function DashboardTab({
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // For B2G this holds "all"|"1"|"2"|"3" (LineFilter); for B2B it holds
-  // "all" or a pipelineId string (e.g. "10631243"). Single piece of state
-  // since the dashboard switches modes when the user toggles department,
-  // and the new value is reset to "all" on every department change.
-  const [trendLine, setTrendLine] = useState<string>("all");
-  // Режим b2g-графика: «По линиям» (агрегатные линии) или «По менеджерам»
-  // (линия на менеджера + сравнение A/B + оверлей выходных). Спека 25 Фаза 3.
-  const [b2gChartMode, setB2gChartMode] = useState<"lines" | "managers">("lines");
-  // Переключатель направления (линии) для плиток b2g: «Все» или конкретная
-  // линия. Плитки показывают одно число (как у Комм), а не все линии сразу.
+  // Переключатель направления (линии) — общий фильтр вкладки b2g: «Все» или
+  // конкретная линия. Скоупит плитки, таблицу и график (как у Комм).
   const [b2gLine, setB2gLine] = useState<"all" | "1" | "2" | "3">("all");
   // Глобальный фильтр «Менеджеры» (B2B): null = все. Живёт в шапке вкладки и
   // фильтрует ВСЁ — KPI-плитки, таблицу, график и детализации. Выбор
@@ -1319,117 +1298,55 @@ export default function DashboardTab({
         document.body,
       )}
 
-      {/* ============ PER-MANAGER TABLES — moved up: detail bound to top filter ============ */}
-      {(isB2G
-        ? [
-            { title: "Квалификатор (1я линия)", line: "1", color: "emerald" },
-            { title: "Бератер (2я линия)", line: "2", color: "purple" },
-            { title: "Доведение (3я линия)", line: "3", color: "sky" },
-            { title: "Руководители (без линии)", line: "__none__", color: "amber" },
-          ]
-        : [
-            { title: "Менеджеры", line: "__all__", color: "blue" },
-          ]
-      ).map(({ title, line, color }) => {
-        // filteredPerManager учитывает глобальный фильтр «Менеджеры» (B2B);
-        // для B2G selectedManagers всегда null → это те же data.perManager.
-        const lineManagers =
-          line === "__all__"
-            ? filteredPerManager
-            : line === "__none__"
-              ? filteredPerManager.filter((mgr) => !mgr.line)
-              : filteredPerManager.filter((mgr) => mgr.line === line);
-        if (lineManagers.length === 0) return null;
-        const titleColorClass =
-          color === "emerald"
-            ? "text-emerald-400"
-            : color === "purple"
-              ? "text-purple-400"
-              : color === "sky"
-                ? "text-sky-400"
-                : color === "amber"
-                  ? "text-amber-400"
-                  : "text-blue-400";
+      {/* ============ PER-MANAGER TABLE — одна таблица, стиль Комм ============
+           Скоуп по переключателю линий (b2g): «Все» → все менеджеры плоско;
+           линия → только её менеджеры. Колонки одинаковы для обоих отделов. */}
+      {(() => {
+        const tableManagers = isB2G && b2gLine !== "all"
+          ? filteredPerManager.filter((mgr) => mgr.line === b2gLine)
+          : filteredPerManager;
+        if (tableManagers.length === 0) return null;
+        const tableTitle = isB2G && b2gLine !== "all" ? LINE_SHORT[b2gLine] : "Менеджеры";
         return (
-          <div key={line} className="glass-panel rounded-2xl p-5 border border-white/5">
+          <div className="glass-panel rounded-2xl p-5 border border-white/5">
             <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
-              <span className={titleColorClass}>{title}</span>
-              <span className="text-slate-500 ml-2">({lineManagers.length} чел.)</span>
+              <span className="text-blue-400">{tableTitle}</span>
+              <span className="text-slate-500 ml-2">({tableManagers.length} чел.)</span>
             </h3>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-slate-500 text-[10px] uppercase tracking-wider border-b border-white/5">
                     <th className="text-left py-2 px-2 font-medium">Менеджер</th>
-                    {isB2G ? (
-                      <>
-                        <th className="text-right py-2 px-2 font-medium">Звонки</th>
-                        <th className="text-right py-2 px-2 font-medium">Дозвон</th>
-                        <th className="text-right py-2 px-2 font-medium">% дозв.</th>
-                        <th className="text-right py-2 px-2 font-medium">На линии</th>
-                        <th className="text-right py-2 px-2 font-medium">Ср. диалог</th>
-                        <th className="text-right py-2 px-2 font-medium">Вх. всего</th>
-                        <th className="text-right py-2 px-2 font-medium">Пропущ.</th>
-                        <th className="text-right py-2 px-2 font-medium">Задачи</th>
-                      </>
-                    ) : (
-                      <>
-                        <th className="text-right py-2 px-2 font-medium">Исходящие</th>
-                        <th className="text-right py-2 px-2 font-medium">Принятых</th>
-                        <th className="text-right py-2 px-2 font-medium">% дозв.</th>
-                        <th className="text-right py-2 px-2 font-medium">Длительность</th>
-                        <th className="text-right py-2 px-2 font-medium">Ожидание</th>
-                        <th className="text-right py-2 px-2 font-medium">SLA</th>
-                        <th className="text-right py-2 px-2 font-medium">Всего</th>
-                      </>
-                    )}
+                    <th className="text-right py-2 px-2 font-medium">Исходящие</th>
+                    <th className="text-right py-2 px-2 font-medium">Принятых</th>
+                    <th className="text-right py-2 px-2 font-medium">% дозв.</th>
+                    <th className="text-right py-2 px-2 font-medium">Длительность</th>
+                    <th className="text-right py-2 px-2 font-medium">Ожидание</th>
+                    <th className="text-right py-2 px-2 font-medium">SLA</th>
+                    <th className="text-right py-2 px-2 font-medium">Всего</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {lineManagers.map((mgr) => {
-                    // B2B % дозвона = принятые исходящие / все исходящие (≤100%).
-                    const b2bDialPct = mgr.outgoingTotal > 0
+                  {tableManagers.map((mgr) => {
+                    // % дозвона = принятые исходящие / все исходящие (≤100%).
+                    const dialPct = mgr.outgoingTotal > 0
                       ? Math.round((mgr.outgoingConnected / mgr.outgoingTotal) * 100)
                       : 0;
                     return (
                     <tr key={mgr.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
                       <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">{mgr.name}</td>
-                      {isB2G ? (
-                        <>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsConnected}</td>
-                          <td className="py-2 px-2 text-right">
-                            <span className={mgr.dialPercent >= 50 ? "text-emerald-400" : mgr.dialPercent >= 30 ? "text-amber-400" : "text-rose-400"}>
-                              {mgr.dialPercent}%
-                            </span>
-                          </td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.totalMinutes} мин</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.avgDialogMinutes} мин</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.incomingTotal}</td>
-                          <td className="py-2 px-2 text-right">
-                            <span className={mgr.missedIncoming > 0 ? "text-rose-400" : "text-emerald-400"}>{mgr.missedIncoming}</span>
-                          </td>
-                          <td className="py-2 px-2 text-right">
-                            <span className={mgr.overdueTasks > 0 ? "text-rose-400" : "text-slate-400"}>
-                              {mgr.overdueTasks > 0 ? `⚠ ${mgr.overdueTasks}` : "0"}
-                            </span>
-                          </td>
-                        </>
-                      ) : (
-                        <>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingTotal}</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingConnected}</td>
-                          <td className="py-2 px-2 text-right">
-                            <span className={b2bDialPct >= 50 ? "text-emerald-400" : b2bDialPct >= 30 ? "text-amber-400" : "text-rose-400"}>
-                              {b2bDialPct}%
-                            </span>
-                          </td>
-                          <td className="py-2 px-2 text-right text-slate-300">{fmtHoursMinutes(mgr.totalMinutes)}</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.avgWaitSeconds} с</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
-                          <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
-                        </>
-                      )}
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingTotal}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingConnected}</td>
+                      <td className="py-2 px-2 text-right">
+                        <span className={dialPct >= 50 ? "text-emerald-400" : dialPct >= 30 ? "text-amber-400" : "text-rose-400"}>
+                          {dialPct}%
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-right text-slate-300">{fmtHoursMinutes(mgr.totalMinutes)}</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.avgWaitSeconds} с</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
+                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
                     </tr>
                     );
                   })}
@@ -1438,58 +1355,31 @@ export default function DashboardTab({
             </div>
           </div>
         );
-      })}
+      })()}
 
-      {/* ============ TREND CHART ============
-           B2G — переключатель «По линиям» (3 агрегатные метрики + выпадашка
-           линий) / «По менеджерам» (линия на менеджера + A/B + выходные).
-           B2B — line per manager, metric via pill toggle + manager multiselect. */}
-      {isB2G ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex justify-end">
-            <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
-              {([
-                ["lines", "По линиям"],
-                ["managers", "По менеджерам"],
-              ] as const).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  onClick={() => setB2gChartMode(mode)}
-                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${b2gChartMode === mode ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {b2gChartMode === "lines" ? (
-            <TrendChart
-              trend={data.trend}
-              trendByLine={data.trendByLine}
-              trendByPipeline={data.trendByPipeline ?? null}
-              filter={trendLine}
-              onFilterChange={setTrendLine}
-              mode="b2g"
-            />
-          ) : (
-            <TrendChartByManager
-              trend={data.trend}
-              trendByManager={data.trendByManager ?? null}
-              department={department}
-              vertical={vertical}
-              selected={selectedManagers}
-            />
-          )}
-        </div>
-      ) : (
-        <TrendChartByManager
-          trend={data.trend}
-          trendByManager={data.trendByManager ?? null}
-          department={department}
-          vertical={vertical}
-          selected={selectedManagers}
-        />
-      )}
+      {/* ============ TREND CHART — line per manager (как у Комм) ============
+           b2g: набор менеджеров скоупится выбранной линией поверх глобального
+           фильтра «Менеджеры». b2b: без линий — скоуп = фильтр «Менеджеры». */}
+      {(() => {
+        let chartSelected = selectedManagers;
+        if (isB2G && b2gLine !== "all") {
+          const lineNames = new Set(
+            data.perManager.filter((r) => r.line === b2gLine).map((r) => r.name),
+          );
+          chartSelected = selectedManagers === null
+            ? lineNames
+            : new Set([...selectedManagers].filter((n) => lineNames.has(n)));
+        }
+        return (
+          <TrendChartByManager
+            trend={data.trend}
+            trendByManager={data.trendByManager ?? null}
+            department={department}
+            vertical={vertical}
+            selected={chartSelected}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -2189,105 +2079,6 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
           </LineChart>
         </ResponsiveContainer>
       )}
-    </div>
-  );
-}
-
-// ==================== Trend chart with funnel filter ====================
-// B2G: line dropdown (Все / 1 / 2 / 3 — Квалификация / Бератер / Доведение)
-// B2B: pipeline dropdown (Все / Бух Комм / Мед Комм)
-
-function TrendChart({
-  trend,
-  trendByLine,
-  trendByPipeline,
-  filter,
-  onFilterChange,
-  mode,
-}: {
-  trend: DailyBucket[];
-  trendByLine: { line1: DailyBucket[]; line2: DailyBucket[]; line3: DailyBucket[] };
-  trendByPipeline: Record<string, DailyBucket[]> | null;
-  filter: string;
-  onFilterChange: (l: string) => void;
-  mode: "b2g" | "b2b";
-}) {
-  let source: DailyBucket[];
-  let activeLabel = "";
-  if (mode === "b2g") {
-    source =
-      filter === "1" ? trendByLine.line1
-        : filter === "2" ? trendByLine.line2
-          : filter === "3" ? trendByLine.line3
-            : trend;
-    if (filter !== "all") activeLabel = LINE_LABEL[filter as LineFilter] ?? "";
-  } else {
-    if (filter !== "all" && trendByPipeline?.[filter]) {
-      source = trendByPipeline[filter];
-      activeLabel = B2B_PIPELINE_LABEL[filter]?.full ?? `Pipeline ${filter}`;
-    } else {
-      source = trend;
-    }
-  }
-
-  const data = (source || []).map((d) => ({
-    date: d.date.slice(5).replace("-", "."),
-    "Звонки": d.callsTotal,
-    "Дозвон": d.callsConnected,
-    "Пропущ.": d.missedIncoming,
-  }));
-  if (data.length === 0) return null;
-
-  const dropdown =
-    mode === "b2g" ? (
-      <select
-        value={filter}
-        onChange={(e) => onFilterChange(e.target.value)}
-        className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
-      >
-        <option value="all">Все линии</option>
-        <option value="1">Квалификация</option>
-        <option value="2">Бератер</option>
-        <option value="3">Доведение</option>
-      </select>
-    ) : trendByPipeline ? (
-      <select
-        value={filter}
-        onChange={(e) => onFilterChange(e.target.value)}
-        className="bg-slate-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500/40 focus:border-blue-500/60 focus:outline-none transition-colors"
-      >
-        <option value="all">Все воронки</option>
-        {Object.keys(trendByPipeline).map((pid) => (
-          <option key={pid} value={pid}>
-            {B2B_PIPELINE_LABEL[pid]?.full ?? `Pipeline ${pid}`}
-          </option>
-        ))}
-      </select>
-    ) : null;
-
-  return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">
-          Динамика звонков по дням
-          {activeLabel && (
-            <span className="text-slate-500 ml-2 font-normal normal-case">— {activeLabel}</span>
-          )}
-        </h3>
-        {dropdown}
-      </div>
-      <ResponsiveContainer width="100%" height={240}>
-        <LineChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-          <XAxis dataKey="date" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={{ stroke: "#334155" }} tickLine={false} />
-          <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
-          <RTooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
-          <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
-          <Line type="monotone" dataKey="Звонки" stroke="#3b82f6" strokeWidth={2} dot={{ fill: "#3b82f6", r: 3 }} />
-          <Line type="monotone" dataKey="Дозвон" stroke="#10b981" strokeWidth={2} dot={{ fill: "#10b981", r: 3 }} />
-          <Line type="monotone" dataKey="Пропущ." stroke="#f43f5e" strokeWidth={2} dot={{ fill: "#f43f5e", r: 3 }} />
-        </LineChart>
-      </ResponsiveContainer>
     </div>
   );
 }
