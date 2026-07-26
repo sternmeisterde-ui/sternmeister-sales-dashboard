@@ -202,12 +202,6 @@ const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
   "3": "Доведение",
 };
 
-const LINE_COLOR_CLASS: Record<Exclude<LineFilter, "all">, string> = {
-  "1": "text-emerald-400",
-  "2": "text-purple-400",
-  "3": "text-sky-400",
-};
-
 // ==================== Component ====================
 
 export default function DashboardTab({
@@ -236,6 +230,9 @@ export default function DashboardTab({
   // Режим b2g-графика: «По линиям» (агрегатные линии) или «По менеджерам»
   // (линия на менеджера + сравнение A/B + оверлей выходных). Спека 25 Фаза 3.
   const [b2gChartMode, setB2gChartMode] = useState<"lines" | "managers">("lines");
+  // Переключатель направления (линии) для плиток b2g: «Все» или конкретная
+  // линия. Плитки показывают одно число (как у Комм), а не все линии сразу.
+  const [b2gLine, setB2gLine] = useState<"all" | "1" | "2" | "3">("all");
   // Глобальный фильтр «Менеджеры» (B2B): null = все. Живёт в шапке вкладки и
   // фильтрует ВСЁ — KPI-плитки, таблицу, график и детализации. Выбор
   // переживает смену периода (сравнивать одну и ту же группу по датам), но
@@ -483,8 +480,10 @@ export default function DashboardTab({
     lostItems && selectedManagers !== null
       ? lostItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : lostItems;
+  // b2b — SLA drill-down под фильтром «Менеджеры»; b2g — SLA dept-level
+  // (звонит дайлер, не ответственный), поэтому фильтр по менеджеру не применяем.
   const visibleSlaItems =
-    slaItems && selectedManagers !== null
+    !isB2G && slaItems && selectedManagers !== null
       ? slaItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : slaItems;
 
@@ -556,16 +555,19 @@ export default function DashboardTab({
   // отфильтрованных строк, как в b2b-ветке.
   const b2gEff = (() => {
     if (!isB2G) return null;
-    // «Потерянные» — всегда dept-итог (лид-based снимок, без атрибуции к
-    // менеджеру): фильтр «Менеджеры» на неё не влияет (спека 25 §2).
+    // Всегда dept-итог, фильтр «Менеджеры» НЕ влияет:
+    //   • «Потерянные» — лид-based снимок без атрибуции (спека 25 §2);
+    //   • SLA — время до первого звонка, а звонит ДАЙЛЕР, не ответственный
+    //     менеджер, поэтому пер-менеджерная атрибуция некорректна (2026-07-27).
     const lost = m.lostCalls ?? 0;
+    const slaMin = m.slaFirstCallMin ?? 0;
     if (selectedManagers === null) {
       return {
         callsTotal: m.callsTotal, callsConnected: m.callsConnected, dialPercent: m.dialPercent,
         totalMinutes: m.totalMinutes, avgDialogMinutes: m.avgDialogMinutes,
         missedIncoming: m.missedIncoming, incomingTotal: m.incomingTotal,
         outgoingTotal: m.outgoingTotal, missedPercent: missed.missedPercent,
-        waitSec: m.unansweredWaitSec ?? null, slaMin: m.slaFirstCallMin ?? 0, lost,
+        waitSec: m.unansweredWaitSec ?? null, slaMin, lost,
       };
     }
     const sub = filteredPerManager;
@@ -575,16 +577,12 @@ export default function DashboardTab({
     const incomingTotal = sub.reduce((s, r) => s + r.incomingTotal, 0);
     const outgoingTotal = sub.reduce((s, r) => s + r.outgoingTotal, 0);
     const missedIncoming = sub.reduce((s, r) => s + r.missedIncoming, 0);
-    // Ожидание — взвешенное по недозвонам; SLA — взвешенное по числу лидов
-    // (те же веса, что в b2b-ветке).
+    // Ожидание — взвешенное по недозвонам (звонок атрибутируется тому, кто
+    // его сделал, — это ок). SLA — dept-level (см. выше), фильтр не трогает.
     const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
     const waitSec = unansWeight > 0
       ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
       : null;
-    const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
-    const slaMin = slaWeight > 0
-      ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
-      : 0;
     return {
       callsTotal, callsConnected,
       dialPercent: callsTotal > 0 ? Math.round((callsConnected / callsTotal) * 100) : 0,
@@ -595,25 +593,6 @@ export default function DashboardTab({
       waitSec, slaMin, lost,
     };
   })();
-
-  // Top-tile breakdown rows. B2G splits by line (Квалификация/Бератер/
-  // Доведение). B2B intentionally renders only the total — per-pipeline
-  // (Бух Комм / Мед Комм) split was removed at the user's request because
-  // the trend chart already exposes that breakdown via dropdown, and the
-  // duplicated split made the tiles visually noisy.
-  type Metric = "calls" | "dial" | "minutes" | "missed";
-  const tileRows = (metric: Metric): TileRow[] | null => {
-    if (!byLine) return null;
-    return (["1", "2", "3"] as const).map((ln) => {
-      const v = byLine[ln];
-      const value =
-        metric === "calls" ? v.callsTotal
-          : metric === "dial" ? `${v.dialPercent}%`
-            : metric === "minutes" ? `${v.totalMinutes}м`
-              : v.missedIncoming;
-      return { key: ln, label: LINE_SHORT[ln], colorClass: LINE_COLOR_CLASS[ln], value };
-    });
-  };
 
   return (
     <div className="flex flex-col gap-4 fade-in">
@@ -687,75 +666,90 @@ export default function DashboardTab({
 
       {/* ============ KPI tiles ============ */}
       {isB2G && b2gEff ? (
-        // B2G — 4 линейные плитки (клик → разбивка по линиям×менеджерам) +
-        // ряд из 3 новых (Ожидание/SLA/Потерянные). Итоги (b2gEff) и построчная
-        // разбивка (tileRows→byLine→filteredPerManager) реагируют на фильтр
-        // «Менеджеры»; «Потерянные» — dept-итог, фильтр её не трогает.
-        <div className="flex flex-col gap-2">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <CallMetricTile
-              icon={Phone}
-              label="Звонки"
-              color="blue"
-              totalValue={b2gEff.callsTotal}
-              totalCaption={`${b2gEff.outgoingTotal}↑ ${b2gEff.incomingTotal}↓`}
-              rows={tileRows("calls")}
-              onClick={() => setLineTileDetail("calls")}
-            />
-            <CallMetricTile
-              icon={Target}
-              label="Дозвон"
-              color={b2gEff.dialPercent >= 50 ? "emerald" : b2gEff.dialPercent >= 30 ? "amber" : "rose"}
-              totalValue={`${b2gEff.dialPercent}%`}
-              totalCaption={`${b2gEff.callsConnected}/${b2gEff.callsTotal}`}
-              rows={tileRows("dial")}
-              onClick={() => setLineTileDetail("dial")}
-            />
-            <CallMetricTile
-              icon={Clock}
-              label="На линии"
-              color="blue"
-              totalValue={`${b2gEff.totalMinutes}м`}
-              totalCaption={`ср. ${b2gEff.avgDialogMinutes}м`}
-              rows={tileRows("minutes")}
-              onClick={() => setLineTileDetail("minutes")}
-            />
-            <CallMetricTile
-              icon={PhoneMissed}
-              label="Пропущенные"
-              color={b2gEff.missedIncoming === 0 ? "emerald" : b2gEff.missedIncoming <= 3 ? "amber" : "rose"}
-              totalValue={b2gEff.missedIncoming}
-              totalCaption={`${b2gEff.missedPercent}% от ${b2gEff.incomingTotal}`}
-              rows={tileRows("missed")}
-              onClick={() => setLineTileDetail("missed")}
-            />
-          </div>
-          {/* Три новые плитки — одним числом на отдел (спека 25 §1). */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            <CallMetricTile
-              icon={Timer} label="Ожидание" color="blue"
-              totalValue={b2gEff.waitSec == null ? "—" : `${b2gEff.waitSec}с`}
-              totalCaption="по недозвонам" rows={null}
-              onClick={() => openTileDetail("wait")}
-              tip="Среднее время гудков в неотвеченных исходящих (от набора до сброса). Обе платформы (CloudTalk + CallGear). Клик — разбивка по платформам и менеджерам."
-            />
-            <CallMetricTile
-              icon={Gauge} label="SLA" color="blue" totalValue={`${b2gEff.slaMin}м`} rows={null}
-              onClick={toggleSlaDetail}
-              tip="Среднее рабочее время от создания лида до первого звонка по нему (по бизнес-часам). Учитываются лиды воронок отдела за период. Клик — детализация по сделкам."
-            />
-            <CallMetricTile
-              icon={PhoneOff}
-              label="Потерянные"
-              color={b2gEff.lost === 0 ? "emerald" : "rose"}
-              totalValue={b2gEff.lost}
-              rows={null}
-              tipAlign="right"
-              tip="Лиды на этапе «Новый лид»/«Недозвон», по которым последний звонок был больше 24 часов назад (или звонков не было вовсе). Снимок на конец периода. Клик — список лидов."
-              onClick={toggleLostLeadsDetail}
-            />
-          </div>
-        </div>
+        // B2G — как у Комм: одиночные плитки. Переключатель направления (линии)
+        // скоупит 4 звонковые плитки; Ожидание/SLA/Потерянные — по отделу.
+        (() => {
+          const cv = b2gLine === "all"
+            ? b2gEff
+            : (() => {
+                const v = byLine![b2gLine];
+                return {
+                  callsTotal: v.callsTotal, callsConnected: v.callsConnected, dialPercent: v.dialPercent,
+                  totalMinutes: v.totalMinutes,
+                  avgDialogMinutes: v.callsConnected > 0 ? Math.round(v.totalMinutes / v.callsConnected) : 0,
+                  missedIncoming: v.missedIncoming, incomingTotal: v.incomingTotal,
+                  outgoingTotal: v.outgoingTotal, missedPercent: v.missedPercent,
+                };
+              })();
+          const deptCap = b2gLine === "all" ? undefined : "по отделу";
+          const LINE_PILLS = [
+            ["all", "Все"], ["1", LINE_SHORT["1"]], ["2", LINE_SHORT["2"]], ["3", LINE_SHORT["3"]],
+          ] as const;
+          return (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5 self-start">
+                {LINE_PILLS.map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setB2gLine(key)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${b2gLine === key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                <CallMetricTile
+                  icon={Phone} label="Звонки" color="blue"
+                  totalValue={cv.callsTotal} totalCaption={`${cv.outgoingTotal}↑ ${cv.incomingTotal}↓`}
+                  rows={null} onClick={() => setLineTileDetail("calls")}
+                  tip="Все звонки (исходящие + входящие) за период. Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Target} label="Дозвон"
+                  color={cv.dialPercent >= 50 ? "emerald" : cv.dialPercent >= 30 ? "amber" : "rose"}
+                  totalValue={`${cv.dialPercent}%`} totalCaption={`${cv.callsConnected}/${cv.callsTotal}`}
+                  rows={null} onClick={() => setLineTileDetail("dial")}
+                  tip="Доля звонков с ответом (длительность ≥ 1 сек). Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Clock} label="На линии" color="blue"
+                  totalValue={`${cv.totalMinutes}м`} totalCaption={`ср. ${cv.avgDialogMinutes}м`}
+                  rows={null} onClick={() => setLineTileDetail("minutes")}
+                  tip="Суммарная длительность разговоров за период. Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={PhoneMissed} label="Пропущенные"
+                  color={cv.missedIncoming === 0 ? "emerald" : cv.missedIncoming <= 3 ? "amber" : "rose"}
+                  totalValue={cv.missedIncoming} totalCaption={`${cv.missedPercent}% от ${cv.incomingTotal}`}
+                  rows={null} onClick={() => setLineTileDetail("missed")}
+                  tip="Входящие без ответа (< 1 сек). Клик — разбивка по линиям и менеджерам."
+                />
+                {/* Дальше — по всему отделу, вне зависимости от выбранной линии. */}
+                <CallMetricTile
+                  icon={Timer} label="Ожидание" color="blue"
+                  totalValue={b2gEff.waitSec == null ? "—" : `${b2gEff.waitSec}с`}
+                  totalCaption={b2gLine === "all" ? "по недозвонам" : "отдел · недозвоны"} rows={null}
+                  onClick={() => openTileDetail("wait")}
+                  tip="Среднее время гудков в неотвеченных исходящих (от набора до сброса), по всему отделу. Обе платформы (CloudTalk + CallGear). Клик — разбивка по платформам и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Gauge} label="SLA" color="blue" totalValue={`${b2gEff.slaMin}м`}
+                  totalCaption={deptCap} rows={null} onClick={toggleSlaDetail}
+                  tip="Среднее календарное время от создания лида до первого звонка по нему (реальный wall-clock, вкл. вечер/выходные — дайлер звонит и вне будних 9–18), по всему отделу. Клик — детализация по сделкам."
+                />
+                <CallMetricTile
+                  icon={PhoneOff} label="Потерянные"
+                  color={b2gEff.lost === 0 ? "emerald" : "rose"}
+                  totalValue={b2gEff.lost} totalCaption={deptCap} rows={null}
+                  tipAlign="right"
+                  tip="Лиды на этапе «Новый лид»/«Недозвон», по которым последний звонок был больше 24 часов назад (или звонков не было вовсе), по всему отделу. Снимок на конец периода. Клик — список лидов."
+                  onClick={toggleLostLeadsDetail}
+                />
+              </div>
+            </div>
+          );
+        })()
       ) : (
         // B2B — 7 single-number tiles, no captions. % дозвона = принятые
         // исходящие / все исходящие (≤100%). Ожидание = средний answer-wait
@@ -1063,6 +1057,42 @@ export default function DashboardTab({
                 <p className="text-slate-400 text-sm py-2">За выбранный период SLA-сделок нет.</p>
               )}
               {visibleSlaItems && visibleSlaItems.length > 0 && (() => {
+                // b2g — плоский список без группировки по ответственному
+                // менеджеру: звонит дайлер, поэтому атрибуция SLA к
+                // ответственному вводит в заблуждение (2026-07-27).
+                if (isB2G) {
+                  const items = [...visibleSlaItems].sort((a, b) => b.slaMinutes - a.slaMinutes);
+                  return (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                            <th className="py-1.5 pr-3 font-medium">Сделка</th>
+                            <th className="py-1.5 pr-3 font-medium">Клиент</th>
+                            <th className="py-1.5 pr-3 font-medium">Телефон</th>
+                            <th className="py-1.5 font-medium text-right">SLA</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {items.map((it) => (
+                            <tr key={it.leadId} className="border-b border-white/5 hover:bg-white/[0.02]">
+                              <td className="py-1.5 pr-3">
+                                <a href={kommoLeadUrl(it.leadId)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline font-mono text-xs break-all">
+                                  {kommoLeadUrl(it.leadId)}
+                                </a>
+                              </td>
+                              <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
+                              <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone ?? "—"}</td>
+                              <td className={`py-1.5 text-right tabular-nums font-semibold ${it.slaMinutes >= 30 ? "text-rose-400" : "text-slate-200"}`}>
+                                {fmtHoursMinutes(it.slaMinutes)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                }
                 const byManager = new Map<string, SlaLeadItem[]>();
                 for (const it of visibleSlaItems) {
                   const key = it.manager || "Без менеджера";
@@ -1184,7 +1214,9 @@ export default function DashboardTab({
                   <button onClick={() => setLineTileDetail(null)} className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Закрыть ✕</button>
                 </div>
                 <div className="overflow-y-auto px-5 py-4 flex flex-col gap-4">
-                  {groups.map((g) => {
+                  {/* Скоуп drill-down = выбранная линия (иначе — все линии),
+                      чтобы сумма совпадала с плиткой при активном переключателе. */}
+                  {groups.filter((g) => b2gLine === "all" || g.key === b2gLine).map((g) => {
                     const rows = filteredPerManager
                       .filter((r) => (g.key === "__none__" ? !r.line : r.line === g.key))
                       .filter((r) => rowVal(r) > 0)

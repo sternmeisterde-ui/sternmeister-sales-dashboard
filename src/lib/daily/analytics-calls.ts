@@ -1450,23 +1450,28 @@ export async function getAnalyticsSlaFirstCallMinutes(
   const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return 0;
   const cacheKey = `sla-first-call-min:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs, dept === "b2b"));
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs, dept));
 }
 
-// useOwn=true (B2B) reads our own Бух-Комм SLA (sla_own_seconds, спека Рузанны);
-// B2G keeps the integrator-COALESCE value (Looker parity). The SQL expression
-// is chosen here so both the value and the IS NOT NULL filter stay consistent.
-function slaSourceSql(useOwn: boolean) {
-  return useOwn
+// Источник SLA по отделу (одно выражение и для значения, и для IS NOT NULL):
+//   • b2b → «своё» SLA Бух Комм (sla_own_seconds, спека Рузанны);
+//   • b2g → КАЛЕНДАРНОЕ время до первого звонка (sla_first_call_calendar_seconds).
+//     Бизнес-часовой sla_first_call_seconds здесь НЕ годится: он считает только
+//     Пн–Сб 09–18 (business-hours.ts), а дайлер Госников звонит и по выходным/
+//     вне окна → лиды, созданные и обзвоненные в такое время, давали SLA=0
+//     (диагностика 2026-07-27: весь свежий b2g был 0). Календарное время
+//     (clamp ≥0) отражает реальный wall-clock от создания до первого звонка.
+function slaSourceSql(dept: "b2g" | "b2b") {
+  return dept === "b2b"
     ? sql`sla_own_seconds`
-    : sql`COALESCE(sla_first_call_seconds_integrator, sla_first_call_seconds)`;
+    : sql`GREATEST(sla_first_call_calendar_seconds, 0)`;
 }
 
-async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number, useOwn: boolean): Promise<number> {
+async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number, dept: "b2g" | "b2b"): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-  const src = slaSourceSql(useOwn);
+  const src = slaSourceSql(dept);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -1511,7 +1516,7 @@ export async function getAnalyticsSlaFirstCallMinutesByManager(
   // :v2 — форма значения изменилась (number → {avgMin, leadCount}), старые
   // кэш-записи с тем же ключом отдавали бы прежний shape.
   const cacheKey = `sla-first-call-min-mgr:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}:${managerIds}:v2`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs, dept === "b2b"));
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs, dept));
 }
 
 async function fetchSlaFirstCallMinutesByManager(
@@ -1519,12 +1524,12 @@ async function fetchSlaFirstCallMinutesByManager(
   pipelineIds: number[],
   fromTs: number,
   toTs: number,
-  useOwn: boolean,
+  dept: "b2g" | "b2b",
 ): Promise<Map<string, ManagerSlaStat>> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-  const src = slaSourceSql(useOwn);
+  const src = slaSourceSql(dept);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -1833,7 +1838,7 @@ export async function getAnalyticsSlaLeadsDetail(
     const fromDate = new Date(fromTs * 1000);
     const toDate = new Date(toTs * 1000);
     const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-    const src = slaSourceSql(dept === "b2b");
+    const src = slaSourceSql(dept);
 
     const result = await (analyticsDb as unknown as {
       execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
