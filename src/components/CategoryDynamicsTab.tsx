@@ -109,7 +109,7 @@ const DIMENSIONS: DimDef[] = [
   },
   {
     key: "startDate",
-    title: "Когда планируют начать",
+    title: "START_DATE",
     buckets: [
       { key: "now", label: "Прямо сейчас", short: "Сейчас", color: SLOT[0] },
       { key: "2w", label: "Через 2 недели", short: "2 нед.", color: SLOT[1] },
@@ -120,7 +120,7 @@ const DIMENSIONS: DimDef[] = [
   },
   {
     key: "income",
-    title: "Доход",
+    title: "INCOME",
     buckets: [
       { key: "lt2", label: "До 2 000 €", short: "До 2к", color: SLOT[0] },
       { key: "2to3", label: "2 000 – 3 000 €", short: "2–3к", color: SLOT[1] },
@@ -131,7 +131,7 @@ const DIMENSIONS: DimDef[] = [
   },
   {
     key: "status",
-    title: "Занятость",
+    title: "STATUS",
     buckets: [
       { key: "de_job", label: "Работаю в Германии", short: "Раб. DE", color: SLOT[0] },
       { key: "spouse", label: "Не работаю, но муж/жена работает", short: "Муж/жена", color: SLOT[1] },
@@ -144,7 +144,7 @@ const DIMENSIONS: DimDef[] = [
   },
   {
     key: "language",
-    title: "Уровень языка",
+    title: "LANGUAGE_LEVEL",
     buckets: [
       { key: "A1", label: "A1 (Начальный уровень)", short: "A1", color: LANG_RAMP[0] },
       { key: "A2", label: "A2 (Базовый уровень)", short: "A2", color: LANG_RAMP[1] },
@@ -911,7 +911,7 @@ export default function CategoryDynamicsTab() {
           «Неквал», «Спам», «Предложение сотрудничества», «Дубль госник», «Бух дубль», «Мед дубль» (поле «Причина закрытия — обязательное»).
           {" "}<span className="text-slate-300 font-medium">Продажа</span> — заполнена «Факт. Дата 1-го платежа»; относится к периоду создания лида, даже если платёж пришёл позже.
           {" "}<span className="text-slate-300 font-medium">Без метки / Без ответа</span> — поле пустое (категория не проставлена, вопрос анкеты не отвечен).
-          {" "}Таблицы «Когда планируют начать», «Доход», «Занятость», «Уровень языка» — те же лиды, разрезанные по ответам анкеты сайта; исторические варианты написания («До 2000 евро», «мужжена», «B1 (Средний уровень)…») сведены в единые корзины.
+          {" "}Таблицы START_DATE, INCOME, STATUS, LANGUAGE_LEVEL — те же лиды, разрезанные по ответам анкеты сайта; исторические варианты написания («До 2000 евро», «мужжена», «B1 (Средний уровень)…») сведены в единые корзины.
           {" "}Клик по заголовку колонки открывает период подробнее (месяц → недели → дни); наведение на ячейку — все числа корзины за колонку.
         </p>
       </div>
