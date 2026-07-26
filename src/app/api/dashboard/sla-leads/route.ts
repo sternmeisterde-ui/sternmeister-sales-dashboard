@@ -7,6 +7,7 @@
 
 import { type NextRequest, NextResponse } from "next/server";
 import { getAnalyticsSlaLeadsDetail } from "@/lib/daily/analytics-calls";
+import { parseVertical } from "@/lib/kommo/pipeline-config";
 import { parseDateBoundary } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const sp = req.nextUrl.searchParams;
     const department = sp.get("department") === "b2b" ? "b2b" : "b2g";
+    // Вертикаль осмысленна только для b2g (Бух/Мед/Все) — иначе undefined.
+    const vertical = department === "b2g" ? parseVertical(sp.get("vertical")) : undefined;
     const fromStr = sp.get("from");
     const toStr = sp.get("to");
     if (!fromStr || !toStr) {
@@ -30,6 +33,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       department,
       Math.floor(fromDate.getTime() / 1000),
       Math.floor(toDate.getTime() / 1000),
+      vertical,
     );
     return NextResponse.json(
       { items },

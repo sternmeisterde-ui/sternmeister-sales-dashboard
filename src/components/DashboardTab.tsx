@@ -139,6 +139,18 @@ interface SlaLeadItem {
   pipelineId: number | null;
 }
 
+// Строка «Потерянных» b2g (ответ /api/dashboard/lost-leads) — лид-based
+// (спека 25 §2): лид на «Новый лид»/«Недозвон» без звонка > 24ч.
+interface B2gLostLeadItem {
+  leadId: number;
+  clientName: string | null;
+  manager: string | null;
+  pipelineName: string | null;
+  stageName: string | null;
+  leadCreatedAt: string | null;
+  lastCallAt: string | null;
+}
+
 // Детализация KPI-плиток B2B — форма ответа /api/dashboard/b2b-tile-details
 // (см. getAnalyticsB2bTileDetails: скоуп/пороги идентичны плиткам).
 type TileDetailKind = "outgoing" | "answered" | "hourly" | "wait";
@@ -190,12 +202,6 @@ const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
   "3": "Доведение",
 };
 
-const LINE_COLOR_CLASS: Record<Exclude<LineFilter, "all">, string> = {
-  "1": "text-emerald-400",
-  "2": "text-purple-400",
-  "3": "text-sky-400",
-};
-
 // ==================== Component ====================
 
 export default function DashboardTab({
@@ -221,6 +227,12 @@ export default function DashboardTab({
   // since the dashboard switches modes when the user toggles department,
   // and the new value is reset to "all" on every department change.
   const [trendLine, setTrendLine] = useState<string>("all");
+  // Режим b2g-графика: «По линиям» (агрегатные линии) или «По менеджерам»
+  // (линия на менеджера + сравнение A/B + оверлей выходных). Спека 25 Фаза 3.
+  const [b2gChartMode, setB2gChartMode] = useState<"lines" | "managers">("lines");
+  // Переключатель направления (линии) для плиток b2g: «Все» или конкретная
+  // линия. Плитки показывают одно число (как у Комм), а не все линии сразу.
+  const [b2gLine, setB2gLine] = useState<"all" | "1" | "2" | "3">("all");
   // Глобальный фильтр «Менеджеры» (B2B): null = все. Живёт в шапке вкладки и
   // фильтрует ВСЁ — KPI-плитки, таблицу, график и детализации. Выбор
   // переживает смену периода (сравнивать одну и ту же группу по датам), но
@@ -248,6 +260,16 @@ export default function DashboardTab({
   const [tileData, setTileData] = useState<B2bTileDetails | null>(null);
   const [tileLoading, setTileLoading] = useState(false);
   const [tileError, setTileError] = useState<string | null>(null);
+  // Drill-down линейных плиток b2g (Фаза 1, спека 25): клик по плитке →
+  // разбивка метрики по линиям × менеджерам. Строится client-side из
+  // filteredPerManager — сумма всегда равна плитке, запросов к БД нет.
+  const [lineTileDetail, setLineTileDetail] = useState<"calls" | "dial" | "minutes" | "missed" | null>(null);
+  // Drill-down «Потерянных» b2g (лиды, не звонки) — своя форма (B2gLostLeadItem),
+  // отдельно от b2b lostItems (звонки). Ленивый фетч по клику.
+  const [lostLeadsOpen, setLostLeadsOpen] = useState(false);
+  const [lostLeadsItems, setLostLeadsItems] = useState<B2gLostLeadItem[] | null>(null);
+  const [lostLeadsLoading, setLostLeadsLoading] = useState(false);
+  const [lostLeadsError, setLostLeadsError] = useState<string | null>(null);
   // Tracks whether we already have data so subsequent refetches don't
   // re-trigger the full-screen DinoLoader (background-refresh UX). Held
   // in a ref because we DON'T want this flag in the fetchData deps —
@@ -303,21 +325,27 @@ export default function DashboardTab({
     setTileDetail(null);
     setTileData(null);
     setTileError(null);
+    setLineTileDetail(null);
+    setLostLeadsOpen(false);
+    setLostLeadsItems(null);
+    setLostLeadsError(null);
   }, [department, range.start, range.end]);
 
   // ESC закрывает открытую модалку детализации.
   useEffect(() => {
-    if (!lostOpen && !slaOpen && !tileDetail) return;
+    if (!lostOpen && !slaOpen && !tileDetail && !lineTileDetail && !lostLeadsOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setLostOpen(false);
         setSlaOpen(false);
         setTileDetail(null);
+        setLineTileDetail(null);
+        setLostLeadsOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [lostOpen, slaOpen, tileDetail]);
+  }, [lostOpen, slaOpen, tileDetail, lineTileDetail, lostLeadsOpen]);
 
   const toggleLostDetail = useCallback(async () => {
     const next = !lostOpen;
@@ -346,7 +374,7 @@ export default function DashboardTab({
     setTileError(null);
     try {
       const res = await fetch(
-        `/api/dashboard/b2b-tile-details?department=b2b&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+        `/api/dashboard/b2b-tile-details?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
       );
       if (!res.ok) throw new Error(`API error ${res.status}`);
       setTileData((await res.json()) as B2bTileDetails);
@@ -355,7 +383,29 @@ export default function DashboardTab({
     } finally {
       setTileLoading(false);
     }
-  }, [tileData, tileLoading, range.start, range.end]);
+  }, [tileData, tileLoading, department, range.start, range.end]);
+
+  // «Потерянные» b2g: снимок на конец периода — грузим список лидов лениво.
+  const toggleLostLeadsDetail = useCallback(async () => {
+    const next = !lostLeadsOpen;
+    setLostLeadsOpen(next);
+    if (!next || lostLeadsItems !== null || lostLeadsLoading) return;
+    setLostLeadsLoading(true);
+    setLostLeadsError(null);
+    try {
+      const verticalParam = vertical ? `&vertical=${vertical}` : "";
+      const res = await fetch(
+        `/api/dashboard/lost-leads?department=${department}&to=${formatDate(range.end)}${verticalParam}`,
+      );
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const json = (await res.json()) as { items: B2gLostLeadItem[] };
+      setLostLeadsItems(json.items);
+    } catch (e) {
+      setLostLeadsError(String(e));
+    } finally {
+      setLostLeadsLoading(false);
+    }
+  }, [lostLeadsOpen, lostLeadsItems, lostLeadsLoading, department, vertical, range.end]);
 
   const toggleSlaDetail = useCallback(async () => {
     const next = !slaOpen;
@@ -364,8 +414,10 @@ export default function DashboardTab({
     setSlaLoading(true);
     setSlaError(null);
     try {
+      // vertical — чтобы drill-down совпадал с плиткой SLA при выборе Бух/Мед.
+      const verticalParam = vertical ? `&vertical=${vertical}` : "";
       const res = await fetch(
-        `/api/dashboard/sla-leads?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+        `/api/dashboard/sla-leads?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}${verticalParam}`,
       );
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const json = (await res.json()) as { items: SlaLeadItem[] };
@@ -375,7 +427,7 @@ export default function DashboardTab({
     } finally {
       setSlaLoading(false);
     }
-  }, [slaOpen, slaItems, slaLoading, department, range.start, range.end]);
+  }, [slaOpen, slaItems, slaLoading, department, vertical, range.start, range.end]);
 
   if (loading && !data) {
     return <DinoLoader />;
@@ -405,14 +457,15 @@ export default function DashboardTab({
 
   // Ростер глобального фильтра «Менеджеры» (B2B): имена таблицы ∪ серии
   // графика (график включает РОПов со звонками, которых нет в таблице).
-  const managerNames = !isB2G
-    ? Array.from(
-        new Set([
-          ...data.perManager.map((r) => r.name),
-          ...Object.keys(data.trendByManager ?? {}),
-        ]),
-      ).sort((a, b) => a.localeCompare(b, "ru"))
-    : [];
+  // Ростер глобального фильтра «Менеджеры» — для обоих отделов. Имена таблицы
+  // ∪ серии графика (график включает РОПов со звонками, которых нет в таблице;
+  // на b2g trendByManager пока пуст — заполнится в Фазе 3).
+  const managerNames = Array.from(
+    new Set([
+      ...data.perManager.map((r) => r.name),
+      ...Object.keys(data.trendByManager ?? {}),
+    ]),
+  ).sort((a, b) => a.localeCompare(b, "ru"));
   // Строки таблицы под фильтром. selectedManagers === null («все») → плитки
   // показывают серверные dept-итоги: они включают и звонки, которые не
   // сматчились ни с одним менеджером, поэтому «все» ≠ сумма по строкам.
@@ -427,8 +480,10 @@ export default function DashboardTab({
     lostItems && selectedManagers !== null
       ? lostItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : lostItems;
+  // b2b — SLA drill-down под фильтром «Менеджеры»; b2g — SLA dept-level
+  // (звонит дайлер, не ответственный), поэтому фильтр по менеджеру не применяем.
   const visibleSlaItems =
-    slaItems && selectedManagers !== null
+    !isB2G && slaItems && selectedManagers !== null
       ? slaItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : slaItems;
 
@@ -462,13 +517,16 @@ export default function DashboardTab({
 
   // ── Aggregate per-line totals client-side from perManager ─────────────
   // For B2G the user wants every call-stat tile to show three sub-numbers
-  // (Line 1 / 2 / 3). We sum perManager rows by `line` field.
+  // (Line 1 / 2 / 3). We sum perManager rows by `line` field. Источник —
+  // filteredPerManager, поэтому глобальный фильтр «Менеджеры» сжимает и
+  // построчную разбивку плиток (при selectedManagers===null это те же
+  // data.perManager).
   const sumByLine = (line: string | null): {
     callsTotal: number; callsConnected: number; missedIncoming: number;
     totalMinutes: number; incomingTotal: number; outgoingTotal: number;
     dialPercent: number; missedPercent: number;
   } => {
-    const rows = data.perManager.filter((r) => r.line === line);
+    const rows = filteredPerManager.filter((r) => r.line === line);
     const callsTotal = rows.reduce((s, r) => s + r.callsTotal, 0);
     const callsConnected = rows.reduce((s, r) => s + r.callsConnected, 0);
     const missedIncoming = rows.reduce((s, r) => s + r.missedIncoming, 0);
@@ -491,24 +549,50 @@ export default function DashboardTab({
     ? { "1": sumByLine("1"), "2": sumByLine("2"), "3": sumByLine("3") }
     : null;
 
-  // Top-tile breakdown rows. B2G splits by line (Квалификация/Бератер/
-  // Доведение). B2B intentionally renders only the total — per-pipeline
-  // (Бух Комм / Мед Комм) split was removed at the user's request because
-  // the trend chart already exposes that breakdown via dropdown, and the
-  // duplicated split made the tiles visually noisy.
-  type Metric = "calls" | "dial" | "minutes" | "missed";
-  const tileRows = (metric: Metric): TileRow[] | null => {
-    if (!byLine) return null;
-    return (["1", "2", "3"] as const).map((ln) => {
-      const v = byLine[ln];
-      const value =
-        metric === "calls" ? v.callsTotal
-          : metric === "dial" ? `${v.dialPercent}%`
-            : metric === "minutes" ? `${v.totalMinutes}м`
-              : v.missedIncoming;
-      return { key: ln, label: LINE_SHORT[ln], colorClass: LINE_COLOR_CLASS[ln], value };
-    });
-  };
+  // Итоги плиток b2g под глобальным фильтром «Менеджеры». selectedManagers ===
+  // null → серверные dept-итоги `m` (включают звонки, не сматченные ни с одним
+  // менеджером, поэтому «все» ≠ сумма строк). При выборе — пересчёт из
+  // отфильтрованных строк, как в b2b-ветке.
+  const b2gEff = (() => {
+    if (!isB2G) return null;
+    // Всегда dept-итог, фильтр «Менеджеры» НЕ влияет:
+    //   • «Потерянные» — лид-based снимок без атрибуции (спека 25 §2);
+    //   • SLA — время до первого звонка, а звонит ДАЙЛЕР, не ответственный
+    //     менеджер, поэтому пер-менеджерная атрибуция некорректна (2026-07-27).
+    const lost = m.lostCalls ?? 0;
+    const slaMin = m.slaFirstCallMin ?? 0;
+    if (selectedManagers === null) {
+      return {
+        callsTotal: m.callsTotal, callsConnected: m.callsConnected, dialPercent: m.dialPercent,
+        totalMinutes: m.totalMinutes, avgDialogMinutes: m.avgDialogMinutes,
+        missedIncoming: m.missedIncoming, incomingTotal: m.incomingTotal,
+        outgoingTotal: m.outgoingTotal, missedPercent: missed.missedPercent,
+        waitSec: m.unansweredWaitSec ?? null, slaMin, lost,
+      };
+    }
+    const sub = filteredPerManager;
+    const callsTotal = sub.reduce((s, r) => s + r.callsTotal, 0);
+    const callsConnected = sub.reduce((s, r) => s + r.callsConnected, 0);
+    const totalMinutes = sub.reduce((s, r) => s + r.totalMinutes, 0);
+    const incomingTotal = sub.reduce((s, r) => s + r.incomingTotal, 0);
+    const outgoingTotal = sub.reduce((s, r) => s + r.outgoingTotal, 0);
+    const missedIncoming = sub.reduce((s, r) => s + r.missedIncoming, 0);
+    // Ожидание — взвешенное по недозвонам (звонок атрибутируется тому, кто
+    // его сделал, — это ок). SLA — dept-level (см. выше), фильтр не трогает.
+    const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
+    const waitSec = unansWeight > 0
+      ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
+      : null;
+    return {
+      callsTotal, callsConnected,
+      dialPercent: callsTotal > 0 ? Math.round((callsConnected / callsTotal) * 100) : 0,
+      totalMinutes,
+      avgDialogMinutes: callsConnected > 0 ? Math.round(totalMinutes / callsConnected) : 0,
+      missedIncoming, incomingTotal, outgoingTotal,
+      missedPercent: incomingTotal > 0 ? Math.round((missedIncoming / incomingTotal) * 100) : 0,
+      waitSec, slaMin, lost,
+    };
+  })();
 
   return (
     <div className="flex flex-col gap-4 fade-in">
@@ -529,9 +613,10 @@ export default function DashboardTab({
               setRange({ start: today, end: today });
             }}
           />
-          {/* Глобальный фильтр «Менеджеры» (B2B) — фильтрует всю вкладку:
-              плитки, таблицу, график и детализации. */}
-          {!isB2G && managerNames.length > 0 && (
+          {/* Глобальный фильтр «Менеджеры» — фильтрует всю вкладку: плитки,
+              таблицы, детализации (b2b — ещё и график; b2g-график по линиям
+              не фильтруется до Фазы 3). */}
+          {managerNames.length > 0 && (
             <ManagerMultiSelect
               managers={managerNames}
               selected={selectedManagers}
@@ -580,42 +665,91 @@ export default function DashboardTab({
       )}
 
       {/* ============ KPI tiles ============ */}
-      {isB2G ? (
-        // B2G — 4 tiles with per-line breakdown (unchanged).
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <CallMetricTile
-            icon={Phone}
-            label="Звонки"
-            color="blue"
-            totalValue={m.callsTotal}
-            totalCaption={`${m.outgoingTotal}↑ ${m.incomingTotal}↓`}
-            rows={tileRows("calls")}
-          />
-          <CallMetricTile
-            icon={Target}
-            label="Дозвон"
-            color={m.dialPercent >= 50 ? "emerald" : m.dialPercent >= 30 ? "amber" : "rose"}
-            totalValue={`${m.dialPercent}%`}
-            totalCaption={`${m.callsConnected}/${m.callsTotal}`}
-            rows={tileRows("dial")}
-          />
-          <CallMetricTile
-            icon={Clock}
-            label="На линии"
-            color="blue"
-            totalValue={`${m.totalMinutes}м`}
-            totalCaption={`ср. ${m.avgDialogMinutes}м`}
-            rows={tileRows("minutes")}
-          />
-          <CallMetricTile
-            icon={PhoneMissed}
-            label="Пропущенные"
-            color={m.missedIncoming === 0 ? "emerald" : m.missedIncoming <= 3 ? "amber" : "rose"}
-            totalValue={m.missedIncoming}
-            totalCaption={`${missed.missedPercent}% от ${missed.incomingTotal}`}
-            rows={tileRows("missed")}
-          />
-        </div>
+      {isB2G && b2gEff ? (
+        // B2G — как у Комм: одиночные плитки. Переключатель направления (линии)
+        // скоупит 4 звонковые плитки; Ожидание/SLA/Потерянные — по отделу.
+        (() => {
+          const cv = b2gLine === "all"
+            ? b2gEff
+            : (() => {
+                const v = byLine![b2gLine];
+                return {
+                  callsTotal: v.callsTotal, callsConnected: v.callsConnected, dialPercent: v.dialPercent,
+                  totalMinutes: v.totalMinutes,
+                  avgDialogMinutes: v.callsConnected > 0 ? Math.round(v.totalMinutes / v.callsConnected) : 0,
+                  missedIncoming: v.missedIncoming, incomingTotal: v.incomingTotal,
+                  outgoingTotal: v.outgoingTotal, missedPercent: v.missedPercent,
+                };
+              })();
+          const deptCap = b2gLine === "all" ? undefined : "по отделу";
+          const LINE_PILLS = [
+            ["all", "Все"], ["1", LINE_SHORT["1"]], ["2", LINE_SHORT["2"]], ["3", LINE_SHORT["3"]],
+          ] as const;
+          return (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5 self-start">
+                {LINE_PILLS.map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setB2gLine(key)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${b2gLine === key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                <CallMetricTile
+                  icon={Phone} label="Звонки" color="blue"
+                  totalValue={cv.callsTotal} totalCaption={`${cv.outgoingTotal}↑ ${cv.incomingTotal}↓`}
+                  rows={null} onClick={() => setLineTileDetail("calls")}
+                  tip="Все звонки (исходящие + входящие) за период. Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Target} label="Дозвон"
+                  color={cv.dialPercent >= 50 ? "emerald" : cv.dialPercent >= 30 ? "amber" : "rose"}
+                  totalValue={`${cv.dialPercent}%`} totalCaption={`${cv.callsConnected}/${cv.callsTotal}`}
+                  rows={null} onClick={() => setLineTileDetail("dial")}
+                  tip="Доля звонков с ответом (длительность ≥ 1 сек). Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Clock} label="На линии" color="blue"
+                  totalValue={`${cv.totalMinutes}м`} totalCaption={`ср. ${cv.avgDialogMinutes}м`}
+                  rows={null} onClick={() => setLineTileDetail("minutes")}
+                  tip="Суммарная длительность разговоров за период. Клик — разбивка по линиям и менеджерам."
+                />
+                <CallMetricTile
+                  icon={PhoneMissed} label="Пропущенные"
+                  color={cv.missedIncoming === 0 ? "emerald" : cv.missedIncoming <= 3 ? "amber" : "rose"}
+                  totalValue={cv.missedIncoming} totalCaption={`${cv.missedPercent}% от ${cv.incomingTotal}`}
+                  rows={null} onClick={() => setLineTileDetail("missed")}
+                  tip="Входящие без ответа (< 1 сек). Клик — разбивка по линиям и менеджерам."
+                />
+                {/* Дальше — по всему отделу, вне зависимости от выбранной линии. */}
+                <CallMetricTile
+                  icon={Timer} label="Ожидание" color="blue"
+                  totalValue={b2gEff.waitSec == null ? "—" : `${b2gEff.waitSec}с`}
+                  totalCaption={b2gLine === "all" ? "по недозвонам" : "отдел · недозвоны"} rows={null}
+                  onClick={() => openTileDetail("wait")}
+                  tip="Среднее время гудков в неотвеченных исходящих (от набора до сброса), по всему отделу. Обе платформы (CloudTalk + CallGear). Клик — разбивка по платформам и менеджерам."
+                />
+                <CallMetricTile
+                  icon={Gauge} label="SLA" color="blue" totalValue={`${b2gEff.slaMin}м`}
+                  totalCaption={deptCap} rows={null} onClick={toggleSlaDetail}
+                  tip="Среднее календарное время от создания лида до первого звонка по нему (реальный wall-clock, вкл. вечер/выходные — дайлер звонит и вне будних 9–18), по всему отделу. Клик — детализация по сделкам."
+                />
+                <CallMetricTile
+                  icon={PhoneOff} label="Потерянные"
+                  color={b2gEff.lost === 0 ? "emerald" : "rose"}
+                  totalValue={b2gEff.lost} totalCaption={deptCap} rows={null}
+                  tipAlign="right"
+                  tip="Лиды на этапе «Новый лид»/«Недозвон», по которым последний звонок был больше 24 часов назад (или звонков не было вовсе), по всему отделу. Снимок на конец периода. Клик — список лидов."
+                  onClick={toggleLostLeadsDetail}
+                />
+              </div>
+            </div>
+          );
+        })()
       ) : (
         // B2B — 7 single-number tiles, no captions. % дозвона = принятые
         // исходящие / все исходящие (≤100%). Ожидание = средний answer-wait
@@ -731,7 +865,7 @@ export default function DashboardTab({
       )}
 
       {/* ============ KPI-ПЛИТКИ — DRILL-DOWN МОДАЛКА (B2B) ============ */}
-      {!isB2G && tileDetail && typeof document !== "undefined" && createPortal(
+      {tileDetail && typeof document !== "undefined" && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
           onClick={() => setTileDetail(null)}
@@ -881,7 +1015,7 @@ export default function DashboardTab({
       )}
 
       {/* ============ SLA — DRILL-DOWN МОДАЛКА (спека 22 п.5.3, B2B) ============ */}
-      {!isB2G && slaOpen && typeof document !== "undefined" && createPortal(
+      {slaOpen && typeof document !== "undefined" && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
           onClick={() => setSlaOpen(false)}
@@ -923,6 +1057,42 @@ export default function DashboardTab({
                 <p className="text-slate-400 text-sm py-2">За выбранный период SLA-сделок нет.</p>
               )}
               {visibleSlaItems && visibleSlaItems.length > 0 && (() => {
+                // b2g — плоский список без группировки по ответственному
+                // менеджеру: звонит дайлер, поэтому атрибуция SLA к
+                // ответственному вводит в заблуждение (2026-07-27).
+                if (isB2G) {
+                  const items = [...visibleSlaItems].sort((a, b) => b.slaMinutes - a.slaMinutes);
+                  return (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                            <th className="py-1.5 pr-3 font-medium">Сделка</th>
+                            <th className="py-1.5 pr-3 font-medium">Клиент</th>
+                            <th className="py-1.5 pr-3 font-medium">Телефон</th>
+                            <th className="py-1.5 font-medium text-right">SLA</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {items.map((it) => (
+                            <tr key={it.leadId} className="border-b border-white/5 hover:bg-white/[0.02]">
+                              <td className="py-1.5 pr-3">
+                                <a href={kommoLeadUrl(it.leadId)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline font-mono text-xs break-all">
+                                  {kommoLeadUrl(it.leadId)}
+                                </a>
+                              </td>
+                              <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
+                              <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone ?? "—"}</td>
+                              <td className={`py-1.5 text-right tabular-nums font-semibold ${it.slaMinutes >= 30 ? "text-rose-400" : "text-slate-200"}`}>
+                                {fmtHoursMinutes(it.slaMinutes)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                }
                 const byManager = new Map<string, SlaLeadItem[]>();
                 for (const it of visibleSlaItems) {
                   const key = it.manager || "Без менеджера";
@@ -950,7 +1120,9 @@ export default function DashboardTab({
                                   <th className="py-1.5 pr-3 font-medium">Клиент</th>
                                   <th className="py-1.5 pr-3 font-medium">Телефон</th>
                                   <th className="py-1.5 pr-3 font-medium text-right">SLA</th>
-                                  <th className="py-1.5 font-medium">Статус</th>
+                                  {/* Статус (sla_own_status) осмыслен только для b2b —
+                                      для b2g он всегда пуст, колонку скрываем. */}
+                                  {!isB2G && <th className="py-1.5 font-medium">Статус</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -975,13 +1147,15 @@ export default function DashboardTab({
                                       <td className={`py-1.5 pr-3 text-right tabular-nums font-semibold ${it.slaMinutes >= 30 ? "text-rose-400" : "text-slate-200"}`}>
                                         {fmtHoursMinutes(it.slaMinutes)}
                                       </td>
-                                      <td className="py-1.5">
-                                        {st ? (
-                                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${st.cls}`}>{st.label}</span>
-                                        ) : (
-                                          <span className="text-slate-600 text-xs">—</span>
-                                        )}
-                                      </td>
+                                      {!isB2G && (
+                                        <td className="py-1.5">
+                                          {st ? (
+                                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${st.cls}`}>{st.label}</span>
+                                          ) : (
+                                            <span className="text-slate-600 text-xs">—</span>
+                                          )}
+                                        </td>
+                                      )}
                                     </tr>
                                   );
                                 })}
@@ -994,6 +1168,151 @@ export default function DashboardTab({
                   </div>
                 );
               })()}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* ====== DRILL-DOWN ЛИНЕЙНЫХ ПЛИТОК (b2g, Фаза 1) — по линиям×менеджерам ====== */}
+      {isB2G && lineTileDetail && typeof document !== "undefined" && createPortal(
+        (() => {
+          const meta: Record<string, { title: string }> = {
+            calls: { title: "Звонки" }, dial: { title: "Дозвон" },
+            minutes: { title: "На линии" }, missed: { title: "Пропущенные" },
+          };
+          const groups = [
+            { key: "1", title: "Квалификатор (1я линия)", cls: "text-emerald-400" },
+            { key: "2", title: "Бератер (2я линия)", cls: "text-purple-400" },
+            { key: "3", title: "Доведение (3я линия)", cls: "text-sky-400" },
+            { key: "__none__", title: "Руководители (без линии)", cls: "text-amber-400" },
+          ];
+          const rowVal = (r: PerManagerRow): number =>
+            lineTileDetail === "calls" ? r.callsTotal
+              : lineTileDetail === "minutes" ? r.totalMinutes
+                : lineTileDetail === "dial" ? r.callsConnected
+                  : r.missedIncoming;
+          const cell = (r: PerManagerRow): string =>
+            lineTileDetail === "dial"
+              ? `${r.callsConnected}/${r.callsTotal} (${r.dialPercent}%)`
+              : lineTileDetail === "minutes" ? `${r.totalMinutes}м`
+                : String(rowVal(r));
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+              onClick={() => setLineTileDetail(null)}
+              role="dialog" aria-modal="true" tabIndex={-1}
+            >
+              <div
+                className="w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+                onClick={(e) => e.stopPropagation()} role="document"
+              >
+                <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+                  <h3 className="text-sm font-bold text-blue-400 truncate">
+                    {meta[lineTileDetail].title} — по линиям и менеджерам
+                  </h3>
+                  <button onClick={() => setLineTileDetail(null)} className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Закрыть ✕</button>
+                </div>
+                <div className="overflow-y-auto px-5 py-4 flex flex-col gap-4">
+                  {/* Скоуп drill-down = выбранная линия (иначе — все линии),
+                      чтобы сумма совпадала с плиткой при активном переключателе. */}
+                  {groups.filter((g) => b2gLine === "all" || g.key === b2gLine).map((g) => {
+                    const rows = filteredPerManager
+                      .filter((r) => (g.key === "__none__" ? !r.line : r.line === g.key))
+                      .filter((r) => rowVal(r) > 0)
+                      .sort((a, b) => rowVal(b) - rowVal(a));
+                    if (rows.length === 0) return null;
+                    const subtotal = rows.reduce((s, r) => s + rowVal(r), 0);
+                    return (
+                      <div key={g.key}>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className={`text-sm font-semibold ${g.cls}`}>{g.title}</span>
+                          <span className="text-xs text-slate-500">
+                            {lineTileDetail === "dial" ? `${subtotal} дозвонов` : lineTileDetail === "minutes" ? `${subtotal}м` : subtotal}
+                          </span>
+                        </div>
+                        <table className="w-full text-sm">
+                          <tbody>
+                            {rows.map((r) => (
+                              <tr key={r.id} className="border-b border-white/5">
+                                <td className="py-1.5 pr-3 text-slate-200 truncate max-w-[220px]">{r.name}</td>
+                                <td className="py-1.5 text-right tabular-nums text-slate-300">{cell(r)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })(),
+        document.body,
+      )}
+
+      {/* ====== «ПОТЕРЯННЫЕ» (b2g) — DRILL-DOWN: список лидов (спека 25 §2) ====== */}
+      {isB2G && lostLeadsOpen && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setLostLeadsOpen(false)}
+          role="dialog" aria-modal="true" tabIndex={-1}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+            onClick={(e) => e.stopPropagation()} role="document"
+          >
+            <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+              <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2 min-w-0">
+                <PhoneOff className="w-4 h-4 shrink-0" />
+                <span className="truncate">Потерянные лиды — без звонка &gt; 24ч</span>
+                {lostLeadsItems && <span className="text-slate-500 font-normal shrink-0">({lostLeadsItems.length})</span>}
+              </h3>
+              <button onClick={() => setLostLeadsOpen(false)} className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Закрыть ✕</button>
+            </div>
+            <div className="overflow-y-auto px-5 py-4">
+              {lostLeadsLoading && (
+                <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
+                </div>
+              )}
+              {lostLeadsError && <p className="text-rose-400 text-sm py-2">{lostLeadsError}</p>}
+              {lostLeadsItems && lostLeadsItems.length === 0 && (
+                <p className="text-slate-400 text-sm py-2">Потерянных лидов на конец периода нет 🎉</p>
+              )}
+              {lostLeadsItems && lostLeadsItems.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                        <th className="py-1.5 pr-3 font-medium">Клиент</th>
+                        <th className="py-1.5 pr-3 font-medium">Сделка</th>
+                        <th className="py-1.5 pr-3 font-medium">Воронка / этап</th>
+                        <th className="py-1.5 pr-3 font-medium">Ответственный</th>
+                        <th className="py-1.5 font-medium">Последний звонок</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lostLeadsItems.map((it) => (
+                        <tr key={it.leadId} className="border-b border-white/5 hover:bg-white/[0.02]">
+                          <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
+                          <td className="py-1.5 pr-3">
+                            <a href={kommoLeadUrl(it.leadId)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline">#{it.leadId} ↗</a>
+                          </td>
+                          <td className="py-1.5 pr-3 text-slate-400 text-xs">
+                            {it.pipelineName ? `${it.pipelineName}${it.stageName ? ` · ${it.stageName}` : ""}` : "—"}
+                          </td>
+                          <td className="py-1.5 pr-3 text-slate-300">{it.manager ?? <span className="text-slate-600">—</span>}</td>
+                          <td className="py-1.5 text-slate-400 whitespace-nowrap tabular-nums">
+                            {it.lastCallAt ? fmtLostAt(it.lastCallAt) : <span className="text-rose-400/80">не звонили</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         </div>,
@@ -1122,17 +1441,46 @@ export default function DashboardTab({
       })}
 
       {/* ============ TREND CHART ============
-           B2G — line/pipeline dropdown (3 aggregate metric lines).
+           B2G — переключатель «По линиям» (3 агрегатные метрики + выпадашка
+           линий) / «По менеджерам» (линия на менеджера + A/B + выходные).
            B2B — line per manager, metric via pill toggle + manager multiselect. */}
       {isB2G ? (
-        <TrendChart
-          trend={data.trend}
-          trendByLine={data.trendByLine}
-          trendByPipeline={data.trendByPipeline ?? null}
-          filter={trendLine}
-          onFilterChange={setTrendLine}
-          mode="b2g"
-        />
+        <div className="flex flex-col gap-2">
+          <div className="flex justify-end">
+            <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
+              {([
+                ["lines", "По линиям"],
+                ["managers", "По менеджерам"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  onClick={() => setB2gChartMode(mode)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${b2gChartMode === mode ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {b2gChartMode === "lines" ? (
+            <TrendChart
+              trend={data.trend}
+              trendByLine={data.trendByLine}
+              trendByPipeline={data.trendByPipeline ?? null}
+              filter={trendLine}
+              onFilterChange={setTrendLine}
+              mode="b2g"
+            />
+          ) : (
+            <TrendChartByManager
+              trend={data.trend}
+              trendByManager={data.trendByManager ?? null}
+              department={department}
+              vertical={vertical}
+              selected={selectedManagers}
+            />
+          )}
+        </div>
       ) : (
         <TrendChartByManager
           trend={data.trend}
@@ -1394,9 +1742,15 @@ function CallMetricTile({
 
   // ── B2G — compact tile: header + 3 line rows. Each row: tiny line tag
   //    on the left, large number on the right. Captions dropped to keep
-  //    width minimal so 4 tiles fit in a row from sm breakpoint onward. ─
+  //    width minimal so 4 tiles fit in a row from sm breakpoint onward.
+  //    onClick (спека 25 Фаза 1) → drill-down по линиям×менеджерам. ─
   return (
-    <div className="glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0 flex flex-col">
+    <div
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      title={onClick ? "Нажми — детализация" : undefined}
+      className={`glass-panel rounded-xl p-3 border border-white/5 hover:border-blue-500/20 transition-all min-w-0 flex flex-col ${onClick ? "cursor-pointer hover:border-blue-500/40" : ""}`}
+    >
       <div className="flex items-center justify-between mb-1.5 gap-1.5">
         <div className="min-w-0 flex-1">
           <div className="text-slate-400 font-semibold tracking-wider text-[10px] uppercase truncate">{label}</div>
