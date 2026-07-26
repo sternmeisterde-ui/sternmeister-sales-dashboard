@@ -1344,7 +1344,13 @@ export default function DashboardTab({
                         </span>
                       </td>
                       <td className="py-2 px-2 text-right text-slate-300">{fmtHoursMinutes(mgr.totalMinutes)}</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.avgWaitSeconds} с</td>
+                      {/* Ожидание: b2g — по недозвонам (как плитка, по звонившему);
+                          b2b — по отвеченным (avgWaitSeconds, как было у Комм). */}
+                      <td className="py-2 px-2 text-right text-slate-300">
+                        {isB2G
+                          ? (mgr.unansweredWaitSeconds ? `${mgr.unansweredWaitSeconds} с` : "—")
+                          : `${mgr.avgWaitSeconds} с`}
+                      </td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
                     </tr>
