@@ -1,12 +1,15 @@
-// GET /api/dashboard/b2b-tile-details?department=b2b&from=YYYY-MM-DD&to=YYYY-MM-DD
+// GET /api/dashboard/b2b-tile-details?department=b2b|b2g&from=YYYY-MM-DD&to=YYYY-MM-DD
 //
-// Детализация KPI-плиток B2B (Исходящие / Принятых / % дозвона / Ожидание):
+// Детализация KPI-плиток (Исходящие / Принятых / % дозвона / Ожидание):
 // разбивка по платформам (CloudTalk/CallGear по префиксу communication_id),
 // менеджер × платформа, почасовка по Берлину и ожидание ответа. Скоуп и
 // пороги идентичны счётчикам плиток (getAnalyticsB2bTileDetails копирует
 // фильтры fetchCallMetricsByMaster/fetchAvgWaitSeconds) — цифры детализации
 // всегда сходятся с плитками. Один ответ обслуживает все четыре модалки —
 // клиент фетчит лениво по первому клику и кэширует на период.
+//
+// Работает для обоих отделов: платформы (ct:/cg-leg:) общие, отличается только
+// durationExpr (b2b фолдит wait в cg-leg, b2g — чистый разговор) — по dept.
 
 import { type NextRequest, NextResponse } from "next/server";
 import { getAnalyticsB2bTileDetails } from "@/lib/daily/analytics-calls";
@@ -18,9 +21,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const sp = req.nextUrl.searchParams;
-    if (sp.get("department") !== "b2b") {
-      return NextResponse.json({ error: "b2b only" }, { status: 400 });
-    }
+    const department = sp.get("department") === "b2g" ? "b2g" : "b2b";
     const fromStr = sp.get("from");
     const toStr = sp.get("to");
     if (!fromStr || !toStr) {
@@ -33,9 +34,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
 
     // Тот же ростер, что у плиток (/api/dashboard) — единое множество агентов.
-    const allManagers = await getManagersWithKommo("b2b");
+    const allManagers = await getManagersWithKommo(department);
     const details = await getAnalyticsB2bTileDetails(
       allManagers,
+      department,
       Math.floor(fromDate.getTime() / 1000),
       Math.floor(toDate.getTime() / 1000),
     );

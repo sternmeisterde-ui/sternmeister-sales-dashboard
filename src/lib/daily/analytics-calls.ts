@@ -12,7 +12,7 @@
 
 import { analyticsDb } from "@/lib/db/analytics";
 import { sql } from "drizzle-orm";
-import { getPipelineIds, B2G_PIPELINES, FIRST_LINE_STATUSES, type Vertical } from "@/lib/kommo/pipeline-config";
+import { getPipelineIds, B2G_PIPELINES, FIRST_LINE_STATUSES, MED_GOV_STATUSES, type Vertical } from "@/lib/kommo/pipeline-config";
 
 /**
  * Включать ли строки с `pipeline_id IS NULL` (телефонные звонки, которые
@@ -646,6 +646,157 @@ export async function getDialerLeadTouches(
   });
 }
 
+// ─── «Потерянные» (b2g) — лид-based, спека 25 §2 ─────────────────────────────
+// НЕ b2b-логика (исходящий недозвон без перезвона). Для Госников «потерянный» =
+// лид на этапе «Новый лид»/«Недозвон», по которому давно не звонили.
+
+/** Одна строка «Потерянных» b2g (для плитки — length, для drill-down — список). */
+export interface B2gLostLeadRow {
+  leadId: number;
+  statusId: number;
+  pipelineId: number;
+  contactName: string | null;
+  /** Ответственный (leads_cohort.manager) — только для показа, без атрибуции. */
+  manager: string | null;
+  leadCreatedAt: string | null;
+  /** Последний звонок по лиду ≤ asOfEnd; null = звонков не было вовсе. */
+  lastCallAt: string | null;
+}
+
+/** Воронки + статусы «Новый лид»/«Недозвон» по вертикали (Бух Гос / Мед Гос). */
+function b2gLostStageSets(vertical?: Vertical): Array<{ pipeline: number; statuses: number[] }> {
+  const buh = {
+    pipeline: B2G_PIPELINES.FIRST_LINE,
+    statuses: [FIRST_LINE_STATUSES.NEW_LEAD, FIRST_LINE_STATUSES.NO_ANSWER],
+  };
+  const med = {
+    pipeline: B2G_PIPELINES.MEDICAL_GOV,
+    statuses: [MED_GOV_STATUSES.NEW_LEAD, MED_GOV_STATUSES.NO_ANSWER],
+  };
+  if (vertical === "med") return [med];
+  if (vertical === "all") return [buh, med];
+  return [buh]; // buh / undefined (legacy)
+}
+
+/**
+ * «Потерянные» b2g — снимок на `asOfEnd`: лиды на «Новый лид»/«Недозвон»
+ * (Бух Гос / Мед Гос по вертикали), у которых последний звонок был > 24ч назад
+ * ИЛИ звонков не было вовсе, а лид провисел > 24ч (по дате создания).
+ *
+ * Резолв этапа — гибридный, как в getDialerLeadTouches: asOfEnd в будущем/сейчас
+ * → текущее состояние leads_cohort (= доска Kommo); историческое asOfEnd →
+ * реконструкция из lead_status_changes (интервал event_at ≤ t < next_event_at)
+ * + лиды без единого события (созданы прямо на этап). Порог «остыл» считаем в
+ * JS (coldBefore = asOfEnd − 24ч) и передаём параметром — избегаем interval/TZ
+ * тонкостей с naive-таймстампами зеркала.
+ *
+ * Без привязки к менеджеру: одно число на отдел (плитка = длина списка),
+ * `manager` возвращается лишь для показа в drill-down.
+ */
+export async function getB2gLostLeads(
+  asOfEnd: Date,
+  vertical?: Vertical,
+): Promise<B2gLostLeadRow[]> {
+  const sets = b2gLostStageSets(vertical);
+  const cacheKey = `b2g-lost-leads:${asOfEnd.getTime()}:${vertical ?? "buh"}`;
+  return cached(cacheKey, ANALYTICS_TTL, async () => {
+    const pipelineList = sql.join(sets.map((s) => sql`${s.pipeline}`), sql`, `);
+    const statusList = sql.join(
+      sets.flatMap((s) => s.statuses).map((s) => sql`${s}`),
+      sql`, `,
+    );
+    const coldBefore = new Date(asOfEnd.getTime() - 24 * 60 * 60 * 1000);
+    const useCurrentState = asOfEnd.getTime() >= Date.now();
+
+    const stageLeads = useCurrentState
+      ? sql`
+        SELECT lead_id, status_id, pipeline_id, manager, created_at
+        FROM analytics.leads_cohort
+        WHERE pipeline_id IN (${pipelineList})
+          AND status_id IN (${statusList})
+          AND is_deleted IS NOT TRUE
+          AND lead_id IS NOT NULL`
+      : sql`
+        SELECT s.lead_id, s.status_id, s.pipeline_id, lc.manager, lc.created_at
+        FROM (
+          SELECT DISTINCT ON (lead_id) lead_id, status_id, pipeline_id
+          FROM analytics.lead_status_changes
+          WHERE pipeline_id IN (${pipelineList})
+            AND event_at <= ${asOfEnd}
+            AND (next_event_at IS NULL OR next_event_at > ${asOfEnd})
+          ORDER BY lead_id, event_at DESC
+        ) s
+        JOIN analytics.leads_cohort lc ON lc.lead_id = s.lead_id
+        WHERE s.status_id IN (${statusList})
+          AND lc.created_at <= ${asOfEnd}
+          AND NOT (lc.is_deleted AND (lc.deleted_at IS NULL OR lc.deleted_at <= ${asOfEnd}))
+        UNION
+        -- Лиды без единого события (созданы прямо на этап) — статус держится с
+        -- создания, значит были на нём в любой t ≥ created_at.
+        SELECT lc.lead_id, lc.status_id, lc.pipeline_id, lc.manager, lc.created_at
+        FROM analytics.leads_cohort lc
+        WHERE lc.pipeline_id IN (${pipelineList})
+          AND lc.status_id IN (${statusList})
+          AND lc.lead_id IS NOT NULL
+          AND lc.created_at <= ${asOfEnd}
+          AND NOT (lc.is_deleted AND (lc.deleted_at IS NULL OR lc.deleted_at <= ${asOfEnd}))
+          AND NOT EXISTS (
+            SELECT 1 FROM analytics.lead_status_changes s2 WHERE s2.lead_id = lc.lead_id
+          )`;
+
+    const result = await (analyticsDb as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{
+      lead_id: string | number;
+      status_id: string | number;
+      pipeline_id: string | number;
+      manager: string | null;
+      lead_created_at: string | null;
+      last_call_at: string | null;
+      contact_name: string | null;
+    }>(sql`
+      WITH stage_leads AS (${stageLeads}),
+      last_call AS (
+        SELECT c.lead_id, max(c.created_at) AS last_call_at
+        FROM analytics.communications c
+        WHERE c.lead_id IN (SELECT lead_id FROM stage_leads)
+          AND c.communication_type LIKE 'call%'
+          AND c.created_at <= ${asOfEnd}
+        GROUP BY c.lead_id
+      )
+      SELECT
+        sl.lead_id, sl.status_id, sl.pipeline_id, sl.manager,
+        sl.created_at AS lead_created_at,
+        lcall.last_call_at,
+        ct.name AS contact_name
+      FROM stage_leads sl
+      LEFT JOIN last_call lcall ON lcall.lead_id = sl.lead_id
+      LEFT JOIN LATERAL (
+        SELECT co.name
+        FROM analytics.lead_contact_links l
+        JOIN analytics.contacts co ON co.contact_id = l.contact_id
+        WHERE l.lead_id = sl.lead_id AND l.is_active
+        ORDER BY l.last_seen_at DESC
+        LIMIT 1
+      ) ct ON TRUE
+      WHERE
+        (lcall.last_call_at IS NOT NULL AND lcall.last_call_at <= ${coldBefore})
+        OR (lcall.last_call_at IS NULL AND sl.created_at <= ${coldBefore})
+      ORDER BY sl.status_id, lcall.last_call_at ASC NULLS FIRST, sl.lead_id
+    `);
+
+    return result.rows.map((r) => ({
+      leadId: Number(r.lead_id),
+      statusId: Number(r.status_id),
+      pipelineId: Number(r.pipeline_id),
+      contactName: r.contact_name ?? null,
+      manager: r.manager ?? null,
+      leadCreatedAt: r.lead_created_at ? new Date(r.lead_created_at).toISOString() : null,
+      lastCallAt: r.last_call_at ? new Date(r.last_call_at).toISOString() : null,
+    }));
+  });
+}
+
 // Per-campaign dialer stats for the «Кампании дайлера» tiles in the dialer
 // view. Source: analytics.dialer_call_attribution (dialer channel only) —
 // campaign linkage is exact, so дозвон/разговор are billing-grade.
@@ -1076,17 +1227,23 @@ const KNOWN_PLATFORMS = new Set(["CloudTalk", "CallGear"]);
 
 export async function getAnalyticsB2bTileDetails(
   managers: Array<{ id: string; name: string }>,
+  department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
 ): Promise<B2bTileDetails> {
+  // durationExpr зависит от отдела (b2b фолдит wait в длительность cg-leg,
+  // b2g — чистый разговор), поэтому dept входит в кэш-ключ. Платформы
+  // (ct:/cg-leg:) у обоих отделов одни и те же.
+  const dept = department === "b2b" ? "b2b" : "b2g";
   const managerIds = managers.map((m) => m.id).sort().join(",");
   // :v2 — wait-разбивка переехала с отвеченных на недозвоны (answered → unanswered).
-  const cacheKey = `b2b-tile-details:${fromTs}:${toTs}:${managerIds}:v2`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchB2bTileDetails(managers, fromTs, toTs));
+  const cacheKey = `tile-details:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchB2bTileDetails(managers, dept, fromTs, toTs));
 }
 
 async function fetchB2bTileDetails(
   managers: Array<{ id: string; name: string }>,
+  dept: "b2g" | "b2b",
   fromTs: number,
   toTs: number,
 ): Promise<B2bTileDetails> {
@@ -1133,7 +1290,7 @@ async function fetchB2bTileDetails(
       EXTRACT(HOUR FROM (created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::int AS hour,
       COUNT(*) FILTER (WHERE communication_type = 'call_out')                                    AS outgoing,
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration >= 1)                  AS connected,
-      COALESCE(SUM(${durationExpr("b2b")}) FILTER (WHERE communication_type = 'call_out' AND duration >= 1), 0) AS talk_s,
+      COALESCE(SUM(${durationExpr(dept)}) FILTER (WHERE communication_type = 'call_out' AND duration >= 1), 0) AS talk_s,
       COUNT(*) FILTER (WHERE communication_type = 'call_out' AND duration < 1)                   AS unanswered,
       AVG(wait_seconds) FILTER (WHERE communication_type = 'call_out' AND duration < 1)          AS avg_wait,
       MAX(wait_seconds) FILTER (WHERE communication_type = 'call_out' AND duration < 1)          AS max_wait
@@ -1287,11 +1444,12 @@ export async function getAnalyticsSlaFirstCallMinutes(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<number> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return 0;
-  const cacheKey = `sla-first-call-min:${dept}:${fromTs}:${toTs}`;
+  const cacheKey = `sla-first-call-min:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs, dept === "b2b"));
 }
 
@@ -1344,14 +1502,15 @@ export async function getAnalyticsSlaFirstCallMinutesByManager(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<Map<string, ManagerSlaStat>> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return new Map();
   const managerIds = managers.map((m) => m.id).sort().join(",");
   // :v2 — форма значения изменилась (number → {avgMin, leadCount}), старые
   // кэш-записи с тем же ключом отдавали бы прежний shape.
-  const cacheKey = `sla-first-call-min-mgr:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
+  const cacheKey = `sla-first-call-min-mgr:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}:${managerIds}:v2`;
   return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutesByManager(managers, pipelineIds, fromTs, toTs, dept === "b2b"));
 }
 
@@ -1664,11 +1823,12 @@ export async function getAnalyticsSlaLeadsDetail(
   department: "b2g" | "b2b" | string,
   fromTs: number,
   toTs: number,
+  vertical?: Vertical,
 ): Promise<SlaLeadDetailRow[]> {
   const dept = department === "b2b" ? "b2b" : "b2g";
-  const pipelineIds = getPipelineIds(dept);
+  const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return [];
-  const cacheKey = `sla-leads-detail:${dept}:${fromTs}:${toTs}`;
+  const cacheKey = `sla-leads-detail:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}`;
   return cached(cacheKey, ANALYTICS_TTL, async () => {
     const fromDate = new Date(fromTs * 1000);
     const toDate = new Date(toTs * 1000);

@@ -42,8 +42,10 @@ import {
   getAnalyticsSlaFirstCallMinutesByManager,
   getAnalyticsLostCallsByManager,
   getAnalyticsInboundByLine,
+  getB2gLostLeads,
   type DailyCallBucket,
   type ManagerSlaStat,
+  type B2gLostLeadRow,
 } from "@/lib/daily/analytics-calls";
 import type { UserCallMetrics as UCMType } from "@/lib/kommo/metrics";
 
@@ -546,7 +548,7 @@ async function buildDashboardResponse(
     // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
     // tasks, and won/lost still come from Kommo (those aren't in the mirror).
     const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw] = await Promise.all([
+    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw, b2gLostLeads] = await Promise.all([
       // All lead snapshots/filters go through analytics.leads_cohort (local
       // mirror) instead of Kommo API — ~20x faster, deterministic results.
       getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
@@ -598,18 +600,18 @@ async function buildDashboardResponse(
       // B2B-only KPI tiles: «Ожидание» = среднее время гудков в неотвеченных
       // исходящих (см. getAnalyticsUnansweredWaitSeconds) and time-to-first-
       // call SLA (min). Cheap dept-wide aggregates; skipped on B2G.
-      department === "b2b"
-        ? getAnalyticsUnansweredWaitSeconds(allManagers, department, from, to).catch((e) => {
-            console.error("[Dashboard] unanswered wait failed:", e);
-            return null;
-          })
-        : Promise.resolve(null),
-      department === "b2b"
-        ? getAnalyticsSlaFirstCallMinutes(department, from, to).catch((e) => {
-            console.error("[Dashboard] sla first-call failed:", e);
-            return 0;
-          })
-        : Promise.resolve(0),
+      // «Ожидание» — среднее гудков в неотвеченных исходящих. Ростер по агентам,
+      // поэтому осмысленно для обоих отделов (b2g/b2b), без вертикали.
+      getAnalyticsUnansweredWaitSeconds(allManagers, department, from, to).catch((e) => {
+        console.error("[Dashboard] unanswered wait failed:", e);
+        return null;
+      }),
+      // SLA до первого звонка (мин). Для b2g — интеграторный (простой) вариант,
+      // vertical-aware по воронке (Бух/Мед/Все). Для b2b — «своё» SLA Бух Комм.
+      getAnalyticsSlaFirstCallMinutes(department, from, to, vertical).catch((e) => {
+        console.error("[Dashboard] sla first-call failed:", e);
+        return 0;
+      }),
       // B2B «Потерянные»: outbound no-answer attempts with no callback to the
       // same number within 15 min (business hours 09–19 Berlin). total — для
       // плитки, byManager — для клиентского пересчёта при фильтре «Менеджеры».
@@ -619,14 +621,12 @@ async function buildDashboardResponse(
             return { total: 0, byManager: new Map<string, number>() };
           })
         : Promise.resolve({ total: 0, byManager: new Map<string, number>() }),
-      // Per-manager first-call SLA (min + число лидов) for the B2B per-manager
-      // «SLA» column and the client-side tile recompute.
-      department === "b2b"
-        ? getAnalyticsSlaFirstCallMinutesByManager(allManagers, department, from, to).catch((e) => {
-            console.error("[Dashboard] per-manager sla failed:", e);
-            return new Map<string, ManagerSlaStat>();
-          })
-        : Promise.resolve(new Map<string, ManagerSlaStat>()),
+      // Per-manager first-call SLA (min + число лидов) — для per-manager «SLA»
+      // и клиентского пересчёта плитки под фильтром «Менеджеры». Оба отдела.
+      getAnalyticsSlaFirstCallMinutesByManager(allManagers, department, from, to, vertical).catch((e) => {
+        console.error("[Dashboard] per-manager sla failed:", e);
+        return new Map<string, ManagerSlaStat>();
+      }),
       // B2B inbound counted BY NUMBER (line_name LIKE 'KOM%'), incl. missed
       // no-agent calls — matches CloudTalk's group inbound. Drives «Всего».
       department === "b2b"
@@ -635,15 +635,21 @@ async function buildDashboardResponse(
             return 0;
           })
         : Promise.resolve(0),
-      // Per-manager daily trend — one series per manager for the B2B «Динамика
-      // звонков» chart (metric + manager selection happen client-side). B2G
-      // keeps its per-line chart, so this query is B2B-only.
-      department === "b2b"
-        ? getAnalyticsDailyTrendByManager(department, trendFrom, trendTo, allManagers.map((m) => m.name), vertical).catch((e) => {
-            console.error("[Dashboard] per-manager trend failed:", e);
-            return {} as Record<string, DailyCallBucket[]>;
+      // Per-manager daily trend — one series per manager for the «Динамика
+      // звонков по менеджерам» chart (metric + manager selection client-side).
+      // Оба отдела: b2g использует его в режиме «По менеджерам» (Фаза 3).
+      getAnalyticsDailyTrendByManager(department, trendFrom, trendTo, allManagers.map((m) => m.name), vertical).catch((e) => {
+        console.error("[Dashboard] per-manager trend failed:", e);
+        return {} as Record<string, DailyCallBucket[]>;
+      }),
+      // «Потерянные» b2g (спека 25 §2) — лид-based снимок на конец периода:
+      // лиды «Новый лид»/«Недозвон» без звонка > 24ч. Плитка = длина списка.
+      department === "b2g"
+        ? getB2gLostLeads(new Date(to * 1000), vertical).catch((e) => {
+            console.error("[Dashboard] b2g lost leads failed:", e);
+            return [] as B2gLostLeadRow[];
           })
-        : Promise.resolve({} as Record<string, DailyCallBucket[]>),
+        : Promise.resolve([] as B2gLostLeadRow[]),
     ]);
 
     // Summary = sum of all per-manager metrics for the period
@@ -817,7 +823,9 @@ async function buildDashboardResponse(
         outgoingConnected: todaySummary.outgoingConnected ?? 0,
         unansweredWaitSec,
         slaFirstCallMin,
-        lostCalls: lostCallsRes.total,
+        // b2b — call-based (недозвон без перезвона); b2g — лид-based снимок
+        // (лиды «Новый лид»/«Недозвон» без звонка > 24ч), спека 25 §2.
+        lostCalls: isB2B ? lostCallsRes.total : b2gLostLeads.length,
         overdueTasks: totalOverdue,
         revenue: todayRevenue,
         managersCount: allManagers.length,
