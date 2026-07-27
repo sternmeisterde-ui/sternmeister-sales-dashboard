@@ -26,6 +26,21 @@ interface Segment {
   eventCount?: number;
 }
 
+// Дорожка присутствия из CloudTalk (спека 26). Отдельная тонкая шкала над
+// основной полоской: та показывает объективное «что делал» (звонки/CRM), эта —
+// заявленный статус. «nodata» ≠ «offline»: пробел означает, что мы статуса не
+// знаем (поллер лежал / менеджера не было в CloudTalk), а не что человек вышел.
+type PresenceSegmentType = "online" | "on_call" | "idle" | "offline" | "nodata";
+
+interface PresenceSegment {
+  type: PresenceSegmentType;
+  idleName?: string | null;
+  startMin: number;
+  endMin: number;
+  durationMin: number;
+  label: string;
+}
+
 interface DayTimeline {
   date: string;
   mode: "working" | "off";
@@ -48,6 +63,13 @@ interface DayTimeline {
   };
   // Dialer view only: per-channel call counts for the day.
   counts?: { dialer: number; manual: number };
+  // undefined = сбор статусов для отдела не ведётся → дорожки нет вовсе.
+  // [] = ведётся, но за день данных нет → рисуем «нет данных».
+  presence?: PresenceSegment[];
+  presenceMinutes?: {
+    online: number; onCall: number; idle: number; offline: number; nodata: number;
+    byIdle: Record<string, number>;
+  };
 }
 
 interface ManagerTimeline {
@@ -378,6 +400,19 @@ export default function TrackingTab({ department }: TrackingTabProps) {
                 </>
               )}
               <LegendDot color="bg-rose-500" label="Простой" />
+              {/* Верхняя тонкая дорожка — статус из CloudTalk. Отделена
+                  разделителем, чтобы не читалась как продолжение легенды
+                  основной полоски: это разные шкалы. */}
+              {department === "b2g" && (
+                <>
+                  <span className="text-slate-700">|</span>
+                  <span className="text-slate-500">статус:</span>
+                  <LegendDot color="bg-teal-500/45" label="Доступен" />
+                  <LegendDot color="bg-blue-500/60" label="На звонке" />
+                  <LegendDot color="bg-slate-400/40" label="Простой с причиной" />
+                  <LegendDot color="bg-slate-700/50" label="Не в сети" />
+                </>
+              )}
             </>
           )}
           {data && (
@@ -443,6 +478,16 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             {department === "b2g" && (
               <li>
                 <b className="text-slate-300">«В телефоне» и «в диалоге».</b> В синее время входит и дозвон: набор номера и гудки по исходящим — это тоже работа, в том числе когда клиент не взял трубку. Чистое время разговора показано отдельно строкой «в диалоге».
+              </li>
+            )}
+            {department === "b2g" && (
+              <li>
+                <b className="text-slate-300">Тонкая полоска сверху — статус из CloudTalk.</b> Это то, кем менеджер объявил себя в телефоне: доступен, на звонке, обед, встреча, перерыв, не в сети. Заполняется автоматически, отмечать ничего не нужно. Штриховка означает, что статус за этот отрезок неизвестен — это не то же самое, что «не в сети».
+              </li>
+            )}
+            {department === "b2g" && (
+              <li>
+                <b className="text-slate-300">Почему две полоски.</b> Нижняя показывает, что человек делал по факту (звонки и работа в CRM), верхняя — что он сам о себе заявил. Они намеренно разделены: статус «доступен» без единого звонка под ним виден сразу.
               </li>
             )}
             {department === "b2g" && (
@@ -600,7 +645,12 @@ function ManagerList({
                 {multiDay && (
                   <span className="text-[11px] text-slate-500 tabular-nums">{formatDateShort(day.date)}</span>
                 )}
-                <TimelineBar day={day} />
+                {/* Присутствие идёт над основной полоской и по тем же границам
+                    окна — обе дорожки считаются в одном buildTimeline. */}
+                <div className="flex flex-col gap-1">
+                  <PresenceBar day={day} />
+                  <TimelineBar day={day} />
+                </div>
                 <button
                   type="button"
                   onClick={() => onOpenDetail(m.id, m.name, m.line, day.date)}
@@ -989,6 +1039,80 @@ function DialerLeadTouchesPanel({
         </div>
       )}
     </div>
+    </>
+  );
+}
+
+// ==================== Дорожка присутствия (CloudTalk) ====================
+// Тонкая полоска НАД основной. Палитра намеренно приглушённая: основная полоска
+// (что человек делал) должна оставаться главной, эта — фоновым контекстом.
+// «Нет данных» рисуется штриховкой, а не цветом: пробел в наблюдении не должен
+// читаться как ещё одно состояние менеджера.
+const PRESENCE_IDLE_COLORS: Record<string, string> = {
+  "Обед": "bg-amber-400/70",
+  "Встреча": "bg-violet-400/60",
+  "Перерыв": "bg-orange-400/55",
+  "Занят": "bg-rose-400/45",
+  "Обучение": "bg-sky-400/55",
+};
+const NODATA_HATCH =
+  "repeating-linear-gradient(45deg, rgba(148,163,184,0.14) 0 3px, transparent 3px 6px)";
+
+function presenceClass(s: PresenceSegment): string {
+  switch (s.type) {
+    case "on_call": return "bg-blue-500/60";
+    case "online": return "bg-teal-500/45";
+    case "offline": return "bg-slate-700/50";
+    case "idle": return PRESENCE_IDLE_COLORS[s.idleName ?? ""] ?? "bg-slate-400/40";
+    default: return "";
+  }
+}
+
+function PresenceBar({ day }: { day: DayTimeline }) {
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  if (!day.presence || day.mode === "off") return null;
+
+  const total = day.totalMinutes || 1;
+  const moveTip = (e: React.MouseEvent<HTMLDivElement>, text: string) =>
+    setTip({ text, x: e.clientX, y: e.clientY });
+
+  // Данных за день нет вовсе — не тратим высоту на пустую штриховку, но и не
+  // молчим: подпись объясняет, что статус неизвестен, а не что его не было.
+  const allNoData = day.presence.every((s) => s.type === "nodata");
+
+  return (
+    <>
+      <div
+        className="relative h-2 rounded-sm bg-slate-800/40 border border-white/5 overflow-hidden flex"
+        title={allNoData ? "Статусы CloudTalk за этот день не собирались" : undefined}
+      >
+        {day.presence.map((s, i) => (
+          <div
+            key={`p-${s.startMin}-${i}`}
+            className={`${presenceClass(s)} h-full transition-opacity hover:opacity-75 cursor-pointer`}
+            style={{
+              width: `${(s.durationMin / total) * 100}%`,
+              ...(s.type === "nodata" ? { backgroundImage: NODATA_HATCH } : null),
+            }}
+            onMouseEnter={(e) => moveTip(e, s.label)}
+            onMouseMove={(e) => moveTip(e, s.label)}
+            onMouseLeave={() => setTip(null)}
+            title={s.label}
+          />
+        ))}
+      </div>
+      {tip && typeof document !== "undefined" && createPortal(
+        <div
+          style={{
+            position: "fixed", top: tip.y - 34, left: tip.x,
+            transform: "translateX(-50%)", pointerEvents: "none", zIndex: 1000,
+          }}
+          className="px-2 py-1 rounded bg-slate-900 border border-white/10 text-[11px] text-white whitespace-nowrap shadow-xl"
+        >
+          {tip.text}
+        </div>,
+        document.body,
+      )}
     </>
   );
 }
@@ -1824,6 +1948,15 @@ function DetailModal({
             </div>
           ) : (
             <>
+              {/* Статус из CloudTalk — над основной полоской, как в общем виде.
+                  timeline тут посчитан тем же buildTimeline, значит границы
+                  окна совпадают и полоски выровнены. */}
+              {!isDialer && timeline.presence && (
+                <div className="mb-1.5">
+                  <PresenceBar day={timeline} />
+                </div>
+              )}
+
               <DetailTimelineBar timeline={timeline} dialerView={isDialer} onHover={setHoverSeg} />
 
               <HourGrid

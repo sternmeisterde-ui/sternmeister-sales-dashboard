@@ -168,7 +168,10 @@ export async function syncCloudTalkStatuses(): Promise<StatusSyncResult> {
     });
     result.changes.push({
       manager: manager.name,
-      from: open ? describe(open.status, open.idleTypeId) : null,
+      // Разрыв наблюдения — не смена статуса. Без этой пометки в логе крона
+      // появляются строки вида «offline → offline», которые читаются как баг,
+      // хотя это перезапуск интервала после простоя поллера.
+      from: stale ? "разрыв данных" : open ? describe(open.status, open.idleTypeId) : null,
       to: describe(agent.status, agent.idleTypeId),
     });
   }

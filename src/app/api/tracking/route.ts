@@ -10,6 +10,12 @@ import { ensureFreshSync, ensureRangeCached } from "@/lib/tracking/sync";
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS } from "@/lib/tracking/event-types";
 import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type DialerCall, type StatusInterval } from "@/lib/tracking/timeline";
+import {
+  getPresenceRanges,
+  indexPresenceByManager,
+  presenceForDay,
+  presenceEnabledFor,
+} from "@/lib/tracking/presence";
 import { getAnalyticsCallEventsByMaster, getDialerCallEventsByMaster, getManagerNamesWithComms } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
@@ -515,6 +521,19 @@ export async function GET(req: NextRequest) {
       return out;
     };
 
+    // Дорожка присутствия из CloudTalk (b2g). Тянем одним запросом на всё окно
+    // и режем по дням локально — интервалов на порядок меньше, чем событий.
+    const presenceByManager = presenceEnabledFor(department)
+      ? indexPresenceByManager(
+          await getPresenceRanges(
+            department,
+            managerIds,
+            rangeStart.getTime(),
+            rangeEnd.getTime(),
+          ),
+        )
+      : null;
+
     // Build timelines
     const result = managers.map((m) => ({
       id: m.id,
@@ -540,13 +559,19 @@ export async function GET(req: NextRequest) {
         const dayUtc = new Date(`${date}T00:00:00Z`);
         const dayOffset = berlinOffsetMin(dayUtc);
         const dayStartMs = dayUtc.getTime() - dayOffset * 60_000;
+        const dayEndMs = dayStartMs + 1440 * 60_000;
         const tl = buildTimeline({
           scheduleRow: effectiveSched,
           dateISO: date,
           tzOffsetMinutes: dayOffset,
           events: eventsForDay,
           selectedCrmTypes,
-          statuses: statusesForDay(m.id, dayStartMs, dayStartMs + 1440 * 60_000),
+          statuses: statusesForDay(m.id, dayStartMs, dayEndMs),
+          // null (сбор не ведётся) → undefined: клиент прячет дорожку целиком.
+          // Пустой массив (ведётся, данных за день нет) → «нет данных».
+          presence: presenceByManager
+            ? presenceForDay(presenceByManager.get(m.id), dayStartMs, dayEndMs)
+            : undefined,
         });
         return { date, ...tl };
       }),

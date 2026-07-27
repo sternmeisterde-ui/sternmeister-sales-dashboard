@@ -41,6 +41,33 @@ export interface StatusInterval {
   endMs: number;
 }
 
+// ==================== Presence track (CloudTalk) ====================
+// Вторая, тонкая дорожка НАД основной полоской: что менеджер сам о себе заявил
+// в CloudTalk Phone. Сознательно отдельная шкала — основная полоска показывает
+// объективное «что делал» (звонки/CRM), эта субъективное «кем себя объявил».
+//
+// Интервалы приходят уже подрезанными по дню (см. /api/tracking). Пробел между
+// ними — это «нет данных», а НЕ «офлайн»: поллер мог лежать, менеджера могли
+// завести в CloudTalk позже. Врать про присутствие хуже, чем показать дырку.
+
+export interface PresenceInterval {
+  status: "online" | "idle" | "on_call" | "offline";
+  idleName: string | null;   // «Обед» / «Встреча» / … — только для idle
+  startMs: number;
+  endMs: number;
+}
+
+export type PresenceSegmentType = "online" | "on_call" | "idle" | "offline" | "nodata";
+
+export interface PresenceSegment {
+  type: PresenceSegmentType;
+  idleName?: string | null;
+  startMin: number;
+  endMin: number;      // exclusive
+  durationMin: number;
+  label: string;
+}
+
 export interface TimelineEvent {
   eventId: string;
   eventType: string;
@@ -97,6 +124,15 @@ export interface TimelineResult {
   // Dialer view only: how many calls of each channel landed that day (counted
   // pre-clipping, so calls outside the 09:00–20:00 window are still counted).
   counts?: { dialer: number; manual: number };
+  // Дорожка присутствия из CloudTalk. undefined = сбор для этого отдела не
+  // ведётся (UI прячет дорожку целиком); [] = ведётся, но за этот день данных
+  // нет (UI рисует «нет данных»). Считается ПО ТОМУ ЖЕ окну, что и основная
+  // полоска — см. комментарий в buildTimeline.
+  presence?: PresenceSegment[];
+  presenceMinutes?: {
+    online: number; onCall: number; idle: number; offline: number; nodata: number;
+    byIdle: Record<string, number>;   // «Обед» → минуты
+  };
 }
 
 export interface ScheduleRow {
@@ -195,6 +231,93 @@ function labelForCall(eventType: string, talkSec: number, waitSec: number): stri
 }
 
 /**
+ * Дорожка присутствия по УЖЕ вычисленному окну основной полоски.
+ *
+ * Вызывается только изнутри buildTimeline — и это не случайность. Окно тут
+ * динамическое (расширяется до первого/последнего действия за сутки), так что
+ * считать вторую дорожку отдельной функцией по «тем же» параметрам значило бы
+ * держать два независимых вычисления в синхроне вручную. Рано или поздно они
+ * разъедутся, и полоски перестанут соответствовать друг другу по времени.
+ * Здесь границы физически одни и те же.
+ */
+function buildPresenceTrack(
+  intervals: PresenceInterval[],
+  shiftStartUtcMs: number,
+  shiftEndUtcMs: number,
+  total: number,
+  startLocal: { h: number; m: number },
+): { segments: PresenceSegment[]; minutes: TimelineResult["presenceMinutes"] } {
+  // 0 = нет данных (дефолт), 1 = офлайн, 2 = онлайн, 3 = простой, 4 = на звонке.
+  const grid = new Uint8Array(total);
+  // Причина простоя по минутам — чтобы соседние «Обед» и «Встреча» не слиплись
+  // в один сегмент.
+  const idleAt = new Array<string | null>(total).fill(null);
+  const codeOf = { offline: 1, online: 2, idle: 3, on_call: 4 } as const;
+
+  for (const iv of intervals) {
+    const s = Math.max(0, Math.floor((iv.startMs - shiftStartUtcMs) / 60_000));
+    const e = Math.min(total, Math.ceil((Math.min(iv.endMs, shiftEndUtcMs) - shiftStartUtcMs) / 60_000));
+    const code = codeOf[iv.status];
+    for (let i = s; i < e; i++) {
+      grid[i] = code;
+      idleAt[i] = iv.status === "idle" ? iv.idleName ?? "Простой" : null;
+    }
+  }
+
+  const minutes = {
+    online: 0, onCall: 0, idle: 0, offline: 0, nodata: 0,
+    byIdle: {} as Record<string, number>,
+  };
+  for (let i = 0; i < total; i++) {
+    switch (grid[i]) {
+      case 1: minutes.offline++; break;
+      case 2: minutes.online++; break;
+      case 4: minutes.onCall++; break;
+      case 3: {
+        minutes.idle++;
+        const name = idleAt[i] ?? "Простой";
+        minutes.byIdle[name] = (minutes.byIdle[name] ?? 0) + 1;
+        break;
+      }
+      default: minutes.nodata++;
+    }
+  }
+
+  const typeOf = (v: number): PresenceSegmentType =>
+    v === 1 ? "offline" : v === 2 ? "online" : v === 3 ? "idle" : v === 4 ? "on_call" : "nodata";
+
+  const segments: PresenceSegment[] = [];
+  let cursor = 0;
+  while (cursor < total) {
+    const v = grid[cursor];
+    const name = idleAt[cursor];
+    let end = cursor + 1;
+    while (end < total && grid[end] === v && idleAt[end] === name) end++;
+
+    const type = typeOf(v);
+    const from = fmtSegmentTime(startLocal, cursor);
+    const to = fmtSegmentTime(startLocal, end);
+    const title =
+      type === "idle" ? name ?? "Простой"
+      : type === "on_call" ? "На звонке"
+      : type === "online" ? "Доступен"
+      : type === "offline" ? "Не в сети"
+      : "Нет данных о статусе";
+    segments.push({
+      type,
+      idleName: type === "idle" ? name : undefined,
+      startMin: cursor,
+      endMin: end,
+      durationMin: end - cursor,
+      label: `${title} · ${from}–${to} · ${end - cursor} мин`,
+    });
+    cursor = end;
+  }
+
+  return { segments, minutes };
+}
+
+/**
  * Build a per-minute array and collapse into contiguous segments.
  */
 export function buildTimeline(params: {
@@ -204,8 +327,11 @@ export function buildTimeline(params: {
   events: TimelineEvent[];    // ALL events for this manager on this date (already filtered by DB)
   selectedCrmTypes: Set<string>;
   statuses?: StatusInterval[]; // ручные статусы этого дня (обед/встреча/завершил)
+  // Присутствие из CloudTalk, подрезанное по этому дню. undefined = сбор не
+  // ведётся (дорожки не будет вовсе); [] = ведётся, но данных за день нет.
+  presence?: PresenceInterval[];
 }): TimelineResult {
-  const { scheduleRow, dateISO, tzOffsetMinutes, events, selectedCrmTypes, statuses = [] } = params;
+  const { scheduleRow, dateISO, tzOffsetMinutes, events, selectedCrmTypes, statuses = [], presence } = params;
   const window = deriveShiftWindow(scheduleRow);
 
   if (!window) {
@@ -495,6 +621,10 @@ export function buildTimeline(params: {
     idle: denom > 0 ? Math.round((idleMin / denom) * 100) : 0,
   };
 
+  const presenceTrack = presence
+    ? buildPresenceTrack(presence, shiftStartUtcMs, shiftEndUtcMs, total, startLocal)
+    : null;
+
   return {
     mode: "working",
     shiftStart: shiftStartLabel,
@@ -506,6 +636,8 @@ export function buildTimeline(params: {
       call: callMin, talk: talkMin, crm: crmMin, idle: idleMin,
       lunch: lunchMin, meeting: meetingMin,
     },
+    presence: presenceTrack?.segments,
+    presenceMinutes: presenceTrack?.minutes,
   };
 }
 
