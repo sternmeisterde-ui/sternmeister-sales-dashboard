@@ -2106,8 +2106,10 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
 // Замена графика TrendChartByManager у Коммерсов (решение 2026-07-28); у
 // Госников остаётся график — ветвление на коллсайте. Механика периодов A/B
 // и выходных (manager_schedule) — та же, что у графика. Два режима:
-//  • обычный: строки-менеджеры × колонки-дни окна, метрика по пилюлям,
-//    «Итого» первой колонкой, футер «Всего», выходные серым;
+//  • обычный: колонки-дни окна, у каждого менеджера ТРИ строки — Звонки /
+//    Дозвон / Пропущенные (пилюли-переключатель убраны 2026-07-28: все
+//    значения должны быть видны разом), «Итого» первой колонкой, футер
+//    «Всего» тремя такими же строками, выходные серым;
 //  • «Сравнить периоды»: плоская таблица без раскрывашек (решение
 //    2026-07-28 — тогл мешал охватить все значения разом): строки-менеджеры,
 //    группы колонок Звонки | Дозвон | Пропущенные, в каждой A | B | Δ,
@@ -2137,7 +2139,6 @@ function TrendTableByManager({ trendByManager, department, selected }: {
   /** Глобальный фильтр «Менеджеры» из шапки вкладки (null = все). */
   selected: Set<string> | null;
 }) {
-  const [metric, setMetric] = useState<TrendMetric>("callsTotal");
   const [compareOn, setCompareOn] = useState(false);
   // Периоды A/B — та же механика «протухающих» override, что у графика:
   // сигнатура окна меняется → падаем на дефолт (без setState-in-effect).
@@ -2317,20 +2318,6 @@ function TrendTableByManager({ trendByManager, department, selected }: {
     <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
       <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
       <div className="flex items-center gap-2 flex-wrap">
-        {/* Пилюли метрики — только в обычном режиме: в сравнении видны все метрики сразу. */}
-        {!compareOn && (
-          <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
-            {METRIC_PILLS.map((p) => (
-              <button
-                key={p.key}
-                onClick={() => setMetric(p.key)}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${metric === p.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        )}
         <button
           onClick={() => setCompareOn((v) => !v)}
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
@@ -2469,47 +2456,69 @@ function TrendTableByManager({ trendByManager, department, selected }: {
             </tr>
           </thead>
           <tbody>
+            {/* У каждого менеджера три строки-метрики — все значения видны разом
+                (пилюли-переключатель убраны по фидбеку 2026-07-28). */}
             {visible.map((m) => {
               const id = managerIdByName?.[m];
               const buckets = trendByManager?.[m] ?? [];
-              const total = sumMetric(buckets, metric);
+              return METRIC_PILLS.map((p, pi) => {
+                const main = pi === 0;
+                const total = sumMetric(buckets, p.key);
+                return (
+                  <tr
+                    key={`${m}-${p.key}`}
+                    className={`${main ? "border-t border-white/10" : "border-b border-white/[0.03]"} hover:bg-white/[0.02] transition-colors`}
+                  >
+                    <td className={`${TREND_STICKY} py-1.5 px-2 whitespace-nowrap ${main ? "text-xs text-slate-200 font-semibold" : "text-[11px] text-slate-500 pl-6"}`}>
+                      {main ? (
+                        <>{m} <span className="text-[10px] font-normal text-slate-500">· {p.label.toLowerCase()}</span></>
+                      ) : (
+                        p.label
+                      )}
+                    </td>
+                    <td className={`py-1.5 px-3 text-right tabular-nums border-l border-white/10 ${main ? "font-semibold" : "text-[11px]"} ${total === 0 ? "text-slate-600" : main ? "text-slate-200" : "text-slate-400"}`}>
+                      {total}
+                    </td>
+                    {currentDates.map((d, idx) => {
+                      const bucket = buckets[idx];
+                      const v = bucket?.[p.key] ?? 0;
+                      const off = !!id && offDays.has(`${id}|${d}`);
+                      return (
+                        <td
+                          key={d}
+                          title={cellTitle(m, bucket, off)}
+                          className={`py-1.5 px-2 text-right tabular-nums ${main ? "" : "text-[11px]"} ${off ? "bg-slate-500/10 text-slate-500" : v === 0 ? "text-slate-600" : main ? "text-slate-200" : "text-slate-400"}`}
+                        >
+                          {v}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              });
+            })}
+            {/* Футер «Всего» — те же три строки-метрики по видимым менеджерам. */}
+            {METRIC_PILLS.map((p, pi) => {
+              const main = pi === 0;
               return (
-                <tr key={m} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
-                  <td className={`${TREND_STICKY} py-1.5 px-2 text-xs text-slate-300 whitespace-nowrap`}>
-                    {m}
+                <tr
+                  key={`__total__-${p.key}`}
+                  className={main ? "border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold" : "bg-blue-500/[0.03]"}
+                >
+                  <td className={`${TREND_STICKY} py-1.5 px-2 whitespace-nowrap ${main ? "text-white" : "text-[11px] text-slate-500 pl-6"}`}>
+                    {main ? <>Всего <span className="text-[10px] font-normal text-slate-500">· {p.label.toLowerCase()}</span></> : p.label}
                   </td>
-                  <td className={`py-1.5 px-3 text-right tabular-nums font-semibold border-l border-white/10 ${total === 0 ? "text-slate-600" : "text-slate-200"}`}>
-                    {total}
+                  <td className={`py-1.5 px-3 text-right tabular-nums border-l border-white/10 ${main ? "text-white" : "text-[11px] text-slate-400"}`}>
+                    {visible.reduce((acc, m) => acc + sumMetric(trendByManager?.[m], p.key), 0)}
                   </td>
-                  {currentDates.map((d, idx) => {
-                    const bucket = buckets[idx];
-                    const v = bucket?.[metric] ?? 0;
-                    const off = !!id && offDays.has(`${id}|${d}`);
-                    return (
-                      <td
-                        key={d}
-                        title={cellTitle(m, bucket, off)}
-                        className={`py-1.5 px-2 text-right tabular-nums ${off ? "bg-slate-500/10 text-slate-500" : v === 0 ? "text-slate-600" : "text-slate-200"}`}
-                      >
-                        {v}
-                      </td>
-                    );
-                  })}
+                  {currentDates.map((d, idx) => (
+                    <td key={d} className={`py-1.5 px-2 text-right tabular-nums ${main ? "text-white" : "text-[11px] text-slate-400"}`}>
+                      {visible.reduce((acc, m) => acc + (trendByManager?.[m]?.[idx]?.[p.key] ?? 0), 0)}
+                    </td>
+                  ))}
                 </tr>
               );
             })}
-            {/* Футер «Всего» — сумма по видимым менеджерам. */}
-            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold">
-              <td className={`${TREND_STICKY} py-2 px-2 text-white`}>Всего</td>
-              <td className="py-2 px-3 text-right tabular-nums text-white border-l border-white/10">
-                {visible.reduce((acc, m) => acc + sumMetric(trendByManager?.[m], metric), 0)}
-              </td>
-              {currentDates.map((d, idx) => (
-                <td key={d} className="py-2 px-2 text-right tabular-nums text-white">
-                  {visible.reduce((acc, m) => acc + (trendByManager?.[m]?.[idx]?.[metric] ?? 0), 0)}
-                </td>
-              ))}
-            </tr>
           </tbody>
         </table>
       </div>
