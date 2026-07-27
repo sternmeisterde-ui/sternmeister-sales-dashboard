@@ -74,7 +74,41 @@ export const managerStatusIntervals = pgTable(
   }),
 );
 
+// ==================== CLOUDTALK STATUS INTERVALS ====================
+// Машинная лента присутствия из CloudTalk (Фаза 0 спеки 26): онлайн / на звонке /
+// простой с причиной / офлайн. Рисуется ОТДЕЛЬНОЙ дорожкой над основной полоской
+// Активности — сознательно не смешиваем с manager_status_intervals: там ручные
+// оправдания простоя (3 значения, вводит человек), тут полное присутствие
+// (4 значения, источник машинный). Общая таблица сломала бы обе семантики.
+export const cloudtalkStatusIntervals = pgTable(
+  "cloudtalk_status_intervals",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    department: text("department").notNull(),                       // 'b2g' | 'b2b'
+    managerId: text("manager_id").notNull(),                        // master_managers.id
+    cloudtalkAgentId: bigint("cloudtalk_agent_id", { mode: "number" }).notNull(),
+    status: text("status").notNull(),                               // online | idle | on_call | offline
+    // Причина простоя — заполняется ТОЛЬКО при status='idle'. CloudTalk держит
+    // agentStatusTypeId последним выбранным даже когда человек уже офлайн, так
+    // что писать его безусловно = нарисовать всем вечный «обед».
+    idleTypeId: integer("idle_type_id"),                            // 17..21 + кастомные
+    idleName: text("idle_name"),                                    // расшифровка на момент записи
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),         // NULL = интервал открыт
+    // Последний опрос, подтвердивший этот статус. Открытый интервал действителен
+    // только ДО last_seen_at: если поллер лежал два часа, эти два часа должны
+    // отрисоваться как «нет данных», а не как продолжение статуса.
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => ({
+    lookup: index("cloudtalk_status_lookup").on(t.department, t.managerId, t.startedAt),
+    open: index("cloudtalk_status_open").on(t.department, t.endedAt),
+  }),
+);
+
 export type TrackingEvent = typeof trackingEvents.$inferSelect;
 export type NewTrackingEvent = typeof trackingEvents.$inferInsert;
 export type TrackingSyncState = typeof trackingSyncState.$inferSelect;
 export type ManagerStatusInterval = typeof managerStatusIntervals.$inferSelect;
+export type CloudtalkStatusInterval = typeof cloudtalkStatusIntervals.$inferSelect;

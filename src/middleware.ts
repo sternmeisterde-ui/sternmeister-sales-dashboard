@@ -46,6 +46,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // CloudTalk presence poller (status-cron compose service, 60s loop) —
+  // CRON_SECRET-authed. Exact match: the rest of /api/tracking/** stays
+  // session-protected. Without this the tick 307s to /login and the status
+  // track silently stops filling (same bug as the CallGear cron, fix d9079c6).
+  if (pathname === "/api/tracking/status-sync") {
+    return NextResponse.next();
+  }
+
   // Always allow the login page
   if (pathname === "/login") {
     return NextResponse.next();

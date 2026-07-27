@@ -80,6 +80,17 @@ services:
       - CLOUDTALK_API_ID=${CLOUDTALK_API_ID}
       - CLOUDTALK_API_SECRET=${CLOUDTALK_API_SECRET}
 
+      # CloudTalk dashboard-логин — присутствие менеджеров (онлайн / на звонке /
+      # простой с причиной / офлайн) для дорожки занятости в «Активности».
+      # Публичный API отдаёт только online/offline/paused без причины простоя,
+      # поэтому ходим во внутренний GraphQL тем же способом, что dialer-sync.
+      # Пароль в base64 — как в dialer-sync, чтобы не воевать с кавычками.
+      # Без CT_STATUS_SYNC_ENABLED=1 тик отвечает skipped и ничего не пишет.
+      # Спека: dev_docs/specs/26-СТАТУСЫ-МЕНЕДЖЕРОВ-ИЗ-CLOUDTALK.md
+      - CT_DASHBOARD_EMAIL=${CT_DASHBOARD_EMAIL}
+      - CT_DASHBOARD_PASSWORD_B64=${CT_DASHBOARD_PASSWORD_B64}
+      - CT_STATUS_SYNC_ENABLED=${CT_STATUS_SYNC_ENABLED}
+
       # AI / transcription providers
       - XAI_API_KEY=${XAI_API_KEY}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
@@ -203,6 +214,38 @@ services:
             http://app:3008/api/exports/process/tick || echo '000')";
           echo "[etl-cron] $${ts} export http=$${exp_status} body=$$(head -c 200 /tmp/export.out)";
           sleep "$${SYNC_INTERVAL_SECONDS}";
+        done
+    networks:
+      - sternmeister-network
+
+  # CloudTalk presence cron — снимает срез статусов менеджеров раз в
+  # CT_STATUS_TICK_SECONDS (по умолчанию 60с) и склеивает его в интервалы
+  # (cloudtalk_status_intervals). Отдельный сервис, а не шаг в etl-cron: там
+  # петля на 600с, а нам нужна минутная гранулярность — иначе границы обеда
+  # уползут на 10 минут. Тик дешёвый: 2 запроса к CloudTalk + пара UPDATE.
+  # У CloudTalk нет истории статусов, поэтому пропущенный тик = дырка в данных
+  # навсегда; сервис поднимается вместе с приложением и живёт всегда.
+  status-cron:
+    image: curlimages/curl:8.7.1
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      - CRON_SECRET=${CRON_SECRET}
+      - CT_STATUS_TICK_SECONDS=${CT_STATUS_TICK_SECONDS:-60}
+      - CT_STATUS_START_DELAY_SECONDS=${CT_STATUS_START_DELAY_SECONDS:-40}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "[status-cron] starting, interval=$${CT_STATUS_TICK_SECONDS}s";
+        sleep "$${CT_STATUS_START_DELAY_SECONDS}";
+        while true; do
+          ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)";
+          http_status="$$(curl -sS -o /tmp/status.out -w '%{http_code}' --max-time 45 \
+            -H "x-cron-secret: $${CRON_SECRET}" \
+            http://app:3008/api/tracking/status-sync || echo '000')";
+          echo "[status-cron] $${ts} http=$${http_status} body=$$(head -c 200 /tmp/status.out)";
+          sleep "$${CT_STATUS_TICK_SECONDS}";
         done
     networks:
       - sternmeister-network

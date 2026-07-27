@@ -77,5 +77,33 @@ export async function ensureTrackingSchema(): Promise<void> {
       ON manager_status_intervals (department, manager_id, started_at)
   `;
 
+  // Машинная лента присутствия из CloudTalk (спека 26, Фаза 0). Пишется
+  // поллером /api/tracking/status-sync раз в минуту. last_seen_at — граница
+  // достоверности открытого интервала: дальше неё данных нет, а не «статус
+  // продолжается».
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloudtalk_status_intervals (
+      id BIGSERIAL PRIMARY KEY,
+      department TEXT NOT NULL,
+      manager_id TEXT NOT NULL,
+      cloudtalk_agent_id BIGINT NOT NULL,
+      status TEXT NOT NULL,
+      idle_type_id INTEGER,
+      idle_name TEXT,
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS cloudtalk_status_lookup
+      ON cloudtalk_status_intervals (department, manager_id, started_at)
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS cloudtalk_status_open
+      ON cloudtalk_status_intervals (department, ended_at)
+  `;
+
   initialized = true;
 }
