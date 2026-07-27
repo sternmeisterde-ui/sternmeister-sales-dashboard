@@ -9,7 +9,7 @@ import {
   hasCategoryLetter,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import { getAnalyticsCallMetricsByMaster, getAnalyticsTeamCallMetrics, getFrozenLeadsCombined, getOverdueTasksByManager, getManagersWithKommoForPeriod } from "@/lib/daily/analytics-calls";
+import { getAnalyticsCallMetricsByMaster, getFrozenLeadsCombined, getOverdueTasksByManager, getManagersWithKommoForPeriod, getAnalyticsUnansweredWaitSeconds, getAnalyticsSlaFirstCallMinutes, getAnalyticsSlaFirstCallMinutesByManager, type ManagerSlaStat } from "@/lib/daily/analytics-calls";
 import { getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
 import { getDailySections } from "@/lib/daily/metrics-config";
 import {
@@ -1083,11 +1083,17 @@ export async function buildDailyResponse(department: string, period: string, dat
   let okkBuh1: number | null = null;
   let okkBuh2: number | null = null;
   let okkMed: number | null = null;
-  let slaShiftSecondsB2B: number | null = null;
+  // «Звонки» Дейли b2b обязаны сходиться с плитками вкладки «Звонки»
+  // (решение 2026-07-28) — источники ровно те же, что в /api/dashboard:
+  //   SLA = getAnalyticsSlaFirstCallMinutes («своё» SLA Бух Комм, минуты);
+  //   Ожидание = среднее гудков в НЕОТВЕЧЕННЫХ исходящих (секунды, плитка);
+  //   сводка звонков = сумма per-manager agent-based метрик (callMetricsMap).
+  // Прежние источники (getSlaFactsCombined business-hours ~50-мин масштаба,
+  // getAnalyticsTeamCallMetrics по воронкам+NULL без правила CallGear,
+  // avgWait=null-заглушка с «—») расходились со «Звонками».
+  let slaFirstCallMinB2B: number | null = null;
+  let slaMinByManagerB2B = new Map<string, ManagerSlaStat>();
   let avgWaitSecondsB2B: number | null = null;
-  // Team-level call metrics for B2B — counts ALL managers in analytics.communications
-  // (including ex-managers no longer in master_managers), so totals match Looker/Excel.
-  let teamCallMetricsB2B: UserCallMetrics | null = null;
   // Per-manager OKK scores for B2B: managerId → score (combined across prompts)
   const okkPerManagerB2B = new Map<string, number>();
 
@@ -1121,23 +1127,16 @@ export async function buildDailyResponse(department: string, period: string, dat
     okkMed = medRes.team;
     for (const [mgrId, v] of allPromptsRes.perManager) okkPerManagerB2B.set(mgrId, v);
 
-    // SLA & avg wait — одна воронка в телефонии, используем Бух Комм.
-    // Team-level call metrics across ALL managers (fix for undercount where
-    // ex-managers get excluded when keyed by master_managers).
-    teamCallMetricsB2B = await getAnalyticsTeamCallMetrics("b2b", from, to).catch(() => null);
-
-    const slaFactsB2B = (await getSlaFactsCombined(allManagers, buhPipelineId, fromDate, toDate)).team;
-    // Use business-hours SLA (from-shift) per Excel comparison: Excel R76 shows
-    // 52.59 мин which matches sla_first_call_from_shift_seconds, not raw
-    // sla_first_call_seconds (which includes evenings/nights, gives ~600 min).
-    // Emitted as SECONDS — the UI renders HH:MM:SS via DURATION_SEC_KEYS.
-    slaShiftSecondsB2B = slaFactsB2B.slaShiftSeconds ?? slaFactsB2B.slaSeconds;
-    // avgWait факт (Excel R72 "Ср. время ожидания ответа (сек)" = ring-to-answer
-    // из Callgear/Cloudtalk). У нас только sla_first_call_from_shift_seconds
-    // (часы до первого звонка на лиде) — это совсем другой SLA. Пока source не
-    // подключён, оставляем null → UI показывает "—", пользователь видит что
-    // метрика не реализована, вместо того чтобы рисовать нерелевантные часы.
-    avgWaitSecondsB2B = null;
+    // SLA и Ожидание — те же вызовы, что плитки «SLA» и «Ожидание» на
+    // вкладке «Звонки» (/api/dashboard), с тем же ростером за период.
+    const [unansweredWaitB2B, slaMinB2B, slaByMgrB2B] = await Promise.all([
+      getAnalyticsUnansweredWaitSeconds(allManagers, "b2b", from, to).catch(() => null),
+      getAnalyticsSlaFirstCallMinutes("b2b", from, to).catch(() => null),
+      getAnalyticsSlaFirstCallMinutesByManager(allManagers, "b2b", from, to).catch(() => new Map<string, ManagerSlaStat>()),
+    ]);
+    avgWaitSecondsB2B = unansweredWaitB2B;
+    slaFirstCallMinB2B = slaMinB2B;
+    slaMinByManagerB2B = slaByMgrB2B;
   }
 
   const sections = activeSections.map((section) => {
@@ -1150,10 +1149,13 @@ export async function buildDailyResponse(department: string, period: string, dat
       .map((m) => callMetricsMap.get(m.id))
       .filter((m): m is UserCallMetrics => m !== undefined);
 
-    // For B2B team-level rollup use direct analytics sum (includes ex-managers);
-    // for B2G and per-manager views keep the master_managers-keyed aggregation.
-    const summaryCallMetrics = department === "b2b" && teamCallMetricsB2B
-      ? teamCallMetricsB2B
+    // B2B: сводка = сумма per-manager метрик по ПОЛНОМУ ростеру за период
+    // (callMetricsMap строится по getManagersWithKommoForPeriod — включает
+    // soft-deleted менеджеров их периодов) — ровно todaySummary вкладки
+    // «Звонки». sectionCallMetrics не годится: в day-режиме `managers`
+    // отфильтрованы Графиком и звонки внеплановых менеджеров пропадали бы.
+    const summaryCallMetrics = department === "b2b"
+      ? sumCallMetrics(Array.from(callMetricsMap.values()))
       : sumCallMetrics(sectionCallMetrics);
 
     // Overdue tasks: prefer analytics.tasks (continuously-refreshed mirror)
@@ -1206,7 +1208,7 @@ export async function buildDailyResponse(department: string, period: string, dat
             getPlan,
             sectionDbLine: section.dbLine,
             okkBuh1, okkBuh2, okkMed,
-            slaShiftSeconds: slaShiftSecondsB2B,
+            slaFirstCallMin: slaFirstCallMinB2B,
             avgWaitSeconds: avgWaitSecondsB2B,
           });
         } else {
@@ -1230,7 +1232,7 @@ export async function buildDailyResponse(department: string, period: string, dat
           okkBuh1,
           okkBuh2,
           okkMed,
-          slaShiftSeconds: slaShiftSecondsB2B,
+          slaFirstCallMin: slaFirstCallMinB2B,
           avgWaitSeconds: avgWaitSecondsB2B,
         });
       } else if (section.key === "funnel") {
@@ -1376,12 +1378,17 @@ export async function buildDailyResponse(department: string, period: string, dat
               else if (metric.key === "calls_totalMinutes_p") fact = "160";
               else if (metric.key === "calls_totalMinutes_f") fact = String(mgrCallMetrics?.totalMinutes ?? 0);
               else if (metric.key === "calls_dialPercent_p") fact = "65";
-              else if (metric.key === "calls_dialPercent_f") fact = String(mgrCallMetrics?.dialPercent ?? 0);
+              // % дозвона — как в таблице «Звонков»: принятые исх. / все исх.
+              else if (metric.key === "calls_dialPercent_f") fact = String(mgrCallMetrics ? pct(mgrCallMetrics.outgoingConnected ?? 0, mgrCallMetrics.outgoingTotal) : 0);
               else if (metric.key === "calls_avgWait_p") fact = "30";
-              // Ожидание/SLA — в МИНУТАХ (ТЗ 2026-07-22); источники держат секунды.
-              else if (metric.key === "calls_avgWait_f") fact = avgWaitSecondsB2B != null ? String(Math.round(avgWaitSecondsB2B / 60 * 10) / 10) : null;
+              // Ожидание/SLA per-manager — те же метрики, что колонки таблицы
+              // «Звонков»: гудки в недозвонах (сек) и SLA до 1-го звонка (мин).
+              else if (metric.key === "calls_avgWait_f") fact = mgrCallMetrics?.unansweredWaitSeconds ? String(mgrCallMetrics.unansweredWaitSeconds) : null;
               else if (metric.key === "calls_sla_p") fact = "25";
-              else if (metric.key === "calls_sla_f") fact = slaShiftSecondsB2B != null ? String(Math.round(slaShiftSecondsB2B / 60 * 10) / 10) : null;
+              else if (metric.key === "calls_sla_f") {
+                const v = slaMinByManagerB2B.get(mgr.id)?.avgMin;
+                fact = v != null ? String(Math.round(v * 10) / 10) : null;
+              }
               // ОКК per-manager — берём из общей окк-выборки (ETL пишет manager_id)
               else if (metric.key === "okk_avg_f") {
                 const v = okkPerManagerB2B.get(mgr.id);
@@ -1785,9 +1792,11 @@ interface B2BFactContext {
   okkBuh1: number | null;
   okkBuh2: number | null;
   okkMed: number | null;
-  /** SLA "from-shift" в СЕКУНДАХ — источник хранит секунды; в минуты
-   *  конвертируется на выдаче calls_sla_f (ТЗ 2026-07-22: факт в минутах). */
-  slaShiftSeconds: number | null;
+  /** SLA до первого звонка в МИНУТАХ — тот же источник, что плитка «SLA»
+   *  вкладки «Звонки» (getAnalyticsSlaFirstCallMinutes). */
+  slaFirstCallMin: number | null;
+  /** Ожидание в СЕКУНДАХ — среднее гудков в НЕОТВЕЧЕННЫХ исходящих, тот же
+   *  источник, что плитка «Ожидание» (getAnalyticsUnansweredWaitSeconds). */
   avgWaitSeconds: number | null;
 }
 
@@ -2007,11 +2016,14 @@ function getB2BFact(key: string, sectionKey: string, ctx: B2BFactContext): strin
       // Оставшиеся plan rows (звонки/дозвон/ОКК): hasPlan:true → plan lookup
       // in the outer render loop. Константы ожидания/SLA — здесь (ТЗ 2026-07-22).
       case "calls_avgWait_p":        return "30";
-      // Ожидание/SLA факты — в МИНУТАХ (1 знак), источники держат секунды.
-      case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(Math.round(ctx.avgWaitSeconds / 60 * 10) / 10) : null; // R60
-      case "calls_dialPercent_f":    return String(summaryCallMetrics.dialPercent); // R62
+      // Ожидание — как плитка «Звонки»: среднее гудков в НЕОТВЕЧЕННЫХ
+      // исходящих, СЕКУНДЫ (история ручного ввода РОПа тоже в секундах).
+      case "calls_avgWait_f":        return ctx.avgWaitSeconds != null ? String(Math.round(ctx.avgWaitSeconds)) : null; // R60
+      // % дозвона — как на «Звонках»: принятые исходящие / все исходящие.
+      case "calls_dialPercent_f":    return String(pct(summaryCallMetrics.outgoingConnected ?? 0, summaryCallMetrics.outgoingTotal)); // R62
       case "calls_sla_p":            return "25";
-      case "calls_sla_f":            return ctx.slaShiftSeconds != null ? String(Math.round(ctx.slaShiftSeconds / 60 * 10) / 10) : null; // R64
+      // SLA — тот же источник, что плитка «SLA» вкладки «Звонки» (минуты).
+      case "calls_sla_f":            return ctx.slaFirstCallMin != null ? String(Math.round(ctx.slaFirstCallMin * 10) / 10) : null; // R64
       // OKK facts: prefer OKK DB; fall back to stored daily_plans for dates
       // before OKK launch (≈ 2026-03-04) where Excel has the only record.
       case "okk_buh1_f":             return ctx.okkBuh1 != null ? String(ctx.okkBuh1) : (ctx.getPlan("calls", null, "okk_buh1_f") ?? null);

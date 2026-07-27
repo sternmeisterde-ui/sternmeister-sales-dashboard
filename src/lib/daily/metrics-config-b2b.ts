@@ -89,7 +89,9 @@ const salesMedMetrics: MetricDef[] = [
 // ====================== 4. ЗВОНКИ + ОКК (R53–R72) ======================
 // Переделка 2026-07-22 (ТЗ Рузанны): строка «Менеджеров на линии план» и
 // «Замороженные лиды» убраны; план ожидания/SLA — константы 30/25 (не
-// редактируются); факты ожидания и SLA — в МИНУТАХ (не HH:MM:SS).
+// редактируются). 2026-07-28: все факты звонков выровнены 1в1 с плитками
+// вкладки «Звонки» (сводка по агентам, % дозвона = исходящие, ожидание —
+// гудки в НЕДОЗВОНАХ в СЕКУНДАХ как плитка, SLA — минуты как плитка).
 const callsMetrics: MetricDef[] = [
   // Факт: количество менеджеров из Графика (manager_schedule ← Google-файл
   // РОПа, синк sync-b2b-schedule): day — on_line на дату, week/month —
@@ -99,10 +101,12 @@ const callsMetrics: MetricDef[] = [
   { key: "calls_total_f", label: "Количество звонков факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "calls_totalMinutes_p", label: "Всего на линии (минут) план", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
   { key: "calls_totalMinutes_f", label: "Всего на линии (минут) факт", hasPlan: false, hasFact: true, unit: "мин", factSource: "db" },
-  // План — константа 30 (как avgWait_p у Гос), не редактируется.
-  { key: "calls_avgWait_p", label: "Среднее время ожидания ответа (мин) план", hasPlan: false, hasFact: true, unit: "мин", factSource: "computed" },
-  // Факт ожидания — ручной ввод В МИНУТАХ (source Callgear, пока не подключён).
-  { key: "calls_avgWait_f", label: "Среднее время ожидания ответа (мин) факт", hasPlan: true, hasFact: false, unit: "мин", factSource: "manual" },
+  // План — константа 30 (сек), не редактируется.
+  { key: "calls_avgWait_p", label: "Среднее время ожидания ответа (сек) план", hasPlan: false, hasFact: true, unit: "сек", factSource: "computed" },
+  // Факт — среднее гудков в НЕОТВЕЧЕННЫХ исходящих (как плитка «Ожидание»
+  // Звонков), СЕКУНДЫ. Ручной ввод РОПа (исторический, тоже в секундах)
+  // перекрывает вычисленное значение.
+  { key: "calls_avgWait_f", label: "Среднее время ожидания ответа (сек) факт", hasPlan: true, hasFact: false, unit: "сек", factSource: "manual" },
   { key: "calls_dialPercent_p", label: "% дозвона план", hasPlan: true, hasFact: false, unit: "%", factSource: "manual" },
   { key: "calls_dialPercent_f", label: "% дозвона факт", hasPlan: false, hasFact: true, unit: "%", factSource: "db" },
   // План — константа 25, не редактируется.
