@@ -421,10 +421,12 @@ function SummaryTimeTable({
   const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
   const metrics = useMemo(() => getAllMetrics(referenceSnapshot), [referenceSnapshot]);
 
-  // Collapsible sections
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  // Collapsible sections. Храним РАЗВЁРНУТЫЕ (пустой сет = всё закрыто):
+  // по умолчанию при входе на вкладку все разделы свёрнуты (решение
+  // 2026-07-28), и инверсия не зависит от момента прихода данных.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const toggleSection = useCallback((key: string) => {
-    setCollapsedSections((prev) => {
+    setExpandedSections((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -499,7 +501,7 @@ function SummaryTimeTable({
             {metrics.map((m) => {
               // ── Section header row (collapsible) ────────────────────────
               if (m.metricKey.startsWith("__section_")) {
-                const isCollapsed = collapsedSections.has(m.sectionKey);
+                const isCollapsed = !expandedSections.has(m.sectionKey);
                 const accent = getSectionAccent(m.sectionDbLine);
                 return (
                   <tr
@@ -539,7 +541,7 @@ function SummaryTimeTable({
               }
 
               // ── Skip all rows for collapsed sections ──────────────────────
-              if (collapsedSections.has(m.sectionKey)) return null;
+              if (!expandedSections.has(m.sectionKey)) return null;
 
               // ── Group sub-header ──────────────────────────────────────────
               // Same sticky-split pattern as the section header above: first
