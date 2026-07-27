@@ -119,41 +119,46 @@ function bucketExpr(dim: DimensionKey): SQL {
     case "category":
       return sql`UPPER(COALESCE(NULLIF(TRIM(category), ''), ''))`;
     case "startDate":
-      // Значения чистые — единственный вопрос без дрейфа форматов.
+      // Вторая форма сайта пишет строчными и с подчёркиваниями
+      // («прямо_сейчас») — канонизируем lower + '_'→' ' (lower() на Neon
+      // folds кириллицу, проверено). Свободный текст (3 шт.) → «Без ответа».
       return sql`
-        CASE TRIM(COALESCE(start_date_answer, ''))
-          WHEN 'Прямо сейчас' THEN 'now'
-          WHEN 'Через 2 недели' THEN '2w'
-          WHEN 'Через месяц' THEN '1m'
-          WHEN 'Не планирую в ближайшее время' THEN 'later'
+        CASE lower(replace(TRIM(COALESCE(start_date_answer, '')), '_', ' '))
+          WHEN 'прямо сейчас' THEN 'now'
+          WHEN 'через 2 недели' THEN '2w'
+          WHEN 'через месяц' THEN '1m'
+          WHEN 'не планирую в ближайшее время' THEN 'later'
           ELSE ''
         END`;
     case "income":
-      // Форматы дрейфуют: «До 2 000» / «До 2000 евро» / «До 2 000 €»,
-      // «2 000 3 000» / «2000 - 3000 евро» / «2 000 – 3 000 €». Средние
-      // корзины ловим по цифрам (все нецифры вон), крайние — по префиксу.
+      // Форматы дрейфуют: «До 2 000» / «До 2000 евро» / «До 2 000 €» /
+      // «до_2000€», «2 000 3 000» / «2000 - 3000 евро» / «2000_-_3000€».
+      // Средние корзины ловим по цифрам (все нецифры вон), крайние — по
+      // префиксу без учёта регистра (вторая форма пишет строчными).
       return sql`
         CASE
           WHEN COALESCE(TRIM(income_answer), '') = '' THEN ''
-          WHEN TRIM(income_answer) LIKE 'До%' THEN 'lt2'
-          WHEN TRIM(income_answer) LIKE 'Выше%' THEN 'gt5'
+          WHEN lower(TRIM(income_answer)) LIKE 'до%' THEN 'lt2'
+          WHEN lower(TRIM(income_answer)) LIKE 'выше%' THEN 'gt5'
           WHEN regexp_replace(income_answer, '[^0-9]', '', 'g') = '20003000' THEN '2to3'
           WHEN regexp_replace(income_answer, '[^0-9]', '', 'g') = '30005000' THEN '3to5'
           ELSE ''
         END`;
     case "status":
-      // «муж/жена» и опечатка «мужжена» — один ответ. «Получаю пособие, не
-      // работаю» — реальный ответ анкеты, отсутствующий в исходном списке
-      // Рузанны; по решению 2026-07-21 — отдельная корзина.
+      // «муж/жена», опечатка «мужжена» и «супруг(а)» — один ответ. «Получаю
+      // пособие, не работаю» — реальный ответ анкеты, отсутствующий в
+      // исходном списке Рузанны; по решению 2026-07-21 — отдельная корзина.
+      // Вторая форма пишет строчными с подчёркиваниями
+      // («работаю_в_германии») — канонизируем lower + '_'→' '.
       return sql`
         CASE
           WHEN COALESCE(TRIM(status_answer), '') = '' THEN ''
-          WHEN TRIM(status_answer) = 'Работаю в Германии' THEN 'de_job'
-          WHEN TRIM(status_answer) = 'Работаю не в Германии' THEN 'job_abroad'
-          WHEN TRIM(status_answer) = 'Фриланс' THEN 'freelance'
-          WHEN status_answer LIKE '%муж%' THEN 'spouse'
-          WHEN status_answer LIKE 'Получаю пособие%' THEN 'benefit'
-          WHEN status_answer LIKE 'Не работаю, не получаю%' THEN 'no_job'
+          WHEN lower(replace(TRIM(status_answer), '_', ' ')) = 'работаю в германии' THEN 'de_job'
+          WHEN lower(replace(TRIM(status_answer), '_', ' ')) = 'работаю не в германии' THEN 'job_abroad'
+          WHEN lower(replace(TRIM(status_answer), '_', ' ')) = 'фриланс' THEN 'freelance'
+          WHEN lower(status_answer) LIKE '%муж%' OR lower(status_answer) LIKE '%супруг%' THEN 'spouse'
+          WHEN lower(replace(status_answer, '_', ' ')) LIKE 'получаю пособие%' THEN 'benefit'
+          WHEN lower(replace(status_answer, '_', ' ')) LIKE 'не работаю, не получаю%' THEN 'no_job'
           ELSE ''
         END`;
     case "language":
@@ -188,7 +193,7 @@ export async function getCategoryDynamicsDays(
   from: string,
   to: string,
 ): Promise<CategoryDynamicsDays> {
-  const cacheKey = `category-dynamics:v4:${funnel}:${from}:${to}`;
+  const cacheKey = `category-dynamics:v5:${funnel}:${from}:${to}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const perDim = await Promise.all(
       DIMENSION_KEYS.map((dim) => fetchDays(dim, funnel, from, to)),
