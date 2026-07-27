@@ -581,9 +581,11 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
     [daysB, dim.buckets, fromB, toB],
   );
 
-  // Все группы схлопнуты по умолчанию — компактный обзор; клик по строке
-  // раскрывает Продажи/Конверсии (как менеджер → блоки в референсе).
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Все группы развёрнуты по умолчанию (как в референсе); клик по строке
+  // схлопывает Продажи/Конверсии (как менеджер → блоки критериев).
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(["__total__", ...dim.buckets.map((b) => b.key || "__none__")]),
+  );
   const toggle = (k: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1070,8 +1072,8 @@ export default function CategoryDynamicsTab() {
 
   return (
     <div className="flex flex-col gap-4 fade-in">
-      {/* ── Фильтры ─────────────────────────────────────────────── */}
-      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+      {/* ── Фильтры (липкие: остаются сверху при скролле) ───────── */}
+      <div className="sticky top-2 z-30 flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between bg-slate-900/80 backdrop-blur-md rounded-2xl border border-white/5 px-3 py-2 shadow-lg">
         <div className="flex items-center gap-2 flex-wrap">
           <CalendarPicker
             mode="range"
@@ -1105,6 +1107,27 @@ export default function CategoryDynamicsTab() {
               </button>
             ))}
           </div>
+          <button
+            onClick={() => setCompareOn((v) => !v)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+          >
+            <ArrowLeftRight className="w-3.5 h-3.5" />
+            Сравнить
+          </button>
+          {compareOn && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold text-orange-400">B</span>
+              <CalendarPicker
+                mode="range"
+                value={{ start: effB.start, end: effB.end }}
+                onChange={(r) => {
+                  if (!r.start) return;
+                  setRangeB({ start: r.start, end: r.end ?? r.start });
+                }}
+                onClear={() => setRangeB(null)}
+              />
+            </div>
+          )}
           {zoomStack.length > 0 && (
             <button
               onClick={zoomBack}
@@ -1168,31 +1191,6 @@ export default function CategoryDynamicsTab() {
           </div>
         </div>
       )}
-
-      {/* ── Сравнение периодов ──────────────────────────────────── */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <button
-          onClick={() => setCompareOn((v) => !v)}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
-        >
-          <ArrowLeftRight className="w-3.5 h-3.5" />
-          Сравнить периоды
-        </button>
-        {compareOn && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold text-slate-500">B</span>
-            <CalendarPicker
-              mode="range"
-              value={{ start: effB.start, end: effB.end }}
-              onChange={(r) => {
-                if (!r.start) return;
-                setRangeB({ start: r.start, end: r.end ?? r.start });
-              }}
-              onClear={() => setRangeB(null)}
-            />
-          </div>
-        )}
-      </div>
 
       {/* ── Таблицы: 5 измерений стеком ──────────────────────────
            Одна и та же выборка лидов, разрезанная по-разному: категории,
