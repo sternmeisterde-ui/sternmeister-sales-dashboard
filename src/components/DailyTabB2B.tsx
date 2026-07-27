@@ -1,5 +1,11 @@
 "use client";
 
+// Вкладка «Дейли» КОММЕРСОВ (b2b). Отделена от Госников 2026-07-28 полной
+// копией DailyTab.tsx: логика расчётов и UI-решения отделов расходятся
+// (пример: здесь разделы по умолчанию свёрнуты), общий компонент делал
+// каждую правку одного отдела риском для другого. b2g-ветки внутри —
+// мёртвый код исходника, вычищать по мере расхождения. Госники — DailyTab.tsx.
+
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import {
   TrendingUp,
@@ -421,11 +427,12 @@ function SummaryTimeTable({
   const referenceSnapshot = snapshots.find((s) => s.sections.length > 0) || snapshots[0];
   const metrics = useMemo(() => getAllMetrics(referenceSnapshot), [referenceSnapshot]);
 
-  // Collapsible sections (по умолчанию всё развёрнуто — поведение Госников;
-  // у Коммерсов своя копия вкладки DailyTabB2B со свёрнутым дефолтом).
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  // Collapsible sections. Храним РАЗВЁРНУТЫЕ (пустой сет = всё закрыто):
+  // при входе на вкладку все разделы свёрнуты (решение 2026-07-28, только
+  // Коммерсы — у Госников в DailyTab.tsx дефолт развёрнутый).
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const toggleSection = useCallback((key: string) => {
-    setCollapsedSections((prev) => {
+    setExpandedSections((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -500,7 +507,7 @@ function SummaryTimeTable({
             {metrics.map((m) => {
               // ── Section header row (collapsible) ────────────────────────
               if (m.metricKey.startsWith("__section_")) {
-                const isCollapsed = collapsedSections.has(m.sectionKey);
+                const isCollapsed = !expandedSections.has(m.sectionKey);
                 const accent = getSectionAccent(m.sectionDbLine);
                 return (
                   <tr
@@ -540,7 +547,7 @@ function SummaryTimeTable({
               }
 
               // ── Skip all rows for collapsed sections ──────────────────────
-              if (collapsedSections.has(m.sectionKey)) return null;
+              if (!expandedSections.has(m.sectionKey)) return null;
 
               // ── Group sub-header ──────────────────────────────────────────
               // Same sticky-split pattern as the section header above: first
@@ -655,10 +662,13 @@ function SummaryTimeTable({
 
 // ====================== MAIN COMPONENT ======================
 
-export default function DailyTab({ department, vertical }: { department: "b2g" | "b2b"; vertical?: "buh" | "med" | "all" }) {
-  // Вертикаль Бух/Мед/Все (b2g, spec 21) — приходит из глобального тоггла
-  // в шапке (page.tsx). Для b2b всегда undefined → legacy-поведение.
-  const vParam = department === "b2g" && vertical ? `&vertical=${vertical}` : "";
+export default function DailyTabB2B() {
+  // Вкладка жёстко закреплена за Коммерсами; b2g-ветки внутри — мёртвый
+  // код от исходника (DailyTab.tsx), вычищать по мере расхождения. Типы
+  // констант оставлены union'ами, чтобы ветки компилировались без правок.
+  const department = "b2b" as "b2g" | "b2b";
+  const vertical = undefined as "buh" | "med" | "all" | undefined;
+  const vParam = "";
   // Редактирование планов — только в конкретной вертикали: в «Все» план =
   // сумма Бух+Мед, писать её некуда (решение 2026-07-06).
   const plansEditable = department === "b2b" || vertical !== "all";
