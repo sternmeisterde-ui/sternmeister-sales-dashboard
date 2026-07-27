@@ -589,7 +589,7 @@ function BreakdownModal({ target, funnel, onClose }: {
       onClick={onClose}
     >
       <div
-        className="glass-panel bg-slate-900 rounded-2xl border border-white/10 p-5 w-full max-w-lg max-h-[80vh] overflow-y-auto"
+        className="rounded-2xl border border-white/10 bg-[#0f172a] shadow-2xl p-5 w-full max-w-lg max-h-[80vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3 mb-1">
