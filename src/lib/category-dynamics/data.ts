@@ -171,19 +171,27 @@ function bucketExpr(dim: DimensionKey): SQL {
 }
 
 /**
- * Дневные агрегаты корзина × день по всем измерениям за [fromTs, toTs]
- * (unix-секунды, границы Berlin-дней). Дни/корзины без лидов отсутствуют —
+ * Дневные агрегаты корзина × день по всем измерениям за [from, to] — civil
+ * Berlin-даты 'YYYY-MM-DD' включительно. Дни/корзины без лидов отсутствуют —
  * клиент дополняет нулями.
+ *
+ * ⚠ Границы периода сравниваются ТОЛЬКО строками дат по берлинскому
+ * календарю (SQL ниже), НЕ Date-параметрами: neon-драйвер сериализует Date
+ * в локальном поясе процесса ('2026-06-01T00:00:00+02:00'), а колонка
+ * created_at — timestamp БЕЗ пояса, Postgres отбрасывает offset и сравнивает
+ * голые компоненты. На проде (TZ=Europe/Berlin) это сдвигало окно на +2ч:
+ * лиды, созданные 1-го числа в 00:00–02:00 Berlin, выпадали из своего месяца
+ * (баг «87 vs 88», лид 19604306, найден 2026-07-27).
  */
 export async function getCategoryDynamicsDays(
   funnel: CategoryFunnel,
-  fromTs: number,
-  toTs: number,
+  from: string,
+  to: string,
 ): Promise<CategoryDynamicsDays> {
-  const cacheKey = `category-dynamics:v3:${funnel}:${fromTs}:${toTs}`;
+  const cacheKey = `category-dynamics:v4:${funnel}:${from}:${to}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const perDim = await Promise.all(
-      DIMENSION_KEYS.map((dim) => fetchDays(dim, funnel, fromTs, toTs)),
+      DIMENSION_KEYS.map((dim) => fetchDays(dim, funnel, from, to)),
     );
     return Object.fromEntries(
       DIMENSION_KEYS.map((dim, i) => [dim, perDim[i]]),
@@ -194,11 +202,9 @@ export async function getCategoryDynamicsDays(
 async function fetchDays(
   dim: DimensionKey,
   funnel: CategoryFunnel,
-  fromTs: number,
-  toTs: number,
+  from: string,
+  to: string,
 ): Promise<DimensionDayRow[]> {
-  const fromDate = new Date(fromTs * 1000);
-  const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(
     pipelineIdsFor(funnel).map((id) => sql`${id}`),
     sql`, `,
@@ -222,8 +228,10 @@ async function fetchDays(
       COUNT(*) FILTER (WHERE first_payment_fact_date IS NOT NULL) AS sales
     FROM analytics.leads_cohort
     WHERE pipeline_id IN (${pipelineList})
-      AND created_at >= ${fromDate}
-      AND created_at <= ${toDate}
+      -- Сравнение по берлинской КАЛЕНДАРНОЙ дате (строки 'YYYY-MM-DD'), а не
+      -- Date-параметрами — см. предупреждение над getCategoryDynamicsDays.
+      AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
+            BETWEEN ${from}::date AND ${to}::date
       AND status_id NOT IN (${sql.join(INCOMING_STATUS_IDS.map((id) => sql`${id}`), sql`, `)})
       AND is_deleted = false
       -- Причина закрытия: авторитетно ТОЛЬКО обязательное поле 876383 (ТЗ:
