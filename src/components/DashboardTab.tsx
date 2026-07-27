@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
-  ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check,
+  ChevronLeft, ChevronRight, ChevronDown, Check,
   PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff, Users,
   ArrowLeftRight,
 } from "lucide-react";
@@ -2108,11 +2108,11 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
 // и выходных (manager_schedule) — та же, что у графика. Два режима:
 //  • обычный: строки-менеджеры × колонки-дни окна, метрика по пилюлям,
 //    «Итого» первой колонкой, футер «Всего», выходные серым;
-//  • «Сравнить периоды»: референс «Оценки критериев» (как в «Динамике
-//    категорий») — Менеджер | период A | период B | Δ; главное число —
-//    Звонки, строка раскрывается на Дозвон/Пропущенные (развёрнуто по
-//    умолчанию), сверху жирная группа «Всего». Пилюли скрыты — все метрики
-//    видны сразу. Δ = A − B; у «Пропущенных» рост красный (инверсия).
+//  • «Сравнить периоды»: плоская таблица без раскрывашек (решение
+//    2026-07-28 — тогл мешал охватить все значения разом): строки-менеджеры,
+//    группы колонок Звонки | Дозвон | Пропущенные, в каждой A | B | Δ,
+//    сверху жирная строка «Всего». Пилюли скрыты — все метрики видны сразу.
+//    Δ = A − B; у «Пропущенных» рост красный (инверсия).
 
 const TREND_DELTA_CLS = { up: "text-emerald-400", down: "text-rose-400", flat: "text-slate-500" } as const;
 
@@ -2147,14 +2147,6 @@ function TrendTableByManager({ trendByManager, department, selected }: {
   const [dataB, setDataB] = useState<Record<string, DailyBucket[]> | null>(null);
   const [loadingA, setLoadingA] = useState(false);
   const [loadingB, setLoadingB] = useState(false);
-  // Схлопнутые строки сравнения (пустой сет = всё развёрнуто, как в референсе).
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const toggle = (k: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k); else next.add(k);
-      return next;
-    });
 
   const managers = useMemo(
     () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
@@ -2321,19 +2313,6 @@ function TrendTableByManager({ trendByManager, department, selected }: {
     return acc;
   }, [compareRows]);
 
-  /** Вложенная строка сравнения: Дозвон / Пропущенные. */
-  const compareSubRow = (key: string, label: string, a: number, b: number, invert: boolean) => {
-    const d = trendDelta(a, b, invert);
-    return (
-      <tr key={key} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
-        <td className={`${TREND_STICKY} px-4 py-1.5 text-[10px] text-slate-500 pl-10`}>{label}</td>
-        <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{a}</td>
-        <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{b}</td>
-        <td title="A − B" className={`px-3 py-1.5 text-center font-mono text-[10px] ${d.cls}`}>{d.text}</td>
-      </tr>
-    );
-  };
-
   const header = (
     <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
       <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
@@ -2397,76 +2376,76 @@ function TrendTableByManager({ trendByManager, department, selected }: {
     );
   }
 
-  // ── Режим сравнения: Менеджер | A | B | Δ (референс «Оценки критериев») ──
+  // ── Режим сравнения: плоско, группы колонок Звонки|Дозвон|Пропущенные,
+  //    в каждой A | B | Δ — все значения видны без раскрывашек ──
   if (compareOn) {
+    const METRIC_GROUPS: Array<{ key: "callsTotal" | "callsConnected" | "missedIncoming"; label: string; invert: boolean }> = [
+      { key: "callsTotal", label: "Звонки", invert: false },
+      { key: "callsConnected", label: "Дозвон", invert: false },
+      { key: "missedIncoming", label: "Пропущенные", invert: true },
+    ];
+    const rangeTitleA = aFrom && aTo ? fmtRange(aFrom, aTo) : "A";
+    const rangeTitleB = bFrom && bTo ? fmtRange(bFrom, bTo) : "B";
+    const valueCells = (vals: { callsTotal: number; callsConnected: number; missedIncoming: number },
+      valsB: { callsTotal: number; callsConnected: number; missedIncoming: number }, bold: boolean) =>
+      METRIC_GROUPS.map((g) => {
+        const d = trendDelta(vals[g.key], valsB[g.key], g.invert);
+        const cls = `px-3 py-2 text-center font-mono text-[12px] ${bold ? "font-bold" : ""}`;
+        return (
+          <Fragment key={g.key}>
+            <td title={rangeTitleA} className={`${cls} ${bold ? "text-white" : "text-slate-200"} border-l border-white/10`}>{vals[g.key]}</td>
+            <td title={rangeTitleB} className={`${cls} ${bold ? "text-white" : "text-slate-200"}`}>{valsB[g.key]}</td>
+            <td title={`A − B${g.invert ? " (рост пропущенных = хуже)" : ""}`} className={`${cls} ${d.cls}`}>{d.text}</td>
+          </Fragment>
+        );
+      });
     return (
       <div className="glass-panel rounded-2xl p-5 border border-white/5">
         {header}
         <div className="overflow-x-auto" style={{ overflowY: "auto", maxHeight: "70vh" }}>
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
+              {/* Строка 1: группы-метрики (A|B|Δ внутри каждой). */}
+              <tr>
+                <th className={`${TREND_STICKY} px-4 py-2`} style={{ zIndex: 50 }} />
+                {METRIC_GROUPS.map((g) => (
+                  <th key={g.key} colSpan={3} className="px-3 py-2 text-center text-[10px] uppercase tracking-wider font-semibold text-slate-200 border-l border-white/10 bg-white/[0.03] whitespace-nowrap">
+                    {g.label}
+                  </th>
+                ))}
+              </tr>
+              {/* Строка 2: A (период A) | B (период B) | Δ. */}
               <tr className="border-b border-white/10">
-                <th className={`${TREND_STICKY} px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[180px]`} style={{ zIndex: 50 }}>
+                <th className={`${TREND_STICKY} px-4 py-1.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[180px]`} style={{ zIndex: 50 }}>
                   Менеджер
                 </th>
-                <th className="px-3 py-2.5 text-center min-w-[90px]">
-                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">{aFrom && aTo ? fmtRange(aFrom, aTo) : "A"}</div>
-                  <div className="text-[9px] text-slate-500">звонки</div>
-                </th>
-                <th className="px-3 py-2.5 text-center min-w-[90px]">
-                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">{bFrom && bTo ? fmtRange(bFrom, bTo) : "B"}</div>
-                  <div className="text-[9px] text-slate-500">звонки</div>
-                </th>
-                <th className="px-3 py-2.5 text-center min-w-[60px]" title="A − B">
-                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Δ</div>
-                </th>
+                {METRIC_GROUPS.map((g) => (
+                  <Fragment key={g.key}>
+                    <th title={rangeTitleA} className="px-3 py-1.5 text-center text-[9px] uppercase tracking-wider font-bold text-blue-400 border-l border-white/10">A</th>
+                    <th title={rangeTitleB} className="px-3 py-1.5 text-center text-[9px] uppercase tracking-wider font-bold text-orange-400">B</th>
+                    <th title="A − B" className="px-3 py-1.5 text-center text-[9px] uppercase tracking-wider font-bold text-slate-500">Δ</th>
+                  </Fragment>
+                ))}
               </tr>
             </thead>
             <tbody className="text-sm">
-              {/* «Всего» — жирная группа сверху (как в «Динамике категорий»). */}
-              <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40 bg-white/[0.02]" onClick={() => toggle("__total__")}>
-                <td className={`${TREND_STICKY} px-4 py-2`}>
-                  <div className="flex items-center gap-2">
-                    {collapsed.has("__total__") ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronUp className="w-3 h-3 text-slate-500" />}
-                    <span className="text-[11px] font-bold text-white">Всего</span>
-                  </div>
-                </td>
-                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">{compareTotals.a.callsTotal}</td>
-                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">{compareTotals.b.callsTotal}</td>
-                {(() => {
-                  const d = trendDelta(compareTotals.a.callsTotal, compareTotals.b.callsTotal);
-                  return <td title="A − B" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d.cls}`}>{d.text}</td>;
-                })()}
+              {/* «Всего» — жирная строка сверху. */}
+              <tr className="border-t border-white/10 bg-white/[0.02]">
+                <td className={`${TREND_STICKY} px-4 py-2 text-[11px] font-bold text-white`}>Всего</td>
+                {valueCells(compareTotals.a, compareTotals.b, true)}
               </tr>
-              {!collapsed.has("__total__") && compareSubRow("__total__conn", "Дозвон", compareTotals.a.callsConnected, compareTotals.b.callsConnected, false)}
-              {!collapsed.has("__total__") && compareSubRow("__total__miss", "Пропущенные", compareTotals.a.missedIncoming, compareTotals.b.missedIncoming, true)}
-
-              {compareRows.map((r, i) => {
-                const color = MANAGER_LINE_COLORS[i % MANAGER_LINE_COLORS.length];
-                const open = !collapsed.has(r.name);
-                const d = trendDelta(r.a.callsTotal, r.b.callsTotal);
-                return (
-                  <Fragment key={r.name}>
-                    <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={() => toggle(r.name)}>
-                      <td className={`${TREND_STICKY} px-4 py-2`}>
-                        <div className="flex items-center gap-2">
-                          {open ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
-                          <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-                          <span className="text-[11px] font-bold text-white">{r.name}</span>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-slate-200">{r.a.callsTotal}</td>
-                      <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-slate-200">{r.b.callsTotal}</td>
-                      <td title="A − B" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d.cls}`}>{d.text}</td>
-                    </tr>
-                    {open && compareSubRow(`${r.name}-conn`, "Дозвон", r.a.callsConnected, r.b.callsConnected, false)}
-                    {open && compareSubRow(`${r.name}-miss`, "Пропущенные", r.a.missedIncoming, r.b.missedIncoming, true)}
-                  </Fragment>
-                );
-              })}
+              {compareRows.map((r) => (
+                <tr key={r.name} className="border-t border-white/[0.06] hover:bg-white/[0.02] transition-colors">
+                  <td className={`${TREND_STICKY} px-4 py-2 text-[11px] text-slate-300 whitespace-nowrap`}>{r.name}</td>
+                  {valueCells(r.a, r.b, false)}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
+        <p className="text-[10px] text-slate-600 mt-2">
+          A: {rangeTitleA} (синий) · B: {rangeTitleB} (оранжевый) · Δ = A − B; у «Пропущенных» рост красный.
+        </p>
       </div>
     );
   }
@@ -2494,14 +2473,10 @@ function TrendTableByManager({ trendByManager, department, selected }: {
               const id = managerIdByName?.[m];
               const buckets = trendByManager?.[m] ?? [];
               const total = sumMetric(buckets, metric);
-              const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
               return (
                 <tr key={m} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
                   <td className={`${TREND_STICKY} py-1.5 px-2 text-xs text-slate-300 whitespace-nowrap`}>
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-                      {m}
-                    </span>
+                    {m}
                   </td>
                   <td className={`py-1.5 px-3 text-right tabular-nums font-semibold border-l border-white/10 ${total === 0 ? "text-slate-600" : "text-slate-200"}`}>
                     {total}
