@@ -25,7 +25,7 @@
 // 1в1 с выгрузками Kommo за июнь (459/27) и март (500/24).
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeftRight, ChevronLeft, ChevronRight, Loader2, Undo2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Undo2, X } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -533,9 +533,12 @@ function GroupsTable({ title, dim, days, from, to, onZoom, onBreakdown }: {
 
 // ==================== Сравнение периодов (референс — «Оценка критериев») ====================
 
-// Как в ComparisonCriteriaTable вкладки «Оценка критериев»: одна таблица,
-// у каждой метрики три колонки — A (синяя подпись) | B (оранжевая) | Δ
-// (цветная дельта A−B). Строки — корзины измерения, футер «Всего» жирный.
+// Макет 1в1 как ComparisonManagerTable вкладки «Оценка критериев»: узкая
+// таблица «Лиды | период A | Лиды | период B | Δ», строки — корзины
+// измерения (раскрываются в Продажи / Конверсии кликом, как менеджер —
+// в блоки критериев), сверху жирная группа «Всего лидов». Главное число
+// периода — % от общего (доля корзины); Δ = A − B (доли — в п.п.,
+// счётчики — в штуках), рост зелёный / падение красное.
 
 type DeltaVal = { text: string; tone: "up" | "down" | "flat" } | null;
 
@@ -558,27 +561,6 @@ function ppDeltaVal(aNum: number, aDen: number, bNum: number, bDen: number): Del
   return { text: `${pp > 0 ? "+" : ""}${pp}`, tone: pp > 0 ? "up" : pp < 0 ? "down" : "flat" };
 }
 
-function metricDelta(id: MetricRowId, bucketKey: string, aggA: RangeAgg, aggB: RangeAgg): DeltaVal {
-  if (aggA.totalLeads === 0 || aggB.totalLeads === 0) return null;
-  const a = aggA.byBucket[bucketKey];
-  const b = aggB.byBucket[bucketKey];
-  switch (id) {
-    case "leads": return intDelta(a.leads, b.leads);
-    case "share": return ppDeltaVal(a.leads, aggA.totalLeads, b.leads, aggB.totalLeads);
-    case "sales": return intDelta(a.sales, b.sales);
-    case "convTotal": return ppDeltaVal(a.sales, aggA.totalLeads, b.sales, aggB.totalLeads);
-    case "convCat": return ppDeltaVal(a.sales, a.leads, b.sales, b.leads);
-  }
-}
-
-const DELTA_TITLE: Record<MetricRowId, string> = {
-  leads: "Разница A − B, лидов",
-  share: "Разница A − B, процентных пунктов",
-  sales: "Разница A − B, продаж",
-  convTotal: "Разница A − B, процентных пунктов",
-  convCat: "Разница A − B, процентных пунктов",
-};
-
 function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, onBreakdown }: {
   title: string;
   dim: DimDef;
@@ -599,115 +581,152 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
     [daysB, dim.buckets, fromB, toB],
   );
 
-  const fmtRange = (f: string, t: string) => `${fmtDM(f)}–${fmtDM(t)}.${t.slice(0, 4)}`;
+  // Все группы схлопнуты по умолчанию — компактный обзор; клик по строке
+  // раскрывает Продажи/Конверсии (как менеджер → блоки в референсе).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
 
-  /** Ячейка значения периода: кликабельна (drill-down по написаниям), с тултипом. */
-  const valueCell = (m: MetricRowId, b: BucketDef, agg: RangeAgg, from: string, to: string, extra = "") => {
+  const fmtRange = (f: string, t: string) => `${fmtDM(f)}–${fmtDM(t)}.${t.slice(0, 4)}`;
+  const stickyStyle = { backgroundColor: "rgb(15, 23, 42)" };
+
+  /** Кликабельная ячейка периода (drill-down по написаниям Kommo). */
+  const periodCell = (b: BucketDef, agg: RangeAgg, from: string, to: string, text: string, cls: string) => {
     const clickable = agg.byBucket[b.key].leads > 0;
-    const muted = metricMuted(m, b.key, agg);
     return (
       <td
-        onClick={clickable ? () => onBreakdown(dim, b, from, to) : undefined}
-        title={`${fmtRange(from, to)}\n${cellTitle(b.label, agg.byBucket[b.key], agg.totalLeads)}${clickable ? "\nКлик — из каких написаний Kommo складывается" : ""}`}
-        className={`py-2 px-3 text-right tabular-nums whitespace-nowrap ${clickable ? "cursor-pointer hover:bg-white/[0.04]" : "cursor-default"} ${muted ? "text-slate-600" : "text-slate-200"} ${extra}`}
+        onClick={clickable ? (e) => { e.stopPropagation(); onBreakdown(dim, b, from, to); } : undefined}
+        title={`${cellTitle(b.label, agg.byBucket[b.key], agg.totalLeads)}${clickable ? "\nКлик — из каких написаний Kommo складывается" : ""}`}
+        className={`${cls} ${clickable ? "cursor-pointer hover:bg-white/[0.06]" : ""}`}
       >
-        {metricCell(m, b.key, agg)}
+        {text}
       </td>
     );
   };
 
+  /** Вложенная строка метрики: подпись с отступом, значения в колонках периодов. */
+  const subRow = (key: string, label: string, valA: string, valB: string, d: DeltaVal, deltaTitle: string) => (
+    <tr key={key} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
+      <td className="px-4 py-1.5 text-[10px] text-slate-500 sticky left-0 z-10 pl-10" style={stickyStyle}>{label}</td>
+      <td />
+      <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{valA}</td>
+      <td />
+      <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{valB}</td>
+      <td title={deltaTitle} className={`px-3 py-1.5 text-center font-mono text-[10px] ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>
+    </tr>
+  );
+
+  const totalOpen = expanded.has("__total__");
+
   return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5 min-w-0">
-      <h3 className="text-xs uppercase font-semibold tracking-wide mb-4 flex items-baseline gap-x-3 gap-y-1 flex-wrap">
-        <span className="text-slate-200">{title}</span>
-        <span className="text-blue-400">A · {fmtRange(fromA, toA)} · {aggA.totalLeads} лидов</span>
-        <span className="text-orange-400">B · {fmtRange(fromB, toB)} · {aggB.totalLeads} лидов</span>
-      </h3>
-      <div className="overflow-x-auto">
-        <table className="text-sm border-collapse">
-          <thead>
-            {/* Строка 1: метрики (merged на тройку A|B|Δ). */}
-            <tr className="text-[11px]">
-              <th className={`${STICKY_CELL} min-w-[170px]`} />
-              {METRIC_ROWS.map((m) => (
-                <th
-                  key={m.id}
-                  colSpan={3}
-                  className="py-2 px-3 text-center font-semibold text-slate-200 border-l border-white/10 bg-white/[0.03] whitespace-nowrap"
-                >
-                  {m.label}
+    <div className="flex flex-col gap-2">
+      <div className="text-[11px] uppercase tracking-widest font-bold text-slate-500">{title}</div>
+      <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+        <div className="w-full rounded-2xl" style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh" }}>
+          <table className="w-full text-left border-collapse">
+            <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
+              <tr className="border-b border-white/10">
+                <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[200px]" style={stickyStyle}>
+                  Корзина
                 </th>
-              ))}
-            </tr>
-            {/* Строка 2: A | B | Δ внутри каждой метрики. */}
-            <tr className="text-[10px] uppercase tracking-wider border-b border-white/10">
-              <th className={`${STICKY_CELL} text-left py-1.5 px-2 font-medium text-slate-500`}>Корзина</th>
-              {METRIC_ROWS.map((m) => (
-                <Fragment key={m.id}>
-                  <th title={fmtRange(fromA, toA)} className="py-1.5 px-3 text-right font-bold text-blue-400 border-l border-white/10">A</th>
-                  <th title={fmtRange(fromB, toB)} className="py-1.5 px-3 text-right font-bold text-orange-400">B</th>
-                  <th title={DELTA_TITLE[m.id]} className="py-1.5 px-3 text-right font-medium text-slate-500">Δ</th>
-                </Fragment>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {dim.buckets.map((b) => (
-              <tr key={b.key || "__none__"} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
-                <td className={`${STICKY_CELL} py-1.5 px-2 text-xs text-slate-300`}>
-                  <span className="inline-flex items-center gap-1.5" title={b.label}>
-                    <BucketDot color={b.color} />
-                    {b.label}
-                  </span>
-                </td>
-                {METRIC_ROWS.map((m) => {
-                  const d = metricDelta(m.id, b.key, aggA, aggB);
-                  return (
-                    <Fragment key={m.id}>
-                      {valueCell(m.id, b, aggA, fromA, toA, "border-l border-white/10")}
-                      {valueCell(m.id, b, aggB, fromB, toB)}
-                      <td
-                        title={DELTA_TITLE[m.id]}
-                        className={`py-2 px-3 text-right tabular-nums whitespace-nowrap ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}
-                      >
-                        {d ? d.text : "—"}
-                      </td>
-                    </Fragment>
-                  );
-                })}
+                <th className="px-2 py-2.5 text-center min-w-[55px]">
+                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">Лиды</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">{fmtRange(fromA, toA)}</div>
+                  <div className="text-[9px] text-slate-500">% от общего</div>
+                </th>
+                <th className="px-2 py-2.5 text-center min-w-[55px]">
+                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">Лиды</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">{fmtRange(fromB, toB)}</div>
+                  <div className="text-[9px] text-slate-500">% от общего</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[60px]" title="A − B: доли в п.п., счётчики в штуках">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Δ</div>
+                </th>
               </tr>
-            ))}
-            {/* Футер «Всего» — как «Средний балл» в референсе. */}
-            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold">
-              <td className={`${STICKY_CELL} py-2 px-2 text-white`}>Всего</td>
-              {METRIC_ROWS.map((m) => {
-                const totalCell = (agg: RangeAgg): string => {
-                  if (agg.totalLeads === 0) return "—";
-                  switch (m.id) {
-                    case "leads": return String(agg.totalLeads);
-                    case "share": return "100%";
-                    case "sales": return String(agg.totalSales);
-                    case "convTotal":
-                    case "convCat": return fmtPct(agg.totalSales, agg.totalLeads);
-                  }
-                };
-                const d: DeltaVal =
-                  aggA.totalLeads === 0 || aggB.totalLeads === 0 ? null
-                  : m.id === "leads" ? intDelta(aggA.totalLeads, aggB.totalLeads)
-                  : m.id === "sales" ? intDelta(aggA.totalSales, aggB.totalSales)
-                  : m.id === "share" ? null
-                  : ppDeltaVal(aggA.totalSales, aggA.totalLeads, aggB.totalSales, aggB.totalLeads);
+            </thead>
+            <tbody className="text-sm">
+              {/* «Всего лидов» — жирная группа сверху; внутри — продажи и конверсия. */}
+              <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40 bg-white/[0.02]" onClick={() => toggle("__total__")}>
+                <td className="px-4 py-2 sticky left-0 z-10" style={stickyStyle}>
+                  <div className="flex items-center gap-2">
+                    {totalOpen ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+                    <span className="text-[11px] font-bold text-white">Всего лидов</span>
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-center text-[11px] text-white font-bold">{aggA.totalLeads}</td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] text-slate-500">100%</td>
+                <td className="px-2 py-2 text-center text-[11px] text-white font-bold">{aggB.totalLeads}</td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] text-slate-500">100%</td>
+                {(() => {
+                  const d = intDelta(aggA.totalLeads, aggB.totalLeads);
+                  return <td title="Δ лидов, шт (A − B)" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>;
+                })()}
+              </tr>
+              {totalOpen && subRow(
+                "__total__sales", "Продажи",
+                String(aggA.totalSales), String(aggB.totalSales),
+                intDelta(aggA.totalSales, aggB.totalSales), "Δ продаж, шт (A − B)",
+              )}
+              {totalOpen && subRow(
+                "__total__conv", "Конверсия в продажу",
+                fmtPct(aggA.totalSales, aggA.totalLeads), fmtPct(aggB.totalSales, aggB.totalLeads),
+                ppDeltaVal(aggA.totalSales, aggA.totalLeads, aggB.totalSales, aggB.totalLeads), "Δ конверсии, п.п. (A − B)",
+              )}
+
+              {/* Корзины: главное число — доля от общего; внутри — продажи и конверсии. */}
+              {dim.buckets.map((b) => {
+                const k = b.key || "__none__";
+                const open = expanded.has(k);
+                const vA = aggA.byBucket[b.key];
+                const vB = aggB.byBucket[b.key];
+                const shareDelta = ppDeltaVal(vA.leads, aggA.totalLeads, vB.leads, aggB.totalLeads);
                 return (
-                  <Fragment key={m.id}>
-                    <td className="py-2 px-3 text-right tabular-nums text-white border-l border-white/10">{totalCell(aggA)}</td>
-                    <td className="py-2 px-3 text-right tabular-nums text-white">{totalCell(aggB)}</td>
-                    <td className={`py-2 px-3 text-right tabular-nums ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>
+                  <Fragment key={k}>
+                    <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={() => toggle(k)}>
+                      <td className="px-4 py-2 sticky left-0 z-10" style={stickyStyle}>
+                        <div className="flex items-center gap-2">
+                          {open ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+                          <BucketDot color={b.color} />
+                          <span className="text-[11px] font-bold text-white">{b.label}</span>
+                        </div>
+                      </td>
+                      {periodCell(b, aggA, fromA, toA, String(vA.leads), `px-2 py-2 text-center text-[11px] font-bold ${vA.leads === 0 ? "text-slate-600" : "text-white"}`)}
+                      {periodCell(b, aggA, fromA, toA, fmtPct(vA.leads, aggA.totalLeads), `px-3 py-2 text-center font-mono text-[12px] font-bold ${vA.leads === 0 ? "text-slate-600" : "text-slate-200"}`)}
+                      {periodCell(b, aggB, fromB, toB, String(vB.leads), `px-2 py-2 text-center text-[11px] font-bold ${vB.leads === 0 ? "text-slate-600" : "text-white"}`)}
+                      {periodCell(b, aggB, fromB, toB, fmtPct(vB.leads, aggB.totalLeads), `px-3 py-2 text-center font-mono text-[12px] font-bold ${vB.leads === 0 ? "text-slate-600" : "text-slate-200"}`)}
+                      <td title="Δ доли от общего, п.п. (A − B)" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${shareDelta ? DELTA_CLS[shareDelta.tone] : "text-slate-600"}`}>
+                        {shareDelta ? shareDelta.text : "—"}
+                      </td>
+                    </tr>
+                    {open && subRow(
+                      `${k}-sales`, "Продажи",
+                      String(vA.sales), String(vB.sales),
+                      intDelta(vA.sales, vB.sales), "Δ продаж, шт (A − B)",
+                    )}
+                    {open && subRow(
+                      `${k}-convTotal`, "Конверсия от общего",
+                      fmtPct(vA.sales, aggA.totalLeads), fmtPct(vB.sales, aggB.totalLeads),
+                      ppDeltaVal(vA.sales, aggA.totalLeads, vB.sales, aggB.totalLeads), "Δ конверсии, п.п. (A − B)",
+                    )}
+                    {open && subRow(
+                      `${k}-convCat`, "Конверсия категории",
+                      fmtPct(vA.sales, vA.leads), fmtPct(vB.sales, vB.leads),
+                      ppDeltaVal(vA.sales, vA.leads, vB.sales, vB.leads), "Δ конверсии, п.п. (A − B)",
+                    )}
                   </Fragment>
                 );
               })}
-            </tr>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
