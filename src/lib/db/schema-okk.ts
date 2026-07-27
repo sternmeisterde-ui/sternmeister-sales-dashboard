@@ -171,6 +171,59 @@ export const okkVoiceFeedback = pgTable("voice_feedback", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// ─── feedback_tasks (Разбор ОС, D2) ───────────────────────
+// Задача на разбор звонка с оценкой < 80. Пишет OKK-сервис (jobs/feedback-tasks),
+// дашборд только читает. Заменила worst_calls, где была «одна задача на
+// менеджера за полдня» и один булев вердикт на весь разбор.
+export interface OkkFeedbackTargetCriterion {
+  block: string;
+  name: string;
+  lost: number;
+  score: number | null;
+  maxScore: number;
+}
+export interface OkkFeedbackReviewItem {
+  name: string;
+  covered: boolean;
+  quality: 0 | 1 | 2;
+  comment: string;
+}
+
+export const okkFeedbackTasks = pgTable("feedback_tasks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  callId: uuid("call_id").notNull(),
+  managerId: uuid("manager_id"),
+  score: integer("score").notNull(),
+  targetCriteria: jsonb("target_criteria").$type<OkkFeedbackTargetCriterion[]>(),
+  status: text("status").notNull(),                 // pending | done | cancelled
+  firstSentAt: timestamp("first_sent_at", { withTimezone: true }),
+  lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+  remindersSent: integer("reminders_sent"),
+  escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  voiceFeedbackId: uuid("voice_feedback_id"),
+  cancelReason: text("cancel_reason"),
+  reviewJson: jsonb("review_json").$type<OkkFeedbackReviewItem[]>(),
+  reviewSummary: text("review_summary"),
+  reviewCovered: integer("review_covered"),
+  reviewTarget: integer("review_target"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
+// ─── feedback_messages (журнал отправок) ──────────────────
+// Что именно и когда написали менеджеру, включая неудачные отправки: «не
+// доставлено» — тоже факт, иначе молчание выглядит как игнор.
+export const okkFeedbackMessages = pgTable("feedback_messages", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  taskId: uuid("task_id").notNull(),
+  kind: text("kind").notNull(),                     // initial | reminder | escalation
+  chatId: text("chat_id"),
+  telegramMessageId: integer("telegram_message_id"),
+  text: text("text").notNull(),
+  error: text("error"),
+  sentAt: timestamp("sent_at", { withTimezone: true }).defaultNow(),
+});
+
 // ─── worst_calls (daily feedback tracking) ────────────────
 export const okkWorstCalls = pgTable("worst_calls", {
   id: uuid("id").primaryKey().defaultRandom(),

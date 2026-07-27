@@ -297,6 +297,106 @@ const VERTICAL_OPTIONS: ReadonlyArray<{ id: Vertical; label: string }> = [
  *  Расширять по мере подключения вкладок к мед-направлению. */
 const VERTICAL_TABS: ReadonlySet<string> = new Set(["dashboard", "daily", "analytics", "looker", "real_calls", "termins", "funnel", "docflow"]);
 
+/**
+ * Задача на разбор ОС (b2g). Отвечает на три вопроса РОПа разом: что менеджера
+ * просили разобрать, что и когда ему отправили, и насколько он разобрал —
+ * пооценочно по целевым пунктам, а не одним «зачтено/не зачтено».
+ */
+function FeedbackTaskPanel({ task }: { task: NonNullable<ManagerCall["feedbackTask"]> }) {
+  const [showLog, setShowLog] = useState(false);
+  const fmt = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString("ru-RU", {
+      timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+    }) : "—";
+
+  const statusChip =
+    task.status === "pending"
+      ? { cls: "bg-slate-500/10 text-slate-300 border-slate-500/30", text: `Ждёт разбора · напоминаний ${task.remindersSent}` }
+      : task.status === "done"
+      ? { cls: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30", text: "Разбор записан" }
+      : { cls: "bg-slate-700/30 text-slate-400 border-slate-600/30", text: `Задача снята${task.cancelReason ? `: ${task.cancelReason}` : ""}` };
+
+  return (
+    <div className="rounded-xl border border-white/5 bg-slate-900/40 p-4 flex flex-col gap-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold ${statusChip.cls}`}>
+          {statusChip.text}
+        </span>
+        {task.escalatedAt && (
+          <span className="px-2 py-1 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 text-[10px] font-bold"
+                title={`Сигнал РОПу отправлен ${fmt(task.escalatedAt)}`}>
+            Просрочено
+          </span>
+        )}
+        <span className="text-[11px] text-slate-500">
+          первое сообщение {fmt(task.firstSentAt)} · последнее {fmt(task.lastSentAt)}
+        </span>
+      </div>
+
+      <div>
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+          Что нужно разобрать
+        </div>
+        <div className="flex flex-col gap-1">
+          {task.targetCriteria.map((c, i) => {
+            // Вердикт по этому пункту, если разбор уже оценён. Сопоставляем по
+            // названию: порядок в оценке совпадает с порядком целевых пунктов.
+            const verdict = task.review?.[i];
+            const icon = !verdict ? "•" : verdict.quality === 2 ? "✅" : verdict.quality === 1 ? "🟡" : "❌";
+            return (
+              <div key={`${c.name}-${i}`} className="text-xs text-slate-300 flex gap-2">
+                <span className="shrink-0">{icon}</span>
+                <span>
+                  {c.name}
+                  {verdict?.comment && <span className="text-slate-500"> — {verdict.comment}</span>}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        {task.reviewTarget != null && (
+          <div className="mt-2 text-xs text-slate-400">
+            Разобрано <b className="text-slate-200">{task.reviewCovered ?? 0}</b> из {task.reviewTarget}
+            {task.reviewSummary && <span className="text-slate-500"> · {task.reviewSummary}</span>}
+          </div>
+        )}
+      </div>
+
+      {task.messages.length > 0 && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowLog((v) => !v)}
+            className="text-[11px] text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            {showLog ? "Скрыть" : "Показать"} отправленные сообщения ({task.messages.length})
+          </button>
+          {showLog && (
+            <div className="mt-2 flex flex-col gap-2">
+              {task.messages.map((m, i) => (
+                <div key={i} className="rounded-lg border border-white/5 bg-slate-950/40 p-2.5">
+                  <div className="flex items-center gap-2 mb-1 text-[10px]">
+                    <span className="text-slate-500">{fmt(m.sentAt)}</span>
+                    <span className="text-slate-600">
+                      {m.kind === "initial" ? "первое" : m.kind === "reminder" ? "напоминание" : "сигнал РОПу"}
+                    </span>
+                    {!m.delivered && (
+                      <span className="text-rose-400" title={m.error ?? ""}>не доставлено</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed">
+                    {m.text.replace(/<[^>]+>/g, "")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
@@ -1890,11 +1990,30 @@ export default function Dashboard() {
                         </td>
                         {showFeedbackCol && (
                           <td className="px-5 py-3 text-center">
-                            {call.voiceFeedback ? (
+                            {/* Задача на разбор (feedback_tasks) — приоритетный
+                                источник: показывает и «ждёт разбора» со счётчиком
+                                напоминаний, и результат оценки по критериям.
+                                Старый вердикт worst_calls остаётся для звонков
+                                до перехода на задачи. */}
+                            {call.voiceFeedback?.taskStatus === "pending" ? (
+                              <button
+                                onClick={() => handleSelectCall(call, "feedback")}
+                                title={`Менеджер ещё не записал разбор. Напоминаний отправлено: ${call.voiceFeedback.remindersSent ?? 0}`}
+                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] font-bold transition-all hover:scale-105 bg-slate-500/10 text-slate-300 border-slate-500/30"
+                              >
+                                <Mic className="w-3 h-3 shrink-0" />
+                                Ждёт
+                                {(call.voiceFeedback.remindersSent ?? 0) > 0 && (
+                                  <span className="text-slate-500">· {call.voiceFeedback.remindersSent}</span>
+                                )}
+                              </button>
+                            ) : call.voiceFeedback ? (
                               <button
                                 onClick={() => handleSelectCall(call, "feedback")}
                                 title={
-                                  call.voiceFeedback.adequate === true
+                                  call.voiceFeedback.reviewTarget
+                                    ? `Разбор записан — разобрано ${call.voiceFeedback.reviewCovered ?? 0} из ${call.voiceFeedback.reviewTarget} целевых пунктов`
+                                    : call.voiceFeedback.adequate === true
                                     ? "Разбор записан — ошибки признаны"
                                     : call.voiceFeedback.adequate === false
                                     ? "Разбор записан — формальный, ошибки не разобраны"
@@ -1909,7 +2028,9 @@ export default function Dashboard() {
                                 }`}
                               >
                                 <Mic className="w-3 h-3 shrink-0" />
-                                {call.voiceFeedback.adequate === true ? "Зачтён" : call.voiceFeedback.adequate === false ? "Не зачтён" : "Есть"}
+                                {call.voiceFeedback.reviewTarget
+                                  ? `${call.voiceFeedback.reviewCovered ?? 0}/${call.voiceFeedback.reviewTarget}`
+                                  : call.voiceFeedback.adequate === true ? "Зачтён" : call.voiceFeedback.adequate === false ? "Не зачтён" : "Есть"}
                               </button>
                             ) : (
                               <span className="text-slate-600 text-[10px]" title="Менеджер не записал разбор">—</span>
@@ -2125,8 +2246,20 @@ export default function Dashboard() {
               </div>
             ) : callModalType === "feedback" ? (
               <div className="flex flex-col gap-4 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                {/* Задача на разбор: что просили разобрать, что отправляли и как
+                    оценён разбор. Показываем ДО голосового — если менеджер ещё
+                    не записал, это единственное содержимое вкладки, и оно должно
+                    объяснять, чего ждём и что ему уже написали. */}
+                {selectedCall.feedbackTask && (
+                  <FeedbackTaskPanel task={selectedCall.feedbackTask} />
+                )}
+
                 {!selectedCall.voiceFeedback ? (
-                  <div className="text-center py-12 text-slate-500 text-sm">Менеджер ещё не записал разбор этой ролевки.</div>
+                  <div className="text-center py-12 text-slate-500 text-sm">
+                    {selectedCall.feedbackTask?.status === "pending"
+                      ? "Менеджер ещё не записал разбор — напоминания отправляются каждый час в рабочее время."
+                      : "Менеджер ещё не записал разбор этой ролевки."}
+                  </div>
                 ) : (
                   <>
                     {/* Вердикт + мета голосового */}

@@ -49,6 +49,31 @@ export interface ManagerCall {
         /** Telegram file_id голосового разбора — для проигрывания через прокси
          *  /api/voice-feedback/[callId]/audio. null/пусто = аудио нет. */
         voiceFileId?: string | null;
+        /** Задача на разбор (feedback_tasks, b2g с 2026-07-28). pending = ждём
+         *  запись, done = записана. Отсутствует у звонков до перехода на задачи. */
+        taskStatus?: "pending" | "done" | "cancelled";
+        /** Сколько напоминаний отправлено по открытой задаче. */
+        remindersSent?: number;
+        /** Итог оценки разбора: сколько целевых пунктов разобрано из скольких. */
+        reviewCovered?: number | null;
+        reviewTarget?: number | null;
+    } | null;
+    /** Полная задача на разбор — только в деталях звонка (карточка). */
+    feedbackTask?: {
+        status: "pending" | "done" | "cancelled";
+        score: number;
+        targetCriteria: Array<{ block: string; name: string; lost: number }>;
+        remindersSent: number;
+        firstSentAt: string | null;
+        lastSentAt: string | null;
+        escalatedAt: string | null;
+        closedAt: string | null;
+        cancelReason: string | null;
+        review: Array<{ name: string; covered: boolean; quality: 0 | 1 | 2; comment: string }> | null;
+        reviewSummary: string | null;
+        reviewCovered: number | null;
+        reviewTarget: number | null;
+        messages: Array<{ kind: string; text: string; sentAt: string | null; delivered: boolean; error: string | null }>;
     } | null;
 }
 
