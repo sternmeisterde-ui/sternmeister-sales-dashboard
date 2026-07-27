@@ -13,9 +13,9 @@ import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 
 // ==================== Types ====================
 
-type SegmentType =
-  | "call" | "crm" | "idle" | "dialer" | "manual"
-  | "lunch" | "meeting" | "dayend";
+// Основная полоска: только телефон / CRM / простой. Статусы менеджера живут на
+// отдельной верхней дорожке (PresenceSegment) — в одной шкале они мешались.
+type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
 
 interface Segment {
   type: SegmentType;
@@ -393,25 +393,24 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             </>
           ) : (
             <>
+              {/* Нижняя полоска — только факт: звонил / сидел в CRM / простаивал. */}
               <LegendDot color="bg-blue-500" label="Телефон" />
               <LegendDot color="bg-emerald-500" label="CRM" />
-              {department === "b2g" && (
-                <>
-                  <LegendDot color="bg-yellow-400/80" label="Обед" />
-                  <LegendDot color="bg-violet-500/80" label="Встреча" />
-                </>
-              )}
               <LegendDot color="bg-rose-500" label="Простой" />
               {/* Верхняя тонкая дорожка — статус из CloudTalk. Отделена
                   разделителем, чтобы не читалась как продолжение легенды
-                  основной полоски: это разные шкалы. */}
+                  основной полоски: это разные шкалы. Полный разбор — в блоке
+                  «Что означает верхняя полоска» под таблицей. */}
               {department === "b2g" && (
                 <>
                   <span className="text-slate-700">|</span>
                   <span className="text-slate-500">статус:</span>
                   <LegendDot color="bg-teal-500/45" label="Доступен" />
                   <LegendDot color="bg-blue-500/60" label="На звонке" />
-                  <LegendDot color="bg-slate-400/40" label="Простой с причиной" />
+                  <LegendDot color="bg-amber-400/70" label="Обед" />
+                  <LegendDot color="bg-violet-400/60" label="Встреча" />
+                  <LegendDot color="bg-orange-400/55" label="Перерыв" />
+                  <LegendDot color="bg-rose-400/45" label="Занят" />
                   <LegendDot color="bg-slate-700/50" label="Не в сети" />
                 </>
               )}
@@ -1216,12 +1215,11 @@ function TimelineBar({ day, dialerView }: { day: DayTimeline; dialerView?: boole
   // muted grey as scheduled-off days plus a badge so the distinction stays
   // (off-day vs no-show vs partial-idle). Dialer view checks call COUNTS,
   // not minutes — a lone 20-second call rounds to 0 minutes but is activity.
+  // Статусы в этой проверке больше не участвуют: нижняя полоска говорит только
+  // про работу, а обед/встречу видно на верхней дорожке.
   const isFullyIdle = dialerView
     ? (day.counts?.dialer ?? 0) === 0 && (day.counts?.manual ?? 0) === 0
-    : day.minutes.call === 0 &&
-      day.minutes.crm === 0 &&
-      (day.minutes.lunch ?? 0) === 0 &&
-      (day.minutes.meeting ?? 0) === 0;
+    : day.minutes.call === 0 && day.minutes.crm === 0;
   if (isFullyIdle) {
     return (
       <div className="relative h-6 rounded-md bg-slate-700/40 border border-slate-600/30 overflow-hidden">
@@ -1250,17 +1248,11 @@ function TimelineBar({ day, dialerView }: { day: DayTimeline; dialerView?: boole
                 ? "bg-emerald-500"
                 : s.type === "manual"
                   ? "bg-rose-500"
-                  : s.type === "lunch"
-                    ? "bg-yellow-400/80"
-                    : s.type === "meeting"
-                      ? "bg-violet-500/80"
-                      : s.type === "dayend"
-                        ? "bg-slate-600/60"
-                        // idle: gray (base bar) in the dialer view — «без звонков»
-                        // is not the same accusation as general-view «простой».
-                        : dialerView
-                          ? "bg-transparent"
-                          : "bg-rose-500/70";
+                  // idle: gray (base bar) in the dialer view — «без звонков»
+                  // is not the same accusation as general-view «простой».
+                  : dialerView
+                    ? "bg-transparent"
+                    : "bg-rose-500/70";
           const text = s.label ?? "";
           return (
             <div
@@ -2282,15 +2274,9 @@ function DetailTimelineBar({
               ? "bg-emerald-500"
               : s.type === "manual"
                 ? "bg-rose-500"
-                : s.type === "lunch"
-                  ? "bg-yellow-400/80"
-                  : s.type === "meeting"
-                    ? "bg-violet-500/80"
-                    : s.type === "dayend"
-                      ? "bg-slate-600/60"
-                      : dialerView
-                        ? "bg-transparent"
-                        : "bg-rose-500/70";
+                : dialerView
+                  ? "bg-transparent"
+                  : "bg-rose-500/70";
         return (
           <div
             key={`${s.type}-${s.startMin}-${i}`}
@@ -2390,7 +2376,7 @@ function SegmentEventList({
   return (
     <div className="mt-4 rounded-lg bg-slate-800/30 border border-white/5 p-3">
       <div className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
-        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "dialer" ? "В дайлере" : seg.type === "manual" ? "Вне дайлера" : seg.type === "lunch" ? "Обед" : seg.type === "meeting" ? "Встреча" : seg.type === "dayend" ? "День завершён" : dialerView ? "Без звонков в CloudTalk" : "Простой"}
+        {seg.type === "call" ? "Звонок" : seg.type === "crm" ? "Работа в CRM" : seg.type === "dialer" ? "В дайлере" : seg.type === "manual" ? "Вне дайлера" : dialerView ? "Без звонков в CloudTalk" : "Простой"}
         <span className="text-slate-500 normal-case tracking-normal ml-2 font-mono">
           {segStart}–{segEnd}
         </span>

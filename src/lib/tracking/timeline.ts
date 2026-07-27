@@ -22,15 +22,15 @@ import { CALL_TYPES, normalizeEventType } from "./event-types";
 //   - Events outside the shift window are clipped to the window.
 //   - If a call overruns the shift end, we clip at shift end.
 
+// Основная полоска отвечает ровно на один вопрос: звонил / сидел в CRM /
+// простаивал. Статусы менеджера (обед, встреча) на неё НЕ наносятся — они
+// живут на отдельной верхней дорожке (PresenceSegment ниже).
+//
 // "dialer" and "manual" are dialer-view-only; the general timeline never emits
 // them. Kept in the shared union so TimelineBar/Segment render both views from
 // one component. "dialer" = a CloudTalk campaign (dialer) call is in progress;
 // "manual" = a CloudTalk call outside the dialer (hand-dialed / incoming).
-// "lunch" / "meeting" / "dayend" — ручные статусы менеджера (Лилия, b2g):
-// обед (жёлтый), встреча (фиолетовый), «завершил день» (серый остаток).
-export type SegmentType =
-  | "call" | "crm" | "idle" | "dialer" | "manual"
-  | "lunch" | "meeting" | "dayend";
+export type SegmentType = "call" | "crm" | "idle" | "dialer" | "manual";
 
 // Ручной статус менеджера, уже приведённый к UTC-миллисекундам вызывающей
 // стороной. endMs — конец интервала; для «активен сейчас» и day_end caller
@@ -543,15 +543,22 @@ export function buildTimeline(params: {
     closeSession(sessionStart, sessionLast);
   }
 
-  // Ручные статусы: красим только поверх ПРОСТОЯ (grid==0) — звонок или CRM
-  // во время «обеда» остаются работой (менеджер реально работал). Значения:
-  // 3=обед, 4=встреча, 5=день завершён.
+  // Ручные статусы на основную полоску НЕ наносим (решение 2026-07-28): статусы
+  // живут на верхней дорожке, а нижняя отвечает на один вопрос — «звонил, сидел
+  // в CRM или простаивал». Смешение двух смыслов в одной шкале превращало её в
+  // мешанину цветов. Минуты статусов всё равно считаем — они нужны как запасной
+  // источник вычетов за дни, по которым нет данных CloudTalk. Считаем только
+  // «пустые» минуты: работа во время обеда остаётся работой.
+  let manualLunchMin = 0;
+  let manualMeetingMin = 0;
   for (const st of statuses) {
-    const val = st.status === "lunch" ? 3 : st.status === "meeting" ? 4 : 5;
+    if (st.status === "day_end") continue; // на цифры не влияет
     const sMin = Math.max(0, Math.floor((st.startMs - shiftStartUtcMs) / 60_000));
     const eMin = Math.min(total, Math.ceil((st.endMs - shiftStartUtcMs) / 60_000));
     for (let i = sMin; i < eMin; i++) {
-      if (grid[i] === 0) grid[i] = val;
+      if (grid[i] !== 0) continue;
+      if (st.status === "lunch") manualLunchMin++;
+      else manualMeetingMin++;
     }
   }
 
@@ -563,13 +570,7 @@ export function buildTimeline(params: {
     let end = cursor + 1;
     while (end < total && grid[end] === v) end++;
 
-    const type: SegmentType =
-      v === 2 ? "call"
-      : v === 1 ? "crm"
-      : v === 3 ? "lunch"
-      : v === 4 ? "meeting"
-      : v === 5 ? "dayend"
-      : "idle";
+    const type: SegmentType = v === 2 ? "call" : v === 1 ? "crm" : "idle";
     const seg: TimelineSegment = {
       type,
       startMin: cursor,
@@ -598,12 +599,6 @@ export function buildTimeline(params: {
       const endHm = fmtSegmentTime(startLocal, end);
       const evWord = evCount === 1 ? "событие" : evCount < 5 ? "события" : "событий";
       seg.label = `Работа в CRM · ${startHm}–${endHm} · ${evCount} ${evWord}`;
-    } else if (type === "lunch") {
-      seg.label = `Обед · ${seg.durationMin} мин`;
-    } else if (type === "meeting") {
-      seg.label = `Встреча · ${seg.durationMin} мин`;
-    } else if (type === "dayend") {
-      seg.label = `День завершён`;
     } else {
       seg.label = `Простой · ${seg.durationMin} мин`;
     }
@@ -625,13 +620,11 @@ export function buildTimeline(params: {
   // разговор). Простой считается от телефонного времени — гудки не простой.
   const callMin = Math.round(phoneSecExact / 60);
   const talkMin = Math.round(talkSecExact / 60);
+  // Ручные минуты (manualLunchMin / manualMeetingMin) посчитаны выше — сетка
+  // теперь хранит только работу, статусов в ней нет.
   let crmMin = 0;
-  let manualLunchMin = 0;
-  let manualMeetingMin = 0;
   for (let i = 0; i < total; i++) {
     if (grid[i] === 1) crmMin++;
-    else if (grid[i] === 3) manualLunchMin++;
-    else if (grid[i] === 4) manualMeetingMin++;
   }
 
   const presenceTrack = presence
