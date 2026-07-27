@@ -70,6 +70,8 @@ interface DayTimeline {
     online: number; onCall: number; idle: number; offline: number; nodata: number;
     byIdle: Record<string, number>;
   };
+  // Откуда взяты вычеты обеда/встреч: статусы CloudTalk или ручные отметки.
+  deductionSource?: "cloudtalk" | "manual";
 }
 
 interface ManagerTimeline {
@@ -482,21 +484,11 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             )}
             {department === "b2g" && (
               <li>
-                <b className="text-slate-300">Тонкая полоска сверху — статус из CloudTalk.</b> Это то, кем менеджер объявил себя в телефоне: доступен, на звонке, обед, встреча, перерыв, не в сети. Заполняется автоматически, отмечать ничего не нужно. Штриховка означает, что статус за этот отрезок неизвестен — это не то же самое, что «не в сети».
-              </li>
-            )}
-            {department === "b2g" && (
-              <li>
-                <b className="text-slate-300">Почему две полоски.</b> Нижняя показывает, что человек делал по факту (звонки и работа в CRM), верхняя — что он сам о себе заявил. Они намеренно разделены: статус «доступен» без единого звонка под ним виден сразу.
-              </li>
-            )}
-            {department === "b2g" && (
-              <li>
-                <b className="text-slate-300">Статусы менеджера.</b> Менеджер отмечает в шапке вкладки: <span className="text-yellow-400 font-semibold">обед</span> (не считается простоем до 60 мин/день), <span className="text-violet-400 font-semibold">встреча</span> (рабочее время) и «завершил день». Статус ставится только в моменте; задним числом интервалы правит админ через лупу дня.
+                <b className="text-slate-300">Почему две полоски.</b> Нижняя показывает, что человек делал по факту (звонки и работа в CRM), верхняя — какой статус у него стоял в CloudTalk. Они намеренно разделены: статус «доступен», под которым нет ни одного звонка, виден сразу. Подробнее про статусы — в блоке ниже.
               </li>
             )}
             <li>
-              <b className="text-slate-300">Простой</b> считается от нормы 8 рабочих часов: 8 часов минус время активности (звонки + работа в CRM).
+              <b className="text-slate-300">Простой</b> считается от нормы 8 рабочих часов: 8 часов минус звонки, работа в CRM, встречи и обучение целиком, и минус час на обед. Час обеда закладывается каждому автоматически — отмечать его не нужно. Перерыв и статус «занят» простоем считаются.
             </li>
             <li>
               <b className="text-slate-300">Обновление данных.</b> Вкладка сама обновляется примерно раз в 5 минут. Звонки попадают сюда из телефонии не мгновенно: по CloudTalk — обычно в течение ~10 минут после звонка.
@@ -506,6 +498,13 @@ export default function TrackingTab({ department }: TrackingTabProps) {
             </li>
           </ul>
         </div>
+      )}
+
+      {/* Разбор статусов простыми словами — b2g. Вынесен в отдельный блок:
+          вопрос «а почему у меня простой, я же был на встрече» возникает у
+          менеджеров чаще всего, и ответ должен быть на экране, а не в чате. */}
+      {!isDialer && department === "b2g" && data && data.managers.length > 0 && (
+        <StatusExplainer />
       )}
 
       {/* Сводная таблица общего вида — пофамильные итоги за период. */}
@@ -565,6 +564,86 @@ export default function TrackingTab({ department }: TrackingTabProps) {
 }
 
 // ==================== Subcomponents ====================
+
+// ==================== Разбор статусов (b2g) ====================
+// Человеческое объяснение верхней дорожки: откуда берётся, что значит каждый
+// статус и как он влияет на простой. Цветовые квадратики повторяют палитру
+// дорожки один в один — иначе таблицу пришлось бы сверять глазами с полоской.
+const STATUS_ROWS: Array<{ color: string; name: string; effect: string; hatch?: boolean }> = [
+  { color: "bg-teal-500/45", name: "Доступен", effect: "Готов принимать звонки. Время идёт в простой, если звонков и работы в CRM нет" },
+  { color: "bg-blue-500/60", name: "На звонке", effect: "Разговор. Считается по данным телефонии, отдельно от статуса" },
+  { color: "bg-amber-400/70", name: "Обед", effect: "Час в день вычитается из простоя каждому автоматически — отмечаться не обязательно" },
+  { color: "bg-violet-400/60", name: "Встреча", effect: "Рабочее время: вычитается из простоя целиком" },
+  { color: "bg-sky-400/55", name: "Обучение", effect: "Рабочее время: вычитается из простоя целиком" },
+  { color: "bg-orange-400/55", name: "Перерыв", effect: "Считается простоем" },
+  { color: "bg-rose-400/45", name: "Занят", effect: "Считается простоем" },
+  { color: "bg-slate-700/50", name: "Не в сети", effect: "Приложение выключено. Считается простоем" },
+  { color: "bg-slate-800", name: "Нет данных", effect: "Статус за этот отрезок неизвестен — это не то же самое, что «не в сети»", hatch: true },
+];
+
+function StatusExplainer() {
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4 text-[12px] text-slate-400 leading-relaxed">
+      <div className="flex items-center gap-2 mb-2.5 text-slate-300 font-semibold">
+        <Info className="w-4 h-4 text-teal-400 shrink-0" /> Что означает верхняя полоска
+      </div>
+
+      <p className="mb-3">
+        Это статус, который менеджер ставит себе в приложении CloudTalk Phone — там же, где звонит.
+        В дашборде отмечать ничего не нужно, статусы подтягиваются сами примерно раз в минуту.
+      </p>
+
+      <div className="overflow-x-auto rounded-lg border border-white/5">
+        <table className="w-full text-[11.5px]">
+          <thead className="bg-slate-900">
+            <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500">
+              <th className="px-3 py-2 font-medium">Статус</th>
+              <th className="px-3 py-2 font-medium">Как влияет на простой</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {STATUS_ROWS.map((r) => (
+              <tr key={r.name}>
+                <td className="px-3 py-1.5 whitespace-nowrap">
+                  <span className="inline-flex items-center gap-2">
+                    <span
+                      className={`w-3 h-3 rounded-sm ${r.color} shrink-0`}
+                      style={r.hatch ? { backgroundImage: NODATA_HATCH } : undefined}
+                    />
+                    <span className="text-slate-200">{r.name}</span>
+                  </span>
+                </td>
+                <td className="px-3 py-1.5 text-slate-400">{r.effect}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <ul className="flex flex-col gap-2 mt-3">
+        <li>
+          <b className="text-slate-300">Простой = 8 часов минус всё полезное.</b> Из нормы рабочего дня
+          вычитаются звонки, работа в CRM, встречи и обучение целиком, плюс час на обед. Что осталось —
+          простой.
+        </li>
+        <li>
+          <b className="text-slate-300">Работа во время обеда остаётся работой.</b> Если менеджер с
+          обеденным статусом ответил на звонок, эта минута считается звонком.
+        </li>
+        <li>
+          <b className="text-slate-300">Штриховка — это про нас, а не про менеджера.</b> Она означает, что
+          в тот момент мы статус не получили: сбор данных начался позже или прерывался. Обвинений за такие
+          отрезки не выносим.
+        </li>
+        <li>
+          <b className="text-slate-300">Забыл переключить статус — не страшно.</b> На цифры это почти не
+          влияет: час обеда заложен всем, а всё остальное считается по фактическим звонкам и работе в CRM.
+          Из статусов на расчёт влияют только встречи и обучение.
+        </li>
+      </ul>
+    </div>
+  );
+}
 
 function LegendDot({ color, label }: { color: string; label: string }) {
   return (
@@ -1376,6 +1455,11 @@ function GeneralSummaryTable({
     .sort((a, b) => b.util - a.util || b.call - a.call);
 
   if (rows.length === 0) return null;
+  // Хоть один день посчитан по статусам CloudTalk — подписываем источник, чтобы
+  // «обед 0 мин» читалось как «не отмечался», а не как «не обедал».
+  const usesCloudTalk = managers.some((m) =>
+    m.days.some((d) => d.mode === "working" && d.deductionSource === "cloudtalk"),
+  );
   // «в диалоге» показываем, только если по отделу реально трекается дозвон
   // (b2g); для b2b колонка дублировала бы «в телефоне».
   const showTalk = department === "b2g" && rows.some((r) => r.hasTalk && r.talk !== r.call);
@@ -1388,6 +1472,7 @@ function GeneralSummaryTable({
         <span className="text-sm font-semibold text-white">Итоги за период</span>
         <span className="text-[11px] text-slate-500">
           суммы по рабочим дням · утилизация = (телефон + CRM) от нормы 8 ч/день
+          {usesCloudTalk && " · встречи — из статусов CloudTalk, час обеда заложен всем"}
         </span>
       </div>
       <div className="overflow-x-auto rounded-lg border border-white/5">
@@ -1401,8 +1486,8 @@ function GeneralSummaryTable({
               <th className="px-3 py-2 font-medium text-right">В CRM</th>
               {showStatuses && (
                 <>
-                  <th className="px-3 py-2 font-medium text-right" title="До 60 мин/день не считается простоем">Обед</th>
-                  <th className="px-3 py-2 font-medium text-right" title="Вычитаются из простоя">Встречи</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Фактически отмеченный обед. На расчёт не влияет: час обеда вычитается из простоя всем автоматически">Обед</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Встречи и обучение — вычитаются из простоя целиком">Встречи</th>
                 </>
               )}
               <th className="px-3 py-2 font-medium text-right">Простой</th>
