@@ -17,6 +17,7 @@ import { trackingEvents, managerStatusIntervals } from "@/lib/db/schema-tracking
 import { ensureTrackingSchema } from "@/lib/tracking/init";
 import { DEFAULT_SELECTED_KEYS, EVENT_TYPE_MAP, normalizeEventType } from "@/lib/tracking/event-types";
 import { buildTimeline, buildDialerTimeline, type TimelineEvent, type ScheduleRow, type StatusInterval } from "@/lib/tracking/timeline";
+import { getPresenceRanges, presenceForDay, presenceEnabledFor } from "@/lib/tracking/presence";
 import { getDialerCallEventsByMaster, getAnalyticsCallEventsByMaster } from "@/lib/daily/analytics-calls";
 import { tzOffsetMinutes } from "@/lib/utils/date";
 import { getSession } from "@/lib/auth";
@@ -305,6 +306,15 @@ export async function GET(req: NextRequest) {
         entityType: null,
       });
     }
+    // Присутствие CloudTalk за этот день — та же дорожка, что в основном виде.
+    const presence = presenceEnabledFor(department)
+      ? presenceForDay(
+          await getPresenceRanges(department, [managerId], dayStartMs, dayEndMs),
+          dayStartMs,
+          dayEndMs,
+        )
+      : undefined;
+
     const timeline = buildTimeline({
       scheduleRow,
       dateISO,
@@ -312,6 +322,7 @@ export async function GET(req: NextRequest) {
       events: timelineEvents,
       selectedCrmTypes,
       statuses,
+      presence,
     });
 
     // Per-event detail. Filter to selected types + calls so the modal
