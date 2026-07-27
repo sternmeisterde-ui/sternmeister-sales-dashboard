@@ -1323,7 +1323,7 @@ export default function DashboardTab({
                     <th className="text-right py-2 px-2 font-medium">Принятых</th>
                     <th className="text-right py-2 px-2 font-medium">% дозв.</th>
                     <th className="text-right py-2 px-2 font-medium">Длительность</th>
-                    <th className="text-right py-2 px-2 font-medium">Ожидание</th>
+                    <th className="text-right py-2 px-2 font-medium" title="Среднее время гудков в неотвеченных исходящих — как плитка «Ожидание» (по недозвонам)">Ожидание</th>
                     <th className="text-right py-2 px-2 font-medium">SLA</th>
                     <th className="text-right py-2 px-2 font-medium">Всего</th>
                   </tr>
@@ -1345,12 +1345,13 @@ export default function DashboardTab({
                         </span>
                       </td>
                       <td className="py-2 px-2 text-right text-slate-300">{fmtHoursMinutes(mgr.totalMinutes)}</td>
-                      {/* Ожидание: b2g — по недозвонам (как плитка, по звонившему);
-                          b2b — по отвеченным (avgWaitSeconds, как было у Комм). */}
+                      {/* Ожидание — по недозвонам в обоих отделах (решение
+                          2026-07-28): среднее гудков в НЕОТВЕЧЕННЫХ исходящих,
+                          как у плитки «Ожидание». Раньше b2b показывал здесь
+                          avgWaitSeconds (по отвеченным) — числа расходились
+                          с плиткой и это путало. */}
                       <td className="py-2 px-2 text-right text-slate-300">
-                        {isB2G
-                          ? (mgr.unansweredWaitSeconds ? `${mgr.unansweredWaitSeconds} с` : "—")
-                          : `${mgr.avgWaitSeconds} с`}
+                        {mgr.unansweredWaitSeconds ? `${mgr.unansweredWaitSeconds} с` : "—"}
                       </td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
