@@ -254,6 +254,10 @@ function buildPresenceTrack(
   // в которую менеджер «на обеде» ответил на звонок, попадёт и в звонки, и в
   // вычет обеда — простой окажется занижен на ровном месте.
   workGrid: Uint8Array,
+  // true → интервалы пришли не из CloudTalk, а из ручных отметок (запасной
+  // источник за дни без данных). Помечаем это в подсказке, чтобы дорожка не
+  // выдавала ручную отметку за статус из телефона.
+  manualSource = false,
 ): {
   segments: PresenceSegment[];
   minutes: TimelineResult["presenceMinutes"];
@@ -324,13 +328,14 @@ function buildPresenceTrack(
       : type === "online" ? "Доступен"
       : type === "offline" ? "Не в сети"
       : "Нет данных о статусе";
+    const suffix = manualSource && type === "idle" ? " · отмечено вручную" : "";
     segments.push({
       type,
       idleName: type === "idle" ? name : undefined,
       startMin: cursor,
       endMin: end,
       durationMin: end - cursor,
-      label: `${title} · ${from}–${to} · ${end - cursor} мин`,
+      label: `${title} · ${from}–${to} · ${end - cursor} мин${suffix}`,
     });
     cursor = end;
   }
@@ -549,17 +554,26 @@ export function buildTimeline(params: {
   // мешанину цветов. Минуты статусов всё равно считаем — они нужны как запасной
   // источник вычетов за дни, по которым нет данных CloudTalk. Считаем только
   // «пустые» минуты: работа во время обеда остаётся работой.
-  let manualLunchMin = 0;
-  let manualMeetingMin = 0;
+  // Считаем по МАСКЕ, а не по каждому интервалу отдельно: интервалы могут
+  // пересекаться (админ добавляет задним числом без проверки на наложение, а
+  // забытый с вечера статус закрывается «сейчас» и накрывает утренний), и
+  // поминутный подсчёт зачёл бы одну минуту дважды — вычет из простоя вырос бы
+  // из воздуха. Маска делает подсчёт идемпотентным, как раньше делала сетка.
+  const manualMask = new Uint8Array(total); // 0=нет, 1=обед, 2=встреча
   for (const st of statuses) {
     if (st.status === "day_end") continue; // на цифры не влияет
+    const val = st.status === "lunch" ? 1 : 2;
     const sMin = Math.max(0, Math.floor((st.startMs - shiftStartUtcMs) / 60_000));
     const eMin = Math.min(total, Math.ceil((st.endMs - shiftStartUtcMs) / 60_000));
     for (let i = sMin; i < eMin; i++) {
-      if (grid[i] !== 0) continue;
-      if (st.status === "lunch") manualLunchMin++;
-      else manualMeetingMin++;
+      if (grid[i] === 0 && manualMask[i] === 0) manualMask[i] = val;
     }
+  }
+  let manualLunchMin = 0;
+  let manualMeetingMin = 0;
+  for (let i = 0; i < total; i++) {
+    if (manualMask[i] === 1) manualLunchMin++;
+    else if (manualMask[i] === 2) manualMeetingMin++;
   }
 
   // Collapse into segments
@@ -627,7 +641,7 @@ export function buildTimeline(params: {
     if (grid[i] === 1) crmMin++;
   }
 
-  const presenceTrack = presence
+  const cloudTalkTrack = presence
     ? buildPresenceTrack(presence, shiftStartUtcMs, shiftEndUtcMs, total, startLocal, grid)
     : null;
 
@@ -635,13 +649,33 @@ export function buildTimeline(params: {
   // из статусов CloudTalk. Где статусов нет (дни до запуска поллера, его
   // простои) — остаются ручные отметки: иначе переключение источника обнулило
   // бы вычеты задним числом и утилизация за прошлые месяцы просела бы.
-  const useCloudTalk = presenceTrack?.hasData ?? false;
+  const useCloudTalk = cloudTalkTrack?.hasData ?? false;
   const meetingMin = useCloudTalk
-    ? presenceTrack!.deductible.meeting + presenceTrack!.deductible.training
+    ? cloudTalkTrack!.deductible.meeting + cloudTalkTrack!.deductible.training
     : manualMeetingMin;
   // Обед показываем фактический (сколько реально стоял статус), но на вычет он
   // не влияет — см. ниже.
-  const lunchMin = useCloudTalk ? presenceTrack!.deductible.lunch : manualLunchMin;
+  const lunchMin = useCloudTalk ? cloudTalkTrack!.deductible.lunch : manualLunchMin;
+
+  // За дни без данных CloudTalk рисуем на дорожке ручные отметки. Иначе
+  // отмеченная встреча пропадала с экрана совсем: нижняя полоска показывает
+  // «нет активности» (работы-то не было), верхняя — сплошную штриховку, а из
+  // простоя встреча при этом вычтена. Картинка расходилась бы с цифрами.
+  // Источник вычетов от этого не меняется — он уже зафиксирован выше.
+  const manualIntervals: PresenceInterval[] = useCloudTalk
+    ? []
+    : statuses
+        .filter((s) => s.status !== "day_end")
+        .map((s) => ({
+          status: "idle" as const,
+          idleName: s.status === "lunch" ? "Обед" : "Встреча",
+          startMs: s.startMs,
+          endMs: s.endMs,
+        }));
+  const presenceTrack =
+    presence && !useCloudTalk && manualIntervals.length > 0
+      ? buildPresenceTrack(manualIntervals, shiftStartUtcMs, shiftEndUtcMs, total, startLocal, grid, true)
+      : cloudTalkTrack;
 
   // Простой от 8-часовой нормы.
   //   • Встречи и обучение — рабочее время, вычитаются целиком.
