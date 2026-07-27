@@ -141,6 +141,17 @@ For B2G the line dropdown switches between 4 server-computed series:
 
 For B2B: no dropdown (would be flat zeros if shown — see below).
 
+**B2B — таблица вместо графика** (2026-07-28, `TrendTableByManager`; у B2G
+остаётся график `TrendChartByManager`). Обычный режим: строки-менеджеры ×
+колонки-дни окна (метрика по пилюлям Звонки/Дозвон/Пропущенные), «Итого»
+первой колонкой, футер «Всего», выходные из `manager_schedule` серым,
+тултип ячейки — все метрики за день. «Сравнить периоды» (референс —
+сравнение в «Оценке критериев»): Менеджер | период A | период B | Δ (A−B),
+главное число — Звонки, строка раскрывается на Дозвон/Пропущенные
+(развёрнуто по умолчанию), сверху жирная группа «Всего»; у «Пропущенных»
+инверсия цвета дельты (рост = красный). Периоды A/B и данные — те же, что
+были у графика (`/api/dashboard/manager-trend`).
+
 Trend window when single day selected: 7-day rolling. When range selected:
 exact range.
 
