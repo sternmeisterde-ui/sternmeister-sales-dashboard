@@ -11,6 +11,7 @@ import Image from "next/image";
 // recharts moved to DashboardTab component
 import { ManagerStat, ManagerCall } from "@/lib/mockData";
 import DailyTab from "@/components/DailyTab";
+import DailyTabB2B from "@/components/DailyTabB2B";
 import CategoryDynamicsTab from "@/components/CategoryDynamicsTab";
 import AnalyticsTab from "@/components/AnalyticsTab";
 import TrackingTab from "@/components/TrackingTab";
@@ -1141,12 +1142,15 @@ export default function Dashboard() {
           />
         )}
 
-        {/* --------------------- DAILY VIEW --------------------- */}
+        {/* --------------------- DAILY VIEW ---------------------
+             Дейли отделов разделено (2026-07-28): у Коммерсов своя копия
+             DailyTabB2B (логика/поведение расходятся), Госники — DailyTab. */}
         {activeTab === "daily" && (
-          <DailyTab
-            department={activeDepartment}
-            vertical={activeDepartment === "b2g" ? activeVertical : undefined}
-          />
+          activeDepartment === "b2b" ? (
+            <DailyTabB2B />
+          ) : (
+            <DailyTab department={activeDepartment} vertical={activeVertical} />
+          )
         )}
 
         {/* --------------------- CATEGORY DYNAMICS VIEW --------------------- */}
