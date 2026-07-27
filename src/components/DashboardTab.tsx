@@ -2106,10 +2106,11 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
 // Замена графика TrendChartByManager у Коммерсов (решение 2026-07-28); у
 // Госников остаётся график — ветвление на коллсайте. Механика периодов A/B
 // и выходных (manager_schedule) — та же, что у графика. Два режима:
-//  • обычный: колонки-дни окна, у каждого менеджера ТРИ строки — Звонки /
-//    Дозвон / Пропущенные (пилюли-переключатель убраны 2026-07-28: все
-//    значения должны быть видны разом), «Итого» первой колонкой, футер
-//    «Всего» тремя такими же строками, выходные серым;
+//  • обычный: строки-менеджеры × колонки-дни окна; ВСЕ метрики упакованы
+//    в одну ячейку (итерации фидбека 2026-07-28: пилюли → строки-метрики →
+//    компактные ячейки): сверху звонки, снизу мелко дозвон (зелёный) ·
+//    пропущенные (красный); «Итого» первой колонкой, футер «Всего»,
+//    выходные серым, легенда под таблицей;
 //  • «Сравнить периоды»: плоская таблица без раскрывашек (решение
 //    2026-07-28 — тогл мешал охватить все значения разом): строки-менеджеры,
 //    группы колонок Звонки | Дозвон | Пропущенные, в каждой A | B | Δ,
@@ -2267,6 +2268,21 @@ function TrendTableByManager({ trendByManager, department, selected }: {
   const fmtDay = (d: string) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
   const WEEKDAYS = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
   const weekday = (d: string) => WEEKDAYS[new Date(`${d}T00:00:00Z`).getUTCDay()];
+
+  /** Упакованная ячейка обычного режима: сверху звонки, снизу мелко
+   *  дозвон (зелёный) · пропущенные (красный). Нули приглушены. */
+  const packedCell = (calls: number, connected: number, missed: number, bold: boolean, off = false) => (
+    <div className="leading-tight">
+      <div className={`tabular-nums ${bold ? "font-semibold" : ""} ${off ? "text-slate-500" : calls === 0 ? "text-slate-600" : bold ? "text-white" : "text-slate-200"}`}>
+        {calls}
+      </div>
+      <div className="text-[10px] tabular-nums whitespace-nowrap">
+        <span className={off ? "text-slate-500" : connected === 0 ? "text-slate-600" : "text-emerald-400"}>{connected}</span>
+        <span className="text-slate-600"> · </span>
+        <span className={off ? "text-slate-500" : missed === 0 ? "text-slate-600" : "text-rose-400"}>{missed}</span>
+      </div>
+    </div>
+  );
 
   const cellTitle = (name: string, b: DailyBucket | undefined, off: boolean) =>
     [
@@ -2456,74 +2472,77 @@ function TrendTableByManager({ trendByManager, department, selected }: {
             </tr>
           </thead>
           <tbody>
-            {/* У каждого менеджера три строки-метрики — все значения видны разом
-                (пилюли-переключатель убраны по фидбеку 2026-07-28). */}
+            {/* Все метрики в одной ячейке: сверху звонки, снизу мелко
+                дозвон (зелёный) · пропущенные (красный). Одна строка на
+                менеджера — компактно, значения видны разом. */}
             {visible.map((m) => {
               const id = managerIdByName?.[m];
               const buckets = trendByManager?.[m] ?? [];
-              return METRIC_PILLS.map((p, pi) => {
-                const main = pi === 0;
-                const total = sumMetric(buckets, p.key);
-                return (
-                  <tr
-                    key={`${m}-${p.key}`}
-                    className={`${main ? "border-t border-white/10" : "border-b border-white/[0.03]"} hover:bg-white/[0.02] transition-colors`}
-                  >
-                    <td className={`${TREND_STICKY} py-1.5 px-2 whitespace-nowrap ${main ? "text-xs text-slate-200 font-semibold" : "text-[11px] text-slate-500 pl-6"}`}>
-                      {main ? (
-                        <>{m} <span className="text-[10px] font-normal text-slate-500">· {p.label.toLowerCase()}</span></>
-                      ) : (
-                        p.label
-                      )}
-                    </td>
-                    <td className={`py-1.5 px-3 text-right tabular-nums border-l border-white/10 ${main ? "font-semibold" : "text-[11px]"} ${total === 0 ? "text-slate-600" : main ? "text-slate-200" : "text-slate-400"}`}>
-                      {total}
-                    </td>
-                    {currentDates.map((d, idx) => {
-                      const bucket = buckets[idx];
-                      const v = bucket?.[p.key] ?? 0;
-                      const off = !!id && offDays.has(`${id}|${d}`);
-                      return (
-                        <td
-                          key={d}
-                          title={cellTitle(m, bucket, off)}
-                          className={`py-1.5 px-2 text-right tabular-nums ${main ? "" : "text-[11px]"} ${off ? "bg-slate-500/10 text-slate-500" : v === 0 ? "text-slate-600" : main ? "text-slate-200" : "text-slate-400"}`}
-                        >
-                          {v}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                );
-              });
-            })}
-            {/* Футер «Всего» — те же три строки-метрики по видимым менеджерам. */}
-            {METRIC_PILLS.map((p, pi) => {
-              const main = pi === 0;
               return (
-                <tr
-                  key={`__total__-${p.key}`}
-                  className={main ? "border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold" : "bg-blue-500/[0.03]"}
-                >
-                  <td className={`${TREND_STICKY} py-1.5 px-2 whitespace-nowrap ${main ? "text-white" : "text-[11px] text-slate-500 pl-6"}`}>
-                    {main ? <>Всего <span className="text-[10px] font-normal text-slate-500">· {p.label.toLowerCase()}</span></> : p.label}
+                <tr key={m} className="border-t border-white/[0.06] hover:bg-white/[0.02] transition-colors">
+                  <td className={`${TREND_STICKY} py-1.5 px-2 text-xs text-slate-200 whitespace-nowrap`}>{m}</td>
+                  <td className="py-1.5 px-3 text-right border-l border-white/10">
+                    {packedCell(
+                      sumMetric(buckets, "callsTotal"),
+                      sumMetric(buckets, "callsConnected"),
+                      sumMetric(buckets, "missedIncoming"),
+                      true,
+                    )}
                   </td>
-                  <td className={`py-1.5 px-3 text-right tabular-nums border-l border-white/10 ${main ? "text-white" : "text-[11px] text-slate-400"}`}>
-                    {visible.reduce((acc, m) => acc + sumMetric(trendByManager?.[m], p.key), 0)}
-                  </td>
-                  {currentDates.map((d, idx) => (
-                    <td key={d} className={`py-1.5 px-2 text-right tabular-nums ${main ? "text-white" : "text-[11px] text-slate-400"}`}>
-                      {visible.reduce((acc, m) => acc + (trendByManager?.[m]?.[idx]?.[p.key] ?? 0), 0)}
-                    </td>
-                  ))}
+                  {currentDates.map((d, idx) => {
+                    const bucket = buckets[idx];
+                    const off = !!id && offDays.has(`${id}|${d}`);
+                    return (
+                      <td
+                        key={d}
+                        title={cellTitle(m, bucket, off)}
+                        className={`py-1.5 px-2 text-right ${off ? "bg-slate-500/10" : ""}`}
+                      >
+                        {packedCell(bucket?.callsTotal ?? 0, bucket?.callsConnected ?? 0, bucket?.missedIncoming ?? 0, false, off)}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
+            {/* Футер «Всего» — суммы по видимым менеджерам, тот же формат ячеек. */}
+            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05]">
+              <td className={`${TREND_STICKY} py-1.5 px-2 text-xs font-semibold text-white`}>Всего</td>
+              {(() => {
+                const sums = (idx: number | null) => {
+                  const acc = { callsTotal: 0, callsConnected: 0, missedIncoming: 0 };
+                  for (const m of visible) {
+                    const buckets = trendByManager?.[m] ?? [];
+                    for (const k of ["callsTotal", "callsConnected", "missedIncoming"] as const) {
+                      acc[k] += idx === null ? sumMetric(buckets, k) : (buckets[idx]?.[k] ?? 0);
+                    }
+                  }
+                  return acc;
+                };
+                const t = sums(null);
+                return (
+                  <>
+                    <td className="py-1.5 px-3 text-right border-l border-white/10">
+                      {packedCell(t.callsTotal, t.callsConnected, t.missedIncoming, true)}
+                    </td>
+                    {currentDates.map((d, idx) => {
+                      const s = sums(idx);
+                      return (
+                        <td key={d} className="py-1.5 px-2 text-right">
+                          {packedCell(s.callsTotal, s.callsConnected, s.missedIncoming, true)}
+                        </td>
+                      );
+                    })}
+                  </>
+                );
+              })()}
+            </tr>
           </tbody>
         </table>
       </div>
       <p className="text-[10px] text-slate-600 mt-2">
-        Серые ячейки — выходной менеджера по Графику. Наведение на ячейку — все метрики за день.
+        В ячейке: сверху — звонки, снизу — <span className="text-emerald-400">дозвон</span> · <span className="text-rose-400">пропущенные</span>.
+        Серые ячейки — выходной менеджера по Графику. Наведение на ячейку — все метрики за день с подписями.
       </p>
     </div>
   );
