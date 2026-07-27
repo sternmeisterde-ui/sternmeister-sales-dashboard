@@ -25,7 +25,7 @@
 // 1в1 с выгрузками Kommo за июнь (459/27) и март (500/24).
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, Undo2 } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, Undo2, X } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -395,7 +395,7 @@ function metricMuted(id: MetricRowId, bucketKey: string, agg: RangeAgg): boolean
 // остался бы тёмной полосой на светлом фоне.
 const STICKY_CELL = "sticky left-0 z-10 bg-slate-900";
 
-function GroupsTable({ title, dim, days, from, to, onZoom }: {
+function GroupsTable({ title, dim, days, from, to, onZoom, onBreakdown }: {
   title: string;
   dim: DimDef;
   days: DayRow[];
@@ -403,6 +403,8 @@ function GroupsTable({ title, dim, days, from, to, onZoom }: {
   to: string;
   /** Клик по заголовку группы-периода — зум в подпериод (не для дней). */
   onZoom: (from: string, to: string) => void;
+  /** Клик по ячейке корзины — разбивка по сырым написаниям Kommo. */
+  onBreakdown: (dim: DimDef, bucket: BucketDef, from: string, to: string) => void;
 }) {
   const dayMap = useMemo(() => buildDayMap(days), [days]);
   const spanDays = diffDaysCivil(to, from) + 1;
@@ -420,12 +422,14 @@ function GroupsTable({ title, dim, days, from, to, onZoom }: {
 
   // «Итого» — первая группа слева, чтобы сводка была видна без скролла;
   // дальше подпериоды слева направо (свайп вправо — как листание excel).
-  const allGroups: Array<{ key: string; label: string; agg: RangeAgg; zoom?: { from: string; to: string } }> = [
-    { key: "__total__", label: "Итого", agg: totals },
+  const allGroups: Array<{ key: string; label: string; agg: RangeAgg; from: string; to: string; zoom?: { from: string; to: string } }> = [
+    { key: "__total__", label: "Итого", agg: totals, from, to },
     ...groups.map((g) => ({
       key: g.from,
       label: columnLabel(unit, g.from, g.to),
       agg: g.agg,
+      from: g.from,
+      to: g.to,
       zoom: zoomable ? { from: g.from, to: g.to } : undefined,
     })),
   ];
@@ -505,11 +509,13 @@ function GroupsTable({ title, dim, days, from, to, onZoom }: {
                 {allGroups.map((g) =>
                   dim.buckets.map((b, i) => {
                     const muted = metricMuted(row.id, b.key, g.agg);
+                    const clickable = g.agg.byBucket[b.key].leads > 0;
                     return (
                       <td
                         key={`${g.key}:${b.key || "__none__"}`}
-                        className={`py-2 px-4 text-right tabular-nums cursor-help whitespace-nowrap ${i === 0 ? "border-l border-white/10" : ""} ${muted ? "text-slate-600" : "text-slate-200"}`}
-                        title={cellTitle(b.label, g.agg.byBucket[b.key], g.agg.totalLeads)}
+                        onClick={clickable ? () => onBreakdown(dim, b, g.from, g.to) : undefined}
+                        className={`py-2 px-4 text-right tabular-nums whitespace-nowrap ${clickable ? "cursor-pointer hover:bg-white/[0.04]" : "cursor-default"} ${i === 0 ? "border-l border-white/10" : ""} ${muted ? "text-slate-600" : "text-slate-200"}`}
+                        title={`${cellTitle(b.label, g.agg.byBucket[b.key], g.agg.totalLeads)}${clickable ? "\nКлик — из каких написаний Kommo складывается" : ""}`}
                       >
                         {metricCell(row.id, b.key, g.agg)}
                       </td>
@@ -520,6 +526,125 @@ function GroupsTable({ title, dim, days, from, to, onZoom }: {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ==================== Drill-down modal ====================
+
+interface BreakdownTarget {
+  dim: DimDef;
+  bucket: BucketDef;
+  from: string;
+  to: string;
+}
+
+interface BreakdownRow {
+  value: string;
+  leads: number;
+  sales: number;
+}
+
+/** Разбивка корзины по сырым написаниям Kommo — для сверок: один ответ
+ *  анкеты лендинги пишут по-разному («2 000 3 000» / «2000 - 3000 евро»),
+ *  и фильтр в Kommo по одному варианту даёт меньше, чем корзина вкладки. */
+function BreakdownModal({ target, funnel, onClose }: {
+  target: BreakdownTarget;
+  funnel: Funnel;
+  onClose: () => void;
+}) {
+  // Ответ хранится с ключом запроса (как в useCategoryDays): пока ключ не
+  // совпал с текущими параметрами — показываем лоадер, без синхронного
+  // сброса state в эффекте (react-hooks/set-state-in-effect).
+  const key = `${funnel}:${target.dim.key}:${target.bucket.key}:${target.from}:${target.to}`;
+  const [result, setResult] = useState<{ key: string; rows?: BreakdownRow[]; error?: string } | null>(null);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const url = `/api/category-dynamics/breakdown?funnel=${funnel}&from=${target.from}&to=${target.to}&dim=${target.dim.key}&bucket=${encodeURIComponent(target.bucket.key)}`;
+    fetch(url, { signal: ac.signal })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`API error ${r.status}: ${await r.text()}`);
+        const j = (await r.json()) as { rows?: BreakdownRow[] };
+        setResult({ key, rows: j.rows ?? [] });
+      })
+      .catch((e) => {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        setResult({ key, error: String(e) });
+      });
+    return () => ac.abort();
+  }, [key, target, funnel]);
+
+  const current = result && result.key === key ? result : null;
+  const rows = current?.rows ?? null;
+  const error = current?.error ?? null;
+
+  const totalLeads = (rows ?? []).reduce((s, r) => s + r.leads, 0);
+  const totalSales = (rows ?? []).reduce((s, r) => s + r.sales, 0);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="glass-panel bg-slate-900 rounded-2xl border border-white/10 p-5 w-full max-w-lg max-h-[80vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 mb-1">
+          <h3 className="text-sm font-semibold text-white">
+            <span className="inline-flex items-center gap-1.5">
+              <BucketDot color={target.bucket.color} />
+              {target.dim.title} — {target.bucket.label}
+            </span>
+          </h3>
+          <button onClick={onClose} aria-label="Закрыть" className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-[11px] text-slate-500 mb-3">
+          {fmtDM(target.from)}–{fmtDM(target.to)}.{target.to.slice(0, 4)} · {FUNNEL_LABEL[funnel]} · как записано в Kommo
+        </p>
+
+        {error && <p className="text-red-400 text-xs">{error}</p>}
+        {!rows && !error && (
+          <div className="py-6 text-center">
+            <Loader2 className="w-5 h-5 animate-spin text-blue-400 inline-block" />
+          </div>
+        )}
+        {rows && (
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                <th className="text-left py-1.5 pr-2 font-medium">Написание в Kommo</th>
+                <th className="text-right py-1.5 pl-2 font-medium">Лиды</th>
+                <th className="text-right py-1.5 pl-2 font-medium">Продажи</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.value || "__empty__"} className="border-b border-white/[0.04]">
+                  <td className="py-1.5 pr-2 text-slate-200 break-words">
+                    {r.value === "" ? <span className="text-slate-500 italic">(поле пустое)</span> : `«${r.value}»`}
+                  </td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums text-slate-200">{r.leads}</td>
+                  <td className="py-1.5 pl-2 text-right tabular-nums text-slate-400">{r.sales}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td className="py-2 pr-2 text-white font-semibold">Итого</td>
+                <td className="py-2 pl-2 text-right tabular-nums text-white font-semibold">{totalLeads}</td>
+                <td className="py-2 pl-2 text-right tabular-nums text-slate-300 font-semibold">{totalSales}</td>
+              </tr>
+            </tfoot>
+          </table>
+        )}
+        <p className="text-[10px] text-slate-600 mt-3 leading-relaxed">
+          Один и тот же ответ анкеты разные формы сайта записывают по-разному — вкладка объединяет все написания в одну корзину. Для сверки в Kommo выбирайте в фильтре все варианты из списка.
+        </p>
       </div>
     </div>
   );
@@ -584,6 +709,8 @@ export default function CategoryDynamicsTab() {
   const [rangeB, setRangeB] = useState<{ start: Date; end: Date } | null>(null);
   // Стек зума (клик по колонке): хранит окна, в которые можно вернуться.
   const [zoomStack, setZoomStack] = useState<Array<{ start: Date; end: Date }>>([]);
+  // Drill-down: ячейка корзины → разбивка по сырым написаниям Kommo.
+  const [breakdown, setBreakdown] = useState<BreakdownTarget | null>(null);
   // Активный пресет: подсвечивается в тумблере; стрелки ‹ › листают именно
   // неделю/месяц/год целиком. null = произвольный диапазон из календаря.
   const [preset, setPreset] = useState<"week" | "month" | "year" | null>("month");
@@ -884,6 +1011,7 @@ export default function CategoryDynamicsTab() {
                 from={fromA}
                 to={toA}
                 onZoom={zoomInto}
+                onBreakdown={(d, bucket, f, t) => setBreakdown({ dim: d, bucket, from: f, to: t })}
               />
               {compareOn && (
                 b.error ? (
@@ -896,6 +1024,7 @@ export default function CategoryDynamicsTab() {
                     from={fromB}
                     to={toB}
                     onZoom={(f, t) => setRangeB({ start: berlinCivilDate(f), end: berlinCivilDate(t) })}
+                    onBreakdown={(d, bucket, f, t) => setBreakdown({ dim: d, bucket, from: f, to: t })}
                   />
                 )
               )}
@@ -912,9 +1041,13 @@ export default function CategoryDynamicsTab() {
           {" "}<span className="text-slate-300 font-medium">Продажа</span> — заполнена «Факт. Дата 1-го платежа»; относится к периоду создания лида, даже если платёж пришёл позже.
           {" "}<span className="text-slate-300 font-medium">Без метки / Без ответа</span> — поле пустое (категория не проставлена, вопрос анкеты не отвечен).
           {" "}Таблицы START_DATE, INCOME, STATUS, LANGUAGE_LEVEL — те же лиды, разрезанные по ответам анкеты сайта; исторические варианты написания («До 2000 евро», «мужжена», «B1 (Средний уровень)…») сведены в единые корзины.
-          {" "}Клик по заголовку колонки открывает период подробнее (месяц → недели → дни); наведение на ячейку — все числа корзины за колонку.
+          {" "}Клик по заголовку колонки открывает период подробнее (месяц → недели → дни); наведение на ячейку — все числа корзины за колонку; клик по ячейке — из каких написаний Kommo складывается цифра.
         </p>
       </div>
+
+      {breakdown && (
+        <BreakdownModal target={breakdown} funnel={funnel} onClose={() => setBreakdown(null)} />
+      )}
     </div>
   );
 }

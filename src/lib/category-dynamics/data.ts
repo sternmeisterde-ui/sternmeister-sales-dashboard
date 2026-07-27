@@ -204,12 +204,13 @@ export async function getCategoryDynamicsDays(
   });
 }
 
-async function fetchDays(
-  dim: DimensionKey,
-  funnel: CategoryFunnel,
-  from: string,
-  to: string,
-): Promise<DimensionDayRow[]> {
+/**
+ * Общий фильтр «правильного количества лидов» (см. шапку файла): воронки,
+ * берлинское окно [from, to] СТРОКАМИ дат (не Date-параметрами — см.
+ * предупреждение над getCategoryDynamicsDays), без Incoming/удалённых/6
+ * исключаемых причин закрытия. Один фрагмент для агрегатов и drill-down.
+ */
+function tabFilterWhere(funnel: CategoryFunnel, from: string, to: string): SQL {
   const pipelineList = sql.join(
     pipelineIdsFor(funnel).map((id) => sql`${id}`),
     sql`, `,
@@ -222,7 +223,33 @@ async function fetchDays(
     [...EXCLUDED_LOSS_REASONS].map((r) => sql`${r}`),
     sql`, `,
   );
+  // Причина закрытия: авторитетно ТОЛЬКО обязательное поле 876383 (ТЗ:
+  // «не другие поля»). Текстовый loss_reason — фолбэк исключительно когда
+  // обязательное поле пустое: у старых лидов (март-2026 и раньше) поля
+  // противоречат друг другу (loss_reason=Спам при обязательном «Игнор»),
+  // и безусловный текст-фильтр терял таких лидов (-9 в марте vs выгрузка).
+  // NB: у SLA (compute-sla) намеренно ДРУГАЯ логика — исключает по OR.
+  return sql`
+    pipeline_id IN (${pipelineList})
+      AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
+            BETWEEN ${from}::date AND ${to}::date
+      AND status_id NOT IN (${sql.join(INCOMING_STATUS_IDS.map((id) => sql`${id}`), sql`, `)})
+      AND is_deleted = false
+      AND (
+        CASE
+          WHEN b2b_close_reason_enum_id IS NOT NULL
+            THEN b2b_close_reason_enum_id NOT IN (${excludedEnumList})
+          ELSE (loss_reason IS NULL OR loss_reason NOT IN (${excludedReasonList}))
+        END
+      )`;
+}
 
+async function fetchDays(
+  dim: DimensionKey,
+  funnel: CategoryFunnel,
+  from: string,
+  to: string,
+): Promise<DimensionDayRow[]> {
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ d: string; b: string; leads: string | number; sales: string | number }>(sql`
@@ -232,26 +259,7 @@ async function fetchDays(
       COUNT(*) AS leads,
       COUNT(*) FILTER (WHERE first_payment_fact_date IS NOT NULL) AS sales
     FROM analytics.leads_cohort
-    WHERE pipeline_id IN (${pipelineList})
-      -- Сравнение по берлинской КАЛЕНДАРНОЙ дате (строки 'YYYY-MM-DD'), а не
-      -- Date-параметрами — см. предупреждение над getCategoryDynamicsDays.
-      AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
-            BETWEEN ${from}::date AND ${to}::date
-      AND status_id NOT IN (${sql.join(INCOMING_STATUS_IDS.map((id) => sql`${id}`), sql`, `)})
-      AND is_deleted = false
-      -- Причина закрытия: авторитетно ТОЛЬКО обязательное поле 876383 (ТЗ:
-      -- «не другие поля»). Текстовый loss_reason — фолбэк исключительно когда
-      -- обязательное поле пустое: у старых лидов (март-2026 и раньше) поля
-      -- противоречат друг другу (loss_reason=Спам при обязательном «Игнор»),
-      -- и безусловный текст-фильтр терял таких лидов (-9 в марте vs выгрузка).
-      -- NB: у SLA (compute-sla) намеренно ДРУГАЯ логика — исключает по OR.
-      AND (
-        CASE
-          WHEN b2b_close_reason_enum_id IS NOT NULL
-            THEN b2b_close_reason_enum_id NOT IN (${excludedEnumList})
-          ELSE (loss_reason IS NULL OR loss_reason NOT IN (${excludedReasonList}))
-        END
-      )
+    WHERE ${tabFilterWhere(funnel, from, to)}
     GROUP BY 1, 2
     ORDER BY 1, 2
   `);
@@ -266,4 +274,76 @@ async function fetchDays(
     leads: Number(r.leads),
     sales: Number(r.sales),
   }));
+}
+
+// ==================== Drill-down: разбивка корзины по сырым написаниям ====
+
+/** Сырая колонка источника каждого измерения (фиксированный список —
+ *  безопасно вставлять через sql.raw). */
+const DIM_RAW_COLUMN: Record<DimensionKey, string> = {
+  category: "category",
+  startDate: "start_date_answer",
+  income: "income_answer",
+  status: "status_answer",
+  language: "language_level",
+};
+
+export interface BucketBreakdownRow {
+  /** Сырое написание в Kommo ("" = поле пустое). */
+  value: string;
+  leads: number;
+  sales: number;
+}
+
+/**
+ * Из каких сырых написаний Kommo складывается корзина `bucket` измерения
+ * `dim` за [from, to] (те же фильтры, что у агрегатов). Нужна для сверок с
+ * Kommo: один ответ анкеты записывается лендингами по-разному
+ * («2 000 3 000» / «2000 - 3000 евро» / «2000_-_3000€»), и фильтр в Kommo
+ * по одному варианту даёт меньшее число, чем корзина вкладки.
+ */
+export async function getCategoryBucketBreakdown(
+  funnel: CategoryFunnel,
+  from: string,
+  to: string,
+  dim: DimensionKey,
+  bucket: string,
+): Promise<BucketBreakdownRow[]> {
+  if (!(DIM_BUCKETS[dim] as readonly string[]).includes(bucket)) {
+    throw new Error(`Unknown bucket "${bucket}" for dimension "${dim}"`);
+  }
+  const cacheKey = `category-dynamics-breakdown:v1:${funnel}:${from}:${to}:${dim}:${bucket}`;
+  return cached(cacheKey, CACHE_TTL, async () => {
+    const rawCol = sql.raw(DIM_RAW_COLUMN[dim]);
+    // Для category нормализатор пропускает ЛЮБОЙ непустой текст (буква как
+    // есть), поэтому «неожиданные» значения вне A–E клеятся к корзине ""
+    // на чтении агрегатов (см. fetchDays). Здесь повторяем ту же склейку.
+    const bucketOfRow =
+      dim === "category"
+        ? sql`CASE WHEN ${bucketExpr(dim)} IN (${sql.join(
+            (DIM_BUCKETS.category as readonly string[])
+              .filter((b) => b !== "")
+              .map((b) => sql`${b}`),
+            sql`, `,
+          )}) THEN ${bucketExpr(dim)} ELSE '' END`
+        : bucketExpr(dim);
+    const result = await (analyticsDb as unknown as {
+      execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
+    }).execute<{ v: string; leads: string | number; sales: string | number }>(sql`
+      SELECT
+        COALESCE(TRIM(${rawCol}), '') AS v,
+        COUNT(*) AS leads,
+        COUNT(*) FILTER (WHERE first_payment_fact_date IS NOT NULL) AS sales
+      FROM analytics.leads_cohort
+      WHERE ${tabFilterWhere(funnel, from, to)}
+        AND ${bucketOfRow} = ${bucket}
+      GROUP BY 1
+      ORDER BY 2 DESC, 1
+    `);
+    return result.rows.map((r) => ({
+      value: r.v,
+      leads: Number(r.leads),
+      sales: Number(r.sales),
+    }));
+  });
 }
