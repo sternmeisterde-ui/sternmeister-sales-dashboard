@@ -24,8 +24,8 @@
 // «Правильное количество лидов» и «продажа» определены на сервере — сверено
 // 1в1 с выгрузками Kommo за июнь (459/27) и март (500/24).
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, Undo2, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ArrowLeftRight, ChevronLeft, ChevronRight, Loader2, Undo2, X } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import {
@@ -531,6 +531,188 @@ function GroupsTable({ title, dim, days, from, to, onZoom, onBreakdown }: {
   );
 }
 
+// ==================== Сравнение периодов (референс — «Оценка критериев») ====================
+
+// Как в ComparisonCriteriaTable вкладки «Оценка критериев»: одна таблица,
+// у каждой метрики три колонки — A (синяя подпись) | B (оранжевая) | Δ
+// (цветная дельта A−B). Строки — корзины измерения, футер «Всего» жирный.
+
+type DeltaVal = { text: string; tone: "up" | "down" | "flat" } | null;
+
+const DELTA_CLS: Record<"up" | "down" | "flat", string> = {
+  up: "text-emerald-400",
+  down: "text-rose-400",
+  flat: "text-slate-500",
+};
+
+/** Дельта количеств: A − B, со знаком. */
+function intDelta(a: number, b: number): DeltaVal {
+  const d = a - b;
+  return { text: d > 0 ? `+${d}` : String(d), tone: d > 0 ? "up" : d < 0 ? "down" : "flat" };
+}
+
+/** Дельта долей в п.п.: A − B. null, когда какой-то из знаменателей пуст. */
+function ppDeltaVal(aNum: number, aDen: number, bNum: number, bDen: number): DeltaVal {
+  if (aDen <= 0 || bDen <= 0) return null;
+  const pp = Math.round((aNum / aDen - bNum / bDen) * 1000) / 10;
+  return { text: `${pp > 0 ? "+" : ""}${pp}`, tone: pp > 0 ? "up" : pp < 0 ? "down" : "flat" };
+}
+
+function metricDelta(id: MetricRowId, bucketKey: string, aggA: RangeAgg, aggB: RangeAgg): DeltaVal {
+  if (aggA.totalLeads === 0 || aggB.totalLeads === 0) return null;
+  const a = aggA.byBucket[bucketKey];
+  const b = aggB.byBucket[bucketKey];
+  switch (id) {
+    case "leads": return intDelta(a.leads, b.leads);
+    case "share": return ppDeltaVal(a.leads, aggA.totalLeads, b.leads, aggB.totalLeads);
+    case "sales": return intDelta(a.sales, b.sales);
+    case "convTotal": return ppDeltaVal(a.sales, aggA.totalLeads, b.sales, aggB.totalLeads);
+    case "convCat": return ppDeltaVal(a.sales, a.leads, b.sales, b.leads);
+  }
+}
+
+const DELTA_TITLE: Record<MetricRowId, string> = {
+  leads: "Разница A − B, лидов",
+  share: "Разница A − B, процентных пунктов",
+  sales: "Разница A − B, продаж",
+  convTotal: "Разница A − B, процентных пунктов",
+  convCat: "Разница A − B, процентных пунктов",
+};
+
+function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, onBreakdown }: {
+  title: string;
+  dim: DimDef;
+  daysA: DayRow[];
+  daysB: DayRow[];
+  fromA: string;
+  toA: string;
+  fromB: string;
+  toB: string;
+  onBreakdown: (dim: DimDef, bucket: BucketDef, from: string, to: string) => void;
+}) {
+  const aggA = useMemo(
+    () => aggregateRange(buildDayMap(daysA), dim.buckets, fromA, toA),
+    [daysA, dim.buckets, fromA, toA],
+  );
+  const aggB = useMemo(
+    () => aggregateRange(buildDayMap(daysB), dim.buckets, fromB, toB),
+    [daysB, dim.buckets, fromB, toB],
+  );
+
+  const fmtRange = (f: string, t: string) => `${fmtDM(f)}–${fmtDM(t)}.${t.slice(0, 4)}`;
+
+  /** Ячейка значения периода: кликабельна (drill-down по написаниям), с тултипом. */
+  const valueCell = (m: MetricRowId, b: BucketDef, agg: RangeAgg, from: string, to: string, extra = "") => {
+    const clickable = agg.byBucket[b.key].leads > 0;
+    const muted = metricMuted(m, b.key, agg);
+    return (
+      <td
+        onClick={clickable ? () => onBreakdown(dim, b, from, to) : undefined}
+        title={`${fmtRange(from, to)}\n${cellTitle(b.label, agg.byBucket[b.key], agg.totalLeads)}${clickable ? "\nКлик — из каких написаний Kommo складывается" : ""}`}
+        className={`py-2 px-3 text-right tabular-nums whitespace-nowrap ${clickable ? "cursor-pointer hover:bg-white/[0.04]" : "cursor-default"} ${muted ? "text-slate-600" : "text-slate-200"} ${extra}`}
+      >
+        {metricCell(m, b.key, agg)}
+      </td>
+    );
+  };
+
+  return (
+    <div className="glass-panel rounded-2xl p-5 border border-white/5 min-w-0">
+      <h3 className="text-xs uppercase font-semibold tracking-wide mb-4 flex items-baseline gap-x-3 gap-y-1 flex-wrap">
+        <span className="text-slate-200">{title}</span>
+        <span className="text-blue-400">A · {fmtRange(fromA, toA)} · {aggA.totalLeads} лидов</span>
+        <span className="text-orange-400">B · {fmtRange(fromB, toB)} · {aggB.totalLeads} лидов</span>
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="text-sm border-collapse">
+          <thead>
+            {/* Строка 1: метрики (merged на тройку A|B|Δ). */}
+            <tr className="text-[11px]">
+              <th className={`${STICKY_CELL} min-w-[170px]`} />
+              {METRIC_ROWS.map((m) => (
+                <th
+                  key={m.id}
+                  colSpan={3}
+                  className="py-2 px-3 text-center font-semibold text-slate-200 border-l border-white/10 bg-white/[0.03] whitespace-nowrap"
+                >
+                  {m.label}
+                </th>
+              ))}
+            </tr>
+            {/* Строка 2: A | B | Δ внутри каждой метрики. */}
+            <tr className="text-[10px] uppercase tracking-wider border-b border-white/10">
+              <th className={`${STICKY_CELL} text-left py-1.5 px-2 font-medium text-slate-500`}>Корзина</th>
+              {METRIC_ROWS.map((m) => (
+                <Fragment key={m.id}>
+                  <th title={fmtRange(fromA, toA)} className="py-1.5 px-3 text-right font-bold text-blue-400 border-l border-white/10">A</th>
+                  <th title={fmtRange(fromB, toB)} className="py-1.5 px-3 text-right font-bold text-orange-400">B</th>
+                  <th title={DELTA_TITLE[m.id]} className="py-1.5 px-3 text-right font-medium text-slate-500">Δ</th>
+                </Fragment>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {dim.buckets.map((b) => (
+              <tr key={b.key || "__none__"} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
+                <td className={`${STICKY_CELL} py-1.5 px-2 text-xs text-slate-300`}>
+                  <span className="inline-flex items-center gap-1.5" title={b.label}>
+                    <BucketDot color={b.color} />
+                    {b.label}
+                  </span>
+                </td>
+                {METRIC_ROWS.map((m) => {
+                  const d = metricDelta(m.id, b.key, aggA, aggB);
+                  return (
+                    <Fragment key={m.id}>
+                      {valueCell(m.id, b, aggA, fromA, toA, "border-l border-white/10")}
+                      {valueCell(m.id, b, aggB, fromB, toB)}
+                      <td
+                        title={DELTA_TITLE[m.id]}
+                        className={`py-2 px-3 text-right tabular-nums whitespace-nowrap ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}
+                      >
+                        {d ? d.text : "—"}
+                      </td>
+                    </Fragment>
+                  );
+                })}
+              </tr>
+            ))}
+            {/* Футер «Всего» — как «Средний балл» в референсе. */}
+            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold">
+              <td className={`${STICKY_CELL} py-2 px-2 text-white`}>Всего</td>
+              {METRIC_ROWS.map((m) => {
+                const totalCell = (agg: RangeAgg): string => {
+                  if (agg.totalLeads === 0) return "—";
+                  switch (m.id) {
+                    case "leads": return String(agg.totalLeads);
+                    case "share": return "100%";
+                    case "sales": return String(agg.totalSales);
+                    case "convTotal":
+                    case "convCat": return fmtPct(agg.totalSales, agg.totalLeads);
+                  }
+                };
+                const d: DeltaVal =
+                  aggA.totalLeads === 0 || aggB.totalLeads === 0 ? null
+                  : m.id === "leads" ? intDelta(aggA.totalLeads, aggB.totalLeads)
+                  : m.id === "sales" ? intDelta(aggA.totalSales, aggB.totalSales)
+                  : m.id === "share" ? null
+                  : ppDeltaVal(aggA.totalSales, aggA.totalLeads, aggB.totalSales, aggB.totalLeads);
+                return (
+                  <Fragment key={m.id}>
+                    <td className="py-2 px-3 text-right tabular-nums text-white border-l border-white/10">{totalCell(aggA)}</td>
+                    <td className="py-2 px-3 text-right tabular-nums text-white">{totalCell(aggB)}</td>
+                    <td className={`py-2 px-3 text-right tabular-nums ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>
+                  </Fragment>
+                );
+              })}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ==================== Drill-down modal ====================
 
 interface BreakdownTarget {
@@ -972,8 +1154,9 @@ export default function CategoryDynamicsTab() {
       <div className="flex items-center gap-2 flex-wrap">
         <button
           onClick={() => setCompareOn((v) => !v)}
-          className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
         >
+          <ArrowLeftRight className="w-3.5 h-3.5" />
           Сравнить периоды
         </button>
         {compareOn && (
@@ -994,41 +1177,41 @@ export default function CategoryDynamicsTab() {
 
       {/* ── Таблицы: 5 измерений стеком ──────────────────────────
            Одна и та же выборка лидов, разрезанная по-разному: категории,
-           затем 4 ответа анкеты. При сравнении таблица B каждого измерения
-           встаёт СРАЗУ ПОД его таблицей A: таблицы широкие (группы периодов
-           по горизонтали), а колонки корзин обеих таблиц выравниваются
-           вертикально — сравнивать одну и ту же метрику проще. */}
+           затем 4 ответа анкеты. В режиме «Сравнить периоды» вместо
+           разбивки по подпериодам — сводная таблица по референсу «Оценки
+           критериев»: строки-корзины, у каждой метрики колонки A|B|Δ. */}
       <div className="flex flex-col gap-4">
         {DIMENSIONS.map((dim) => {
           const aDays = aDims?.[dim.key] ?? [];
           const bDays = bDims?.[dim.key] ?? [];
-          return (
-            <div key={dim.key} className="flex flex-col gap-4">
-              <GroupsTable
-                title={compareOn ? `${dim.title} — период A` : `${dim.title} — ${FUNNEL_LABEL[funnel]}`}
+          return compareOn ? (
+            b.error ? (
+              <div key={dim.key} className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center text-red-400 text-sm">{b.error}</div>
+            ) : (
+              <ComparisonDimTable
+                key={dim.key}
+                title={`${dim.title} — ${FUNNEL_LABEL[funnel]}`}
                 dim={dim}
-                days={aDays}
-                from={fromA}
-                to={toA}
-                onZoom={zoomInto}
+                daysA={aDays}
+                daysB={bDays}
+                fromA={fromA}
+                toA={toA}
+                fromB={fromB}
+                toB={toB}
                 onBreakdown={(d, bucket, f, t) => setBreakdown({ dim: d, bucket, from: f, to: t })}
               />
-              {compareOn && (
-                b.error ? (
-                  <div className="glass-panel rounded-2xl p-8 border border-red-500/20 text-center text-red-400 text-sm">{b.error}</div>
-                ) : (
-                  <GroupsTable
-                    title={`${dim.title} — период B`}
-                    dim={dim}
-                    days={bDays}
-                    from={fromB}
-                    to={toB}
-                    onZoom={(f, t) => setRangeB({ start: berlinCivilDate(f), end: berlinCivilDate(t) })}
-                    onBreakdown={(d, bucket, f, t) => setBreakdown({ dim: d, bucket, from: f, to: t })}
-                  />
-                )
-              )}
-            </div>
+            )
+          ) : (
+            <GroupsTable
+              key={dim.key}
+              title={`${dim.title} — ${FUNNEL_LABEL[funnel]}`}
+              dim={dim}
+              days={aDays}
+              from={fromA}
+              to={toA}
+              onZoom={zoomInto}
+              onBreakdown={(d, bucket, f, t) => setBreakdown({ dim: d, bucket, from: f, to: t })}
+            />
           );
         })}
       </div>
