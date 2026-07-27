@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { Fragment, useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   Phone, Clock, AlertTriangle,
   PhoneMissed, Target, Loader2, RefreshCw,
-  ChevronLeft, ChevronRight, ChevronDown, Check,
+  ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Check,
   PhoneOutgoing, PhoneCall, Timer, Gauge, PhoneOff, Users,
+  ArrowLeftRight,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -1363,9 +1364,11 @@ export default function DashboardTab({
         );
       })()}
 
-      {/* ============ TREND CHART — line per manager (как у Комм) ============
-           b2g: набор менеджеров скоупится выбранной линией поверх глобального
-           фильтра «Менеджеры». b2b: без линий — скоуп = фильтр «Менеджеры». */}
+      {/* ============ TREND — per manager ============
+           b2g: график (линии), набор менеджеров скоупится выбранной линией
+           поверх глобального фильтра «Менеджеры». b2b: ТАБЛИЦА вместо графика
+           (решение 2026-07-28) с режимом сравнения периодов A|B|Δ по
+           референсу «Оценки критериев»; скоуп = фильтр «Менеджеры». */}
       {(() => {
         let chartSelected = selectedManagers;
         if (isB2G && b2gLine !== "all") {
@@ -1375,6 +1378,15 @@ export default function DashboardTab({
           chartSelected = selectedManagers === null
             ? lineNames
             : new Set([...selectedManagers].filter((n) => lineNames.has(n)));
+        }
+        if (department === "b2b") {
+          return (
+            <TrendTableByManager
+              trendByManager={data.trendByManager ?? null}
+              department={department}
+              selected={chartSelected}
+            />
+          );
         }
         return (
           <TrendChartByManager
@@ -2085,6 +2097,450 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
           </LineChart>
         </ResponsiveContainer>
       )}
+    </div>
+  );
+}
+
+// ==================== Таблица динамики по менеджерам (только b2b) ====================
+//
+// Замена графика TrendChartByManager у Коммерсов (решение 2026-07-28); у
+// Госников остаётся график — ветвление на коллсайте. Механика периодов A/B
+// и выходных (manager_schedule) — та же, что у графика. Два режима:
+//  • обычный: строки-менеджеры × колонки-дни окна, метрика по пилюлям,
+//    «Итого» первой колонкой, футер «Всего», выходные серым;
+//  • «Сравнить периоды»: референс «Оценки критериев» (как в «Динамике
+//    категорий») — Менеджер | период A | период B | Δ; главное число —
+//    Звонки, строка раскрывается на Дозвон/Пропущенные (развёрнуто по
+//    умолчанию), сверху жирная группа «Всего». Пилюли скрыты — все метрики
+//    видны сразу. Δ = A − B; у «Пропущенных» рост красный (инверсия).
+
+const TREND_DELTA_CLS = { up: "text-emerald-400", down: "text-rose-400", flat: "text-slate-500" } as const;
+
+function trendDelta(a: number, b: number, invert = false): { text: string; cls: string } {
+  const d = a - b;
+  const tone = d === 0 ? "flat" : (d > 0) !== invert ? "up" : "down";
+  return { text: d > 0 ? `+${d}` : String(d), cls: TREND_DELTA_CLS[tone] };
+}
+
+/** Сумма метрики по дням периода. */
+function sumMetric(buckets: DailyBucket[] | undefined, metric: TrendMetric): number {
+  return (buckets ?? []).reduce((acc, b) => acc + (b[metric] ?? 0), 0);
+}
+
+// Липкая колонка имён: непрозрачный ИМЕНОВАННЫЙ класс (светлая тема
+// перекрашивает только именованные Tailwind-классы, см. CategoryDynamicsTab).
+const TREND_STICKY = "sticky left-0 z-10 bg-slate-900";
+
+function TrendTableByManager({ trendByManager, department, selected }: {
+  trendByManager: Record<string, DailyBucket[]> | null;
+  department: string;
+  /** Глобальный фильтр «Менеджеры» из шапки вкладки (null = все). */
+  selected: Set<string> | null;
+}) {
+  const [metric, setMetric] = useState<TrendMetric>("callsTotal");
+  const [compareOn, setCompareOn] = useState(false);
+  // Периоды A/B — та же механика «протухающих» override, что у графика:
+  // сигнатура окна меняется → падаем на дефолт (без setState-in-effect).
+  const [periodAOverride, setPeriodAOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [periodBOverride, setPeriodBOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [dataA, setDataA] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [dataB, setDataB] = useState<Record<string, DailyBucket[]> | null>(null);
+  const [loadingA, setLoadingA] = useState(false);
+  const [loadingB, setLoadingB] = useState(false);
+  // Схлопнутые строки сравнения (пустой сет = всё развёрнуто, как в референсе).
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggle = (k: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+
+  const managers = useMemo(
+    () => Object.keys(trendByManager ?? {}).sort((a, b) => a.localeCompare(b, "ru")),
+    [trendByManager],
+  );
+  const visible = useMemo(
+    () => (selected === null ? managers : managers.filter((m) => selected.has(m))),
+    [managers, selected],
+  );
+
+  const currentDates = useMemo(
+    () => (trendByManager && managers.length ? (trendByManager[managers[0]] ?? []).map((d) => d.date) : []),
+    [trendByManager, managers],
+  );
+  const windowSig = `${currentDates[0] ?? ""}|${currentDates.length}`;
+
+  // Имя менеджера → id (master_managers) — для выходных из manager_schedule.
+  const [managerIdByName, setManagerIdByName] = useState<Record<string, string> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/daily/managers?department=${department}`)
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const m of (j.managers ?? []) as Array<{ id: string; name: string }>) map[m.name] = m.id;
+        setManagerIdByName(map);
+      })
+      .catch(() => { if (!cancelled) setManagerIdByName({}); });
+    return () => { cancelled = true; };
+  }, [department]);
+
+  const defaultA = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    return { start: berlinCivilDate(currentDates[0]), end: berlinCivilDate(currentDates[currentDates.length - 1]) };
+  }, [currentDates]);
+  const defaultB = useMemo(() => {
+    if (currentDates.length === 0) return null;
+    const prevEnd = addDaysCivil(currentDates[0], -1);
+    const prevStart = addDaysCivil(prevEnd, -(currentDates.length - 1));
+    return { start: berlinCivilDate(prevStart), end: berlinCivilDate(prevEnd) };
+  }, [currentDates]);
+
+  const customA = !!(periodAOverride && periodAOverride.sig === windowSig);
+  const effA = useMemo(
+    () => (customA && periodAOverride ? { start: periodAOverride.start, end: periodAOverride.end } : defaultA),
+    [customA, periodAOverride, defaultA],
+  );
+  const effB = useMemo(
+    () => (periodBOverride && periodBOverride.sig === windowSig
+      ? { start: periodBOverride.start, end: periodBOverride.end }
+      : defaultB),
+    [periodBOverride, windowSig, defaultB],
+  );
+  const aFrom = effA ? formatDate(effA.start) : null;
+  const aTo = effA ? formatDate(effA.end) : null;
+  const bFrom = effB ? formatDate(effB.start) : null;
+  const bTo = effB ? formatDate(effB.end) : null;
+
+  const fetchInto = useCallback(
+    async (
+      from: string,
+      to: string,
+      setData: (d: Record<string, DailyBucket[]> | null) => void,
+      setLoading: (b: boolean) => void,
+    ) => {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/dashboard/manager-trend?department=${department}&from=${from}&to=${to}`);
+        const j = await res.json();
+        setData(j.success ? j.trendByManager : null);
+      } catch {
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [department],
+  );
+
+  useEffect(() => {
+    if (!compareOn || !customA || !aFrom || !aTo) return;
+    fetchInto(aFrom, aTo, setDataA, setLoadingA);
+  }, [compareOn, customA, aFrom, aTo, fetchInto]);
+
+  useEffect(() => {
+    if (!compareOn || !bFrom || !bTo) return;
+    fetchInto(bFrom, bTo, setDataB, setLoadingB);
+  }, [compareOn, bFrom, bTo, fetchInto]);
+
+  // Выходные менеджеров на датах окна (для серых ячеек обычного режима).
+  const [offDays, setOffDays] = useState<Set<string>>(new Set()); // `${userId}|${date}`
+  useEffect(() => {
+    if (currentDates.length === 0) { setOffDays(new Set()); return; }
+    const months = Array.from(new Set(currentDates.map((d) => d.slice(0, 7))));
+    let cancelled = false;
+    Promise.all(
+      months.map((mo) =>
+        fetch(`/api/daily/schedule?month=${mo}`).then((r) => r.json()).catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const set = new Set<string>();
+      for (const res of results) {
+        const schedule = res?.schedule as Array<{ userId: string; scheduleDate: string; isOnLine: boolean }> | undefined;
+        if (!schedule) continue;
+        for (const row of schedule) {
+          if (!row.isOnLine) set.add(`${row.userId}|${row.scheduleDate}`);
+        }
+      }
+      setOffDays(set);
+    });
+    return () => { cancelled = true; };
+  }, [currentDates]);
+
+  const fmtRange = (a: string, b: string) => `${a.slice(8, 10)}.${a.slice(5, 7)}–${b.slice(8, 10)}.${b.slice(5, 7)}`;
+  const fmtDay = (d: string) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+  const WEEKDAYS = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+  const weekday = (d: string) => WEEKDAYS[new Date(`${d}T00:00:00Z`).getUTCDay()];
+
+  const cellTitle = (name: string, b: DailyBucket | undefined, off: boolean) =>
+    [
+      `${name}${off ? " · выходной" : ""}`,
+      `Звонки: ${b?.callsTotal ?? 0}`,
+      `Дозвон: ${b?.callsConnected ?? 0}`,
+      `Пропущенные: ${b?.missedIncoming ?? 0}`,
+      `Длительность: ${fmtHoursMinutes(b?.totalMinutes ?? 0)}`,
+    ].join("\n");
+
+  // ── Режим сравнения: суммы A/B по менеджерам ──
+  const seriesA = compareOn && customA ? dataA : trendByManager;
+  const seriesB = compareOn ? dataB : null;
+  const compareRows = useMemo(() => {
+    if (!compareOn) return [];
+    const names = Array.from(new Set([...Object.keys(seriesA ?? {}), ...Object.keys(seriesB ?? {})]))
+      .filter((n) => selected === null || selected.has(n));
+    return names
+      .map((name) => ({
+        name,
+        a: {
+          callsTotal: sumMetric(seriesA?.[name], "callsTotal"),
+          callsConnected: sumMetric(seriesA?.[name], "callsConnected"),
+          missedIncoming: sumMetric(seriesA?.[name], "missedIncoming"),
+        },
+        b: {
+          callsTotal: sumMetric(seriesB?.[name], "callsTotal"),
+          callsConnected: sumMetric(seriesB?.[name], "callsConnected"),
+          missedIncoming: sumMetric(seriesB?.[name], "missedIncoming"),
+        },
+      }))
+      .sort((x, y) => y.a.callsTotal - x.a.callsTotal || x.name.localeCompare(y.name, "ru"));
+  }, [compareOn, seriesA, seriesB, selected]);
+  const compareTotals = useMemo(() => {
+    const acc = {
+      a: { callsTotal: 0, callsConnected: 0, missedIncoming: 0 },
+      b: { callsTotal: 0, callsConnected: 0, missedIncoming: 0 },
+    };
+    for (const r of compareRows) {
+      for (const k of ["callsTotal", "callsConnected", "missedIncoming"] as const) {
+        acc.a[k] += r.a[k];
+        acc.b[k] += r.b[k];
+      }
+    }
+    return acc;
+  }, [compareRows]);
+
+  /** Вложенная строка сравнения: Дозвон / Пропущенные. */
+  const compareSubRow = (key: string, label: string, a: number, b: number, invert: boolean) => {
+    const d = trendDelta(a, b, invert);
+    return (
+      <tr key={key} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
+        <td className={`${TREND_STICKY} px-4 py-1.5 text-[10px] text-slate-500 pl-10`}>{label}</td>
+        <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{a}</td>
+        <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{b}</td>
+        <td title="A − B" className={`px-3 py-1.5 text-center font-mono text-[10px] ${d.cls}`}>{d.text}</td>
+      </tr>
+    );
+  };
+
+  const header = (
+    <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
+      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase">Динамика звонков по дням</h3>
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Пилюли метрики — только в обычном режиме: в сравнении видны все метрики сразу. */}
+        {!compareOn && (
+          <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
+            {METRIC_PILLS.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => setMetric(p.key)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${metric === p.key ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <button
+          onClick={() => setCompareOn((v) => !v)}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+        >
+          <ArrowLeftRight className="w-3.5 h-3.5" />
+          Сравнить периоды
+        </button>
+        {compareOn && effA && effB && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-bold text-blue-400">A</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effA.start, end: effA.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodAOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodAOverride(null)}
+            />
+            <span className="text-[10px] font-bold text-orange-400">B</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: effB.start, end: effB.end }}
+              onChange={(r) => {
+                if (!r.start) return;
+                setPeriodBOverride({ sig: windowSig, start: r.start, end: r.end ?? r.start });
+              }}
+              onClear={() => setPeriodBOverride(null)}
+            />
+          </div>
+        )}
+        {(loadingA || loadingB) && <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400" />}
+      </div>
+    </div>
+  );
+
+  if (managers.length === 0) {
+    return (
+      <div className="glass-panel rounded-2xl p-5 border border-white/5">
+        {header}
+        <div className="py-10 text-center text-slate-500 text-sm">Нет данных по менеджерам за период</div>
+      </div>
+    );
+  }
+
+  // ── Режим сравнения: Менеджер | A | B | Δ (референс «Оценки критериев») ──
+  if (compareOn) {
+    return (
+      <div className="glass-panel rounded-2xl p-5 border border-white/5">
+        {header}
+        <div className="overflow-x-auto" style={{ overflowY: "auto", maxHeight: "70vh" }}>
+          <table className="w-full text-left border-collapse">
+            <thead className="sticky top-0 z-40" style={{ backgroundColor: "rgb(15, 23, 42)", boxShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>
+              <tr className="border-b border-white/10">
+                <th className={`${TREND_STICKY} px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[180px]`} style={{ zIndex: 50 }}>
+                  Менеджер
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">{aFrom && aTo ? fmtRange(aFrom, aTo) : "A"}</div>
+                  <div className="text-[9px] text-slate-500">звонки</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">{bFrom && bTo ? fmtRange(bFrom, bTo) : "B"}</div>
+                  <div className="text-[9px] text-slate-500">звонки</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[60px]" title="A − B">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Δ</div>
+                </th>
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {/* «Всего» — жирная группа сверху (как в «Динамике категорий»). */}
+              <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40 bg-white/[0.02]" onClick={() => toggle("__total__")}>
+                <td className={`${TREND_STICKY} px-4 py-2`}>
+                  <div className="flex items-center gap-2">
+                    {collapsed.has("__total__") ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronUp className="w-3 h-3 text-slate-500" />}
+                    <span className="text-[11px] font-bold text-white">Всего</span>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">{compareTotals.a.callsTotal}</td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">{compareTotals.b.callsTotal}</td>
+                {(() => {
+                  const d = trendDelta(compareTotals.a.callsTotal, compareTotals.b.callsTotal);
+                  return <td title="A − B" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d.cls}`}>{d.text}</td>;
+                })()}
+              </tr>
+              {!collapsed.has("__total__") && compareSubRow("__total__conn", "Дозвон", compareTotals.a.callsConnected, compareTotals.b.callsConnected, false)}
+              {!collapsed.has("__total__") && compareSubRow("__total__miss", "Пропущенные", compareTotals.a.missedIncoming, compareTotals.b.missedIncoming, true)}
+
+              {compareRows.map((r, i) => {
+                const color = MANAGER_LINE_COLORS[i % MANAGER_LINE_COLORS.length];
+                const open = !collapsed.has(r.name);
+                const d = trendDelta(r.a.callsTotal, r.b.callsTotal);
+                return (
+                  <Fragment key={r.name}>
+                    <tr className="border-t border-white/10 cursor-pointer hover:bg-slate-800/40" onClick={() => toggle(r.name)}>
+                      <td className={`${TREND_STICKY} px-4 py-2`}>
+                        <div className="flex items-center gap-2">
+                          {open ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+                          <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+                          <span className="text-[11px] font-bold text-white">{r.name}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-slate-200">{r.a.callsTotal}</td>
+                      <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-slate-200">{r.b.callsTotal}</td>
+                      <td title="A − B" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d.cls}`}>{d.text}</td>
+                    </tr>
+                    {open && compareSubRow(`${r.name}-conn`, "Дозвон", r.a.callsConnected, r.b.callsConnected, false)}
+                    {open && compareSubRow(`${r.name}-miss`, "Пропущенные", r.a.missedIncoming, r.b.missedIncoming, true)}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Обычный режим: менеджеры × дни окна ──
+  return (
+    <div className="glass-panel rounded-2xl p-5 border border-white/5">
+      {header}
+      <div className="overflow-x-auto">
+        <table className="text-sm border-collapse w-full">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+              <th className={`${TREND_STICKY} text-left py-1.5 px-2 font-medium min-w-[170px]`}>Менеджер</th>
+              <th className="py-1.5 px-3 text-right font-semibold text-slate-300 border-l border-white/10">Итого</th>
+              {currentDates.map((d) => (
+                <th key={d} className="py-1.5 px-2 text-right font-medium whitespace-nowrap">
+                  <div className="text-slate-600">{weekday(d)}</div>
+                  <div>{fmtDay(d)}</div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((m) => {
+              const id = managerIdByName?.[m];
+              const buckets = trendByManager?.[m] ?? [];
+              const total = sumMetric(buckets, metric);
+              const color = MANAGER_LINE_COLORS[managers.indexOf(m) % MANAGER_LINE_COLORS.length];
+              return (
+                <tr key={m} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
+                  <td className={`${TREND_STICKY} py-1.5 px-2 text-xs text-slate-300 whitespace-nowrap`}>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+                      {m}
+                    </span>
+                  </td>
+                  <td className={`py-1.5 px-3 text-right tabular-nums font-semibold border-l border-white/10 ${total === 0 ? "text-slate-600" : "text-slate-200"}`}>
+                    {total}
+                  </td>
+                  {currentDates.map((d, idx) => {
+                    const bucket = buckets[idx];
+                    const v = bucket?.[metric] ?? 0;
+                    const off = !!id && offDays.has(`${id}|${d}`);
+                    return (
+                      <td
+                        key={d}
+                        title={cellTitle(m, bucket, off)}
+                        className={`py-1.5 px-2 text-right tabular-nums ${off ? "bg-slate-500/10 text-slate-500" : v === 0 ? "text-slate-600" : "text-slate-200"}`}
+                      >
+                        {v}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+            {/* Футер «Всего» — сумма по видимым менеджерам. */}
+            <tr className="border-t-2 border-white/10 bg-blue-500/[0.05] text-xs font-semibold">
+              <td className={`${TREND_STICKY} py-2 px-2 text-white`}>Всего</td>
+              <td className="py-2 px-3 text-right tabular-nums text-white border-l border-white/10">
+                {visible.reduce((acc, m) => acc + sumMetric(trendByManager?.[m], metric), 0)}
+              </td>
+              {currentDates.map((d, idx) => (
+                <td key={d} className="py-2 px-2 text-right tabular-nums text-white">
+                  {visible.reduce((acc, m) => acc + (trendByManager?.[m]?.[idx]?.[metric] ?? 0), 0)}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-slate-600 mt-2">
+        Серые ячейки — выходной менеджера по Графику. Наведение на ячейку — все метрики за день.
+      </p>
     </div>
   );
 }
