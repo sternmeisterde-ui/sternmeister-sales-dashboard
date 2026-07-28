@@ -148,10 +148,20 @@ export async function getRoleplayAuditDetail(leadId: number): Promise<RoleplayCa
       ORDER BY roleplay_at NULLS LAST
     `),
   );
-  return rows.map((r) => ({
+  // Номер попытки считаем САМИ, по времени звонка. Поле `attempt` — зеркало
+  // client_evaluations.roleplay_number, а оно ненадёжно: клампится до 3,
+  // ловит гонки при параллельной оценке и не пересчитывается, когда старую
+  // строку переоценили. В базе действительно есть сделки с двумя «попытками 1»
+  // (проверено 29.07), и в карточке это выглядело бы ошибкой.
+  const seen: Record<string, number> = { dc: 0, aa: 0 };
+  return rows.map((r) => {
+    const side = r.side === "aa" ? "aa" : "dc";
+    // Нумеруем только состоявшиеся ролевки — как это делает ОКК.
+    const ordinal = r.conducted === true ? (seen[side] += 1) : null;
+    return {
     okkCallId: r.okkCallId,
-    side: r.side === "aa" ? "aa" : "dc",
-    attempt: r.attempt,
+    side,
+    attempt: ordinal,
     at: r.at ? new Date(r.at).toISOString() : null,
     managerName: r.managerName,
     durationSeconds: r.durationSeconds,
@@ -162,5 +172,6 @@ export async function getRoleplayAuditDetail(leadId: number): Promise<RoleplayCa
     gateReason: r.gateReason,
     criterionScores: r.criterionScores ?? null,
     questions: Array.isArray(r.questions) ? r.questions : null,
-  }));
+    };
+  });
 }
