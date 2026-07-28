@@ -168,7 +168,7 @@ export default function RoleplaysView({ vertical }: Props) {
               label="Разобрано ОКК"
               value={data.totals.analyzed}
               sub={data.coveragePct === null ? undefined : `${data.coveragePct}% консультаций`}
-              hint="ОКК берёт в разбор только звонки от 15 минут, поэтому часть консультаций в него не попадает. Непокрытое ≠ «ролевки не было»."
+              hint="Разбирается не всё: звонок короче порога (с 29.07 — 10 минут, раньше 15), повторный звонок к сделке с 4+ касаниями, уехавший этап, сбой обработки. Причина по каждому клиенту — в подсказке к его строке. Неразобранное ≠ «ролевки не было»."
             />
             <Tile
               label="Ролевка подтверждена"
@@ -331,7 +331,7 @@ function ManagersTable({
               <Th sub="цель — больше 2" title="Сколько раз в среднем поговорили с одним клиентом. Именно этот показатель тянет конверсию в Гутшайн.">
                 Консультаций на клиента
               </Th>
-              <Th sub="из консультаций" title="ОКК берёт в разбор звонки от 15 минут, поэтому часть консультаций в него не попадает. Неразобранное не значит «ролевки не было».">
+              <Th sub="из консультаций" title="Разбирается не всё: короткий звонок, повторный звонок к сделке с 4+ касаниями, уехавший этап, сбой обработки. Причина по каждому клиенту — в таблице ниже. Неразобранное не значит «ролевки не было».">
                 Разобрал ОКК
               </Th>
               <Th sub="клиент отвечал по-немецки" title="Из разобранных: подтверждена настоящая репетиция — клиент сам произносил немецкие ответы.">
@@ -403,7 +403,7 @@ function ClientsTable({
               </Th>
               <Th align="center" sub="дата в Kommo">Термин</Th>
               <Th sub="звонки от 10 минут">Консультаций</Th>
-              <Th sub="из них / всего" title="ОКК берёт в разбор звонки от 15 минут — остальные консультации в него не попадают.">
+              <Th sub="из них / всего" title="Сколько консультаций попало в разбор ОКК. Наведите на цифру — покажет, почему остальные не разобраны.">
                 Разобрал ОКК
               </Th>
               <Th align="center" sub="1–5, по порядку" title="Балл клиента за ролевку. ○ — репетиция была, но материала мало; ⚠ — сбой авто-оценки.">
@@ -444,13 +444,20 @@ function ClientsTable({
                 <td className="px-3 py-2 text-slate-400 max-w-[190px] truncate">{c.stage ?? "—"}</td>
                 <td className="px-3 py-2 text-center text-slate-300 tabular-nums">{fmtDay(c.terminIso)}</td>
                 <td className="px-3 py-2 text-right text-slate-100 tabular-nums font-semibold">{c.consultations}</td>
-                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">
+                <td
+                  className="px-3 py-2 text-right text-slate-400 tabular-nums"
+                  title={
+                    c.analyzed < c.consultations
+                      ? c.notAnalyzed.length > 0
+                        ? `Не разобрано ${c.consultations - c.analyzed}:\n` +
+                          c.notAnalyzed.map((r) => `• ${r.count} × ${r.reason}`).join("\n")
+                        : `Не разобрано ${c.consultations - c.analyzed} — причина не определилась`
+                      : undefined
+                  }
+                >
                   {c.analyzed}
                   {c.analyzed < c.consultations && (
-                    <span
-                      className="text-slate-600"
-                      title={`ОКК не разобрал ${c.consultations - c.analyzed} консультаций — короче 15 минут`}
-                    >
+                    <span className={c.notAnalyzed.length > 0 ? "text-slate-500 cursor-help" : "text-slate-600"}>
                       {" "}
                       /{c.consultations}
                     </span>

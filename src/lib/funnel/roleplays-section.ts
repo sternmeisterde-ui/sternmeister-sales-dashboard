@@ -34,6 +34,7 @@
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db/index";
+import { d2OkkDb } from "@/lib/db/okk";
 import { trackingDb } from "@/lib/db/tracking-db";
 import {
   getBeraterPipelineIds,
@@ -90,6 +91,12 @@ export interface ManagerRow {
   botScores: number;
 }
 
+/** Почему консультация не попала в разбор ОКК (человеческим языком). */
+export interface NotAnalyzedReason {
+  reason: string;
+  count: number;
+}
+
 export interface ClientRow {
   leadId: number;
   name: string;
@@ -101,6 +108,8 @@ export interface ClientRow {
   consultations: number;
   analyzed: number;
   confirmed: number;
+  /** Разбивка «почему не разобрано» — вместо догадок в подсказке. */
+  notAnalyzed: NotAnalyzedReason[];
   /** Баллы бота по порядку проведения. */
   botScores: Array<{ score: number | null; at: string | null; notScored: NotScoredKind | null }>;
   /** Ручные правки оценок в Kommo: кто и когда. */
@@ -228,6 +237,11 @@ export async function computeRoleplaysSection(
   // Слой 3. Ручные правки оценок в карточке Kommo (из tracking_events).
   const manualEdits = await fetchManualScoreEdits(from, to);
 
+  // Почему часть консультаций не разобрана — берём фактическую причину из D2,
+  // а не гадаем. Причин несколько и они неочевидны (повторный звонок, уехавший
+  // этап, сбой обработки), поэтому одной подписи «короче порога» мало.
+  const notAnalyzed = await fetchNotAnalyzedReasons([...leadIds], from, to, consultStatuses);
+
   // Справочники: имена клиентов, ответственные, термины, этап последней консультации.
   const ids = [...leadIds];
   const [names, leadMeta, roster] = await Promise.all([
@@ -304,6 +318,7 @@ export async function computeRoleplaysSection(
       consultations: e.consultations,
       analyzed: okk.length,
       confirmed: okk.filter((r) => r.confirmed).length,
+      notAnalyzed: notAnalyzed.get(leadId) ?? [],
       botScores: okk.map((r) => ({
         score: r.score5,
         at: r.roleplayAt ? new Date(r.roleplayAt).toISOString() : null,
@@ -426,6 +441,113 @@ function berlinDay(iso: string): string | null {
     month: "2-digit",
     day: "2-digit",
   }).format(d);
+}
+
+/** Человеческая причина по тексту `calls.error_message` из ОКК. */
+function humanReason(err: string | null, promptType: string | null): string {
+  if (promptType && promptType !== "d2_berater" && promptType !== "d2_berater2") {
+    // Звонок разобран, но под другой рубрикой: ОКК классифицирует по своему
+    // dual-фильтру и мог отнести разговор к доведению или квалификации.
+    const label =
+      promptType.includes("dovedenie") ? "доведение"
+      : promptType.includes("qualifier") ? "квалификация"
+      : promptType;
+    return `разобран как «${label}», а не консультация`;
+  }
+  const e = err ?? "";
+  if (/follow-up call on/i.test(e)) {
+    const m = /priorCount=(\d+)/.exec(e);
+    return `повторный звонок: у сделки уже ${m ? m[1] : "4+"} касаний — первичный скрипт не разбирают`;
+  }
+  if (/too short for/i.test(e)) {
+    const m = /\((\d+)s < (\d+)s\)/.exec(e);
+    return m
+      ? `короче порога разбора (${Math.round(Number(m[1]) / 60)} мин < ${Math.round(Number(m[2]) / 60)} мин)`
+      : "короче порога разбора";
+  }
+  if (/status .* not allowed|initial\/current status/i.test(e)) {
+    return "сделка уехала на другой этап — рубрика не совпала";
+  }
+  if (/primary of interrupted pair/i.test(e)) return "первая часть склеенного разговора (разбирают вторую)";
+  if (/stuck in evaluating|Evaluation failed/i.test(e)) return "сбой обработки — звонок так и не оценён";
+  if (/no CRM data/i.test(e)) return "нет данных CRM";
+  if (/unknown pipeline/i.test(e)) return "неизвестная воронка";
+  if (/Unmatched agent/i.test(e)) return "менеджер не сопоставлен";
+  if (/Excluded agent/i.test(e)) return "менеджер исключён из ОКК";
+  if (!e) return "не дошёл до разбора";
+  return e.slice(0, 70);
+}
+
+/**
+ * Почему консультации сделки не попали в разбор ОКК. Читаем D2 напрямую (как
+ * getOkkByLead): в analytics зеркалятся только УЖЕ разобранные ролевки, а нам
+ * нужны как раз неразобранные и их причина.
+ */
+async function fetchNotAnalyzedReasons(
+  leadIds: number[],
+  from: string,
+  to: string,
+  consultStatuses: number[],
+): Promise<Map<number, NotAnalyzedReason[]>> {
+  const out = new Map<number, NotAnalyzedReason[]>();
+  const ids = leadIds.filter((n) => Number.isInteger(n) && n > 0);
+  if (ids.length === 0) return out;
+  try {
+    const rows = unwrapRows<{
+      leadId: string | number;
+      err: string | null;
+      promptType: string | null;
+    }>(
+      await d2OkkDb.execute(sql`
+        SELECT c.kommo_lead_id AS "leadId",
+               c.error_message AS "err",
+               e.prompt_type   AS "promptType"
+        FROM calls c
+        LEFT JOIN LATERAL (
+          SELECT prompt_type FROM evaluations
+          WHERE call_id = c.id ORDER BY created_at DESC LIMIT 1
+        ) e ON TRUE
+        WHERE c.kommo_lead_id IN (${sql.raw(ids.join(","))})
+          AND c.duration_seconds >= ${CONSULT_MIN_SECONDS}
+          AND (c.call_created_at AT TIME ZONE 'Europe/Berlin')::date
+                BETWEEN ${from}::date AND ${to}::date
+          -- Только звонки, сделанные НА консультационном этапе: у ОКК есть
+          -- собственный снимок стадии на момент звонка, он же используется в
+          -- слое 1 (там стадия берётся из lead_status_changes). Без этого в
+          -- «почему не разобрано» попадали звонки доведения и квалификации,
+          -- которые консультациями и не считались.
+          AND c.initial_kommo_status_id IN (${sql.join(
+            consultStatuses.map((id) => sql`${id}`),
+            sql`, `,
+          )})
+          AND (e.prompt_type IS NULL OR e.prompt_type NOT IN ('d2_berater', 'd2_berater2'))
+      `),
+    );
+    const perLead = new Map<number, Map<string, number>>();
+    for (const r of rows) {
+      const id = Number(r.leadId);
+      if (!Number.isInteger(id)) continue;
+      const reason = humanReason(r.err, r.promptType);
+      const m = perLead.get(id) ?? new Map<string, number>();
+      m.set(reason, (m.get(reason) ?? 0) + 1);
+      perLead.set(id, m);
+    }
+    for (const [id, m] of perLead) {
+      out.set(
+        id,
+        [...m.entries()]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((a, b) => b.count - a.count),
+      );
+    }
+  } catch (e) {
+    // D2 недоступна — раздел должен работать и без объяснений.
+    console.error(
+      "[funnel/roleplays] not-analyzed reasons unavailable (non-fatal):",
+      e instanceof Error ? e.message : e,
+    );
+  }
+  return out;
 }
 
 interface ManualEdit {
