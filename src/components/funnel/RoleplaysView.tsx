@@ -4,39 +4,23 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Loader2,
   TriangleAlert,
-  ClipboardCheck,
   ExternalLink,
   Info,
 } from "lucide-react";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  LabelList,
-  ResponsiveContainer,
-} from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
 import FilterSelect from "@/components/funnel/FilterSelect";
 import RoleplayDetailDrawer from "@/components/funnel/RoleplayDetailDrawer";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import type { RoleplaysResult, ClientRow, ManagerRow } from "@/lib/funnel/roleplays-section";
+import type { RoleplaysResult, ClientRow, ManagerRow, WeekPoint } from "@/lib/funnel/roleplays-section";
 
 /**
  * Раздел «Ролевки». Период фильтруется по ДАТЕ КОНСУЛЬТАЦИИ (когда звонили), а
  * не по дате термина — вопрос раздела «сколько провели за неделю», и ответ
  * должен меняться вместе с выбранными неделями.
  *
- * Палитра серий проверена валидатором (dataviz, dark, surface #0f172a):
- * lightness band / chroma / CVD (worst ΔE 12.5 protan) / контраст — всё PASS.
+ * Только таблицы: графики убрали по просьбе заказчика (2026-07-28) — занимали
+ * пол-экрана, а читать цифры всё равно приходилось в таблицах.
  */
-const C_CONSULT = "#3b82f6"; // консультации — полное покрытие
-const C_ANALYZED = "#d97706"; // разобрано ОКК
-const C_CONFIRMED = "#0d9488"; // ролевка подтверждена
-
 const PAGE_SIZE = 50;
 const cache = new Map<string, RoleplaysResult>();
 
@@ -61,13 +45,6 @@ function scoreColor(s: number): string {
   if (s === 3) return "text-amber-300";
   return "text-rose-300";
 }
-
-const tipStyle = {
-  background: "#0f172a",
-  border: "1px solid rgba(255,255,255,0.1)",
-  borderRadius: 12,
-  fontSize: 12,
-} as const;
 
 export default function RoleplaysView({ vertical }: Props) {
   const today = todayBerlinDate();
@@ -136,13 +113,6 @@ export default function RoleplaysView({ vertical }: Props) {
   }
 
   const weeks = data?.weeks ?? [];
-  const chartData = weeks.map((w) => ({
-    label: weekLabel(w.weekStart),
-    Консультации: w.consultations,
-    "Разобрано ОКК": w.analyzed,
-    "Ролевка подтверждена": w.confirmed,
-    perLead: w.perLead ?? 0,
-  }));
 
   return (
     <div className="flex flex-col gap-4">
@@ -218,49 +188,7 @@ export default function RoleplaysView({ vertical }: Props) {
             />
           </div>
 
-          <div className="glass-panel rounded-2xl border border-white/5 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <ClipboardCheck className="w-4 h-4 text-blue-400" />
-              <span className="text-sm font-medium text-slate-200">Понедельно</span>
-              <span className="text-xs text-slate-500">недели по понедельникам, Берлин</span>
-            </div>
-            <div className="h-[260px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData} margin={{ top: 16, right: 8, bottom: 0, left: -18 }} barGap={2}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} tickLine={false} axisLine={false} />
-                  <Tooltip cursor={{ fill: "rgba(255,255,255,0.04)" }} contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }} />
-                  <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
-                  <Bar dataKey="Консультации" fill={C_CONSULT} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  <Bar dataKey="Разобрано ОКК" fill={C_ANALYZED} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                  <Bar dataKey="Ролевка подтверждена" fill={C_CONFIRMED} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Отдельный график: у «на клиента» своя шкала, а две оси на одном
-              графике — запрещённый приём (нечитаемо и вводит в заблуждение). */}
-          <div className="glass-panel rounded-2xl border border-white/5 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-sm font-medium text-slate-200">Консультаций на клиента</span>
-              <span className="text-xs text-slate-500">цель — больше двух</span>
-            </div>
-            <div className="h-[160px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chartData} margin={{ top: 18, right: 8, bottom: 0, left: -18 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94a3b8" }} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} tickLine={false} axisLine={false} />
-                  <Tooltip cursor={{ fill: "rgba(255,255,255,0.04)" }} contentStyle={tipStyle} itemStyle={{ color: "#e2e8f0" }} labelStyle={{ color: "#94a3b8" }} />
-                  <Bar dataKey="perLead" name="на клиента" fill={C_CONSULT} radius={[4, 4, 0, 0]} isAnimationActive={false}>
-                    <LabelList dataKey="perLead" position="top" style={{ fill: "#94a3b8", fontSize: 11 }} />
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          <WeeksTable rows={weeks} />
 
           <ManagersTable rows={data.managers} onPick={setManager} picked={manager} />
 
@@ -315,6 +243,66 @@ function Tile({
   );
 }
 
+/** Шапка колонки: короткое название + поясняющая строчка под ним. */
+function Th({
+  children,
+  sub,
+  align = "right",
+  title,
+}: {
+  children: React.ReactNode;
+  sub?: string;
+  align?: "left" | "right" | "center";
+  title?: string;
+}) {
+  return (
+    <th className={`px-3 py-2 align-bottom text-${align} font-semibold`} title={title}>
+      <div className="text-[11px] normal-case tracking-normal text-slate-300">{children}</div>
+      {sub && <div className="text-[10px] normal-case tracking-normal text-slate-500 font-normal">{sub}</div>}
+    </th>
+  );
+}
+
+/** Недельная динамика — та самая, ради которой раздел и делался: растёт ли
+ *  число консультаций на клиента. Таблицей, а не графиком (просьба 28.07). */
+function WeeksTable({ rows }: { rows: WeekPoint[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
+        <span className="text-sm font-medium text-slate-200">По неделям</span>
+        <span className="text-xs text-slate-500">неделя начинается с понедельника</span>
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-slate-500">
+              <Th align="left">Неделя с</Th>
+              <Th sub="звонки от 10 минут">Консультаций</Th>
+              <Th sub="уникальных сделок">Клиентов</Th>
+              <Th sub="цель — больше 2">Консультаций на клиента</Th>
+              <Th sub="из консультаций">Разобрал ОКК</Th>
+              <Th sub="клиент отвечал по-немецки">Ролевка была</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((w) => (
+              <tr key={w.weekStart} className="border-t border-white/5">
+                <td className="px-3 py-2 text-slate-300 tabular-nums">{weekLabel(w.weekStart)}</td>
+                <td className="px-3 py-2 text-right text-slate-100 tabular-nums font-semibold">{w.consultations}</td>
+                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{w.leads}</td>
+                <td className="px-3 py-2 text-right text-slate-200 tabular-nums">{w.perLead ?? "—"}</td>
+                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{w.analyzed}</td>
+                <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{w.confirmed}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ManagersTable({
   rows,
   onPick,
@@ -329,24 +317,32 @@ function ManagersTable({
     <div className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
         <span className="text-sm font-medium text-slate-200">По менеджерам</span>
-        <span className="text-xs text-slate-500">клик по строке — отфильтровать клиентов</span>
+        <span className="text-xs text-slate-500">клик по строке — отфильтровать клиентов ниже</span>
       </div>
       <div className="overflow-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
-              <th className="px-3 py-2 text-left">Менеджер</th>
-              <th className="px-3 py-2 text-right">Консультаций</th>
-              <th className="px-3 py-2 text-right">Клиентов</th>
-              <th className="px-3 py-2 text-right">На клиента</th>
-              <th className="px-3 py-2 text-right">Разобрано</th>
-              <th className="px-3 py-2 text-right">Подтверждено</th>
-              <th className="px-3 py-2 text-right" title="Оценок, выставленных руками в карточке Kommo">
-                Оценок руками
-              </th>
-              <th className="px-3 py-2 text-right" title="Оценок, посчитанных ботом (с 22.06 он их и записывает в Kommo)">
-                Оценок ботом
-              </th>
+            <tr className="text-slate-500">
+              <Th align="left">Менеджер</Th>
+              <Th sub="звонки от 10 минут" title="Соединённые звонки не короче 10 минут, сделанные пока сделка стояла на этапе консультации перед ДЦ или АА. Считается по телефонии — ничего не теряется.">
+                Консультаций
+              </Th>
+              <Th sub="уникальных сделок">Клиентов</Th>
+              <Th sub="цель — больше 2" title="Сколько раз в среднем поговорили с одним клиентом. Именно этот показатель тянет конверсию в Гутшайн.">
+                Консультаций на клиента
+              </Th>
+              <Th sub="из консультаций" title="ОКК берёт в разбор звонки от 15 минут, поэтому часть консультаций в него не попадает. Неразобранное не значит «ролевки не было».">
+                Разобрал ОКК
+              </Th>
+              <Th sub="клиент отвечал по-немецки" title="Из разобранных: подтверждена настоящая репетиция — клиент сам произносил немецкие ответы.">
+                Ролевка была
+              </Th>
+              <Th sub="вписал в карточку сам" title="Сколько раз менеджер руками проставил балл ролевки в карточке Kommo за период.">
+                Баллов поставил менеджер
+              </Th>
+              <Th sub="посчитал автоматически" title="Сколько баллов посчитал бот ОКК. С 22.06.2026 он записывает их в карточку сам и может перезаписать ручной.">
+                Баллов поставил бот
+              </Th>
             </tr>
           </thead>
           <tbody>
@@ -394,20 +390,28 @@ function ClientsTable({
         <span className="text-xs text-slate-500 tabular-nums">
           показано {rows.length} из {total}
         </span>
-        <span className="text-xs text-slate-500 ml-auto">клик по строке — разбор ролевок</span>
+        <span className="text-xs text-slate-500 ml-auto">клик по строке — разбор ролевок по критериям</span>
       </div>
       <div className="overflow-auto max-h-[520px]">
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-slate-900/80 backdrop-blur z-10">
-            <tr className="text-[10px] uppercase tracking-widest font-semibold text-slate-500">
-              <th className="px-3 py-2 text-left">Клиент</th>
-              <th className="px-3 py-2 text-left">Менеджер</th>
-              <th className="px-3 py-2 text-left">Этап консультации</th>
-              <th className="px-3 py-2 text-center">Термин</th>
-              <th className="px-3 py-2 text-right">Конс.</th>
-              <th className="px-3 py-2 text-right">Разобрано</th>
-              <th className="px-3 py-2 text-center">Оценки бота</th>
-              <th className="px-3 py-2 text-center">Проставлено руками</th>
+            <tr className="text-slate-500">
+              <Th align="left">Клиент</Th>
+              <Th align="left" sub="ответственный по сделке">Менеджер</Th>
+              <Th align="left" sub="на момент последнего звонка" title="Где стояла сделка, когда с клиентом говорили в последний раз, а не где она сейчас.">
+                Этап
+              </Th>
+              <Th align="center" sub="дата в Kommo">Термин</Th>
+              <Th sub="звонки от 10 минут">Консультаций</Th>
+              <Th sub="из них / всего" title="ОКК берёт в разбор звонки от 15 минут — остальные консультации в него не попадают.">
+                Разобрал ОКК
+              </Th>
+              <Th align="center" sub="1–5, по порядку" title="Балл клиента за ролевку. ○ — репетиция была, но материала мало; ⚠ — сбой авто-оценки.">
+                Оценил бот
+              </Th>
+              <Th align="center" sub="правок в карточке" title="Сколько раз менеджер руками вписал балл в карточку Kommo. Наведите, чтобы увидеть кто и когда.">
+                Вписал менеджер
+              </Th>
             </tr>
           </thead>
           <tbody>
