@@ -216,6 +216,7 @@ export default function RoleplaysView({ vertical }: Props) {
           leadId={selected.leadId}
           name={selected.name}
           managerName={selected.managerName}
+          notAnalyzed={selected.notAnalyzed}
           onClose={() => setSelected(null)}
         />
       )}

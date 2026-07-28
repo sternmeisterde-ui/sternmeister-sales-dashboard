@@ -9,6 +9,9 @@ interface Props {
   leadId: number;
   name: string;
   managerName: string | null;
+  /** Почему часть консультаций не разобрана — показываем прямо в карточке,
+   *  иначе «звонков не найдено» читается как «ролевок не было». */
+  notAnalyzed?: Array<{ reason: string; count: number }>;
   onClose: () => void;
 }
 
@@ -35,7 +38,7 @@ function fmtDay(iso: string | null): string {
  * Карточка сделки: все консультационные звонки, разобранные ОКК, с баллом
  * клиента, разбивкой по 6 критериям и разбором по вопросам банка бератора.
  */
-export default function RoleplayDetailDrawer({ leadId, name, managerName, onClose }: Props) {
+export default function RoleplayDetailDrawer({ leadId, name, managerName, notAnalyzed = [], onClose }: Props) {
   const [calls, setCalls] = useState<RoleplayCallDetail[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -95,14 +98,32 @@ export default function RoleplayDetailDrawer({ leadId, name, managerName, onClos
               <Loader2 className="w-4 h-4 animate-spin" /> Загрузка звонков…
             </div>
           )}
-          {calls?.length === 0 && (
+          {calls?.length === 0 && notAnalyzed.length === 0 && (
             <div className="text-sm text-slate-500 py-6 text-center">
-              По этой сделке ОКК не разбирал ни одной консультации — все звонки короче 15 минут.
+              По этой сделке ОКК не разбирал ни одной консультации.
             </div>
           )}
           {calls?.map((c) => (
             <CallCard key={c.okkCallId} call={c} />
           ))}
+
+          {notAnalyzed.length > 0 && (
+            <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1.5">
+                Не попало в разбор ОКК
+              </div>
+              <div className="flex flex-col gap-1 text-[11px] text-slate-400">
+                {notAnalyzed.map((r, i) => (
+                  <div key={i}>
+                    <span className="text-slate-200 tabular-nums">{r.count}</span> × {r.reason}
+                  </div>
+                ))}
+              </div>
+              <div className="text-[10px] text-slate-600 mt-2">
+                Такие звонки не значат «ролевки не было» — просто ОКК их не разбирал.
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

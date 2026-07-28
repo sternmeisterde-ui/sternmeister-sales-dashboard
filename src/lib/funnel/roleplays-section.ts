@@ -305,6 +305,20 @@ export async function computeRoleplaysSection(
   for (const [leadId, e] of clientMap) {
     const okk = okkByLead.get(leadId) ?? [];
     const meta = leadMeta.get(leadId);
+    // Остаток: разрыв между консультациями и разбором, который причинами не
+    // объяснился. Так бывает, когда снимок этапа у ОКК (initial_kommo_status_id)
+    // расходится с историей стадий в analytics — звонок попал в консультации
+    // здесь, но в ОКК числится на другом этапе. Лучше честное «отметки нет»,
+    // чем пустая подсказка.
+    const reasons = [...(notAnalyzed.get(leadId) ?? [])];
+    const explained = reasons.reduce((s, r) => s + r.count, 0);
+    const gap = e.consultations - okk.length;
+    if (gap > explained) {
+      reasons.push({
+        reason: "отметки в ОКК нет — звонок не поступал в разбор",
+        count: gap - explained,
+      });
+    }
     // Ответственный по CRM, а если его нет — тот, кто больше звонил.
     const topCaller = [...e.managers.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     const side = e.sides.size === 1 ? [...e.sides][0] : null;
@@ -318,7 +332,7 @@ export async function computeRoleplaysSection(
       consultations: e.consultations,
       analyzed: okk.length,
       confirmed: okk.filter((r) => r.confirmed).length,
-      notAnalyzed: notAnalyzed.get(leadId) ?? [],
+      notAnalyzed: reasons,
       botScores: okk.map((r) => ({
         score: r.score5,
         at: r.roleplayAt ? new Date(r.roleplayAt).toISOString() : null,
@@ -443,6 +457,15 @@ function berlinDay(iso: string): string | null {
   }).format(d);
 }
 
+/** «4 касания» вместо «4 касаний»: причины читают люди, а не парсер. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} ${one}`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} ${few}`;
+  return `${n} ${many}`;
+}
+
 /** Человеческая причина по тексту `calls.error_message` из ОКК. */
 function humanReason(err: string | null, promptType: string | null): string {
   if (promptType && promptType !== "d2_berater" && promptType !== "d2_berater2") {
@@ -457,25 +480,75 @@ function humanReason(err: string | null, promptType: string | null): string {
   const e = err ?? "";
   if (/follow-up call on/i.test(e)) {
     const m = /priorCount=(\d+)/.exec(e);
-    return `повторный звонок: у сделки уже ${m ? m[1] : "4+"} касаний — первичный скрипт не разбирают`;
+    const n = m ? Number(m[1]) : null;
+    return `повторный звонок: у сделки уже ${n === null ? "4+ касаний" : plural(n, "касание", "касания", "касаний")} — первичный скрипт не разбирают`;
   }
   if (/too short for/i.test(e)) {
     const m = /\((\d+)s < (\d+)s\)/.exec(e);
+    // Округляем ВНИЗ: при 899 с округление вверх давало «15 мин < 15 мин».
     return m
-      ? `короче порога разбора (${Math.round(Number(m[1]) / 60)} мин < ${Math.round(Number(m[2]) / 60)} мин)`
+      ? `короче порога разбора (${Math.floor(Number(m[1]) / 60)} мин < ${Math.round(Number(m[2]) / 60)} мин)`
       : "короче порога разбора";
   }
   if (/status .* not allowed|initial\/current status/i.test(e)) {
     return "сделка уехала на другой этап — рубрика не совпала";
   }
+  if (/non-primary on/i.test(e)) {
+    // Post-eval skip: оценка посчитана, но Grok распознал в содержании не
+    // первичный скрипт (followup / check-in / перевод), и её отбросили.
+    const m = /call_type=([a-z_]+)/i.exec(e);
+    const kind =
+      m?.[1] === "check_in" ? "созвон-сверка"
+      : m?.[1] === "transfer" ? "перевод на другого менеджера"
+      : m?.[1] === "interrupted" ? "оборванный разговор"
+      : m?.[1] === "unqualified" ? "клиент не квалифицирован"
+      : m?.[1] === "deferred_start" ? "отложенный старт"
+      : "повторный разговор";
+    return `не первичный разговор (${kind}) — оценку отбросили после разбора`;
+  }
   if (/primary of interrupted pair/i.test(e)) return "первая часть склеенного разговора (разбирают вторую)";
+  if (/incomplete \((\w+)\)/i.test(e)) {
+    const m = /incomplete \((\w+)\)/i.exec(e);
+    const kind =
+      m?.[1] === "connection_drop" ? "оборвалась связь"
+      : m?.[1] === "abrupt_cutoff" ? "разговор резко оборвался"
+      : m?.[1] === "transcript_truncated" ? "запись обрезана"
+      : "разговор неполный";
+    return `${kind}, продолжения за 48 часов не было`;
+  }
   if (/stuck in evaluating|Evaluation failed/i.test(e)) return "сбой обработки — звонок так и не оценён";
   if (/no CRM data/i.test(e)) return "нет данных CRM";
   if (/unknown pipeline/i.test(e)) return "неизвестная воронка";
   if (/Unmatched agent/i.test(e)) return "менеджер не сопоставлен";
   if (/Excluded agent/i.test(e)) return "менеджер исключён из ОКК";
+  if (/Removed \(auto/i.test(e)) return "оценка снята автоматикой (не консультация)";
+  // Исторические пометки ручных чисток мая 2026 — оценка была, но её сняли.
+  if (/Cleanup .*continuation .*non-primary/i.test(e)) {
+    return "оценка снята при чистке 20.05: продолжение признано не первичным";
+  }
+  if (/Cleanup .*pre-v5\.1 script/i.test(e)) {
+    return "оценка снята при чистке: звонок по старому скрипту (до 16.05)";
+  }
+  if (/Cleanup .*incomplete/i.test(e)) {
+    return "оценка снята при чистке: разговор неполный, продолжения не было";
+  }
+  if (/Cleanup (\d{4}-\d{2}-\d{2})/i.test(e)) {
+    const d = /Cleanup (\d{4}-\d{2}-\d{2})/i.exec(e)?.[1] ?? "";
+    return `оценка снята при чистке ${d}`;
+  }
+  if (/Removed: complaint/i.test(e)) {
+    return "оценка снята по жалобе — звонок не должен был оцениваться";
+  }
+  if (/canary|halted|retro-/i.test(e)) return "остановлено служебным прогоном";
+  if (/Telegram notification failed/i.test(e)) {
+    // Оценка есть, упало только уведомление — на разбор это не влияет, но в
+    // error_message остаётся именно этот текст.
+    return "оценка есть, не ушло уведомление менеджеру";
+  }
   if (!e) return "не дошёл до разбора";
-  return e.slice(0, 70);
+  // Незнакомый случай: показываем как есть, но помечаем — так видно, что
+  // словарь причин пора дополнить, а не что это «нормальная» формулировка.
+  return `не разобрано: ${e.slice(0, 60)}`;
 }
 
 /**
