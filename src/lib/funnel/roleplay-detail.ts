@@ -15,13 +15,60 @@ import { classifyNotScored, type Side, type NotScoredKind } from "./roleplays-se
 
 /** Русские подписи 6 критериев клиентской ролевки (OKK criteria-config.json). */
 export const CLIENT_RP_CRITERIA: Record<string, string> = {
-  selbstpraesentation: "Самопрезентация (о себе)",
+  selbstpraesentation: "Рассказ о себе",
   fachkenntnis: "Знание курса",
   argumentation: "Аргументация",
   einwandbehandlung: "Работа с возражениями",
   ablehnungsszenario: "Сценарий отказа",
   sprachkompetenz: "Немецкая речь",
 };
+
+/**
+ * Продуктовые названия тем вопросов бератера. В зеркале лежат сырые ключи
+ * (`accounting_fit`, `course_content`), которые ничего не говорят человеку —
+ * подписи собраны по `question_intent` из банка вопросов ОКК
+ * (src/criteria/client_roleplay/rubrics.json), а не придуманы.
+ */
+export const CLIENT_RP_TOPICS: Record<string, string> = {
+  introduction: "Представился, кто он",
+  current_situation: "Текущая ситуация",
+  work_history: "Прошлый опыт работы",
+  motivation: "Мотивация учиться",
+  accounting_fit: "Почему бухгалтерия подходит",
+  accounting_experience: "Опыт в бухгалтерии",
+  course_content: "Что входит в курс",
+  course_duration: "Длительность обучения",
+  course_format: "Почему онлайн-формат",
+  course_expectation: "Что ждёт от обучения",
+  course_availability: "Сможет учиться полный день",
+  funding: "Чем оплачивает обучение",
+  provider_contact: "Как вышел на учебный центр",
+  provider_certification: "Аккредитация учебного центра",
+  computer_skills: "Владение компьютером",
+  language_level: "Уровень немецкого",
+  language_support: "Роль немецкого в обучении",
+  personal_commitments: "Личные обстоятельства",
+  job_goal: "Цель по работе после курса",
+  job_market_research: "Изучал ли рынок труда",
+  employment_confidence: "Насколько уверен в трудоустройстве",
+  work_readiness: "Готовность выйти на работу",
+  long_term_work: "Планы работать в Германии долго",
+  next_step: "Следующий шаг",
+  // Возражения бератера — их клиент должен отработать.
+  job_guarantee: "Возражение: гарантии работы нет",
+  price: "Возражение: дорого",
+  cheaper_offer: "Возражение: есть дешевле",
+  language_course_first: "Возражение: сначала язык",
+  simpler_job: "Возражение: найди работу попроще",
+  direct_work_alternative: "Возражение: иди работать сразу",
+  course_difficulty: "Возражение: курс будет сложным",
+  course_duration_readiness: "Возражение: восемь месяцев — долго",
+};
+
+/** Человеческая подпись темы вопроса; незнакомый ключ показываем как есть. */
+export function topicLabel(topic: string): string {
+  return CLIENT_RP_TOPICS[topic] ?? topic;
+}
 
 export interface CriterionScore {
   coverage: number;

@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, X, ExternalLink, ClipboardCheck } from "lucide-react";
-import type { RoleplayCallDetail, CriterionScore } from "@/lib/funnel/roleplay-detail";
-import { CLIENT_RP_CRITERIA } from "@/lib/funnel/roleplay-detail";
+import type { RoleplayCallDetail, CriterionScore, QuestionResult } from "@/lib/funnel/roleplay-detail";
+import { CLIENT_RP_CRITERIA, topicLabel } from "@/lib/funnel/roleplay-detail";
 
 interface Props {
   leadId: number;
@@ -16,10 +16,36 @@ interface Props {
 }
 
 const STRENGTH_LABEL: Record<string, string> = {
-  weak: "слабо",
-  sufficient: "достаточно",
-  strong: "сильно",
+  weak: "слабый",
+  sufficient: "достаточный",
+  strong: "уверенный",
 };
+
+/** Почему ответ не засчитан — по problem_type из разбора. */
+const PROBLEM_LABEL: Record<string, string> = {
+  missing_meaning: "ответ не закрывает смысл вопроса",
+  fact_contradiction: "противоречит фактам о курсе",
+  off_topic: "ответ не по теме",
+  too_short: "слишком коротко",
+};
+
+/**
+ * Вердикт по вопросу — в той же логике, что бейджи «Оценки критериев» у
+ * Коммерсов: зачёт / незачёт / особый случай отдельным цветом.
+ */
+function QuestionBadge({ q }: { q: QuestionResult }) {
+  const base = "shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold mt-0.5";
+  if (q.covered && q.is_ideal) {
+    return <span className={`${base} bg-emerald-500/15 text-emerald-300`} title="Ответ закрывает вопрос, клиент добавил уместные детали">✓ +</span>;
+  }
+  if (q.covered && !q.self_produced) {
+    return <span className={`${base} bg-amber-500/15 text-amber-300`} title="Смысл закрыт, но клиент повторил за менеджером — самостоятельным ответом это не считается">✓ повтор</span>;
+  }
+  if (q.covered) {
+    return <span className={`${base} bg-emerald-500/15 text-emerald-400`} title="Клиент сам ответил и закрыл смысл вопроса">✓</span>;
+  }
+  return <span className={`${base} bg-rose-500/15 text-rose-400`} title="Вопрос прозвучал, но ответ не закрыл смысл">✗</span>;
+}
 
 function scoreColor(s: number): string {
   if (s >= 4) return "text-emerald-300";
@@ -110,7 +136,7 @@ export default function RoleplayDetailDrawer({ leadId, name, managerName, notAna
           {notAnalyzed.length > 0 && (
             <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
               <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1.5">
-                Не попало в разбор ОКК
+                ОКК не разобрал {notAnalyzed.reduce((s, r) => s + r.count, 0)} звонк(ов)
               </div>
               <div className="flex flex-col gap-1 text-[11px] text-slate-400">
                 {notAnalyzed.map((r, i) => (
@@ -206,19 +232,23 @@ function CallCard({ call }: { call: RoleplayCallDetail }) {
           )}
 
           {questions.length > 0 && (
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-2">
               <div className="text-[10px] uppercase tracking-widest text-slate-500">
-                Вопросы бератора ({questions.length})
+                Что спросил бератер и как ответил клиент ({questions.length} из {call.questions?.length ?? questions.length})
               </div>
               {questions.map((q) => (
-                <div key={q.question_id} className="text-[11px] leading-snug">
-                  <span className={q.covered ? "text-emerald-300" : "text-rose-300"}>{q.covered ? "✓" : "✗"}</span>{" "}
-                  <span className="text-slate-300">{q.question_topic}</span>
-                  {!q.self_produced && <span className="text-slate-500"> · повтор за менеджером</span>}
-                  {q.answer_strength && (
-                    <span className="text-slate-500"> · {STRENGTH_LABEL[q.answer_strength] ?? q.answer_strength}</span>
-                  )}
-                  {q.quote && <div className="text-slate-500 italic pl-4 truncate">«{q.quote}»</div>}
+                <div key={q.question_id} className="flex items-start gap-2 text-[11px] leading-snug">
+                  <QuestionBadge q={q} />
+                  <div className="min-w-0">
+                    <div className="text-slate-200">{topicLabel(q.question_topic)}</div>
+                    <div className="text-slate-500">
+                      {CLIENT_RP_CRITERIA[q.criterion] ?? q.criterion}
+                      {q.answer_strength && ` · ответ ${STRENGTH_LABEL[q.answer_strength] ?? q.answer_strength}`}
+                      {q.covered && !q.self_produced && " · повторил за менеджером, сам не сформулировал"}
+                      {!q.covered && q.problem_type && ` · ${PROBLEM_LABEL[q.problem_type] ?? q.problem_type}`}
+                    </div>
+                    {q.quote && <div className="text-slate-400 italic mt-0.5">«{q.quote}»</div>}
+                  </div>
                 </div>
               ))}
             </div>

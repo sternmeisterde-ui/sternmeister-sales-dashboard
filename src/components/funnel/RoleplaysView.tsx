@@ -11,7 +11,7 @@ import CalendarPicker from "@/components/CalendarPicker";
 import FilterSelect from "@/components/funnel/FilterSelect";
 import RoleplayDetailDrawer from "@/components/funnel/RoleplayDetailDrawer";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import type { RoleplaysResult, ClientRow, ManagerRow, WeekPoint } from "@/lib/funnel/roleplays-section";
+import type { RoleplaysResult, ClientRow, ManagerRow } from "@/lib/funnel/roleplays-section";
 
 /**
  * Раздел «Ролевки». Период фильтруется по ДАТЕ КОНСУЛЬТАЦИИ (когда звонили), а
@@ -33,11 +33,6 @@ function fmtDay(iso: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: "Europe/Berlin" });
-}
-
-function weekLabel(ymd: string): string {
-  const d = new Date(`${ymd}T12:00:00Z`);
-  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: "UTC" });
 }
 
 function scoreColor(s: number): string {
@@ -111,8 +106,6 @@ export default function RoleplaysView({ vertical }: Props) {
     setSeen(clients);
     setVisible(PAGE_SIZE);
   }
-
-  const weeks = data?.weeks ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -188,8 +181,6 @@ export default function RoleplaysView({ vertical }: Props) {
             />
           </div>
 
-          <WeeksTable rows={weeks} />
-
           <ManagersTable rows={data.managers} onPick={setManager} picked={manager} />
 
           <ClientsTable
@@ -261,46 +252,6 @@ function Th({
       <div className="text-[11px] normal-case tracking-normal text-slate-300">{children}</div>
       {sub && <div className="text-[10px] normal-case tracking-normal text-slate-500 font-normal">{sub}</div>}
     </th>
-  );
-}
-
-/** Недельная динамика — та самая, ради которой раздел и делался: растёт ли
- *  число консультаций на клиента. Таблицей, а не графиком (просьба 28.07). */
-function WeeksTable({ rows }: { rows: WeekPoint[] }) {
-  if (rows.length === 0) return null;
-  return (
-    <div className="glass-panel rounded-2xl border border-white/5 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
-        <span className="text-sm font-medium text-slate-200">По неделям</span>
-        <span className="text-xs text-slate-500">неделя начинается с понедельника</span>
-      </div>
-      <div className="overflow-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-slate-500">
-              <Th align="left">Неделя с</Th>
-              <Th sub="звонки от 10 минут">Консультаций</Th>
-              <Th sub="уникальных сделок">Клиентов</Th>
-              <Th sub="цель — больше 2">Консультаций на клиента</Th>
-              <Th sub="из консультаций">Разобрал ОКК</Th>
-              <Th sub="клиент отвечал по-немецки">Ролевка была</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((w) => (
-              <tr key={w.weekStart} className="border-t border-white/5">
-                <td className="px-3 py-2 text-slate-300 tabular-nums">{weekLabel(w.weekStart)}</td>
-                <td className="px-3 py-2 text-right text-slate-100 tabular-nums font-semibold">{w.consultations}</td>
-                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{w.leads}</td>
-                <td className="px-3 py-2 text-right text-slate-200 tabular-nums">{w.perLead ?? "—"}</td>
-                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{w.analyzed}</td>
-                <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{w.confirmed}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
   );
 }
 
@@ -448,11 +399,10 @@ function ClientsTable({
                 <td
                   className="px-3 py-2 text-right text-slate-400 tabular-nums"
                   title={
-                    c.analyzed < c.consultations
-                      ? c.notAnalyzed.length > 0
-                        ? `Не разобрано ${c.consultations - c.analyzed}:\n` +
-                          c.notAnalyzed.map((r) => `• ${r.count} × ${r.reason}`).join("\n")
-                        : `Не разобрано ${c.consultations - c.analyzed} — причина не определилась`
+                    c.notAnalyzed.length > 0
+                      ? `ОКК не разобрал ${c.notAnalyzed.reduce((s, r) => s + r.count, 0)} звонк(ов):\n` +
+                        c.notAnalyzed.map((r) => `• ${r.count} × ${r.reason}`).join("\n") +
+                        "\n\nКолонка считает консультации по телефонии, причины — по данным ОКК; наборы могут расходиться на 1–2 звонка."
                       : undefined
                   }
                 >

@@ -11,9 +11,10 @@
  *     analytics.communications × интервалы стадий из lead_status_changes.
  *     Это главный счётчик: он ничего не теряет.
  *
- *  2. РАЗБОР ОКК (частичное покрытие ≈ 7% звонков!). ОКК берёт в оценку только
- *     звонки ОТ 15 МИНУТ (MIN_DURATION_BY_PROMPT.d2_berater=900), поэтому
- *     консультации 10–15 мин туда не попадают вовсе. Из разобранных видно,
+ *  2. РАЗБОР ОКК (частичное покрытие, на июль ≈ 76% консультаций). Порог взятия
+ *     в оценку снижен до 10 минут (PR okk#51), но часть звонков ОКК пропускает
+ *     по своим правилам — фактическую причину по каждому показывает humanReason.
+ *     Из разобранных видно,
  *     репетировали ли реально: `roleplay_present` = клиент сам отвечал
  *     по-немецки (гейт по ответам). Менеджерский критерий «Проведение ролевки»
  *     мягче — засчитывает «предложил / перенёс / отправил в тренажёр», поэтому
@@ -65,17 +66,6 @@ export interface RoleplaysParams {
   /** Конец периода включительно, YYYY-MM-DD (Berlin). */
   to: string;
   vertical?: Vertical;
-}
-
-export interface WeekPoint {
-  /** Понедельник недели, YYYY-MM-DD (Berlin). */
-  weekStart: string;
-  consultations: number;
-  analyzed: number;
-  confirmed: number;
-  leads: number;
-  /** Консультаций на клиента за неделю. */
-  perLead: number | null;
 }
 
 export interface ManagerRow {
@@ -130,7 +120,6 @@ export interface RoleplaysTotals {
 
 export interface RoleplaysResult {
   totals: RoleplaysTotals;
-  weeks: WeekPoint[];
   managers: ManagerRow[];
   clients: ClientRow[];
   /** Доля разобранного ОКК — чтобы никто не принял «не разобрано» за «не было». */
@@ -139,14 +128,6 @@ export interface RoleplaysResult {
 
 export function classifyNotScored(gateReason: string | null): NotScoredKind {
   return gateReason && /degenerate/i.test(gateReason) ? "degenerate" : "insufficient";
-}
-
-/** Понедельник берлинской недели для YYYY-MM-DD. */
-function weekStartOf(ymd: string): string {
-  const d = new Date(`${ymd}T12:00:00Z`);
-  const dow = (d.getUTCDay() + 6) % 7; // 0 = понедельник
-  d.setUTCDate(d.getUTCDate() - dow);
-  return d.toISOString().slice(0, 10);
 }
 
 interface ConsultRow {
@@ -305,18 +286,17 @@ export async function computeRoleplaysSection(
   for (const [leadId, e] of clientMap) {
     const okk = okkByLead.get(leadId) ?? [];
     const meta = leadMeta.get(leadId);
-    // Остаток: разрыв между консультациями и разбором, который причинами не
-    // объяснился. Так бывает, когда снимок этапа у ОКК (initial_kommo_status_id)
-    // расходится с историей стадий в analytics — звонок попал в консультации
-    // здесь, но в ОКК числится на другом этапе. Лучше честное «отметки нет»,
-    // чем пустая подсказка.
+    // Причины — это звонки, которые ВИДЕЛ ОКК, но не разобрал. Колонка же
+    // считает консультации по телефонии: телефония видит все соединённые
+    // звонки, ОКК — только дошедшие до него, поэтому суммы могут не совпасть.
+    // Сводим явно, а не подгоняем: если телефония насчитала больше, чем ОКК
+    // вообще видел, добавляем честную строку «до ОКК не дошёл».
     const reasons = [...(notAnalyzed.get(leadId) ?? [])];
-    const explained = reasons.reduce((s, r) => s + r.count, 0);
-    const gap = e.consultations - okk.length;
-    if (gap > explained) {
+    const okkSeen = okk.length + reasons.reduce((s, r) => s + r.count, 0);
+    if (e.consultations > okkSeen) {
       reasons.push({
-        reason: "отметки в ОКК нет — звонок не поступал в разбор",
-        count: gap - explained,
+        reason: "звонок до ОКК не дошёл — отметки о разборе нет вовсе",
+        count: e.consultations - okkSeen,
       });
     }
     // Ответственный по CRM, а если его нет — тот, кто больше звонил.
@@ -342,40 +322,6 @@ export async function computeRoleplaysSection(
     });
   }
   clients.sort((a, b) => b.consultations - a.consultations || a.name.localeCompare(b.name, "ru"));
-
-  // ── Понедельная динамика ──────────────────────────────────────────────────
-  const weekMap = new Map<string, { c: number; a: number; k: number; leads: Set<number> }>();
-  const bump = (week: string) => {
-    let w = weekMap.get(week);
-    if (!w) {
-      w = { c: 0, a: 0, k: 0, leads: new Set() };
-      weekMap.set(week, w);
-    }
-    return w;
-  };
-  for (const r of consultRows) {
-    const w = bump(weekStartOf(r.day));
-    w.c += Number(r.n) || 0;
-    w.leads.add(Number(r.leadId));
-  }
-  for (const r of okkRows) {
-    if (!r.roleplayAt) continue;
-    const day = berlinDay(r.roleplayAt);
-    if (!day) continue;
-    const w = bump(weekStartOf(day));
-    w.a += 1;
-    if (r.confirmed) w.k += 1;
-  }
-  const weeks: WeekPoint[] = [...weekMap.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([weekStart, w]) => ({
-      weekStart,
-      consultations: w.c,
-      analyzed: w.a,
-      confirmed: w.k,
-      leads: w.leads.size,
-      perLead: w.leads.size > 0 ? Math.round((w.c / w.leads.size) * 100) / 100 : null,
-    }));
 
   // ── Срез по менеджерам ────────────────────────────────────────────────────
   const mgrMap = new Map<
@@ -436,7 +382,6 @@ export async function computeRoleplaysSection(
 
   return {
     totals,
-    weeks,
     managers,
     clients,
     coveragePct:
@@ -446,16 +391,6 @@ export async function computeRoleplaysSection(
   };
 }
 
-function berlinDay(iso: string): string | null {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Berlin",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(d);
-}
 
 /** «4 касания» вместо «4 касаний»: причины читают люди, а не парсер. */
 function plural(n: number, one: string, few: string, many: string): string {
@@ -580,7 +515,13 @@ async function fetchNotAnalyzedReasons(
           SELECT prompt_type FROM evaluations
           WHERE call_id = c.id ORDER BY created_at DESC LIMIT 1
         ) e ON TRUE
-        WHERE c.kommo_lead_id IN (${sql.raw(ids.join(","))})
+        -- Отсекаем звонки, по которым КЛИЕНТСКАЯ ролевка всё-таки посчитана:
+        -- именно их считает колонка «Разобрал ОКК». Раньше проверялось наличие
+        -- МЕНЕДЖЕРСКОЙ оценки, и звонки, где её пропустило правило повторных,
+        -- попадали разом и в «разобрано», и в «причины пропуска».
+        LEFT JOIN client_evaluations ce ON ce.call_id = c.id
+        WHERE ce.call_id IS NULL
+          AND c.kommo_lead_id IN (${sql.raw(ids.join(","))})
           AND c.duration_seconds >= ${CONSULT_MIN_SECONDS}
           AND (c.call_created_at AT TIME ZONE 'Europe/Berlin')::date
                 BETWEEN ${from}::date AND ${to}::date
