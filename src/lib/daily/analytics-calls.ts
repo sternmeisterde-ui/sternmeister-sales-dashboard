@@ -1612,6 +1612,13 @@ export interface LostCallDetailRow {
   statusName: string | null;
   /** ФИ клиента из зеркала контактов (по сделке или по номеру). */
   clientName: string | null;
+  /** Как именно потеряли клиента (b2b, решение 2026-07-29 по жалобе РОПа
+   *  «в потерянных нет входящих»):
+   *   • `out_unanswered` — мы звонили, не дозвонились, не перезвонили в 15 мин;
+   *   • `in_missed` — клиент звонил САМ, никто не взял и не перезвонили в 24ч.
+   *     Входящие Коммерсов приходят на линию KOM% без агента (manager IS NULL),
+   *     поэтому по агенту их не поймать — скоуп по line_name. */
+  kind: "out_unanswered" | "in_missed";
 }
 
 /** ФИ контактов по нормализованным номерам (последние 10 цифр) из зеркала
@@ -1664,8 +1671,9 @@ export async function getAnalyticsLostCallsDetail(
 ): Promise<LostCallDetailRow[]> {
   const dept = department === "b2b" ? "b2b" : "b2g";
   const managerIds = managers.map((m) => m.id).sort().join(",");
-  const cacheKey = `lost-calls-detail:${dept}:${fromTs}:${toTs}:${managerIds}:v2`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCallsDetail(managers, fromTs, toTs));
+  // :v3 — в b2b добавлены пропущенные входящие (kind), форма строк изменилась.
+  const cacheKey = `lost-calls-detail:${dept}:${fromTs}:${toTs}:${managerIds}:v3`;
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchLostCallsDetail(managers, fromTs, toTs, dept));
 }
 
 /**
@@ -1699,6 +1707,7 @@ async function fetchLostCallsDetail(
   managers: Array<{ id: string; name: string }>,
   fromTs: number,
   toTs: number,
+  dept: "b2g" | "b2b" = "b2b",
 ): Promise<LostCallDetailRow[]> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
@@ -1710,6 +1719,52 @@ async function fetchLostCallsDetail(
   if (names.length === 0) return [];
   const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
 
+  // Пропущенные входящие (клиент звонил сам) — только Коммерсы: их входящие
+  // приходят на линию KOM% в очередь БЕЗ агента (manager IS NULL), поэтому
+  // скоуп по line_name, а не по ростеру. У Госников «Потерянные» — лид-based
+  // снимок (getB2gLostLeads, спека 25 §2), эту ветку им не включаем.
+  const inMissed = dept === "b2b"
+    ? sql`
+      UNION ALL
+      SELECT
+        i.manager, i.phone, i.pnorm, i.created_at, i.lead_id,
+        lci.pipeline AS pipeline_name, lci.status AS status_name, lni.name AS client_name,
+        'in_missed' AS kind
+      FROM (
+        SELECT DISTINCT ON (communication_id)
+          communication_id, created_at, manager, lead_id, phone,
+          right(regexp_replace(phone, '\D', '', 'g'), 10) AS pnorm
+        FROM analytics.communications
+        WHERE created_at >= ${fromDate}
+          AND created_at <= ${toDate}
+          AND communication_type = 'call_in'
+          AND line_name LIKE 'KOM%'
+          AND (duration IS NULL OR duration < 1)
+          AND phone IS NOT NULL AND phone <> ''
+        ORDER BY communication_id, lead_id NULLS LAST
+      ) i
+      LEFT JOIN LATERAL (
+        SELECT pipeline, status FROM analytics.leads_cohort WHERE lead_id = i.lead_id LIMIT 1
+      ) lci ON i.lead_id IS NOT NULL
+      LEFT JOIN LATERAL (
+        SELECT ct.name FROM analytics.lead_contact_links ll
+        JOIN analytics.contacts ct ON ct.contact_id = ll.contact_id
+        WHERE ll.lead_id = i.lead_id AND ll.is_active
+        ORDER BY ll.last_seen_at DESC LIMIT 1
+      ) lni ON i.lead_id IS NOT NULL
+      WHERE i.pnorm <> ''
+        AND EXTRACT(hour FROM (i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
+        AND EXTRACT(hour FROM (i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
+        -- Перезвонили в течение суток (любым сотрудником) → клиент не потерян.
+        AND NOT EXISTS (
+          SELECT 1 FROM analytics.communications cb
+          WHERE cb.communication_type = 'call_out'
+            AND cb.created_at > i.created_at
+            AND cb.created_at <= i.created_at + interval '24 hours'
+            AND right(regexp_replace(cb.phone, '\D', '', 'g'), 10) = i.pnorm
+        )`
+    : sql``;
+
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{
@@ -1719,6 +1774,7 @@ async function fetchLostCallsDetail(
     lead_id: string | number | null;
     pipeline_name: string | null;
     status_name: string | null;
+    kind: string;
   }>(sql`
     WITH outs AS (
       SELECT DISTINCT ON (communication_id)
@@ -1753,7 +1809,8 @@ async function fetchLostCallsDetail(
       c.lead_id,
       lc.pipeline AS pipeline_name,
       lc.status AS status_name,
-      ln.name AS client_name
+      ln.name AS client_name,
+      'out_unanswered' AS kind
     FROM candidates c
     LEFT JOIN LATERAL (
       SELECT pipeline, status FROM analytics.leads_cohort
@@ -1774,7 +1831,8 @@ async function fetchLostCallsDetail(
         AND cb.created_at <= c.created_at + interval '15 minutes'
         AND right(regexp_replace(cb.phone, '\D', '', 'g'), 10) = c.pnorm
     )
-    ORDER BY c.manager NULLS LAST, c.created_at
+    ${inMissed}
+    ORDER BY 1 NULLS LAST, 4
   `);
 
   // ФИ для строк без сделки — одним batch-запросом по номерам.
@@ -1801,6 +1859,7 @@ async function fetchLostCallsDetail(
       statusName: r.status_name,
       clientName:
         r.client_name ?? (r.pnorm ? nameByPnorm.get(String(r.pnorm)) ?? null : null),
+      kind: r.kind === "in_missed" ? "in_missed" : "out_unanswered",
     };
   });
 }
