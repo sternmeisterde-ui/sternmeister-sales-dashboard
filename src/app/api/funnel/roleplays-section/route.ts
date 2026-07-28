@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { computeRoleplayAudit } from "@/lib/funnel/roleplay-audit";
+import { computeRoleplaysSection } from "@/lib/funnel/roleplays-section";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import type { Vertical } from "@/lib/kommo/pipeline-config";
 
@@ -17,10 +17,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/funnel/roleplay-audit?termin_from=YYYY-MM-DD&termin_to=YYYY-MM-DD&vertical=
- * Таблица «Ролевки»: проведено / оценено ботом / выставлено в Kommo по каждой
- * сделке с термином в периоде. Фильтр — тот же, что у таблицы клиентов.
- * Только admin (вкладка Воронка целиком admin-only).
+ * GET /api/funnel/roleplays-section?from=YYYY-MM-DD&to=YYYY-MM-DD&vertical=
+ * Раздел «Ролевки»: консультации ≥10 мин, разбор ОКК, подтверждённые ролевки,
+ * ручные vs ботовые оценки в Kommo. Период — по ДАТЕ КОНСУЛЬТАЦИИ (звонка).
+ * Только admin.
  */
 export async function GET(req: NextRequest) {
   const session = await getSession();
@@ -31,22 +31,19 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
   const today = fmtLocalDate(todayBerlinDate());
-  let from = parseDate(sp.get("termin_from")) ?? today;
-  let to = parseDate(sp.get("termin_to"));
-  if (to && from > to) [from, to] = [to, from];
-
-  const limitRaw = Number(sp.get("limit"));
-  const limit =
-    Number.isInteger(limitRaw) && limitRaw > 0 && limitRaw <= 1000 ? limitRaw : 300;
+  let from = parseDate(sp.get("from")) ?? today;
+  let to = parseDate(sp.get("to")) ?? today;
+  if (from > to) [from, to] = [to, from];
 
   try {
-    const result = await computeRoleplayAudit(
-      { terminFrom: from, terminTo: to, vertical: parseVerticalParam(sp.get("vertical")) },
-      limit,
-    );
+    const result = await computeRoleplaysSection({
+      from,
+      to,
+      vertical: parseVerticalParam(sp.get("vertical")),
+    });
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
-    console.error("[/api/funnel/roleplay-audit] failed:", e);
+    console.error("[/api/funnel/roleplays-section] failed:", e);
     return NextResponse.json(
       { error: "internal", message: e instanceof Error ? e.message : String(e) },
       { status: 500 },

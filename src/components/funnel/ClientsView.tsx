@@ -18,7 +18,6 @@ import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
 import InfoPopover from "@/components/funnel/InfoPopover";
 import ClientDrawer, { NOT_SCORED_MARK } from "@/components/funnel/ClientDrawer";
 import FilterSelect from "@/components/funnel/FilterSelect";
-import RoleplayAuditTable from "@/components/funnel/RoleplayAuditTable";
 
 // Кеш по периоду — переключение Когорты⇄Клиенты не должно перезагружать таблицу.
 const cache = new Map<string, ClientsResult>();
@@ -1394,14 +1393,6 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
             onRowClick={setSelected}
             onFilterManager={setManager}
             onFilterStage={setStage}
-          />
-          {/* Аудит ролевок: провели ли, оценил ли бот, сходится ли с Kommo.
-              Свой запрос (тот же фильтр периода), чтобы не утяжелять /clients. */}
-          <RoleplayAuditTable
-            terminFrom={terminFrom}
-            terminTo={terminTo}
-            vertical={vertical}
-            manager={manager}
           />
         </>
       )}
