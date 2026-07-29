@@ -85,11 +85,17 @@ async function main() {
   // Звонки ОКК за период: соединённые, от порога консультации, ещё без оценки
   // клиента. Первые половины склеенных пар пропускаем — разговор оценивается
   // на продолжении, и добор создал бы вторую ролевку на тот же день.
+  // ⚠ ТОЛЬКО ЗВОНКИ БЕРАТЕРОВ (линия 2). Консультацию с ролевкой ведёт бератер;
+  // квалификатор (линия 1) и доведение (линия 3) звонят тем же клиентам по
+  // своим вопросам, и их разговоры на консультационном этапе — не консультации.
+  // Без этого фильтра добор 29.07 создал 62 лишние клиентские ролевки, три из
+  // которых бот даже оценил и записал в карточки.
   const calls = rows(await d2OkkDb.execute(sql`
     SELECT c.id, c.kommo_lead_id, c.call_created_at, c.duration_seconds,
            c.pair_role, c.error_message, COALESCE(c.transcript, '') <> '' AS has_transcript
     FROM calls c
     LEFT JOIN client_evaluations ce ON ce.call_id = c.id
+    JOIN managers m ON m.id = c.manager_id AND m.line = '2'
     WHERE ce.call_id IS NULL
       AND c.kommo_lead_id IS NOT NULL
       AND COALESCE(c.duration_seconds, 0) >= ${CONSULT_MIN_SECONDS}
