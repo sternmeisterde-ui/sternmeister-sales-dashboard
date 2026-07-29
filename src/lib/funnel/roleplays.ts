@@ -73,6 +73,10 @@ export async function getRoleplaysForLeads(
              roleplay_at::text AS roleplay_at, gate_reason
       FROM analytics.client_roleplays
       WHERE lead_id IN (${sql.raw(ids.join(","))})
+        -- Только СОСТОЯВШИЕСЯ ролевки: с миграции 0035 зеркало содержит и
+        -- звонки, где менеджер ролевку не проводил (нужны таблице «Ролевки»).
+        -- Здесь они дали бы фантомные «попытки» без балла.
+        AND manager_conducted = TRUE
       ORDER BY lead_id, side, attempt NULLS LAST, roleplay_at
     `),
   );

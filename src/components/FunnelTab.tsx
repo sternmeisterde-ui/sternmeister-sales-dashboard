@@ -14,6 +14,7 @@ import UnifiedFunnel from "@/components/funnel/UnifiedFunnel";
 import ViewModeToggle, { type FunnelViewMode } from "@/components/funnel/ViewModeToggle";
 import ClientsView from "@/components/funnel/ClientsView";
 import ManagersView from "@/components/funnel/ManagersView";
+import RoleplaysView from "@/components/funnel/RoleplaysView";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import { CONVERSION_ORDER, CONVERSIONS } from "@/lib/funnel/conversions";
 import {
@@ -500,6 +501,10 @@ export default function FunnelTab({
       {viewMode === "clients" && <ClientsView filters={filters} vertical={vertical} />}
 
       {viewMode === "managers" && <ManagersView filters={filters} vertical={vertical} />}
+
+      {/* «Ролевки» — свой фильтр периода (по дате консультации), общий фильтр
+          вкладки к нему не применяется: там период про дату создания лида. */}
+      {viewMode === "roleplays" && <RoleplaysView vertical={vertical} />}
 
       {viewMode === "cohorts" && (
         <>

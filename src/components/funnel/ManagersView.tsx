@@ -69,7 +69,7 @@ function buildColumns(role: ManagerRoleKey): Column[] {
     { key: "roleBase", label: `База ${conv}`, title: `База конверсии ${conv}: ${convLabel} (знаменатель)`, numeric: true },
     { key: "roleConversionPct", label: `${conv} %`, title: `Профильная конверсия роли — ${convLabel} (цель ÷ база)`, numeric: true },
     { key: "conversionC5Pct", label: "C5 %", title: "Личная сквозная конверсия: Гутшайн / Клиенты", numeric: true },
-    { key: "consultations", label: "Конс.", title: "Проведённых консультаций (ДЦ+АА) по клиентам", numeric: true },
+    { key: "consultations", label: "Конс.", title: "Консультационных звонков (ДЦ+АА) по клиентам менеджера — по факту звонка из ОКК, не по событию статуса в Kommo", numeric: true },
     { key: "touches", label: "Касания", title: "Касаний по клиентам менеджера за выбранный период", numeric: true },
     { key: "touchesPerDay", label: "Кас./день", title: "Среднее касаний в активный рабочий день (касания ÷ дни с касаниями)", numeric: true },
     { key: "avgOkk", label: "ОКК", title: "Средний ОКК звонков роли (0–100)", numeric: true },

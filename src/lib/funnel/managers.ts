@@ -24,7 +24,7 @@ import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db/index";
 import { d2OkkDb } from "@/lib/db/okk";
-import { getBeraterStatusSets, type Vertical } from "@/lib/kommo/pipeline-config";
+import { type Vertical } from "@/lib/kommo/pipeline-config";
 import {
   enrichDisqualifiedAt,
   fetchBeraterContext,
@@ -37,12 +37,7 @@ import {
   type BeraterLead,
   type ComputeOpts,
 } from "./compute";
-
-/** Статусы «консультация проведена» (ДЦ/АА) по вертикали. */
-function consultDoneStatuses(vertical?: Vertical): number[] {
-  const br = getBeraterStatusSets(vertical);
-  return [...br.consultBeforeDCDone, ...br.consultBeforeAADone];
-}
+import { getConsultCallCountsByLead } from "./okk-by-lead";
 
 export type ManagerRoleKey = "qualifier" | "berater" | "dovedenie";
 
@@ -144,7 +139,6 @@ type OkkAgg = Record<ManagerRoleKey, { sum: number; n: number }>;
 
 export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult> {
   const scope = getVerticalScope(opts.vertical);
-  const consultStatuses = consultDoneStatuses(opts.vertical);
   // 1. Квал-база первой линии (та же, что у когорт; уважает period/source).
   const baseLeadsRaw = await fetchQualifiedBaseLeads(opts);
   const leadIds = baseLeadsRaw.map((l) => l.leadId);
@@ -169,6 +163,17 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
   const baseLeads = baseLeadsRaw.map((lead) =>
     enrichDisqualifiedAt(lead, closeReasonHistory.get(lead.leadId))
   );
+
+  // 2b. Консультации считаем по ФАКТУ звонка (D2), а не по событиям статусов —
+  // ключи здесь Бератер-сделки (звонок-консультация висит на ней), поэтому
+  // запрос идёт после beraterContext.
+  const beraterLeadIds: number[] = [];
+  for (const list of beraterContext.values()) {
+    for (const b of list as BeraterLead[]) beraterLeadIds.push(b.leadId);
+  }
+  const consultCallsByLead = beraterLeadIds.length
+    ? await getConsultCallCountsByLead(beraterLeadIds, opts.vertical)
+    : new Map<number, number>();
 
   // Только B2G-менеджеры (не РОП). Отсекает B2B-ответственных и системных юзеров.
   const isB2gManager = (uid: number): boolean => {
@@ -197,7 +202,7 @@ export async function computeManagers(opts: ComputeOpts): Promise<ManagersResult
     const touchInfo = touchesByLead.get(lead.leadId);
     const touches = touchInfo?.total ?? 0;
     const touchDays = touchInfo?.days ?? [];
-    const consult = countConsultations(beraters, consultStatuses);
+    const consult = countConsultationCalls(beraters, consultCallsByLead);
 
     // Результаты конверсий по лиду. C2/C3/C4 нужны и для общего пути, и как
     // профильные конверсии ролей (см. ROLE_CONVERSION).
@@ -303,12 +308,17 @@ function creditBeraterResponsible(
   return firstMatch;
 }
 
-// ── Консультации: +1 за каждую проведённую (ДЦ/АА) среди Бератер-сделок клиента ─
-function countConsultations(beraters: BeraterLead[], statuses: number[]): number {
+// ── Консультации: фактические консультационные звонки по Бератер-сделкам ──────
+// Раньше считались входы в статусы «Консультация … проведена» — перестановка
+// статуса туда-обратно накручивала счётчик, а несколько консультаций подряд в
+// одном статусе давали 1. Теперь источник — разобранные ОКК звонки
+// (см. getConsultCallCountsByLead), поэтому цифра стала ниже и честнее.
+function countConsultationCalls(
+  beraters: BeraterLead[],
+  callsByLead: Map<number, number>
+): number {
   let n = 0;
-  for (const b of beraters) {
-    for (const s of statuses) if (b.events.has(s)) n += 1;
-  }
+  for (const b of beraters) n += callsByLead.get(b.leadId) ?? 0;
   return n;
 }
 

@@ -3,7 +3,7 @@
 
 import { getLeads } from "@/lib/kommo/client";
 import { analyticsDb } from "@/lib/db/analytics";
-import { leadsCohort } from "@/lib/db/schema-analytics";
+import { leadsCohort, type RoleplaySlot } from "@/lib/db/schema-analytics";
 import { sql } from "drizzle-orm";
 import type { KommoLookups } from "./lookups";
 import {
@@ -63,6 +63,21 @@ const CF = {
   QS_INCOME: 869938,
 } as const;
 
+/**
+ * «Ролевочные» поля карточки (B2G Бератер): по 3 слота на сторону, у каждого
+ * дата + оценка (select со значениями «1».. «5»). Подтверждено запросом
+ * GET /leads/custom_fields 28.07.2026. Заполняются РУКАМИ менеджером — таблица
+ * «Ролевки» сверяет их с автооценкой ОКК. Миграция 0036.
+ */
+const RP_SLOT_FIELDS: Array<{ side: "dc" | "aa"; attempt: number; dateId: number; scoreId: number }> = [
+  { side: "dc", attempt: 1, dateId: 891978, scoreId: 891980 },
+  { side: "dc", attempt: 2, dateId: 891982, scoreId: 891984 },
+  { side: "dc", attempt: 3, dateId: 891986, scoreId: 891988 },
+  { side: "aa", attempt: 1, dateId: 891990, scoreId: 891992 },
+  { side: "aa", attempt: 2, dateId: 891994, scoreId: 891996 },
+  { side: "aa", attempt: 3, dateId: 891998, scoreId: 892000 },
+];
+
 // ---- B2B payment custom-fields (looked up by name, not by id) ----
 // Field IDs for payment dates/amounts vary per Kommo account, so we match
 // by field_name exactly as used in build-response.ts:findCustomField.
@@ -119,6 +134,47 @@ function findByName(fields: CustomFields, names: readonly string[]): unknown | u
  *  must not be conflated). */
 function findByFieldId(fields: CustomFields, fieldId: number): unknown | undefined {
   return fields?.find((f) => f?.field_id === fieldId)?.values?.[0]?.value;
+}
+
+/**
+ * Ручные оценки ролевок из карточки Kommo → компактный JSONB.
+ * Возвращает ТОЛЬКО заполненные слоты; если не заполнено ничего — ПУСТОЙ
+ * массив, а не null. Это принципиально: NULL в колонке означает «сделку не
+ * синкали после миграции 0036» (данных нет), а `[]` — «синкали, слотов нет».
+ * Без этого различия таблица «Ролевки» красным пометила бы расхождением всё,
+ * что просто ещё не пересинкалось.
+ *
+ * Балл читаем из текста значения select'а («1».. «5»), а не из enum_id: enum'ы
+ * привязаны к конкретному слоту (у ДЦ-1 свой набор из 5 id, у ДЦ-2 свой), и
+ * захардкоженная карта из 30 id ломалась бы при любой пересборке поля в Kommo.
+ * Дата — берлинский день (YYYY-MM-DD): в поле Kommo времени нет.
+ */
+export function parseRoleplaySlotsFromLead(cf: CustomFields): RoleplaySlot[] {
+  const slots: RoleplaySlot[] = [];
+  for (const f of RP_SLOT_FIELDS) {
+    const scoreRaw = findByFieldId(cf, f.scoreId);
+    const dateRaw = findByFieldId(cf, f.dateId);
+    const score = parseNumber(scoreRaw);
+    const date = parseDate(dateRaw);
+    if (score === null && date === null) continue; // слот пуст
+    slots.push({
+      side: f.side,
+      attempt: f.attempt,
+      score: score !== null && score >= 1 && score <= 5 ? Math.round(score) : null,
+      date: date ? fmtBerlinDay(date) : null,
+    });
+  }
+  return slots;
+}
+
+/** Date → 'YYYY-MM-DD' в Europe/Berlin (CLAUDE.md #1: никаких UTC-полночей). */
+function fmtBerlinDay(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
 }
 
 export interface LeadCacheEntry {
@@ -342,6 +398,7 @@ export async function syncLeads(
         lead.custom_fields_values,
         CF.EXCLUDE_FROM_ANALYTICS,
       ),
+      roleplaySlots: parseRoleplaySlotsFromLead(cf),
       updatedAt: lead.updated_at ? new Date(lead.updated_at * 1000) : null,
     });
   }

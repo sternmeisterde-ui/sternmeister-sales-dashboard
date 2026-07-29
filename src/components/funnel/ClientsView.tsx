@@ -113,7 +113,6 @@ type SortKey =
   | "dc"
   | "aa"
   | "roleplays"
-  | "consultations"
   | "okk"
   | "activity"
   | "score";
@@ -145,7 +144,6 @@ const COLUMNS: {
   { key: "dc", label: "ДЦ", align: "center", value: (c) => c.dc.latest ?? -1 },
   { key: "aa", label: "АА", align: "center", value: (c) => c.aa.latest ?? -1 },
   { key: "roleplays", label: "С ботом", align: "center", value: (c) => c.botRoleplayCount },
-  { key: "consultations", label: "Конс.", align: "center", value: (c) => c.consultations },
   { key: "okk", label: "ОКК", align: "center", value: (c) => c.okkDeal ?? -1 },
   { key: "activity", label: "Активность", align: "right", value: (c) => c.daysSinceLastTouch ?? Number.POSITIVE_INFINITY },
   { key: "score", label: "Готовность", align: "right", value: (c) => c.score },
@@ -314,9 +312,6 @@ function ClientTable({
                   <td className="px-3 py-2 text-center"><SideCell side={c.aa} /></td>
                   <td className="px-3 py-2 text-center text-slate-300 tabular-nums" title="тренировок с ботом">
                     {c.botRoleplayCount || <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="px-3 py-2 text-center text-slate-300 tabular-nums">
-                    {c.consultations || <span className="text-slate-600">—</span>}
                   </td>
                   <td className="px-3 py-2 text-center tabular-nums" title="средний ОКК звонков по сделке (из ОКК-системы)">
                     {c.okkDeal === null ? (

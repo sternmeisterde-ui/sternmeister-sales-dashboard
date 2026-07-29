@@ -23,6 +23,18 @@ import { sql } from "drizzle-orm";
 
 export const analyticsSchema = pgSchema("analytics");
 
+/**
+ * Один заполненный «ролевочный» слот карточки Kommo (ручная оценка менеджера).
+ * side — 'dc' | 'aa', attempt — 1..3, score — 1..5, date — YYYY-MM-DD (день,
+ * время в поле Kommo не хранится). Миграция 0036.
+ */
+export interface RoleplaySlot {
+  side: "dc" | "aa";
+  attempt: number;
+  score: number | null;
+  date: string | null;
+}
+
 // ==================== DATASOURCE ====================
 
 export const leadsCohort = analyticsSchema.table(
@@ -108,6 +120,11 @@ export const leadsCohort = analyticsSchema.table(
     // (lead_deleted). Добавлено в 0022_leads_cohort_is_deleted.sql.
     isDeleted: boolean("is_deleted").default(false).notNull(),
     deletedAt: timestamp("deleted_at"),
+    // Ручные оценки ролевок из карточки Kommo (CF 891978..892000, по 3 слота
+    // на сторону): [{side,attempt,score,date}], только заполненные слоты.
+    // Таблица «Ролевки» сверяет их с автооценкой бота. Миграция 0036.
+    // NULL = сделку не синкали после 0036 (данных нет); [] = синкали, пусто.
+    roleplaySlots: jsonb("roleplay_slots").$type<RoleplaySlot[]>(),
   },
   (t) => [
     index().on(t.leadId),

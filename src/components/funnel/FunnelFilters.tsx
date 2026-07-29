@@ -21,11 +21,12 @@ interface Props {
   lastUpdatedAt: Date | null;
   /**
    * Режим вкладки — определяет, какие фильтры применяются:
-   *   cohorts  — все;
-   *   clients  — только свой фильтр даты термина (всё в шапке затемнено);
-   *   managers — Период + Канал применяются, Зрелость + Менеджер нет.
+   *   cohorts   — все;
+   *   clients   — только свой фильтр даты термина (всё в шапке затемнено);
+   *   managers  — Период + Канал применяются, Зрелость + Менеджер нет;
+   *   roleplays — свой фильтр периода консультаций, шапка не применяется.
    */
-  mode?: "cohorts" | "clients" | "managers";
+  mode?: "cohorts" | "clients" | "managers" | "roleplays";
   onChange: (next: Partial<FunnelFiltersState>) => void;
   onReset: () => void;
 }
@@ -50,16 +51,25 @@ export default function FunnelFilters({
 }: Props) {
   const isClients = mode === "clients";
   const isManagers = mode === "managers";
-  // Период + Канал: применяются в cohorts и managers; в clients — свой фильтр даты.
-  const dimPS = isClients ? "opacity-40 pointer-events-none" : "";
-  const titlePS = isClients ? "Не применяется к виду «Клиенты» (только дата термина)" : undefined;
-  // Зрелость + Менеджер: только в cohorts; в clients и managers не применяются.
-  const dimMM = isClients || isManagers ? "opacity-40 pointer-events-none" : "";
+  const isRoleplays = mode === "roleplays";
+  // Период + Канал: применяются в cohorts и managers; в clients и roleplays —
+  // свой фильтр даты внутри самого вида (термин / дата консультации).
+  const ownDate = isClients || isRoleplays;
+  const dimPS = ownDate ? "opacity-40 pointer-events-none" : "";
+  const titlePS = isClients
+    ? "Не применяется к виду «Клиенты» (только дата термина)"
+    : isRoleplays
+      ? "Не применяется к виду «Ролевки» (только дата консультации)"
+      : undefined;
+  // Зрелость + Менеджер: только в cohorts; в остальных видах не применяются.
+  const dimMM = ownDate || isManagers ? "opacity-40 pointer-events-none" : "";
   const titleMM = isClients
     ? "Не применяется к виду «Клиенты»"
     : isManagers
       ? "Не применяется к виду «Менеджеры»"
-      : undefined;
+      : isRoleplays
+        ? "Не применяется к виду «Ролевки»"
+        : undefined;
   return (
     <section
       className="glass-panel rounded-2xl border border-white/5 px-4 py-3 flex flex-wrap items-center gap-2"
