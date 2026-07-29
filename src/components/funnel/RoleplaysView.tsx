@@ -11,7 +11,7 @@ import CalendarPicker from "@/components/CalendarPicker";
 import FilterSelect from "@/components/funnel/FilterSelect";
 import RoleplayDetailDrawer from "@/components/funnel/RoleplayDetailDrawer";
 import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import type { RoleplaysResult, ClientRow, ManagerRow } from "@/lib/funnel/roleplays-section";
+import type { RoleplaysResult, ClientRow, ManagerRow, SlotCompare } from "@/lib/funnel/roleplays-section";
 
 /**
  * Раздел «Ролевки». Период фильтруется по ДАТЕ КОНСУЛЬТАЦИИ (когда звонили), а
@@ -33,6 +33,55 @@ function fmtDay(iso: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", timeZone: "Europe/Berlin" });
+}
+
+/**
+ * Ячейка сверки «что стоит в карточке» ↔ «что насчитал бот».
+ *
+ * Красное = балл в карточке бот не подтверждал: либо поставил другую цифру,
+ * либо эту ролевку вовсе не разбирал. Это и есть ответ на вопрос «где ещё
+ * стоит оценка менеджера» — цифра держится только на его слове.
+ */
+function SlotCell({ slot }: { slot: SlotCompare }) {
+  const when = slot.day ? fmtDay(`${slot.day}T12:00:00Z`) : "дата не указана";
+  const who = slot.editedBy ? `правил руками: ${slot.editedBy}` : null;
+  const tip = (text: string) => [`${when}: ${text}`, who].filter(Boolean).join("\n");
+
+  switch (slot.status) {
+    case "pending":
+      return (
+        <span className="text-amber-400 cursor-help" title={tip("разговор сегодня — бот досчитает примерно через два часа")}>
+          {slot.kommo ?? "…"}
+        </span>
+      );
+    case "bot_only":
+      return (
+        <span className="text-rose-300 font-semibold cursor-help" title={tip(`бот оценил на ${slot.bot}, но в карточке пусто — запись не дошла`)}>
+          ∅
+        </span>
+      );
+    case "kommo_only":
+      return (
+        <span className="text-rose-300 font-semibold cursor-help" title={tip(`в карточке ${slot.kommo}, но эту ролевку бот не разбирал — балл ничем не подтверждён`)}>
+          {slot.kommo}
+        </span>
+      );
+    case "mismatch":
+      return (
+        <span className="text-rose-300 font-semibold cursor-help" title={tip(`бот поставил ${slot.bot}, а в карточке ${slot.kommo} — цифру правили после разбора`)}>
+          {slot.kommo}
+        </span>
+      );
+    default:
+      return (
+        <span
+          className={`font-semibold ${slot.kommo === null ? "text-slate-600" : scoreColor(slot.kommo)}`}
+          title={tip(slot.kommo === null ? "ролевка была, балл не выставлен ни ботом, ни руками" : "совпадает с оценкой бота")}
+        >
+          {slot.kommo ?? "—"}
+        </span>
+      );
+  }
 }
 
 function scoreColor(s: number): string {
@@ -289,11 +338,14 @@ function ManagersTable({
               <Th sub="клиент отвечал по-немецки" title="Из разобранных: подтверждена настоящая репетиция — клиент сам произносил немецкие ответы.">
                 Ролевка была
               </Th>
-              <Th sub="вписал в карточку сам" title="Сколько раз менеджер руками проставил балл ролевки в карточке Kommo за период.">
-                Баллов поставил менеджер
+              <Th sub="посчитал по записи" title="Сколько ролевок бот ОКК оценил сам, разобрав запись разговора.">
+                Оценил бот
               </Th>
-              <Th sub="посчитал автоматически" title="Сколько баллов посчитал бот ОКК. С 22.06.2026 он записывает их в карточку сам и может перезаписать ручной.">
-                Баллов поставил бот
+              <Th sub="стоит фактически" title="Сколько баллов реально заполнено в полях «Ролевка ДЦ/АА-N оценка» в карточках Kommo за период.">
+                Оценок в Kommo
+              </Th>
+              <Th sub="балл не подтверждён ботом" title="Слоты, где цифра в карточке не совпала с ботом или бот эту ролевку вовсе не разбирал. Менеджер вписывает балл сразу, бот считает свой примерно через два часа — если после этого в карточке осталась другая цифра, её поправили руками. Сегодняшние разговоры не в счёт: бот ещё в работе.">
+                Расхождений
               </Th>
             </tr>
           </thead>
@@ -312,8 +364,15 @@ function ManagersTable({
                 <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{m.perLead ?? "—"}</td>
                 <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{m.analyzed}</td>
                 <td className="px-3 py-2 text-right text-slate-300 tabular-nums">{m.confirmed}</td>
-                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{m.manualScores}</td>
                 <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{m.botScores}</td>
+                <td className="px-3 py-2 text-right text-slate-400 tabular-nums">{m.kommoScores}</td>
+                <td
+                  className={`px-3 py-2 text-right tabular-nums ${
+                    m.mismatches > 0 ? "text-rose-300 font-semibold" : "text-slate-600"
+                  }`}
+                >
+                  {m.mismatches}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -361,8 +420,8 @@ function ClientsTable({
               <Th align="center" sub="1–5, по порядку" title="Балл клиента за ролевку. ○ — репетиция была, но материала мало; ⚠ — сбой авто-оценки.">
                 Оценил бот
               </Th>
-              <Th align="center" sub="правок в карточке" title="Сколько раз менеджер руками вписал балл в карточку Kommo. Наведите, чтобы увидеть кто и когда.">
-                Вписал менеджер
+              <Th align="center" sub="фактически в карточке" title="Что реально стоит в полях «Ролевка ДЦ/АА-N оценка». Красным — цифра не совпала с ботом или бот эту ролевку не разбирал. Наведите на балл: покажет оценку бота, дату и кто правил слот руками.">
+                Стоит в Kommo
               </Th>
             </tr>
           </thead>
@@ -435,19 +494,16 @@ function ClientsTable({
                   )}
                 </td>
                 <td className="px-3 py-2 text-center">
-                  {c.manualEdits.length === 0 ? (
-                    <span className="text-slate-600">—</span>
+                  {c.kommoSlots.length === 0 ? (
+                    <span className="text-slate-600" title="За этот период в карточке нет ни одной оценки за ролевку">—</span>
                   ) : (
-                    <span
-                      className="text-slate-300 tabular-nums cursor-help"
-                      title={c.manualEdits
-                        .map(
-                          (e) =>
-                            `${e.side === "dc" ? "ДЦ" : "АА"}-${e.attempt} = ${e.score ?? "?"} · ${fmtDay(e.at)} · ${e.author ?? "неизвестно"}`,
-                        )
-                        .join("\n")}
-                    >
-                      {c.manualEdits.length}
+                    <span className="inline-flex items-center gap-1 tabular-nums">
+                      {c.kommoSlots.map((slot, i) => (
+                        <span key={i} className="inline-flex items-center gap-1">
+                          {i > 0 && <span className="text-slate-600">→</span>}
+                          <SlotCell slot={slot} />
+                        </span>
+                      ))}
                     </span>
                   )}
                 </td>
