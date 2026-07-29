@@ -117,7 +117,10 @@ export default function RoleplayDetailDrawer({ leadId, name, managerName, notAna
           </button>
         </div>
 
-        <div className="overflow-auto p-4 flex flex-col gap-3">
+        {/* Обычный блок со space-y, а НЕ flex-col: в скроллящемся flex-контейнере
+            дочерние карточки сжимаются (flex-shrink по умолчанию 1) и длинный
+            список вопросов обрезался вместо того, чтобы дать прокрутку. */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
           {err && <div className="text-sm text-rose-300">Не удалось загрузить детализацию: {err}</div>}
           {!calls && !err && (
             <div className="flex items-center gap-2 text-sm text-slate-400 py-6 justify-center">
@@ -207,7 +210,7 @@ function CallCard({ call }: { call: RoleplayCallDetail }) {
       )}
 
       {open && (
-        <div className="border-t border-white/5 px-3 py-2.5 flex flex-col gap-3">
+        <div className="border-t border-white/5 px-3 py-2.5 space-y-3">
           {crits.length > 0 && (
             <table className="w-full text-xs">
               <thead>
@@ -232,7 +235,7 @@ function CallCard({ call }: { call: RoleplayCallDetail }) {
           )}
 
           {questions.length > 0 && (
-            <div className="flex flex-col gap-2">
+            <div className="space-y-2">
               <div className="text-[10px] uppercase tracking-widest text-slate-500">
                 Что спросил бератер и как ответил клиент ({questions.length} из {call.questions?.length ?? questions.length})
               </div>
