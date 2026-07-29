@@ -33,7 +33,13 @@ function includeNullPipeline(vertical?: Vertical): boolean {
   return vertical !== "buh" && vertical !== "med";
 }
 import type { UserCallMetrics } from "@/lib/kommo/metrics";
-import { getManagersWithKommo, type ManagerRow } from "@/lib/db/queries-daily";
+import {
+  getManagersWithKommo,
+  getShiftWindows,
+  type ManagerRow,
+  type DayShifts,
+  type ShiftWindow,
+} from "@/lib/db/queries-daily";
 import { cached } from "@/lib/kommo/cache";
 
 // 60s TTL + in-flight dedup для всех analytics-запросов. В months-mode 12
@@ -1729,7 +1735,10 @@ async function fetchLostCallsDetail(
       SELECT
         i.manager, i.phone, i.pnorm, i.created_at, i.lead_id,
         lci.pipeline AS pipeline_name, lci.status AS status_name, lni.name AS client_name,
-        'in_missed' AS kind
+        'in_missed' AS kind,
+        ((i.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date::text AS berlin_date,
+        (EXTRACT(hour FROM ((i.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')) * 60
+          + EXTRACT(minute FROM ((i.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')))::int AS berlin_min
       FROM (
         SELECT DISTINCT ON (communication_id)
           communication_id, created_at, manager, lead_id, phone,
@@ -1753,8 +1762,7 @@ async function fetchLostCallsDetail(
         ORDER BY ll.last_seen_at DESC LIMIT 1
       ) lni ON i.lead_id IS NOT NULL
       WHERE i.pnorm <> ''
-        AND EXTRACT(hour FROM (i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
-        AND EXTRACT(hour FROM (i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
+        -- Окно смен — в TS (см. candidates выше).
         -- Перезвонили в течение суток (любым сотрудником) → клиент не потерян.
         AND NOT EXISTS (
           SELECT 1 FROM analytics.communications cb
@@ -1775,6 +1783,8 @@ async function fetchLostCallsDetail(
     pipeline_name: string | null;
     status_name: string | null;
     kind: string;
+    berlin_date: string;
+    berlin_min: number | string;
   }>(sql`
     WITH outs AS (
       SELECT DISTINCT ON (communication_id)
@@ -1794,12 +1804,12 @@ async function fetchLostCallsDetail(
       ORDER BY communication_id, lead_id NULLS LAST
     ),
     candidates AS (
+      -- Окно рабочего времени НЕ хардкодим: фильтрация по смене менеджера из
+      -- manager_schedule происходит в TS (график живёт в другой БД — D1).
       SELECT communication_id, created_at, pnorm, manager, lead_id, phone
       FROM outs
       WHERE (duration IS NULL OR duration < 1)
         AND pnorm <> ''
-        AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) >= 9
-        AND EXTRACT(hour FROM (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')) < 19
     )
     SELECT
       c.manager,
@@ -1810,7 +1820,10 @@ async function fetchLostCallsDetail(
       lc.pipeline AS pipeline_name,
       lc.status AS status_name,
       ln.name AS client_name,
-      'out_unanswered' AS kind
+      'out_unanswered' AS kind,
+      ((c.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date::text AS berlin_date,
+      (EXTRACT(hour FROM ((c.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')) * 60
+        + EXTRACT(minute FROM ((c.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')))::int AS berlin_min
     FROM candidates c
     LEFT JOIN LATERAL (
       SELECT pipeline, status FROM analytics.leads_cohort
@@ -1843,7 +1856,45 @@ async function fetchLostCallsDetail(
     .map((r) => String(r.pnorm));
   const nameByPnorm = await contactNamesByPnorm(unlinkedPnorms);
 
-  return rows.map((r) => {
+  // ── Окно рабочего времени берём из ГРАФИКА менеджера ──────────────────
+  // (решение владельца 2026-07-29; раньше был хардкод 09:00–19:00 на всех).
+  // Смены реально разные: 09–18 / 10–19 / 11–20. График живёт в D1, звонки —
+  // в Analytics, поэтому фильтруем здесь, а не в SQL. Правила:
+  //   1) есть смена у этого менеджера в этот день → его окно;
+  //   2) нет его смены, но кто-то был на линии → дневное окно отдела
+  //      (мин. начало … макс. конец) — иначе звонок вне графика просто
+  //      исчезал бы из метрики;
+  //   3) графика на дату нет вообще (месяц не импортирован) → прежние 9–19,
+  //      чтобы метрика не обнулилась молча.
+  // Пропущенный ВХОДЯЩИЙ привязать к конкретному менеджеру нельзя (очередь
+  // без агента), поэтому для него всегда дневное окно отдела; если в этот
+  // день никто не работал — это не потеря (выходной), строку отбрасываем.
+  const idByName = new Map<string, string>();
+  for (const m of managers) {
+    idByName.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) idByName.set(alias, m.id);
+  }
+  const berlinDates = Array.from(new Set(rows.map((r) => String(r.berlin_date)))).sort();
+  const shifts = berlinDates.length
+    ? await getShiftWindows(dept, berlinDates[0], berlinDates[berlinDates.length - 1])
+    : new Map<string, DayShifts>();
+  const FALLBACK: ShiftWindow = { startMin: 9 * 60, endMin: 19 * 60 };
+
+  const inShift = (r: (typeof rows)[number]): boolean => {
+    const day = shifts.get(String(r.berlin_date));
+    const min = Number(r.berlin_min);
+    if (!day) return min >= FALLBACK.startMin && min < FALLBACK.endMin; // правило 3
+    if (r.kind === "in_missed") {
+      if (!day.envelope) return false;                                   // выходной
+      return min >= day.envelope.startMin && min < day.envelope.endMin;
+    }
+    const mgrId = r.manager ? idByName.get(r.manager) : undefined;
+    const own = mgrId ? day.byManagerId.get(mgrId) : undefined;
+    const win = own ?? day.envelope ?? FALLBACK;                         // правила 1–2
+    return min >= win.startMin && min < win.endMin;
+  };
+
+  return rows.filter(inShift).map((r) => {
     // created_at — timestamp WITHOUT time zone (naive = UTC по конвенции
     // проекта). Драйвер отдаёт строку без пояса; new Date(naive) парсил бы
     // её в TZ процесса — прибиваем к UTC явно.

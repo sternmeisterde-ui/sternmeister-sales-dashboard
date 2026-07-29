@@ -227,6 +227,69 @@ export async function getFullScheduleForDate(
   return rows;
 }
 
+/** Смена одного менеджера на дату, в минутах от полуночи (Berlin). */
+export interface ShiftWindow { startMin: number; endMin: number }
+
+/** График смен за диапазон дат: дата → { окно отдела, окна по менеджерам }. */
+export interface DayShifts {
+  /** Мин. начало … макс. конец среди тех, кто на линии. null = никто не работал. */
+  envelope: ShiftWindow | null;
+  /** master_managers.id → окно смены (только те, кто на линии и с часами). */
+  byManagerId: Map<string, ShiftWindow>;
+}
+
+function hhmmToMin(v: string | null): number | null {
+  if (!v) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim());
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/**
+ * Смены отдела за диапазон дат (для «Потерянных» по графику, 2026-07-29).
+ * Даты без единой строки в `manager_schedule` в карту НЕ попадают — вызывающий
+ * отличает «графика нет» (фолбэк на 09:00–19:00) от «никто не работал»
+ * (envelope=null → пропущенный входящий не считается потерянным).
+ */
+export async function getShiftWindows(
+  department: string,
+  fromDateStr: string,
+  toDateStr: string,
+): Promise<Map<string, DayShifts>> {
+  const rows = await db
+    .select({
+      userId: managerSchedule.userId,
+      scheduleDate: managerSchedule.scheduleDate,
+      isOnLine: managerSchedule.isOnLine,
+      shiftStartTime: managerSchedule.shiftStartTime,
+      shiftEndTime: managerSchedule.shiftEndTime,
+    })
+    .from(managerSchedule)
+    .innerJoin(masterManagers, eq(masterManagers.id, managerSchedule.userId))
+    .where(
+      and(
+        eq(masterManagers.department, department),
+        gte(managerSchedule.scheduleDate, fromDateStr),
+        lte(managerSchedule.scheduleDate, toDateStr),
+      ),
+    );
+
+  const out = new Map<string, DayShifts>();
+  for (const r of rows) {
+    let day = out.get(r.scheduleDate);
+    if (!day) { day = { envelope: null, byManagerId: new Map() }; out.set(r.scheduleDate, day); }
+    if (!r.isOnLine) continue;
+    const s = hhmmToMin(r.shiftStartTime);
+    const e = hhmmToMin(r.shiftEndTime);
+    if (s == null || e == null || e <= s) continue;
+    day.byManagerId.set(r.userId, { startMin: s, endMin: e });
+    day.envelope = day.envelope
+      ? { startMin: Math.min(day.envelope.startMin, s), endMin: Math.max(day.envelope.endMin, e) }
+      : { startMin: s, endMin: e };
+  }
+  return out;
+}
+
 /**
  * Get schedule for an entire month: date → userId → { isOnLine, scheduleValue }
  */
