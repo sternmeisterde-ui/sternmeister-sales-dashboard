@@ -1036,11 +1036,19 @@ async function fetchMergedHalfIds(from: string, to: string): Promise<string[]> {
   try {
     const rows = unwrapRows<{ id: string | null }>(
       await d2OkkDb.execute(sql`
-        SELECT callgear_call_id AS "id"
-        FROM calls
-        WHERE pair_role = 'primary'
-          AND duration_seconds >= ${CONSULT_MIN_SECONDS}
-          AND (call_created_at AT TIME ZONE 'Europe/Berlin')::date
+        SELECT p.callgear_call_id AS "id"
+        FROM calls p
+        -- ⚠ Исключаем первую половину ТОЛЬКО когда вторая сама считается
+        -- консультацией. Если продолжение короче порога (11 случаев за июль)
+        -- или его нет вовсе (ещё 7), в счёте остаётся именно первая половина —
+        -- убрав её, мы потеряли бы разговор целиком.
+        JOIN calls t
+          ON t.paired_call_id = p.id
+         AND t.pair_role = 'continuation'
+         AND t.duration_seconds >= ${CONSULT_MIN_SECONDS}
+        WHERE p.pair_role = 'primary'
+          AND p.duration_seconds >= ${CONSULT_MIN_SECONDS}
+          AND (p.call_created_at AT TIME ZONE 'Europe/Berlin')::date
                 BETWEEN ${from}::date AND ${to}::date
       `),
     );
