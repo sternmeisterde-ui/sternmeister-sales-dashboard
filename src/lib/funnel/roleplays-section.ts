@@ -44,6 +44,7 @@ import {
 } from "@/lib/kommo/pipeline-config";
 import { unwrapRows } from "./compute";
 import { getLeadNames } from "./clients";
+import { NAME_ALIASES } from "@/lib/daily/name-aliases";
 
 /** Консультация = соединённый разговор не короче этого (решение РОПа 28.07). */
 export const CONSULT_MIN_SECONDS = 600;
@@ -361,8 +362,14 @@ export async function computeRoleplaysSection(
   );
 
   const dcSet = new Set(dcStatuses.map(Number));
+
+  // Консультация — разговор БЕРАТЕРА. Звонок квалификатора или доведения тому
+  // же клиенту на том же этапе консультацией не является (см. fetchBeraterNames).
+  const beraterNames = await fetchBeraterNames();
+  const consultRowsBerater = consultRows.filter((r) => r.manager && beraterNames.has(r.manager));
+
   const leadIds = new Set<number>();
-  for (const r of consultRows) leadIds.add(Number(r.leadId));
+  for (const r of consultRowsBerater) leadIds.add(Number(r.leadId));
 
   // Слой 2. Что из этого разобрал ОКК и где репетиция подтверждена.
   const okkRows = leadIds.size
@@ -390,6 +397,11 @@ export async function computeRoleplaysSection(
           ORDER BY lead_id, roleplay_at
         `),
       )
+        // Разбор засчитываем только по звонку БЕРАТЕРА — тем же фильтром, что и
+        // консультации. Зеркало `client_roleplays` умеет только дописывать, и
+        // строка, ошибочно созданная по звонку квалификатора, осталась бы в нём
+        // навсегда: фильтр на чтении делает раздел устойчивым к такому мусору.
+        .filter((r) => !r.managerName || beraterNames.has(r.managerName))
     : [];
 
   // Сегодняшний берлинский день: ролевку этого дня бот, возможно, ещё считает
@@ -425,7 +437,7 @@ export async function computeRoleplaysSection(
       sides: Set<Side>;
     }
   >();
-  for (const r of consultRows) {
+  for (const r of consultRowsBerater) {
     const leadId = Number(r.leadId);
     const n = Number(r.n) || 0;
     let e = clientMap.get(leadId);
@@ -525,7 +537,7 @@ export async function computeRoleplaysSection(
     }
     return m;
   };
-  for (const r of consultRows) {
+  for (const r of consultRowsBerater) {
     if (!r.manager) continue;
     const m = mgr(r.manager);
     m.c += Number(r.n) || 0;
@@ -941,6 +953,34 @@ async function unwrapRowsAsync<T>(query: ReturnType<typeof sql>): Promise<T[]> {
 }
 
 /** kommo_user_id → каноничное имя (master_managers, D1). */
+/**
+ * Имена бератеров (линия 2) — только их разговоры считаются консультациями.
+ *
+ * Квалификатор (линия 1) и доведение (линия 3) звонят тем же клиентам по своим
+ * вопросам, и их звонок на консультационном этапе консультацией не является:
+ * ролевку с клиентом ведёт бератер. Без этого фильтра в разделе появлялись
+ * строки менеджеров, которые ролевок не проводят вовсе.
+ *
+ * Неактивных не отсекаем: разговор ушедшего бератера всё равно был
+ * консультацией. Алиасы — из общей таблицы (analytics пишет имена с дрейфом,
+ * CLAUDE.md #7).
+ */
+async function fetchBeraterNames(): Promise<Set<string>> {
+  const rows = unwrapRows<{ name: string | null }>(
+    await db.execute(sql`
+      SELECT name FROM master_managers
+      WHERE department = 'b2g' AND line = '2'
+    `),
+  );
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (!r.name) continue;
+    out.add(r.name);
+    for (const alias of NAME_ALIASES[r.name] ?? []) out.add(alias);
+  }
+  return out;
+}
+
 async function fetchManagerNames(): Promise<Map<number, string>> {
   const out = new Map<number, string>();
   const rows = unwrapRows<{ uid: string | number | null; name: string | null }>(
