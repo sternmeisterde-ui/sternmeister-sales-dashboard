@@ -75,16 +75,63 @@ export interface ManagerRow {
   confirmed: number;
   leads: number;
   perLead: number | null;
-  /** Оценок, выставленных РУКАМИ в карточке Kommo за период. */
-  manualScores: number;
-  /** Оценок, посчитанных ботом (с 22.06 он их и записывает в Kommo сам). */
+  /** Оценок, посчитанных ботом по записи разговора. */
   botScores: number;
+  /** Баллов фактически стоит в карточках Kommo за период. */
+  kommoScores: number;
+  /** Из них расходятся с ботом (или бот их вовсе не подтверждал). */
+  mismatches: number;
 }
 
 /** Почему консультация не попала в разбор ОКК (человеческим языком). */
 export interface NotAnalyzedReason {
   reason: string;
   count: number;
+}
+
+/**
+ * Одна ролевка в сверке «что насчитал бот» ↔ «что фактически стоит в Kommo».
+ *
+ * Смысл сверки: менеджер вписывает балл сразу, бот считает свой примерно через
+ * два часа и перезаписывает поле. Значит расхождение — это либо балл, который
+ * бот ещё не проверил, либо тот, который менеджер поправил ПОСЛЕ бота. И то и
+ * другое РОПу нужно видеть поимённо.
+ *
+ * Сопоставляем по стороне и ДАТЕ (допуск ±1 день), а не по номеру слота:
+ * `roleplay_number` ненадёжен, а дату и менеджер, и бот пишут одну и ту же —
+ * дату разговора.
+ */
+export interface SlotCompare {
+  side: Side;
+  /** Позиция слота в карточке (ДЦ-1..3 / АА-1..3); null — бот оценил, слота нет. */
+  attempt: number | null;
+  /** Балл бота (null — бот эту ролевку не оценивал). */
+  bot: number | null;
+  /** Что фактически стоит в карточке (null — слот пуст). */
+  kommo: number | null;
+  /** Дата разговора — по данным бота или из слота. */
+  day: string | null;
+  status: SlotStatus;
+  /** Кто последним правил слот руками (из журнала событий Kommo). */
+  editedBy: string | null;
+  editedAt: string | null;
+}
+
+export type SlotStatus =
+  /** Балл в карточке совпал с ботом. */
+  | "match"
+  /** В карточке другая цифра — балл менеджера пережил разбор бота. */
+  | "mismatch"
+  /** Бот оценил, а в карточке пусто — запись не дошла. */
+  | "bot_only"
+  /** В карточке стоит балл, ролевку бот не разбирал — подтверждения нет. */
+  | "kommo_only"
+  /** Разговор сегодня: бот считает ~2 часа, расхождением это считать рано. */
+  | "pending";
+
+/** Расхождение = всё, кроме совпадения и «бот ещё считает». */
+export function isMismatch(s: SlotStatus): boolean {
+  return s === "mismatch" || s === "bot_only" || s === "kommo_only";
 }
 
 export interface ClientRow {
@@ -102,8 +149,8 @@ export interface ClientRow {
   notAnalyzed: NotAnalyzedReason[];
   /** Баллы бота по порядку проведения. */
   botScores: Array<{ score: number | null; at: string | null; notScored: NotScoredKind | null }>;
-  /** Ручные правки оценок в Kommo: кто и когда. */
-  manualEdits: Array<{ side: Side; attempt: number; score: number | null; at: string; author: string | null }>;
+  /** Сверка «бот ↔ карточка Kommo» по каждой ролевке периода. */
+  kommoSlots: SlotCompare[];
 }
 
 export type NotScoredKind = "insufficient" | "degenerate";
@@ -114,8 +161,9 @@ export interface RoleplaysTotals {
   confirmed: number;
   leads: number;
   perLead: number | null;
-  manualScores: number;
   botScores: number;
+  kommoScores: number;
+  mismatches: number;
 }
 
 export interface RoleplaysResult {
@@ -128,6 +176,135 @@ export interface RoleplaysResult {
 
 export function classifyNotScored(gateReason: string | null): NotScoredKind {
   return gateReason && /degenerate/i.test(gateReason) ? "degenerate" : "insufficient";
+}
+
+/** Слот из зеркала карточки Kommo. */
+interface KommoSlot {
+  side: Side;
+  attempt: number;
+  score: number | null;
+  date: string | null;
+}
+
+/** 'YYYY-MM-DD' по Берлину; null на пустой/битой дате. */
+function berlinDay(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+/** Разница в днях между двумя 'YYYY-MM-DD'. */
+function dayGap(a: string | null, b: string | null): number {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  return Math.abs((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000);
+}
+
+/**
+ * Сводит ролевки бота и слоты карточки в одну сверку.
+ *
+ * Пара ищется по стороне и дате разговора: сначала точное совпадение дня, затем
+ * ±1 день (менеджер нередко вписывает балл на следующее утро). По номеру слота
+ * не сопоставляем — `roleplay_number` клампится до 3 и ловит гонки.
+ */
+function compareSlots(
+  bot: Array<{ side: Side; day: string | null; score: number | null }>,
+  kommo: KommoSlot[],
+  edits: Array<{ side: Side; attempt: number; at: string; author: string | null }>,
+  today: string,
+): SlotCompare[] {
+  const freeSlots = [...kommo];
+  const out: SlotCompare[] = [];
+
+  const lastEdit = (side: Side, attempt: number) =>
+    edits
+      .filter((e) => e.side === side && e.attempt === attempt)
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .at(-1) ?? null;
+
+  const take = (
+    side: Side,
+    day: string | null,
+    maxGap: number,
+    want: "sameScore" | "scored" | "any",
+    score: number | null,
+  ): KommoSlot | null => {
+    const i = freeSlots.findIndex((s) => {
+      if (s.side !== side || dayGap(s.date, day) > maxGap) return false;
+      if (want === "sameScore") return score !== null && s.score === score;
+      if (want === "scored") return s.score !== null;
+      return true;
+    });
+    return i >= 0 ? freeSlots.splice(i, 1)[0] : null;
+  };
+
+  // Пары ищем в порядке убывания уверенности, и каждый проход — по ВСЕМ
+  // ролевкам сразу. Иначе первая же строка забирает чужой слот: например
+  // неоценённая ролевка перехватывала слот у оценённой в тот же день, и вместо
+  // честного совпадения выходила пара выдуманных расхождений.
+  const passes: Array<[number, "sameScore" | "scored" | "any"]> = [
+    [0, "sameScore"], // тот же день и та же цифра — самое надёжное
+    [0, "scored"],
+    [0, "any"],
+    [1, "sameScore"], // менеджер нередко вписывает балл на следующее утро
+    [1, "scored"],
+    [1, "any"],
+  ];
+  const pending: Array<{ side: Side; day: string | null; score: number | null; slot: KommoSlot | null }> =
+    bot.map((b) => ({ ...b, slot: null }));
+  for (const [gap, want] of passes) {
+    for (const p of pending) {
+      if (p.slot) continue;
+      p.slot = take(p.side, p.day, gap, want, p.score);
+    }
+  }
+
+  for (const p of pending) {
+    const edit = p.slot ? lastEdit(p.side, p.slot.attempt) : null;
+    let status: SlotStatus;
+    if (!p.slot || p.slot.score === null) {
+      // Бот оценил, а в карточке пусто. В день разговора это норма: он считает
+      // примерно два часа — расхождением такое объявлять рано.
+      status = p.score === null ? "match" : p.day === today ? "pending" : "bot_only";
+    } else if (p.score === null) {
+      status = "kommo_only"; // балл стоит, но бот эту ролевку не оценил
+    } else {
+      status = p.slot.score === p.score ? "match" : "mismatch";
+    }
+    out.push({
+      side: p.side,
+      attempt: p.slot?.attempt ?? null,
+      bot: p.score,
+      kommo: p.slot?.score ?? null,
+      day: p.day ?? p.slot?.date ?? null,
+      status,
+      editedBy: edit?.author ?? null,
+      editedAt: edit?.at ?? null,
+    });
+  }
+
+  // Остались слоты, которым не нашлось ролевки бота — балл стоит, а разбора нет.
+  for (const s of freeSlots) {
+    if (s.score === null) continue;
+    const edit = lastEdit(s.side, s.attempt);
+    out.push({
+      side: s.side,
+      attempt: s.attempt,
+      bot: null,
+      kommo: s.score,
+      day: s.date,
+      status: s.date === today ? "pending" : "kommo_only",
+      editedBy: edit?.author ?? null,
+      editedAt: edit?.at ?? null,
+    });
+  }
+
+  return out.sort((a, b) => (a.day ?? "").localeCompare(b.day ?? ""));
 }
 
 interface ConsultRow {
@@ -215,7 +392,13 @@ export async function computeRoleplaysSection(
       )
     : [];
 
-  // Слой 3. Ручные правки оценок в карточке Kommo (из tracking_events).
+  // Сегодняшний берлинский день: ролевку этого дня бот, возможно, ещё считает
+  // (запись в карточку идёт примерно через два часа после разговора).
+  const today = berlinDay(new Date().toISOString()) ?? to;
+
+  // Слой 3. Что ФАКТИЧЕСКИ стоит в карточках Kommo (зеркало полей из
+  // leads_cohort.roleplay_slots) + кто последним правил слот руками.
+  const kommoSlotsByLead = await fetchKommoSlots([...leadIds], from, to);
   const manualEdits = await fetchManualScoreEdits(from, to);
 
   // Почему часть консультаций не разобрана — берём фактическую причину из D2,
@@ -267,7 +450,8 @@ export async function computeRoleplaysSection(
     else okkByLead.set(id, [r]);
   }
 
-  const editsByLead = new Map<number, ClientRow["manualEdits"]>();
+  type Edit = { side: Side; attempt: number; score: number | null; at: string; author: string | null };
+  const editsByLead = new Map<number, Edit[]>();
   for (const e of manualEdits) {
     if (!leadIds.has(e.leadId)) continue;
     const list = editsByLead.get(e.leadId);
@@ -318,7 +502,12 @@ export async function computeRoleplaysSection(
         at: r.roleplayAt ? new Date(r.roleplayAt).toISOString() : null,
         notScored: r.score5 === null ? classifyNotScored(r.gateReason) : null,
       })),
-      manualEdits: (editsByLead.get(leadId) ?? []).sort((a, b) => a.at.localeCompare(b.at)),
+      kommoSlots: compareSlots(
+        okk.map((r) => ({ side: r.side === "aa" ? "aa" : "dc", day: berlinDay(r.roleplayAt), score: r.score5 })),
+        kommoSlotsByLead.get(leadId) ?? [],
+        editsByLead.get(leadId) ?? [],
+        today,
+      ),
     });
   }
   clients.sort((a, b) => b.consultations - a.consultations || a.name.localeCompare(b.name, "ru"));
@@ -326,12 +515,12 @@ export async function computeRoleplaysSection(
   // ── Срез по менеджерам ────────────────────────────────────────────────────
   const mgrMap = new Map<
     string,
-    { c: number; a: number; k: number; leads: Set<number>; manual: number; bot: number }
+    { c: number; a: number; k: number; leads: Set<number>; bot: number; kommo: number; bad: number }
   >();
   const mgr = (name: string) => {
     let m = mgrMap.get(name);
     if (!m) {
-      m = { c: 0, a: 0, k: 0, leads: new Set(), manual: 0, bot: 0 };
+      m = { c: 0, a: 0, k: 0, leads: new Set(), bot: 0, kommo: 0, bad: 0 };
       mgrMap.set(name, m);
     }
     return m;
@@ -349,11 +538,15 @@ export async function computeRoleplaysSection(
     if (r.confirmed) m.k += 1;
     if (r.score5 !== null) m.bot += 1;
   }
-  for (const e of manualEdits) {
-    if (!leadIds.has(e.leadId)) continue;
-    const name = roster.get(e.kommoUserId);
-    if (!name) continue;
-    mgr(name).manual += 1;
+  // Сверку «бот ↔ карточка» вешаем на ОТВЕТСТВЕННОГО по сделке: спрос за то,
+  // что стоит в карточке, идёт с него, кто бы физически ни правил поле.
+  for (const c of clients) {
+    if (!c.managerName) continue;
+    const m = mgr(c.managerName);
+    for (const s of c.kommoSlots) {
+      if (s.kommo !== null) m.kommo += 1;
+      if (isMismatch(s.status)) m.bad += 1;
+    }
   }
   const managers: ManagerRow[] = [...mgrMap.entries()]
     .map(([name, m]) => ({
@@ -363,7 +556,8 @@ export async function computeRoleplaysSection(
       confirmed: m.k,
       leads: m.leads.size,
       perLead: m.leads.size > 0 ? Math.round((m.c / m.leads.size) * 100) / 100 : null,
-      manualScores: m.manual,
+      kommoScores: m.kommo,
+      mismatches: m.bad,
       botScores: m.bot,
     }))
     .sort((a, b) => b.consultations - a.consultations);
@@ -374,7 +568,8 @@ export async function computeRoleplaysSection(
     confirmed: okkRows.filter((r) => r.confirmed).length,
     leads: clients.length,
     perLead: null,
-    manualScores: managers.reduce((s, m) => s + m.manualScores, 0),
+    kommoScores: managers.reduce((s, m) => s + m.kommoScores, 0),
+    mismatches: managers.reduce((s, m) => s + m.mismatches, 0),
     botScores: managers.reduce((s, m) => s + m.botScores, 0),
   };
   totals.perLead =
@@ -582,6 +777,51 @@ interface ManualEdit {
  * ФИЗИЧЕСКИ. Есть событие → значение выставил человек; нет события, а балл в
  * карточке есть → это автозапись бота (работает с 22.06.2026).
  */
+/**
+ * Что фактически стоит в карточках Kommo — из зеркала `roleplay_slots`.
+ *
+ * Берём только слоты с датой внутри периода: карточка копит ролевки за всю
+ * жизнь сделки, и июньский слот в июльской выборке выглядел бы «расхождением».
+ *
+ * NULL в колонке = сделку ещё не синкали после миграции 0036 (обычный ETL
+ * обновляет только изменившиеся сделки) — такие в сверку не попадают вовсе,
+ * иначе пустое зеркало читалось бы как «в карточке ничего не стоит».
+ */
+async function fetchKommoSlots(
+  leadIds: number[],
+  from: string,
+  to: string,
+): Promise<Map<number, KommoSlot[]>> {
+  const out = new Map<number, KommoSlot[]>();
+  if (leadIds.length === 0) return out;
+
+  const rows = unwrapRows<{ leadId: string | number; slots: unknown }>(
+    await analyticsDb.execute(sql`
+      SELECT lead_id AS "leadId", roleplay_slots AS "slots"
+      FROM analytics.leads_cohort
+      WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+        AND roleplay_slots IS NOT NULL
+    `),
+  );
+
+  for (const r of rows) {
+    if (!Array.isArray(r.slots)) continue;
+    const slots: KommoSlot[] = [];
+    for (const raw of r.slots as Array<Record<string, unknown>>) {
+      const date = typeof raw.date === "string" ? raw.date : null;
+      if (!date || date < from || date > to) continue;
+      slots.push({
+        side: raw.side === "aa" ? "aa" : "dc",
+        attempt: Number(raw.attempt) || 1,
+        score: typeof raw.score === "number" ? raw.score : null,
+        date,
+      });
+    }
+    if (slots.length) out.set(Number(r.leadId), slots);
+  }
+  return out;
+}
+
 async function fetchManualScoreEdits(from: string, to: string): Promise<ManualEdit[]> {
   const out: ManualEdit[] = [];
   const fieldIds = Object.keys(SCORE_FIELDS);

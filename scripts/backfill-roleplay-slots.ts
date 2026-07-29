@@ -26,11 +26,76 @@ config({ path: resolve(process.cwd(), ".env.local") });
 
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "../src/lib/db/analytics";
-import { getLeads } from "../src/lib/kommo/client";
+import { getAuthHeaders, getBaseUrl, getLeads, rateLimitedFetch } from "../src/lib/kommo/client";
 import { getBeraterPipelineIds } from "../src/lib/kommo/pipeline-config";
 import { parseRoleplaySlotsFromLead } from "../src/lib/etl/sync-leads";
 
+/**
+ * Точечный режим: `--from=YYYY-MM-DD --to=YYYY-MM-DD`.
+ *
+ * Берём только сделки, по которым в периоде есть разбор ролевок, и тянем их
+ * строго по id пачками. Для месяца это единицы запросов вместо полного обхода
+ * воронки — так сверку «бот ↔ карточка» можно наполнить, не гоняя всю историю
+ * рядом с прод-кроном.
+ */
+const ID_BATCH = 50; // Kommo режет длину URL раньше формального лимита в 250
+
+async function backfillByRange(from: string, to: string): Promise<void> {
+  const res = await analyticsDb.execute(sql`
+    SELECT DISTINCT cr.lead_id AS id
+    FROM analytics.client_roleplays cr
+    JOIN analytics.leads_cohort lc ON lc.lead_id = cr.lead_id
+    WHERE ((cr.roleplay_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
+            BETWEEN ${from}::date AND ${to}::date
+      AND lc.is_deleted = FALSE`);
+  const ids = ((res as unknown as { rows: Array<{ id: number }> }).rows ?? []).map((r) => Number(r.id));
+  const requests = Math.ceil(ids.length / ID_BATCH);
+  console.log(`=== точечный добор ${from}..${to}: сделок ${ids.length}, запросов к Kommo ${requests} ===`);
+  if (ids.length === 0) return;
+
+  const headers = await getAuthHeaders();
+  const base = await getBaseUrl();
+  let updated = 0;
+  let withSlots = 0;
+
+  for (let i = 0; i < ids.length; i += ID_BATCH) {
+    const batch = ids.slice(i, i + ID_BATCH);
+    const url = new URL(`${base}/leads`); // getBaseUrl уже содержит /api/v4
+    batch.forEach((id) => url.searchParams.append("filter[id][]", String(id)));
+    url.searchParams.set("limit", String(ID_BATCH));
+
+    const r = await rateLimitedFetch(url.toString(), { headers });
+    if (r.status === 204) continue; // так Kommo отвечает на пустую выборку
+    if (!r.ok) throw new Error(`Kommo ${r.status} на пачке ${i / ID_BATCH + 1}`);
+
+    const json = (await r.json()) as {
+      _embedded?: { leads?: Array<{ id: number; custom_fields_values: unknown }> };
+    };
+    for (const lead of json._embedded?.leads ?? []) {
+      const slots = parseRoleplaySlotsFromLead(
+        lead.custom_fields_values as Parameters<typeof parseRoleplaySlotsFromLead>[0],
+      );
+      await analyticsDb.execute(sql`
+        UPDATE analytics.leads_cohort
+           SET roleplay_slots = ${JSON.stringify(slots)}::jsonb
+         WHERE lead_id = ${lead.id}`);
+      updated++;
+      if (slots.length > 0) withSlots++;
+    }
+    console.log(`  пачка ${Math.floor(i / ID_BATCH) + 1}/${requests}: обновлено ${updated}`);
+  }
+  console.log(`\nDone: обновлено ${updated}, из них со слотами ${withSlots} ✅`);
+}
+
 async function main(): Promise<void> {
+  const arg = (n: string) => process.argv.find((a) => a.startsWith(`--${n}=`))?.slice(n.length + 3) ?? null;
+  const from = arg("from");
+  const to = arg("to");
+  if (from && to) {
+    await backfillByRange(from, to);
+    return;
+  }
+
   const pipelines = getBeraterPipelineIds("all"); // бух + мед Бератер
   console.log(`=== backfill roleplay_slots (pipelines ${pipelines.join(", ")}) ===`);
 
