@@ -38,7 +38,10 @@ async function main() {
   const { sql } = await import("drizzle-orm");
   const { analyticsDb } = await import("../src/lib/db/analytics");
   const { getBeraterPipelineIds } = await import("../src/lib/kommo/pipeline-config");
-  const rows = (r: any) => (Array.isArray(r) ? r : r.rows) as any[];
+  /** Драйвер отдаёт либо массив, либо { rows }. */
+  type Row = Record<string, unknown>;
+  const rows = (r: unknown): Row[] =>
+    (Array.isArray(r) ? r : ((r as { rows?: Row[] })?.rows ?? [])) as Row[];
   const beraterIds = getBeraterPipelineIds(VERTICAL);
 
   // Слоты с датой внутри окна. roleplay_slots = NULL значит «сделку не синкали»

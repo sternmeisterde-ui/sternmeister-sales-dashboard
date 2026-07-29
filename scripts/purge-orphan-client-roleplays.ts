@@ -37,7 +37,10 @@ async function main() {
   const { sql } = await import("drizzle-orm");
   const { analyticsDb } = await import("../src/lib/db/analytics");
   const { d2OkkDb } = await import("../src/lib/db/okk");
-  const rows = (r: any) => (Array.isArray(r) ? r : r.rows) as any[];
+  /** Драйвер отдаёт либо массив, либо { rows }. */
+  type Row = Record<string, unknown>;
+  const rows = (r: unknown): Row[] =>
+    (Array.isArray(r) ? r : ((r as { rows?: Row[] })?.rows ?? [])) as Row[];
 
   // Источник: какие звонки реально имеют оценку клиента в окне.
   const live = new Set(

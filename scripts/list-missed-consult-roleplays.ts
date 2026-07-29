@@ -43,7 +43,10 @@ async function main() {
   const { d2OkkDb } = await import("../src/lib/db/okk");
   const { getBeraterPipelineIds, getBeraterStatusSets } = await import("../src/lib/kommo/pipeline-config");
   const { CONSULT_MIN_SECONDS } = await import("../src/lib/funnel/roleplays-section");
-  const rows = (r: any) => (Array.isArray(r) ? r : r.rows) as any[];
+  /** Драйвер отдаёт либо массив, либо { rows }. */
+  type Row = Record<string, unknown>;
+  const rows = (r: unknown): Row[] =>
+    (Array.isArray(r) ? r : ((r as { rows?: Row[] })?.rows ?? [])) as Row[];
 
   const beraterIds = getBeraterPipelineIds(VERTICAL);
   const br = getBeraterStatusSets(VERTICAL);
