@@ -454,7 +454,14 @@ function buildPipelineBreakdown(
 
 // ==================== MAIN HANDLER ====================
 
+// Прошедшие дни уже не меняются — их ответ держим 5 минут.
 const RESPONSE_CACHE_TTL = 5 * 60 * 1000;
+// Окно, захватывающее СЕГОДНЯ, живёт своей жизнью: CloudTalk-синк доливает
+// звонки каждые 10 минут, а drill-down-модалки ходят мимо этого кэша
+// (no-store + 60-секундный кэш analytics-запросов). При 5 минутах плитка и
+// таблица отставали от своей же детализации — РОП видела «разные цифры» в
+// плитке и в модалке (2026-07-29). Держим их в одном такте — 60 секунд.
+const LIVE_RESPONSE_CACHE_TTL = 60 * 1000;
 
 export async function GET(req: NextRequest) {
   try {
@@ -480,8 +487,13 @@ export async function GET(req: NextRequest) {
     // v14 (2026-07-20): avgWaitSeconds → avgWaitCloudtalkSec/avgWaitCallgearSec
     // (формулы кабинетов телефоний) — v13-кэш отдавал бы старый shape.
     const cacheKey = `dashboard-response:v14:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
-    const responseData = await cached(cacheKey, RESPONSE_CACHE_TTL, () =>
-      buildDashboardResponse(department, vertical, period, dateStr, fromStr, toStr)
+    // Окно захватывает сегодняшний берлинский день → короткий TTL (см. выше).
+    const today = todayCivil();
+    const isLiveWindow = (toStr ?? dateStr) >= today;
+    const responseData = await cached(
+      cacheKey,
+      isLiveWindow ? LIVE_RESPONSE_CACHE_TTL : RESPONSE_CACHE_TTL,
+      () => buildDashboardResponse(department, vertical, period, dateStr, fromStr, toStr),
     );
 
     return NextResponse.json(responseData, {
