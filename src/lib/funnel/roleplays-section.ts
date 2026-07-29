@@ -326,6 +326,10 @@ export async function computeRoleplaysSection(
   const aaStatuses = [...br.consultBeforeAA, ...br.consultBeforeAADone];
   const consultStatuses = [...dcStatuses, ...aaStatuses];
 
+  // Оборвавшийся разговор телефония показывает двумя звонками, а разговор один
+  // и оценивается целиком — первую половину из счёта исключаем.
+  const mergedHalfIds = await fetchMergedHalfIds(from, to);
+
   // Слой 1. Звонки ≥10 мин, попавшие в интервал консультационной стадии.
   // Интервал стадии — от события смены статуса до следующего события по сделке.
   const consultRows = unwrapRows<ConsultRow>(
@@ -357,6 +361,14 @@ export async function computeRoleplaysSection(
         AND c.duration >= ${CONSULT_MIN_SECONDS}
         AND ((c.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date
               BETWEEN ${from}::date AND ${to}::date
+        ${
+          mergedHalfIds.length
+            ? sql`AND c.communication_id NOT IN (${sql.join(
+                mergedHalfIds.map((id) => sql`${id}`),
+                sql`, `,
+              )})`
+            : sql``
+        }
       GROUP BY 1, 2, 3, 4
     `),
   );
@@ -435,6 +447,11 @@ export async function computeRoleplaysSection(
       lastStatusId: number | null;
       managers: Map<string, number>;
       sides: Set<Side>;
+      /** день → сколько консультаций; нужен, чтобы «разобрано» считалось в тех
+       *  же единицах, что и «консультаций» (см. ниже про разные источники). */
+      byDay: Map<string, number>;
+      /** день → менеджер, для той же поправки в срезе по менеджерам. */
+      dayManager: Map<string, string>;
     }
   >();
   for (const r of consultRowsBerater) {
@@ -442,10 +459,20 @@ export async function computeRoleplaysSection(
     const n = Number(r.n) || 0;
     let e = clientMap.get(leadId);
     if (!e) {
-      e = { consultations: 0, lastDay: null, lastStatusId: null, managers: new Map(), sides: new Set() };
+      e = {
+        consultations: 0,
+        lastDay: null,
+        lastStatusId: null,
+        managers: new Map(),
+        sides: new Set(),
+        byDay: new Map(),
+        dayManager: new Map(),
+      };
       clientMap.set(leadId, e);
     }
     e.consultations += n;
+    e.byDay.set(r.day, (e.byDay.get(r.day) ?? 0) + n);
+    if (r.manager) e.dayManager.set(r.day, r.manager);
     if (e.lastDay === null || r.day > e.lastDay) {
       e.lastDay = r.day;
       e.lastStatusId = Number(r.statusId);
@@ -487,7 +514,11 @@ export async function computeRoleplaysSection(
     // звонки, ОКК — только дошедшие до него, поэтому суммы могут не совпасть.
     // Сводим явно, а не подгоняем: если телефония насчитала больше, чем ОКК
     // вообще видел, добавляем честную строку «до ОКК не дошёл».
-    const reasons = [...(notAnalyzed.get(leadId) ?? [])];
+    // Первая половина оборвавшегося разговора больше не причина пропуска: она
+    // и не считается отдельной консультацией, и оценена вместе со второй.
+    const reasons = [...(notAnalyzed.get(leadId) ?? [])].filter(
+      (r) => !r.reason.startsWith("часть оборвавшегося разговора"),
+    );
     const okkSeen = okk.length + reasons.reduce((s, r) => s + r.count, 0);
     if (e.consultations > okkSeen) {
       reasons.push({
@@ -495,6 +526,15 @@ export async function computeRoleplaysSection(
         count: e.consultations - okkSeen,
       });
     }
+    // «Разобрано» считаем В ТЕХ ЖЕ ЕДИНИЦАХ, что и «консультаций» — в звонках,
+    // а не в строках разбора. Иначе колонка легко превышала «всего»: у одного
+    // разговора бывает несколько строк (пере-оценка, две ролевки за день), а у
+    // склеенного разговора строка одна на два звонка. День считаем разобранным,
+    // если по нему есть хоть один вердикт: бот слышал этот разговор.
+    const okkDays = new Set(okk.map((r) => berlinDay(r.roleplayAt)).filter((d): d is string => !!d));
+    let analyzed = 0;
+    for (const [day, n] of e.byDay) if (okkDays.has(day)) analyzed += n;
+
     // Ответственный по CRM, а если его нет — тот, кто больше звонил.
     const topCaller = [...e.managers.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     const side = e.sides.size === 1 ? [...e.sides][0] : null;
@@ -506,7 +546,7 @@ export async function computeRoleplaysSection(
       side,
       terminIso: side === "aa" ? (meta?.aaTerminIso ?? null) : (meta?.terminIso ?? null),
       consultations: e.consultations,
-      analyzed: okk.length,
+      analyzed,
       confirmed: okk.filter((r) => r.confirmed).length,
       notAnalyzed: reasons,
       botScores: okk.map((r) => ({
@@ -546,9 +586,31 @@ export async function computeRoleplaysSection(
   for (const r of okkRows) {
     if (!r.managerName) continue;
     const m = mgr(r.managerName);
-    m.a += 1;
     if (r.confirmed) m.k += 1;
     if (r.score5 !== null) m.bot += 1;
+  }
+  // «Разобрал ОКК» — в звонках, как и «Консультаций» (см. подробности выше, в
+  // сборке по клиентам). Считаем по дням: день разобран, если по нему есть
+  // вердикт бота; звонок дня относим тому, кто в этот день звонил.
+  {
+    const okkDaysByLead = new Map<number, Set<string>>();
+    for (const r of okkRows) {
+      const day = berlinDay(r.roleplayAt);
+      if (!day) continue;
+      const id = Number(r.leadId);
+      const set = okkDaysByLead.get(id) ?? new Set<string>();
+      set.add(day);
+      okkDaysByLead.set(id, set);
+    }
+    for (const [leadId, e] of clientMap) {
+      const days = okkDaysByLead.get(leadId);
+      if (!days) continue;
+      for (const [day, n] of e.byDay) {
+        const manager = e.dayManager.get(day);
+        if (!manager || !days.has(day)) continue;
+        mgr(manager).a += n;
+      }
+    }
   }
   // Сверку «бот ↔ карточка» вешаем на ОТВЕТСТВЕННОГО по сделке: спрос за то,
   // что стоит в карточке, идёт с него, кто бы физически ни правил поле.
@@ -576,7 +638,8 @@ export async function computeRoleplaysSection(
 
   const totals: RoleplaysTotals = {
     consultations: clients.reduce((s, c) => s + c.consultations, 0),
-    analyzed: okkRows.length,
+    // Тоже в звонках, а не в строках разбора — иначе покрытие выходило за 100%.
+    analyzed: clients.reduce((s, c) => s + c.analyzed, 0),
     confirmed: okkRows.filter((r) => r.confirmed).length,
     leads: clients.length,
     perLead: null,
@@ -648,7 +711,11 @@ function humanReason(err: string | null, promptType: string | null): string {
       : "повторный разговор";
     return `не первичный разговор (${kind}) — оценку отбросили после разбора`;
   }
-  if (/primary of interrupted pair/i.test(e)) return "первая часть склеенного разговора (разбирают вторую)";
+  // Не пропуск: связь оборвалась, менеджер перезвонил, и бот оценивает разговор
+  // ЦЕЛИКОМ — расшифровки всех частей склеиваются перед оценкой второй половины
+  // (scheduler.ts, ветка pairRole='continuation'), недостающие части при этом
+  // дорасшифровываются. Прежняя подпись «разбирают вторую» читалась как потеря.
+  if (/primary of interrupted pair/i.test(e)) return "часть оборвавшегося разговора — оценён целиком, вместе со второй частью";
   if (/incomplete \((\w+)\)/i.test(e)) {
     const m = /incomplete \((\w+)\)/i.exec(e);
     const kind =
@@ -953,6 +1020,42 @@ async function unwrapRowsAsync<T>(query: ReturnType<typeof sql>): Promise<T[]> {
 }
 
 /** kommo_user_id → каноничное имя (master_managers, D1). */
+/**
+ * Идентификаторы первых половин оборвавшихся разговоров.
+ *
+ * Связь упала, менеджер перезвонил — телефония видит два звонка, а разговор
+ * ОДИН. Оценивается он целиком (расшифровки всех частей склеиваются перед
+ * оценкой последней), поэтому и в счётчике консультаций он должен быть один.
+ * Первую половину исключаем ПО ЕЁ ID из выборки, а не вычитаем по менеджеру:
+ * вычитание промахивалось на звонках, которые в консультации и не попадали, и
+ * счётчик уходил ниже числа разборов.
+ *
+ * Берём только половины от порога консультации — короткие в счёт и так не идут.
+ */
+async function fetchMergedHalfIds(from: string, to: string): Promise<string[]> {
+  try {
+    const rows = unwrapRows<{ id: string | null }>(
+      await d2OkkDb.execute(sql`
+        SELECT callgear_call_id AS "id"
+        FROM calls
+        WHERE pair_role = 'primary'
+          AND duration_seconds >= ${CONSULT_MIN_SECONDS}
+          AND (call_created_at AT TIME ZONE 'Europe/Berlin')::date
+                BETWEEN ${from}::date AND ${to}::date
+      `),
+    );
+    // В ОКК id CloudTalk хранится как «ct-123», в телефонии — как «ct:123».
+    // Склеек из CallGear не бывает (проверено на июле: все 29 — CloudTalk).
+    return rows
+      .map((r) => r.id)
+      .filter((id): id is string => !!id && id.startsWith("ct-"))
+      .map((id) => `ct:${id.slice(3)}`);
+  } catch (e) {
+    console.error("[funnel/roleplays] merged halves unavailable:", e instanceof Error ? e.message : e);
+    return [];
+  }
+}
+
 /**
  * Имена бератеров (линия 2) — только их разговоры считаются консультациями.
  *
