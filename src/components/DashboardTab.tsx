@@ -918,7 +918,7 @@ export default function DashboardTab({
                 totalValue={lost}
                 rows={null}
                 tipAlign="right"
-                tip="Клиенты, до которых не дотянулись, в рабочие часы по Графику менеджера: наш недозвон без повторной попытки на тот же номер в течение 15 минут + пропущенный ВХОДЯЩИЙ, на который не перезвонили в течение суток. Клик — детализация по менеджерам, у каждой строки видно тип."
+                tip="Входящие звонки клиентов в рабочие часы по Графику, на которые никто не ответил и не перезвонил на этот номер в течение 15 минут. Исходящие недозвоны сюда не входят. Клик — детализация: время, клиент, номер, сделка."
                 onClick={toggleLostDetail}
               />
               {/* tipAlign right on the last two so the popover opens leftward
@@ -987,7 +987,7 @@ export default function DashboardTab({
             <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
               <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2 min-w-0">
                 <PhoneOff className="w-4 h-4 shrink-0" />
-                <span className="truncate">Потерянные звонки — детализация</span>
+                <span className="truncate">Потерянные входящие — детализация</span>
                 {visibleLostItems && <span className="text-slate-500 font-normal shrink-0">({visibleLostItems.length})</span>}
               </h3>
               <button
@@ -1007,13 +1007,13 @@ export default function DashboardTab({
           {lostError && <p className="text-rose-400 text-sm py-2">{lostError}</p>}
 
           {visibleLostItems && visibleLostItems.length === 0 && (
-            <p className="text-slate-400 text-sm py-2">За выбранный период потерянных звонков нет 🎉</p>
+            <p className="text-slate-400 text-sm py-2">За выбранный период потерянных входящих нет 🎉</p>
           )}
 
           {visibleLostItems && visibleLostItems.length > 0 && (() => {
             // Группировка по ответственному МОПу (Рузанна: «разбито по мопам»).
-            // Пропущенные входящие приходят в очередь БЕЗ агента (manager=null)
-            // — им отдельная группа, чтобы было видно, что клиент звонил сам.
+            // У Коммерсов входящие падают в общую очередь без агента, поэтому
+            // почти всё уходит в одну группу «Входящие — никто не взял».
             const byManager = new Map<string, LostCallItem[]>();
             for (const it of visibleLostItems) {
               const key = it.kind === "in_missed"
@@ -1037,7 +1037,6 @@ export default function DashboardTab({
                         <thead>
                           <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
                             <th className="py-1.5 pr-3 font-medium">Время</th>
-                            <th className="py-1.5 pr-3 font-medium" title="Мы звонили и не дозвонились / клиент звонил сам и не дождался">Тип</th>
                             <th className="py-1.5 pr-3 font-medium">Клиент</th>
                             <th className="py-1.5 pr-3 font-medium">Телефон</th>
                             <th className="py-1.5 pr-3 font-medium">Сделка</th>
@@ -1048,17 +1047,6 @@ export default function DashboardTab({
                           {items.map((it, i) => (
                             <tr key={`${it.phone}-${it.createdAt}-${i}`} className="border-b border-white/5 hover:bg-white/[0.02]">
                               <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap tabular-nums">{fmtLostAt(it.createdAt)}</td>
-                              <td className="py-1.5 pr-3 whitespace-nowrap">
-                                {it.kind === "in_missed" ? (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-medium" title="Клиент звонил сам, никто не взял и не перезвонили в течение суток">
-                                    входящий
-                                  </span>
-                                ) : (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-400 font-medium" title="Мы звонили, не дозвонились и не перезвонили в течение 15 минут">
-                                    недозвон
-                                  </span>
-                                )}
-                              </td>
                               <td className="py-1.5 pr-3 text-slate-200">{it.clientName ?? <span className="text-slate-600">—</span>}</td>
                               <td className="py-1.5 pr-3 text-slate-200 font-mono text-xs">{it.phone}</td>
                               <td className="py-1.5 pr-3">
