@@ -56,7 +56,7 @@ export function middleware(request: NextRequest) {
 
   // Always allow the login page
   if (pathname === "/login") {
-    return NextResponse.next();
+    return noStore(NextResponse.next(), pathname);
   }
 
   // Always allow Next.js internals and static assets
@@ -73,10 +73,34 @@ export function middleware(request: NextRequest) {
   // (Node runtime has reliable access to SESSION_SECRET).
   const cookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   if (!cookie) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    // Редирект тоже без кеша: иначе браузер может держать «иди на /login»
+    // и после входа.
+    return noStore(NextResponse.redirect(new URL("/login", request.url)), pathname);
   }
 
-  return NextResponse.next();
+  // Страницы под сессией — тем более no-store: они персональные.
+  return noStore(NextResponse.next(), pathname);
+}
+
+/**
+ * HTML-документы не кешируем.
+ *
+ * Next отдаёт пререндеренные страницы с `Cache-Control: s-maxage=31536000` и
+ * без `max-age`/`must-revalidate` — для браузера это «явного срока нет»,
+ * и он оставляет разметку в кеше по своей эвристике. После деплоя такая
+ * разметка ссылается на чанки прошлой сборки, которых уже нет: страница
+ * выглядит старой, пока не нажмёшь Ctrl+F5 (жалоба 29.07.2026).
+ *
+ * Ставим no-store ТОЛЬКО на документы: у `/_next/static/*` имена с хешем,
+ * они обязаны кешироваться вечно, а часть API специально держит
+ * `private, max-age=60..3600` — их трогать нельзя.
+ */
+function noStore(res: NextResponse, pathname: string): NextResponse {
+  // API решают сами: часть роутов намеренно держит private, max-age=60..3600
+  // (dashboard/termins, daily, audio) — перебивать их нельзя.
+  if (pathname.startsWith("/api")) return res;
+  res.headers.set("Cache-Control", "no-store, must-revalidate");
+  return res;
 }
 
 export const config = {
