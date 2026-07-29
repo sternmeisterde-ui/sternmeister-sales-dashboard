@@ -47,6 +47,29 @@ import { cached } from "@/lib/kommo/cache";
 // одни и те же SQL — кэш рубит их до 1 запроса per key.
 const ANALYTICS_TTL = 60 * 1000;
 
+/**
+ * Разбор времени из `analytics.*`: колонки — `timestamp WITHOUT time zone`, и
+ * naive-значение по конвенции проекта = **UTC** (ETL пишет Date, драйвер шлёт
+ * `toISOString()`, Postgres срезает пояс). При чтении drizzle/neon-http ставит
+ * identity-парсер на TIMESTAMP/TIMESTAMPTZ, поэтому в JS прилетает голая строка
+ * `"YYYY-MM-DD HH:MM:SS"`. Голый `new Date(...)` разобрал бы её в TZ процесса —
+ * на проде (TZ=Europe/Berlin) это сдвигает момент на −2 часа (летом).
+ * Прибиваем к UTC явно.
+ *
+ * Сдвиг был не гипотетическим: в «Активность → Дайлер» шкала 09:00–20:00
+ * оказывалась пустой всё утро — реальные звонки 09:00–11:00 уезжали за левый
+ * край окна и обрезались (2026-07-29).
+ *
+ * SQL-агрегаты этой проблемы не имеют: они конвертируют явно
+ * (`(created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin'`).
+ */
+export function parseAnalyticsTs(raw: string | Date): Date {
+  if (raw instanceof Date) return raw; // парсер драйвера уже отдал момент
+  const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+  const hasTz = iso.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(iso);
+  return new Date(hasTz ? iso : `${iso}Z`);
+}
+
 // Known name drift between `master_managers.name` (authoritative) and
 // `analytics.communications.manager` (from integrator). Add entries here when
 // a new manager shows up with a transliteration mismatch — verified from prod
@@ -344,7 +367,7 @@ async function fetchCallEventsByMaster(
       managerId,
       eventId: `comm:${row.communication_id}`,
       eventType: direction,
-      createdAt: new Date(row.created_at),
+      createdAt: parseAnalyticsTs(row.created_at),
       durationSec: Number(row.duration ?? 0),
       // b2b: 0 — там wait для cg-leg уже внутри duration (durationExpr), и
       // семантику Коммерсов в этом чате не меняем.
@@ -466,7 +489,7 @@ async function fetchDialerCallEventsByMaster(
     out.push({
       managerId,
       eventId: `comm:${row.communication_id}`,
-      createdAt: new Date(row.created_at),
+      createdAt: parseAnalyticsTs(row.created_at),
       direction: row.communication_type === "call_in" ? "incoming" : "outgoing",
       talkSec: Number(row.duration ?? 0),
       waitSec: Number(row.wait_seconds ?? 0),
@@ -641,12 +664,12 @@ export async function getDialerLeadTouches(
       statusId: Number(r.status_id),
       contactName: r.contact_name ?? null,
       manager: r.manager ?? null,
-      leadCreatedAt: r.lead_created_at ? new Date(r.lead_created_at).toISOString() : null,
+      leadCreatedAt: r.lead_created_at ? parseAnalyticsTs(r.lead_created_at).toISOString() : null,
       dialerTouches: Number(r.dialer_touches ?? 0),
       manualTouches: Number(r.manual_touches ?? 0),
       periodDialerTouches: Number(r.period_dialer ?? 0),
       periodManualTouches: Number(r.period_manual ?? 0),
-      lastTouchAt: r.last_touch_at ? new Date(r.last_touch_at).toISOString() : null,
+      lastTouchAt: r.last_touch_at ? parseAnalyticsTs(r.last_touch_at).toISOString() : null,
       callers: (r.callers ?? []).map((c) => ({ name: c.name, n: Number(c.n) })),
     }));
   });
@@ -797,8 +820,8 @@ export async function getB2gLostLeads(
       pipelineId: Number(r.pipeline_id),
       contactName: r.contact_name ?? null,
       manager: r.manager ?? null,
-      leadCreatedAt: r.lead_created_at ? new Date(r.lead_created_at).toISOString() : null,
-      lastCallAt: r.last_call_at ? new Date(r.last_call_at).toISOString() : null,
+      leadCreatedAt: r.lead_created_at ? parseAnalyticsTs(r.lead_created_at).toISOString() : null,
+      lastCallAt: r.last_call_at ? parseAnalyticsTs(r.last_call_at).toISOString() : null,
     }));
   });
 }
@@ -1895,16 +1918,10 @@ async function fetchLostCallsDetail(
   };
 
   return rows.filter(inShift).map((r) => {
-    // created_at — timestamp WITHOUT time zone (naive = UTC по конвенции
-    // проекта). Драйвер отдаёт строку без пояса; new Date(naive) парсил бы
-    // её в TZ процесса — прибиваем к UTC явно.
-    const raw = String(r.created_at);
-    const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
-    const hasTz = iso.endsWith("Z") || /[+-]\d{2}:?\d{2}$/.test(iso);
     return {
       manager: r.manager,
       phone: r.phone,
-      createdAt: new Date(hasTz ? iso : `${iso}Z`).toISOString(),
+      createdAt: parseAnalyticsTs(r.created_at).toISOString(),
       leadId: r.lead_id == null ? null : Number(r.lead_id),
       pipelineName: r.pipeline_name,
       statusName: r.status_name,
