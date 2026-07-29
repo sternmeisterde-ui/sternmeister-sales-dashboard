@@ -65,7 +65,14 @@ async function main() {
         AND lc.is_deleted = FALSE
         AND lc.exclude_from_analytics = FALSE
     )
-    SELECT lead_id, status_id, event_at, next_at
+    -- Время отдаём эпохой в миллисекундах, а НЕ меткой времени: analytics
+    -- хранит их без зоны, драйвер возвращает строку "2026-07-07 15:36:04", и
+    -- new Date() трактует её как локальную. На машине в UTC+5 интервалы этапов
+    -- уезжали на пять часов, и звонки молча выпадали из консультационного окна
+    -- (43 разговора за июль, из них 17 — настоящие потерянные ролевки).
+    SELECT lead_id, status_id,
+           extract(epoch from event_at) * 1000 AS event_ms,
+           extract(epoch from next_at) * 1000 AS next_ms
     FROM stage_ranges
     WHERE status_id IN (${sql.join(consultStatuses.map((id) => sql`${id}`), sql`, `)})
       AND (next_at IS NULL OR next_at >= ${FROM}::date)
@@ -76,8 +83,8 @@ async function main() {
     const arr = byLead.get(String(s.lead_id)) ?? [];
     arr.push({
       statusId: Number(s.status_id),
-      from: new Date(s.event_at).getTime(),
-      to: s.next_at ? new Date(s.next_at).getTime() : Number.POSITIVE_INFINITY,
+      from: Number(s.event_ms),
+      to: s.next_ms === null ? Number.POSITIVE_INFINITY : Number(s.next_ms),
     });
     byLead.set(String(s.lead_id), arr);
   }
