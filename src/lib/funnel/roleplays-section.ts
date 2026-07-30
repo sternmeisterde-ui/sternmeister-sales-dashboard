@@ -634,6 +634,19 @@ export async function computeRoleplaysSection(
       mismatches: m.bad,
       botScores: m.bot,
     }))
+    // Менеджер попадает в срез и как ответственный по сделке — из-за этого в
+    // таблице появлялись строки с нулями во всех колонках (РОП, третья линия:
+    // сделка на них числится, но консультаций они не ведут). Такие убираем:
+    // строка без единой цифры ничего не сообщает.
+    .filter(
+      (m) =>
+        m.consultations > 0 ||
+        m.analyzed > 0 ||
+        m.confirmed > 0 ||
+        m.botScores > 0 ||
+        m.kommoScores > 0 ||
+        m.mismatches > 0,
+    )
     .sort((a, b) => b.consultations - a.consultations);
 
   const totals: RoleplaysTotals = {
