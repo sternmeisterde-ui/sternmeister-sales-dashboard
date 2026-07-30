@@ -148,8 +148,18 @@ export interface ClientRow {
   confirmed: number;
   /** Разбивка «почему не разобрано» — вместо догадок в подсказке. */
   notAnalyzed: NotAnalyzedReason[];
-  /** Баллы бота по порядку проведения. */
-  botScores: Array<{ score: number | null; at: string | null; notScored: NotScoredKind | null }>;
+  /**
+   * Разборы бота по порядку разговоров. Балл есть не у каждого: бот мог
+   * разобрать разговор и не найти в нём репетиции (`present: false`) — такой
+   * разбор в счётчик оценок не идёт и в колонке показывается отдельным знаком.
+   */
+  botScores: Array<{
+    score: number | null;
+    at: string | null;
+    notScored: NotScoredKind | null;
+    /** Подтвердил ли бот, что репетиция вообще была. */
+    present: boolean;
+  }>;
   /** Сверка «бот ↔ карточка Kommo» по каждой ролевке периода. */
   kommoSlots: SlotCompare[];
 }
@@ -553,6 +563,7 @@ export async function computeRoleplaysSection(
         score: r.score5,
         at: r.roleplayAt ? new Date(r.roleplayAt).toISOString() : null,
         notScored: r.score5 === null ? classifyNotScored(r.gateReason) : null,
+        present: !!r.confirmed,
       })),
       kommoSlots: compareSlots(
         okk.map((r) => ({ side: r.side === "aa" ? "aa" : "dc", day: berlinDay(r.roleplayAt), score: r.score5 })),
