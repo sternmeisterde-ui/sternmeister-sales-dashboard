@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line, CartesianGrid, ReferenceLine, LabelList } from "recharts";
-import { fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
-import CalendarPicker from "@/components/CalendarPicker";
+import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, ArrowLeftRight, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Line, CartesianGrid, ReferenceLine, LabelList } from "recharts";
+import { addDaysCivil, berlinCivilDate, fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
+import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
 import type {
   ClientRow,
@@ -14,7 +14,7 @@ import type {
   ClientGroup,
   ClientSideReadiness,
 } from "@/lib/funnel/clients";
-import type { BotDailyPoint } from "@/lib/funnel/bot-roleplays";
+import type { BotDailyPoint, BotTrainingSummary } from "@/lib/funnel/bot-roleplays";
 import InfoPopover from "@/components/funnel/InfoPopover";
 import ClientDrawer, { NOT_SCORED_MARK } from "@/components/funnel/ClientDrawer";
 import FilterSelect from "@/components/funnel/FilterSelect";
@@ -553,102 +553,577 @@ function LanguageLevels({ clients, onDrill }: { clients: ClientRow[]; onDrill: D
   );
 }
 
-// Всплывающая табличка дня: всего ролевок (+ разбивка по уровням) и уникальных.
-function TrainingTooltip({ active, payload, label }: {
+/** Период по умолчанию — текущий календарный месяц с 1-го числа по сегодня. */
+function defaultTrainingRange(): { start: Date; end: Date } {
+  const today = fmtLocalDate(todayBerlinDate());
+  return { start: berlinCivilDate(`${today.slice(0, 7)}-01`), end: todayBerlinDate() };
+}
+
+/** Сдвиг ISO-даты на календарный месяц с прижатием дня к концу месяца:
+ * 31.07 → 30.06, 31.03 → 28/29.02. Это и есть сравнение периодов, а не дней. */
+function shiftTrainingMonth(iso: string, offset: number): string {
+  const year = Number(iso.slice(0, 4));
+  const month = Number(iso.slice(5, 7)) - 1;
+  const day = Number(iso.slice(8, 10));
+  const target = new Date(Date.UTC(year, month + offset, 1));
+  const targetYear = target.getUTCFullYear();
+  const targetMonth = target.getUTCMonth();
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  return `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+}
+
+type TrainingRange = { start: Date; end: Date };
+
+interface TrainingChartPoint {
+  index: number;
+  label: string;
+  aDate: string | null;
+  bDate: string | null;
+  totalA: number | null;
+  totalB: number | null;
+  usersA: number | null;
+  usersB: number | null;
+  lvl1A: number | null;
+  lvl1B: number | null;
+  lvl2A: number | null;
+  lvl2B: number | null;
+}
+
+interface TrainingApiResponse {
+  points: BotDailyPoint[];
+  summary: BotTrainingSummary;
+}
+
+type TrainingMetric = "total" | "users";
+
+/** API возвращает только дни с тренировками. Для честного сравнения периодов
+ *  дополняем пропуски нулями, иначе 6 июня могло бы совместиться с 5 июля. */
+function padTrainingDays(from: string, to: string, points: BotDailyPoint[]): BotDailyPoint[] {
+  const byDay = new Map(points.map((p) => [p.day, p]));
+  const out: BotDailyPoint[] = [];
+  let day = from;
+  let guard = 0;
+  while (day <= to && guard < 800) {
+    out.push(byDay.get(day) ?? {
+      day,
+      total: 0,
+      users: 0,
+      lvl1: 0,
+      lvl2: 0,
+    });
+    day = addDaysCivil(day, 1);
+    guard += 1;
+  }
+  return out;
+}
+
+/** Нарастающий итог строится строго из тех же дневных значений. Для users это
+ *  сумма дневных уникальных: клиент, тренировавшийся в разные дни, участвует в
+ *  каждом таком дне — ровно как договорились для обычного графика. */
+function accumulateTrainingDays(points: BotDailyPoint[]): BotDailyPoint[] {
+  let total = 0;
+  let users = 0;
+  let lvl1 = 0;
+  let lvl2 = 0;
+  return points.map((p) => {
+    total += p.total;
+    users += p.users;
+    lvl1 += p.lvl1;
+    lvl2 += p.lvl2;
+    return { ...p, total, users, lvl1, lvl2 };
+  });
+}
+
+/** Период B накладывается на A по номеру дня: день 1 ↔ день 1. Это позволяет
+ *  сравнить, например, июль (31 день) с июнем (30 дней). */
+function mergeTrainingPeriods(
+  periodA: BotDailyPoint[],
+  periodB: BotDailyPoint[] | null,
+  cumulative: boolean,
+): TrainingChartPoint[] {
+  const a = cumulative ? accumulateTrainingDays(periodA) : periodA;
+  const b = periodB ? (cumulative ? accumulateTrainingDays(periodB) : periodB) : null;
+  const length = Math.max(a.length, b?.length ?? 0);
+  return Array.from({ length }, (_, index) => {
+    const pa = a[index];
+    const pb = b?.[index];
+    return {
+      index,
+      label: b ? String(index + 1) : (pa?.day.slice(5) ?? String(index + 1)),
+      aDate: pa?.day ?? null,
+      bDate: pb?.day ?? null,
+      totalA: pa?.total ?? null,
+      totalB: pb?.total ?? null,
+      usersA: pa?.users ?? null,
+      usersB: pb?.users ?? null,
+      lvl1A: pa?.lvl1 ?? null,
+      lvl1B: pb?.lvl1 ?? null,
+      lvl2A: pa?.lvl2 ?? null,
+      lvl2B: pb?.lvl2 ?? null,
+    };
+  });
+}
+
+function shortTrainingDate(day: string | null): string {
+  return day ? day.slice(8, 10) + "." + day.slice(5, 7) : "—";
+}
+
+function trainingRangeLabel(from: string, to: string): string {
+  return `${shortTrainingDate(from)}–${shortTrainingDate(to)}`;
+}
+
+function TrainingCompareTooltip({ active, payload, metric, cumulative }: {
   active?: boolean;
-  payload?: Array<{ payload: BotDailyPoint }>;
-  label?: string;
+  payload?: Array<{ payload?: TrainingChartPoint }>;
+  metric: TrainingMetric;
+  cumulative: boolean;
 }) {
-  if (!active || !payload?.length) return null;
-  const p = payload[0].payload;
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  const rows = [
+    { key: "A", day: point.aDate, value: metric === "total" ? point.totalA : point.usersA, lvl1: point.lvl1A, lvl2: point.lvl2A },
+    { key: "B", day: point.bDate, value: metric === "total" ? point.totalB : point.usersB, lvl1: point.lvl1B, lvl2: point.lvl2B },
+  ].filter((r) => r.day !== null && r.value !== null);
   return (
-    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "6px 10px" }}>
-      <div style={{ color: "#94a3b8", marginBottom: 2 }}>{label}</div>
-      <div style={{ color: "#e2e8f0" }}>
-        Ролевок: <b>{p.total}</b> <span style={{ color: "#64748b" }}>(Ур.1 {p.lvl1} · Ур.2 {p.lvl2})</span>
+    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "7px 10px" }}>
+      <div style={{ color: "#94a3b8", marginBottom: 4 }}>
+        День {point.index + 1}{cumulative ? " · нарастающим итогом" : ""}
       </div>
-      <div style={{ color: "#e2e8f0" }}>
-        Уникальных: <b>{p.users}</b>
+      {rows.map((r) => (
+        <div key={r.key} style={{ color: r.key === "A" ? "#e2e8f0" : "#94a3b8", marginTop: 2 }}>
+          <b>{r.key}</b> · {shortTrainingDate(r.day)}: <b>{r.value}</b>{" "}
+          {metric === "total" && (
+            <span style={{ color: "#64748b" }}>(Ур.1 {r.lvl1} · Ур.2 {r.lvl2})</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TrainingMetricChart({
+  metric,
+  data,
+  compareOn,
+  cumulative,
+  rangeA,
+  rangeB,
+  onPointClick,
+}: {
+  metric: TrainingMetric;
+  data: TrainingChartPoint[];
+  compareOn: boolean;
+  cumulative: boolean;
+  rangeA: string;
+  rangeB: string | null;
+  onPointClick: (point: TrainingChartPoint) => void;
+}) {
+  const isTotal = metric === "total";
+  const color = isTotal ? "#60a5fa" : "#f0b63d";
+  const keyA = isTotal ? "totalA" : "usersA";
+  const keyB = isTotal ? "totalB" : "usersB";
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 min-w-0">
+      <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
+        <div>
+          <div className="text-sm font-medium text-slate-200">
+            {isTotal ? "Количество тренировок" : "Уникальные клиенты"}
+          </div>
+          <div className="text-[11px] text-slate-500">
+            {cumulative ? "нарастающим итогом" : "по дням"} · клик по точке — список клиентов
+          </div>
+        </div>
+        <div className="text-[10px] text-slate-500 flex items-center gap-2 flex-wrap">
+          <span>A: {rangeA}</span>
+          {compareOn && rangeB && <span className="border-b border-dashed border-slate-500">B: {rangeB}</span>}
+        </div>
+      </div>
+      <div className="h-56">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart
+            data={data}
+            margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
+            onClick={(state) => {
+              const event = state as unknown as {
+                activePayload?: Array<{ payload?: TrainingChartPoint }>;
+              };
+              const point = event.activePayload?.[0]?.payload;
+              if (point) onPointClick(point);
+            }}
+            className="cursor-pointer"
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis
+              dataKey="label"
+              tick={{ fill: "#94a3b8", fontSize: 11 }}
+              axisLine={false}
+              tickLine={false}
+              minTickGap={24}
+            />
+            <YAxis yAxisId="count" allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <Tooltip content={<TrainingCompareTooltip metric={metric} cumulative={cumulative} />} />
+            {compareOn && <Legend wrapperStyle={{ fontSize: 11, color: "#cbd5e1" }} />}
+            <Line
+              yAxisId="count"
+              type="linear"
+              dataKey={keyA}
+              name={compareOn ? "Период A" : (isTotal ? "Тренировки" : "Уникальные")}
+              stroke={color}
+              strokeWidth={2.5}
+              dot={false}
+              activeDot={{ r: 4 }}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+            {compareOn && (
+              <Line
+                yAxisId="count"
+                type="linear"
+                dataKey={keyB}
+                name="Период B"
+                stroke={color}
+                strokeWidth={2}
+                strokeDasharray="5 4"
+                strokeOpacity={0.65}
+                dot={false}
+                activeDot={{ r: 4 }}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            )}
+          </ComposedChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
 }
 
-// Тренировки с ботом по дням за последние 8 недель (независимо от фильтра термина —
-// это активность практики, а не сделки). Сам грузит свой endpoint. Клик по дню →
-// список «кто сколько прошёл» в этот день.
+type TrainingPeriodTotals = {
+  trainings: number;
+  dailyUnique: number;
+  engagedTargetLeads: number;
+  targetLeads: number;
+  conversionPct: number | null;
+};
+
+function trainingPeriodTotals(points: BotDailyPoint[], summary: BotTrainingSummary): TrainingPeriodTotals {
+  return {
+    trainings: points.reduce((sum, point) => sum + point.total, 0),
+    dailyUnique: points.reduce((sum, point) => sum + point.users, 0),
+    engagedTargetLeads: summary.engagedTargetLeads,
+    targetLeads: summary.targetLeads,
+    conversionPct: summary.conversionPct,
+  };
+}
+
+function TrainingComparisonTable({ pointsA, pointsB, summaryA, summaryB, labelA, labelB }: {
+  pointsA: BotDailyPoint[];
+  pointsB: BotDailyPoint[];
+  summaryA: BotTrainingSummary;
+  summaryB: BotTrainingSummary;
+  labelA: string;
+  labelB: string;
+}) {
+  const a = trainingPeriodTotals(pointsA, summaryA);
+  const b = trainingPeriodTotals(pointsB, summaryB);
+  const metrics: Array<{
+    key: keyof TrainingPeriodTotals;
+    label: string;
+    unit: string;
+    neutral?: boolean;
+    format: (value: number) => string;
+  }> = [
+    { key: "trainings", label: "Тренировки", unit: "", format: String },
+    { key: "dailyUnique", label: "Уникальные за день (сумма)", unit: "", format: String },
+    { key: "engagedTargetLeads", label: "Занимались из целевых", unit: "", format: String },
+    { key: "targetLeads", label: "Всего целевых лидов", unit: "", neutral: true, format: String },
+    { key: "conversionPct", label: "Конверсия в занятие", unit: " п.п.", format: (value) => `${value}%` },
+  ];
+
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 overflow-hidden">
+      <div className="flex items-baseline gap-x-3 gap-y-1 flex-wrap mb-3 text-xs font-semibold uppercase tracking-wide">
+        <span className="text-slate-300">Сравнение периодов</span>
+        <span className="text-blue-400">A · {labelA}</span>
+        <span className="text-orange-400">B · {labelB}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] text-sm border-collapse">
+          <thead>
+            <tr className="border-b border-white/10 text-[10px] uppercase tracking-widest font-semibold">
+              <th className="py-2 px-3 text-left text-slate-500">Показатель</th>
+              <th className="py-2 px-3 text-right text-blue-400">A</th>
+              <th className="py-2 px-3 text-right text-orange-400">B</th>
+              <th className="py-2 px-3 text-right text-slate-500">Δ · A − B</th>
+            </tr>
+          </thead>
+          <tbody>
+            {metrics.map((metric) => {
+              const va = a[metric.key];
+              const vb = b[metric.key];
+              const delta = va === null || vb === null ? null : Math.round((va - vb) * 10) / 10;
+              const deltaClass = metric.neutral || delta === null || delta === 0
+                ? "text-slate-500"
+                : delta > 0 ? "text-emerald-400" : "text-rose-400";
+              return (
+                <tr key={metric.key} className="border-t border-white/[0.06] hover:bg-white/[0.02]">
+                  <td className="py-2.5 px-3 text-slate-300">{metric.label}</td>
+                  <td className="py-2.5 px-3 text-right tabular-nums text-blue-300 font-medium">
+                    {va === null ? "—" : metric.format(va)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right tabular-nums text-orange-300 font-medium">
+                    {vb === null ? "—" : metric.format(vb)}
+                  </td>
+                  <td className={`py-2.5 px-3 text-right tabular-nums font-medium ${deltaClass}`}>
+                    {delta === null ? "—" : `${delta > 0 ? "+" : ""}${delta}${metric.unit}`}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[10px] text-slate-600 mt-2">
+        Целевые: клиенты «Бух Бератер» с ДЦ/АА-термином в периоде; закрытые, удалённые,
+        исключённые из аналитики и A1 не входят. Конверсия считает уникального целевого
+        клиента один раз за весь период.
+      </p>
+    </div>
+  );
+}
+
+// Общий блок двух графиков. Период здесь СВОЙ, а не «Дата термина» сверху:
+// тренировки — активность практики и не зависят от даты термина клиента.
 function TrainingChart({ onDrill, vertical }: { onDrill: DrillFn; vertical?: "buh" | "med" | "all" }) {
-  const [points, setPoints] = useState<BotDailyPoint[] | null>(null);
+  const [rangeA, setRangeA] = useState<TrainingRange>(defaultTrainingRange);
+  // Сравнение включено сразу: таблица A/B/Δ — самостоятельная часть раздела
+  // «Клиенты», поэтому не должна быть спрятана за первым кликом по переключателю.
+  const [compareOn, setCompareOn] = useState(true);
+  const [cumulative, setCumulative] = useState(false);
+  const [rangeBOverride, setRangeBOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
+  const [loadedA, setLoadedA] = useState<{ key: string; data: TrainingApiResponse } | null>(null);
+  const [loadedB, setLoadedB] = useState<{ key: string; data: TrainingApiResponse } | null>(null);
+  const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null);
   const isMed = vertical === "med";
 
-  const onDayClick = (s: { activeLabel?: string | number }) => {
-    const day = s?.activeLabel != null ? String(s.activeLabel) : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
-    fetch(`/api/funnel/bot-roleplay-day?day=${day}`)
+  const aFrom = fmtLocalDate(rangeA.start);
+  const aTo = fmtLocalDate(rangeA.end);
+  const windowSig = `${aFrom}|${aTo}`;
+  const defaultB = useMemo<TrainingRange>(() => {
+    return {
+      start: berlinCivilDate(shiftTrainingMonth(aFrom, -1)),
+      end: berlinCivilDate(shiftTrainingMonth(aTo, -1)),
+    };
+  }, [aFrom, aTo]);
+  const rangeB = rangeBOverride?.sig === windowSig
+    ? { start: rangeBOverride.start, end: rangeBOverride.end }
+    : defaultB;
+  const bFrom = fmtLocalDate(rangeB.start);
+  const bTo = fmtLocalDate(rangeB.end);
+  const keyA = `${aFrom}|${aTo}`;
+  const keyB = `${bFrom}|${bTo}`;
+
+  useEffect(() => {
+    if (isMed) return;
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({ from: aFrom, to: aTo });
+    fetch(`/api/funnel/bot-roleplay-stats?${params}`, { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((j: { clients: Array<{ leadId: number; name: string; kommoUrl: string; count: number }> }) => {
-        const rows: DrillRow[] = (j.clients ?? []).map((c) => ({
-          key: c.leadId,
-          name: c.name,
-          kommoUrl: c.kommoUrl,
-          primary: `${c.count} рол.`,
-        }));
-        onDrill(`Тренировки ${day} — кто сколько прошёл`, rows);
+      .then((j: TrainingApiResponse) => {
+        setLoadedA({ key: keyA, data: j });
+        setLoadError((current) => current?.key === keyA ? null : current);
+      })
+      .catch((e) => {
+        if ((e as Error).name !== "AbortError") {
+          setLoadError({ key: keyA, message: "Не удалось загрузить период A" });
+        }
+      });
+    return () => ctrl.abort();
+  }, [isMed, aFrom, aTo, keyA]);
+
+  useEffect(() => {
+    if (isMed || !compareOn) return;
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({ from: bFrom, to: bTo });
+    fetch(`/api/funnel/bot-roleplay-stats?${params}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: TrainingApiResponse) => {
+        setLoadedB({ key: keyB, data: j });
+        setLoadError((current) => current?.key === keyB ? null : current);
+      })
+      .catch((e) => {
+        if ((e as Error).name !== "AbortError") {
+          setLoadError({ key: keyB, message: "Не удалось загрузить период B" });
+        }
+      });
+    return () => ctrl.abort();
+  }, [isMed, compareOn, bFrom, bTo, keyB]);
+
+  const dataA = loadedA?.key === keyA ? loadedA.data : null;
+  const dataB = compareOn && loadedB?.key === keyB ? loadedB.data : null;
+  const rawA = dataA?.points ?? null;
+  const rawB = dataB?.points ?? null;
+  const periodA = useMemo(
+    () => (rawA ? padTrainingDays(aFrom, aTo, rawA) : null),
+    [rawA, aFrom, aTo],
+  );
+  const periodB = useMemo(
+    () => (rawB ? padTrainingDays(bFrom, bTo, rawB) : null),
+    [rawB, bFrom, bTo],
+  );
+  const chartData = useMemo(
+    () => (periodA && dataA
+      ? mergeTrainingPeriods(
+          periodA,
+          compareOn ? periodB : null,
+          cumulative,
+        )
+      : []),
+    [periodA, periodB, dataA, compareOn, cumulative],
+  );
+  const waiting = rawA === null || (compareOn && rawB === null);
+  const error = loadError?.key === keyA || (compareOn && loadError?.key === keyB)
+    ? loadError.message
+    : null;
+  const hasData = chartData.some((p) => (p.totalA ?? 0) > 0 || (p.totalB ?? 0) > 0);
+
+  const openTrainingDay = (point: TrainingChartPoint) => {
+    const periods: Array<{ key: "A" | "B"; day: string }> = [];
+    if (point.aDate) periods.push({ key: "A", day: point.aDate });
+    if (compareOn && point.bDate) periods.push({ key: "B", day: point.bDate });
+    Promise.all(
+      periods.map(async (period) => {
+        const res = await fetch(`/api/funnel/bot-roleplay-day?day=${period.day}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json() as { clients: Array<{ leadId: number; name: string; kommoUrl: string; count: number }> };
+        return { period, clients: json.clients ?? [] };
+      }),
+    )
+      .then((groups) => {
+        const rows: DrillRow[] = groups.flatMap(({ period, clients }) =>
+          clients.map((client) => ({
+            key: `${period.key}:${client.leadId}`,
+            name: client.name,
+            kommoUrl: client.kommoUrl,
+            primary: `${compareOn ? `${period.key} · ` : ""}${client.count} рол.`,
+          })),
+        );
+        const dates = periods.map((p) => `${p.key} ${shortTrainingDate(p.day)}`).join(" · ");
+        onDrill(`Тренировки — ${dates}`, rows);
       })
       .catch(() => {});
   };
-  useEffect(() => {
-    if (isMed) return; // мед-бот ещё не существует — не дёргаем бух-статистику
-    let cancelled = false;
-    const to = todayBerlinDate();
-    const from = new Date(to);
-    from.setDate(from.getDate() - 56);
-    const params = new URLSearchParams({ from: fmtLocalDate(from), to: fmtLocalDate(to) });
-    fetch(`/api/funnel/bot-roleplay-stats?${params}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((j: { points: BotDailyPoint[] }) => {
-        if (!cancelled) setPoints(j.points ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setPoints([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isMed]);
 
-  if (!isMed && points !== null && points.length === 0) return null; // нет данных бота / env off
   return (
-    <div className="glass-panel rounded-2xl border border-white/5 p-4">
-      <div className="flex items-center gap-2 mb-1">
-        <Users className="w-4 h-4 text-blue-400" />
-        <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
+    <div className="flex flex-col gap-3">
+      {/* Общая панель стоит НАД графиками и управляет сразу обоими. */}
+      <div className="glass-panel rounded-2xl border border-white/5 px-4 py-3 flex flex-col gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Users className="w-4 h-4 text-blue-400" />
+          <span className="text-sm font-medium text-slate-200">Тренировки с ботом по дням</span>
+          {!isMed && <span className="text-xs text-slate-500">только завершённые ролевки</span>}
+        </div>
         {!isMed && (
-          <span className="text-xs text-slate-500">только завершённые ролевки · 8 недель · клик по дню — кто тренировался</span>
-        )}
-      </div>
-      <div className="h-56">
-        {isMed ? (
-          <MedBotPlaceholder />
-        ) : points === null ? (
-          <div className="flex items-center justify-center h-full text-sm text-slate-500">
-            <Loader2 className="w-4 h-4 animate-spin mr-2" /> загрузка…
+          <div className="flex items-center gap-2 flex-wrap justify-start">
+            <span className="text-[10px] font-bold text-blue-400">A</span>
+            <CalendarPicker
+              mode="range"
+              value={{ start: rangeA.start, end: rangeA.end } satisfies DateRange}
+              onChange={(range) => {
+                if (!range.start) return;
+                setRangeA({ start: range.start, end: range.end ?? range.start });
+              }}
+              onClear={() => setRangeA(defaultTrainingRange())}
+              maxDate={todayBerlinDate()}
+            />
+            <button
+              type="button"
+              onClick={() => setCompareOn((value) => !value)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${compareOn ? "bg-orange-500/20 text-orange-400 border-orange-500/30" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              Сравнить периоды
+            </button>
+            {compareOn && (
+              <>
+                <span className="text-[10px] font-bold text-orange-400">B</span>
+                <CalendarPicker
+                  mode="range"
+                  value={{ start: rangeB.start, end: rangeB.end } satisfies DateRange}
+                  onChange={(range) => {
+                    if (!range.start) return;
+                    setRangeBOverride({ sig: windowSig, start: range.start, end: range.end ?? range.start });
+                  }}
+                  onClear={() => setRangeBOverride(null)}
+                  maxDate={todayBerlinDate()}
+                />
+              </>
+            )}
+            <button
+              type="button"
+              aria-pressed={cumulative}
+              onClick={() => setCumulative((value) => !value)}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${cumulative ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900/60 text-slate-400 border-white/10 hover:text-slate-200"}`}
+            >
+              Кумулятивно
+            </button>
+            {waiting && <Loader2 className="w-3.5 h-3.5 text-slate-500 animate-spin" />}
           </div>
-        ) : (
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 0, left: -20 }} onClick={onDayClick} className="cursor-pointer">
-              <XAxis dataKey="day" tickFormatter={(d: string) => d.slice(5)} tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={24} />
-              <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
-              <Tooltip content={<TrainingTooltip />} />
-              <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
-              {/* Область = всего ролевок за день; линия = уникальные пользователи.
-                  Разбивка по уровням — в тултипе, чтобы не перегружать визуал. */}
-              <Area type="monotone" dataKey="total" stroke="#60a5fa" fill="rgba(96,165,250,0.28)" name="Ролевок" />
-              <Line type="monotone" dataKey="users" stroke="#f0b63d" strokeWidth={2} dot={false} name="Уникальных" />
-            </ComposedChart>
-          </ResponsiveContainer>
         )}
       </div>
+
+      {isMed ? (
+        <div className="glass-panel rounded-2xl border border-white/5 p-4">
+          <MedBotPlaceholder />
+        </div>
+      ) : error ? (
+        <div className="glass-panel rounded-2xl border border-rose-500/30 bg-rose-500/5 px-4 py-3 text-sm text-rose-300 flex items-center gap-2">
+          <TriangleAlert className="w-4 h-4 shrink-0" /> {error}
+        </div>
+      ) : waiting ? (
+        <div className="glass-panel rounded-2xl border border-white/5 px-4 py-12 flex items-center justify-center text-sm text-slate-500">
+          <Loader2 className="w-4 h-4 animate-spin mr-2" /> загрузка…
+        </div>
+      ) : (
+        <>
+          {compareOn && periodA && periodB && dataA && dataB && (
+            <TrainingComparisonTable
+              pointsA={periodA}
+              pointsB={periodB}
+              summaryA={dataA.summary}
+              summaryB={dataB.summary}
+              labelA={trainingRangeLabel(aFrom, aTo)}
+              labelB={trainingRangeLabel(bFrom, bTo)}
+            />
+          )}
+          {!hasData ? (
+            <div className="glass-panel rounded-2xl border border-white/5 px-4 py-12 text-center text-sm text-slate-500">
+              За выбранные периоды завершённых ролевок нет.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <TrainingMetricChart
+                metric="total"
+                data={chartData}
+                compareOn={compareOn}
+                cumulative={cumulative}
+                rangeA={trainingRangeLabel(aFrom, aTo)}
+                rangeB={compareOn ? trainingRangeLabel(bFrom, bTo) : null}
+                onPointClick={openTrainingDay}
+              />
+              <TrainingMetricChart
+                metric="users"
+                data={chartData}
+                compareOn={compareOn}
+                cumulative={cumulative}
+                rangeA={trainingRangeLabel(aFrom, aTo)}
+                rangeB={compareOn ? trainingRangeLabel(bFrom, bTo) : null}
+                onPointClick={openTrainingDay}
+              />
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -1369,7 +1844,6 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
             <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
             <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
-          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
           <CorrelationPanel vertical={vertical} />
           <ReadinessSummaryWidget
             summary={data.summary}
@@ -1394,6 +1868,8 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
             onFilterManager={setManager}
             onFilterStage={setStage}
           />
+          {/* Внизу и со своим периодом: тренировки не привязаны к дате термина. */}
+          <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
         </>
       )}
 

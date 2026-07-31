@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase, Tags,
+  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase, Tags, Timer,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -62,6 +62,16 @@ const cleanText = (text: string) => {
     .replace(/\]/g, '')   // Убрать ]
     .replace(/\#/g, '')   // Убрать #
     .trim();
+};
+
+/** Длительность API приходит строкой `мм:сс` (иногда `чч:мм:сс`).
+ * Для фильтра сравниваем секунды, чтобы граница «от 10 мин» была точной. */
+const callDurationSeconds = (value: string): number => {
+  const parts = value.split(":").map(Number);
+  if (parts.some((part) => !Number.isFinite(part) || part < 0)) return 0;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
 };
 
 // Взвешенные баллы (D2 v5.1: вес критерия ×3/×1.5/×0.5) дают дробные
@@ -537,6 +547,7 @@ export default function Dashboard() {
   const filterPopupRef = useRef<HTMLDivElement>(null);
   const [pageMounted, setPageMounted] = useState(false);
   useEffect(() => { setPageMounted(true); }, []);
+  const [durationFilterMin, setDurationFilterMin] = useState(0);
   const [scoreFilter, setScoreFilter] = useState(0);
   // `dateRange` is the user's in-progress selection inside the inline filter
   // calendar (before they hit "Применить"). The single source of truth for the
@@ -901,7 +912,7 @@ export default function Dashboard() {
   // Set of manager names matching current line filter (for call filtering)
   const filteredManagerNames = new Set(filteredManagers.map(m => m.name));
 
-  // Filter calls by line, date range, score, and search query
+  // Filter calls by line, date range, duration, score, and search query
   const filteredCalls = activeCalls.filter(call => {
     // Filter by line (via manager name) — applies to both B2G (manager.line)
     // and B2B (manager has totalCalls in the line-filtered period).
@@ -921,6 +932,15 @@ export default function Dashboard() {
       if (!(callDate >= startOfDay && callDate <= endOfDay)) {
         return false;
       }
+    }
+
+    // Минимальная длительность — только для таблицы ОКК. В AI Ролевках
+    // контрол скрыт и сохранённое значение не должно влиять на выдачу.
+    if (
+      activeTab === "real_calls" &&
+      callDurationSeconds(call.callDuration) < durationFilterMin * 60
+    ) {
+      return false;
     }
 
     // Filter by minimum score
@@ -1683,6 +1703,26 @@ export default function Dashboard() {
                 </h2>
                 {/* Advanced Table Filters */}
                 <div className="flex gap-3 items-center">
+                  {/* Минимальная длительность — только для ОКК, слева от оценки. */}
+                  {activeTab === "real_calls" && (
+                    <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5 gap-2">
+                      <Timer className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <span className="text-[10px] text-slate-400 whitespace-nowrap">от</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="60"
+                        step="1"
+                        value={durationFilterMin}
+                        onChange={(e) => setDurationFilterMin(parseInt(e.target.value, 10))}
+                        aria-label="Минимальная длительность звонка"
+                        className="w-20 accent-cyan-500 cursor-pointer"
+                      />
+                      <span className="text-xs font-bold text-cyan-400 w-12 text-right whitespace-nowrap">
+                        {durationFilterMin} мин
+                      </span>
+                    </div>
+                  )}
                   <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5 gap-2">
                     <BarChart3 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                     <span className="text-[10px] text-slate-400 whitespace-nowrap">от</span>

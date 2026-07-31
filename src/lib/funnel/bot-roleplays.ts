@@ -13,6 +13,7 @@
  */
 import { sql } from "drizzle-orm";
 import { analyticsDb } from "@/lib/db/analytics";
+import { getBeraterPipelineIds } from "@/lib/kommo/pipeline-config";
 import { unwrapRows } from "./compute";
 
 export interface BotRoleplaySummary {
@@ -40,6 +41,20 @@ export interface BotDailyPoint {
   users: number; // уникальных пользователей за день
   lvl1: number; // level_1 / leicht
   lvl2: number; // level_2 / mittel / schwer
+}
+
+export interface BotTrainingSummary {
+  /** Все целевые лиды периода (Бух Бератер + ДЦ/АА-термин в периоде). */
+  targetLeads: number;
+  /** Сколько целевых лидов тренировались хотя бы раз в выбранном периоде. */
+  engagedTargetLeads: number;
+  /** engagedTargetLeads / targetLeads × 100. */
+  conversionPct: number | null;
+}
+
+export interface BotTrainingStats {
+  points: BotDailyPoint[];
+  summary: BotTrainingSummary;
 }
 
 export interface BotDayClient {
@@ -81,9 +96,10 @@ export async function getBotRoleplaysOnDay(dayIso: string): Promise<BotDayClient
 
 /**
  * Дневная статистика завершённых сессий бота за окно [fromIso, toIso] (ISO-даты).
- * Для графика «тренировки по дням». Graceful no-op без BERATER_BOT_DATABASE_URL.
+ * Для графика «тренировки по дням» + целевой пул по датам ДЦ/АА-термина.
+ * Читаем только analytics-зеркало; любой сбой даёт graceful пустой результат.
  */
-export async function getBotDailyStats(fromIso: string, toIso: string): Promise<BotDailyPoint[]> {
+export async function getBotTrainingStats(fromIso: string, toIso: string): Promise<BotTrainingStats> {
   try {
     // День — БЕРЛИНСКАЯ дата (CLAUDE.md #1), не UTC-substring: иначе вечерние
     // тренировки после 22:00 Berlin (лето) уезжали на соседний день.
@@ -93,32 +109,98 @@ export async function getBotDailyStats(fromIso: string, toIso: string): Promise<
     // Берлинский день D начинается в D−1T22:00Z (лето) → нижняя граница −1 день.
     const coarseLo = shiftIsoDay(fromIso, -1);
     const coarseHi = shiftIsoDay(toIso, 1);
-    const rows = unwrapRows<{ day: string; total: string | number; users: string | number; lvl1: string | number; lvl2: string | number }>(
-      await analyticsDb.execute(sql`
-        SELECT to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day,
-               count(*) AS total,
-               count(DISTINCT user_id) AS users,
-               count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
-               count(*) FILTER (WHERE lower(coalesce(difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
-        FROM analytics.bot_roleplays
-        WHERE finished_at >= ${coarseLo}
-          AND finished_at < ${coarseHi}
-          AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') >= ${fromIso}
-          AND to_char(finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') <= ${toIso}
-        GROUP BY 1 ORDER BY 1
+    const beraterIds = getBeraterPipelineIds("buh");
+    const beraterIn = sql.join(beraterIds.map((id) => sql`${id}`), sql`, `);
+    const dcDate = sql`((termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`;
+    const aaDate = sql`((aa_termin_date AT TIME ZONE 'UTC') AT TIME ZONE 'Europe/Berlin')::date`;
+    const targetLeadCte = sql`
+      SELECT lead_id
+      FROM analytics.leads_cohort
+      WHERE pipeline_id IN (${beraterIn})
+        AND is_deleted = FALSE
+        AND exclude_from_analytics = FALSE
+        AND status_id <> 143
+        AND (language_level IS NULL OR TRIM(language_level) NOT ILIKE 'A1%')
+        AND (
+          (${dcDate} >= ${fromIso}::date AND ${dcDate} <= ${toIso}::date)
+          OR (${aaDate} >= ${fromIso}::date AND ${aaDate} <= ${toIso}::date)
+        )
+    `;
+    const periodSessionsCte = sql`
+      SELECT
+        br.*,
+        to_char(br.finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') AS day
+      FROM analytics.bot_roleplays br
+      WHERE br.finished_at >= ${coarseLo}
+        AND br.finished_at < ${coarseHi}
+        AND to_char(br.finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') >= ${fromIso}
+        AND to_char(br.finished_at::timestamptz AT TIME ZONE 'Europe/Berlin', 'YYYY-MM-DD') <= ${toIso}
+    `;
+
+    const [dailyResult, summaryResult] = await Promise.all([
+      analyticsDb.execute(sql`
+        WITH period_sessions AS (${periodSessionsCte})
+        SELECT
+          ps.day,
+          count(*) AS total,
+          count(DISTINCT ps.user_id) AS users,
+          count(*) FILTER (WHERE lower(coalesce(ps.difficulty,'')) IN ${sql.raw(LEVEL1)}) AS lvl1,
+          count(*) FILTER (WHERE lower(coalesce(ps.difficulty,'')) IN ${sql.raw(LEVEL2)}) AS lvl2
+        FROM period_sessions ps
+        GROUP BY ps.day
+        ORDER BY ps.day
       `),
-    );
-    return rows.map((r) => ({
+      analyticsDb.execute(sql`
+        WITH target_leads AS (${targetLeadCte}),
+        period_sessions AS (${periodSessionsCte})
+        SELECT
+          count(DISTINCT tl.lead_id) AS target_leads,
+          count(DISTINCT ps.lead_id) AS engaged_target_leads
+        FROM target_leads tl
+        LEFT JOIN period_sessions ps ON ps.lead_id = tl.lead_id
+      `),
+    ]);
+    const rows = unwrapRows<{
+      day: string;
+      total: string | number;
+      users: string | number;
+      lvl1: string | number;
+      lvl2: string | number;
+    }>(dailyResult);
+    const summaryRow = unwrapRows<{
+      target_leads: string | number;
+      engaged_target_leads: string | number;
+    }>(summaryResult)[0];
+    const targetLeads = Number(summaryRow?.target_leads) || 0;
+    const engagedTargetLeads = Number(summaryRow?.engaged_target_leads) || 0;
+    return {
+      points: rows.map((r) => ({
       day: String(r.day),
       total: Number(r.total) || 0,
       users: Number(r.users) || 0,
       lvl1: Number(r.lvl1) || 0,
       lvl2: Number(r.lvl2) || 0,
-    }));
+      })),
+      summary: {
+        targetLeads,
+        engagedTargetLeads,
+        conversionPct: targetLeads > 0
+          ? Math.round((engagedTargetLeads / targetLeads) * 1000) / 10
+          : null,
+      },
+    };
   } catch (e) {
-    console.error("[funnel] getBotDailyStats failed (non-fatal):", e instanceof Error ? e.message : e);
-    return [];
+    console.error("[funnel] getBotTrainingStats failed (non-fatal):", e instanceof Error ? e.message : e);
+    return {
+      points: [],
+      summary: { targetLeads: 0, engagedTargetLeads: 0, conversionPct: null },
+    };
   }
+}
+
+/** Совместимый помощник для возможных серверных потребителей только дневного ряда. */
+export async function getBotDailyStats(fromIso: string, toIso: string): Promise<BotDailyPoint[]> {
+  return (await getBotTrainingStats(fromIso, toIso)).points;
 }
 
 /**

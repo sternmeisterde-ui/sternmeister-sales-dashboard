@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { getBotDailyStats } from "@/lib/funnel/bot-roleplays";
+import { getBotTrainingStats } from "@/lib/funnel/bot-roleplays";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/funnel/bot-roleplay-stats?from=YYYY-MM-DD&to=YYYY-MM-DD
- * Дневная статистика тренировок с ботом ролевок (для графика). Только admin.
- * Без BERATER_BOT_DATABASE_URL вернёт пустой массив (graceful).
+ * Дневная статистика тренировок и целевой пул для сравнительной таблицы.
+ * Только admin; данные тренировок читаются из analytics-зеркала.
+ * Ответ больше не зависит от модуля рассылок.
  */
 export async function GET(req: NextRequest) {
   const session = await getSession();
@@ -24,8 +25,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const points = await getBotDailyStats(from, to);
-    return NextResponse.json({ points }, { headers: { "Cache-Control": "no-store" } });
+    const training = await getBotTrainingStats(from, to);
+    return NextResponse.json(
+      training,
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (e) {
     console.error("[/api/funnel/bot-roleplay-stats] failed:", e);
     return NextResponse.json(
