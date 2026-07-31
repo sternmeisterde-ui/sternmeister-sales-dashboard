@@ -65,7 +65,7 @@ const cleanText = (text: string) => {
 };
 
 /** Длительность API приходит строкой `мм:сс` (иногда `чч:мм:сс`).
- * Для фильтра сравниваем секунды, чтобы граница «от 10 мин» была точной. */
+ * Для фильтра сравниваем секунды, чтобы верхняя граница «до N минут» была точной. */
 const callDurationSeconds = (value: string): number => {
   const parts = value.split(":").map(Number);
   if (parts.some((part) => !Number.isFinite(part) || part < 0)) return 0;
@@ -547,7 +547,7 @@ export default function Dashboard() {
   const filterPopupRef = useRef<HTMLDivElement>(null);
   const [pageMounted, setPageMounted] = useState(false);
   useEffect(() => { setPageMounted(true); }, []);
-  const [durationFilterMin, setDurationFilterMin] = useState(0);
+  const [durationFilterMax, setDurationFilterMax] = useState(60);
   const [scoreFilter, setScoreFilter] = useState(0);
   // `dateRange` is the user's in-progress selection inside the inline filter
   // calendar (before they hit "Применить"). The single source of truth for the
@@ -934,11 +934,11 @@ export default function Dashboard() {
       }
     }
 
-    // Минимальная длительность — только для таблицы ОКК. В AI Ролевках
+    // Максимальная длительность — только для таблицы ОКК. В AI Ролевках
     // контрол скрыт и сохранённое значение не должно влиять на выдачу.
     if (
       activeTab === "real_calls" &&
-      callDurationSeconds(call.callDuration) < durationFilterMin * 60
+      callDurationSeconds(call.callDuration) > durationFilterMax * 60
     ) {
       return false;
     }
@@ -1703,23 +1703,23 @@ export default function Dashboard() {
                 </h2>
                 {/* Advanced Table Filters */}
                 <div className="flex gap-3 items-center">
-                  {/* Минимальная длительность — только для ОКК, слева от оценки. */}
+                  {/* Максимальная длительность — только для ОКК, слева от оценки. */}
                   {activeTab === "real_calls" && (
                     <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5 gap-2">
                       <Timer className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <span className="text-[10px] text-slate-400 whitespace-nowrap">от</span>
+                      <span className="text-[10px] text-slate-400 whitespace-nowrap">до</span>
                       <input
                         type="range"
                         min="0"
                         max="60"
                         step="1"
-                        value={durationFilterMin}
-                        onChange={(e) => setDurationFilterMin(parseInt(e.target.value, 10))}
-                        aria-label="Минимальная длительность звонка"
+                        value={durationFilterMax}
+                        onChange={(e) => setDurationFilterMax(parseInt(e.target.value, 10))}
+                        aria-label="Максимальная длительность звонка"
                         className="w-20 accent-cyan-500 cursor-pointer"
                       />
                       <span className="text-xs font-bold text-cyan-400 w-12 text-right whitespace-nowrap">
-                        {durationFilterMin} мин
+                        {durationFilterMax} мин
                       </span>
                     </div>
                   )}
