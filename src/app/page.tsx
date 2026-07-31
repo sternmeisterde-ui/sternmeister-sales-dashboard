@@ -74,6 +74,9 @@ const callDurationSeconds = (value: string): number => {
   return 0;
 };
 
+// Последнее положение слайдера означает отсутствие верхней границы.
+const NO_DURATION_LIMIT = 61;
+
 // Взвешенные баллы (D2 v5.1: вес критерия ×3/×1.5/×0.5) дают дробные
 // block_score / max_block_score / total_max_score. Показываем целое как целое,
 // а дробное — с одним знаком, без хвостов «.0».
@@ -547,7 +550,7 @@ export default function Dashboard() {
   const filterPopupRef = useRef<HTMLDivElement>(null);
   const [pageMounted, setPageMounted] = useState(false);
   useEffect(() => { setPageMounted(true); }, []);
-  const [durationFilterMax, setDurationFilterMax] = useState(60);
+  const [durationFilterMax, setDurationFilterMax] = useState(NO_DURATION_LIMIT);
   const [scoreFilter, setScoreFilter] = useState(0);
   // `dateRange` is the user's in-progress selection inside the inline filter
   // calendar (before they hit "Применить"). The single source of truth for the
@@ -938,6 +941,7 @@ export default function Dashboard() {
     // контрол скрыт и сохранённое значение не должно влиять на выдачу.
     if (
       activeTab === "real_calls" &&
+      durationFilterMax < NO_DURATION_LIMIT &&
       callDurationSeconds(call.callDuration) > durationFilterMax * 60
     ) {
       return false;
@@ -1707,19 +1711,20 @@ export default function Dashboard() {
                   {activeTab === "real_calls" && (
                     <div className="hidden sm:flex items-center bg-slate-800/50 rounded-lg px-3 py-1.5 border border-white/5 gap-2">
                       <Timer className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <span className="text-[10px] text-slate-400 whitespace-nowrap">до</span>
                       <input
                         type="range"
-                        min="0"
-                        max="60"
+                        min="1"
+                        max={NO_DURATION_LIMIT}
                         step="1"
                         value={durationFilterMax}
                         onChange={(e) => setDurationFilterMax(parseInt(e.target.value, 10))}
                         aria-label="Максимальная длительность звонка"
                         className="w-20 accent-cyan-500 cursor-pointer"
                       />
-                      <span className="text-xs font-bold text-cyan-400 w-12 text-right whitespace-nowrap">
-                        {durationFilterMax} мин
+                      <span className="text-xs font-bold text-cyan-400 min-w-20 text-right whitespace-nowrap">
+                        {durationFilterMax === NO_DURATION_LIMIT
+                          ? "без лимита"
+                          : `до ${durationFilterMax} мин`}
                       </span>
                     </div>
                   )}
