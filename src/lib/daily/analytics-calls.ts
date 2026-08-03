@@ -1240,7 +1240,10 @@ export interface B2bTileDetails {
    *  (метрика плитки «Ожидание», переопределение 2026-07-20). */
   waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; unanswered: number }>;
   /** То же по менеджерам (канонические имена). */
-  waitManagers: Array<{ manager: string; avgWaitSec: number; unanswered: number }>;
+  // Ожидание в разрезе менеджер × платформа. «Другое» (звонок не из ct:/cg-leg:)
+  // тоже приезжает — иначе «Всего» по менеджеру не сошлось бы с плиткой, которая
+  // считает по всем платформам.
+  waitManagers: Array<{ manager: string; platform: string; avgWaitSec: number; unanswered: number }>;
 }
 
 // B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
@@ -1332,7 +1335,7 @@ async function fetchB2bTileDetails(
   const mp = new Map<string, { manager: string; platform: string; outgoing: number; connected: number }>();
   const hr = new Map<number, { outgoing: number; connected: number }>();
   const wpf = new Map<string, { sumWait: number; maxWait: number; unanswered: number }>();
-  const wmg = new Map<string, { sumWait: number; unanswered: number }>();
+  const wmg = new Map<string, { manager: string; platform: string; sumWait: number; unanswered: number }>();
 
   for (const r of result.rows) {
     const platform = r.platform;
@@ -1370,10 +1373,11 @@ async function fetchB2bTileDetails(
         wpf.set(platform, wp);
       }
 
-      const wm = wmg.get(mgr) ?? { sumWait: 0, unanswered: 0 };
+      const wmKey = `${mgr}::${platform}`;
+      const wm = wmg.get(wmKey) ?? { manager: mgr, platform, sumWait: 0, unanswered: 0 };
       wm.sumWait += avgWait * unanswered;
       wm.unanswered += unanswered;
-      wmg.set(mgr, wm);
+      wmg.set(wmKey, wm);
     }
   }
 
@@ -1393,13 +1397,14 @@ async function fetchB2bTileDetails(
         unanswered: v.unanswered,
       }))
       .sort((a, b) => b.unanswered - a.unanswered),
-    waitManagers: [...wmg.entries()]
-      .map(([manager, v]) => ({
-        manager,
+    waitManagers: [...wmg.values()]
+      .map((v) => ({
+        manager: v.manager,
+        platform: v.platform,
         avgWaitSec: v.unanswered > 0 ? Math.round(v.sumWait / v.unanswered) : 0,
         unanswered: v.unanswered,
       }))
-      .sort((a, b) => b.avgWaitSec - a.avgWaitSec),
+      .sort((a, b) => b.unanswered - a.unanswered),
   };
 }
 
