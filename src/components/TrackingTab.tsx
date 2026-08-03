@@ -54,11 +54,13 @@ interface DayTimeline {
   // in CloudTalk calls outside the dialer; `idle` there = no calls.
   // `talk` — general view: чистое время в диалоге (call там = в телефоне,
   // т.е. разговор + дозвон исходящих; для b2b совпадает с talk).
-  // `lunch`/`meeting` — минуты ручных статусов (b2g).
+  // `lunch`/`meeting`/`break` — ФАКТИЧЕСКИЕ минуты статусов (b2g), ровно то,
+  // что закрашено на дорожке присутствия. Из простоя вычитается меньше (только
+  // минуты без звонков и CRM) — см. timeline.ts.
   pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
   minutes: {
     call: number; crm: number; idle: number;
-    talk?: number; lunch?: number; meeting?: number;
+    talk?: number; lunch?: number; meeting?: number; break?: number;
     dialer?: number; manual?: number;
   };
   // Dialer view only: per-channel call counts for the day.
@@ -572,8 +574,8 @@ const STATUS_ROWS: Array<{ color: string; name: string; effect: string; hatch?: 
   { color: "bg-teal-500/45", name: "Доступен", effect: "Готов принимать звонки. Время идёт в простой, если звонков и работы в CRM нет" },
   { color: "bg-blue-500/60", name: "На звонке", effect: "Разговор. Считается по данным телефонии, отдельно от статуса" },
   { color: "bg-amber-400/70", name: "Обед", effect: "Час в день вычитается из простоя каждому автоматически — отмечаться не обязательно" },
-  { color: "bg-violet-400/60", name: "Встреча", effect: "Рабочее время: вычитается из простоя целиком" },
-  { color: "bg-sky-400/55", name: "Обучение", effect: "Рабочее время: вычитается из простоя целиком" },
+  { color: "bg-violet-400/60", name: "Встреча", effect: "Рабочее время: вычитается из простоя — но только те минуты, в которые не было звонков и работы в CRM (иначе они посчитались бы дважды)" },
+  { color: "bg-sky-400/55", name: "Обучение", effect: "Так же, как встреча: вычитается из простоя, кроме минут со звонками и CRM" },
   { color: "bg-orange-400/55", name: "Перерыв", effect: "Считается простоем" },
   { color: "bg-rose-400/45", name: "Занят", effect: "Считается простоем" },
   { color: "bg-slate-700/50", name: "Не в сети", effect: "Приложение выключено. Считается простоем" },
@@ -628,6 +630,11 @@ function StatusExplainer() {
         <li>
           <b className="text-slate-300">Работа во время обеда остаётся работой.</b> Если менеджер с
           обеденным статусом ответил на звонок, эта минута считается звонком.
+        </li>
+        <li>
+          <b className="text-slate-300">Цифры в «Итогах за период» — это факт с дорожки.</b> В колонках
+          обед / встречи / перерыв столько же минут, сколько закрашено сверху. Вычет из простоя может быть
+          меньше: минуты статуса, в которые человек звонил или работал в CRM, уже учтены как работа.
         </li>
         <li>
           <b className="text-slate-300">Штриховка — это про нас, а не про менеджера.</b> Она означает, что
@@ -1425,6 +1432,7 @@ function GeneralSummaryTable({
       let idle = 0;
       let lunch = 0;
       let meeting = 0;
+      let brk = 0;
       let hasTalk = false;
       for (const d of m.days) {
         if (d.mode !== "working") continue;
@@ -1434,6 +1442,7 @@ function GeneralSummaryTable({
         idle += d.minutes.idle;
         lunch += d.minutes.lunch ?? 0;
         meeting += d.minutes.meeting ?? 0;
+        brk += d.minutes.break ?? 0;
         if (d.minutes.talk != null) {
           hasTalk = true;
           talk += d.minutes.talk;
@@ -1441,7 +1450,7 @@ function GeneralSummaryTable({
       }
       const denom = call + crm + idle;
       const util = denom > 0 ? Math.round(((call + crm) / denom) * 100) : 0;
-      return { id: m.id, name: m.name, line: m.line, workDays, call, talk, hasTalk, crm, idle, lunch, meeting, util };
+      return { id: m.id, name: m.name, line: m.line, workDays, call, talk, hasTalk, crm, idle, lunch, meeting, brk, util };
     })
     .filter((r) => r.workDays > 0)
     .sort((a, b) => b.util - a.util || b.call - a.call);
@@ -1456,7 +1465,8 @@ function GeneralSummaryTable({
   // (b2g); для b2b колонка дублировала бы «в телефоне».
   const showTalk = department === "b2g" && rows.some((r) => r.hasTalk && r.talk !== r.call);
   // Колонки статусов — когда они вообще используются.
-  const showStatuses = department === "b2g" && rows.some((r) => r.lunch > 0 || r.meeting > 0);
+  const showStatuses =
+    department === "b2g" && rows.some((r) => r.lunch > 0 || r.meeting > 0 || r.brk > 0);
 
   return (
     <div className="glass-panel rounded-2xl border border-white/5 p-4 mt-4">
@@ -1464,7 +1474,8 @@ function GeneralSummaryTable({
         <span className="text-sm font-semibold text-white">Итоги за период</span>
         <span className="text-[11px] text-slate-500">
           суммы по рабочим дням · утилизация = (телефон + CRM) от нормы 8 ч/день
-          {usesCloudTalk && " · встречи — из статусов CloudTalk, час обеда заложен всем"}
+          {usesCloudTalk &&
+            " · обед / встречи / перерыв — факт по дорожке статусов CloudTalk; из простоя вычитаются только минуты встреч без звонков и CRM, час обеда заложен всем"}
         </span>
       </div>
       <div className="overflow-x-auto rounded-lg border border-white/5">
@@ -1478,8 +1489,9 @@ function GeneralSummaryTable({
               <th className="px-3 py-2 font-medium text-right">В CRM</th>
               {showStatuses && (
                 <>
-                  <th className="px-3 py-2 font-medium text-right" title="Фактически отмеченный обед. На расчёт не влияет: час обеда вычитается из простоя всем автоматически">Обед</th>
-                  <th className="px-3 py-2 font-medium text-right" title="Встречи и обучение — вычитаются из простоя целиком">Встречи</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Фактически отмеченный обед — столько же, сколько закрашено на дорожке статусов. На расчёт не влияет: час обеда вычитается из простоя всем автоматически">Обед</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Фактически отмеченные встречи и обучение (как на дорожке). Из простоя вычитаются только те минуты, в которые не было ни звонков, ни работы в CRM">Встречи</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Отмеченные перерывы (как на дорожке). Из простоя НЕ вычитаются — перерыв это простой">Перерыв</th>
                 </>
               )}
               <th className="px-3 py-2 font-medium text-right">Простой</th>
@@ -1508,6 +1520,9 @@ function GeneralSummaryTable({
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono tabular-nums text-violet-400/90">
                       {r.meeting > 0 ? fmtHm(r.meeting) : "—"}
+                    </td>
+                    <td className="px-3 py-1.5 text-right font-mono tabular-nums text-orange-400/90">
+                      {r.brk > 0 ? fmtHm(r.brk) : "—"}
                     </td>
                   </>
                 )}
@@ -1549,19 +1564,23 @@ function PctSummary({ day }: { day: DayTimeline }) {
       {day.minutes.talk != null && day.minutes.talk !== day.minutes.call && (
         <div className="text-[10px] text-slate-500">в диалоге {fmtHm(day.minutes.talk)}</div>
       )}
-      {((day.minutes.lunch ?? 0) > 0 || (day.minutes.meeting ?? 0) > 0) && (
-        <div className="text-[10px]">
-          {(day.minutes.lunch ?? 0) > 0 && (
-            <span className="text-yellow-400/90">обед {fmtHm(day.minutes.lunch!)}</span>
-          )}
-          {(day.minutes.lunch ?? 0) > 0 && (day.minutes.meeting ?? 0) > 0 && (
-            <span className="text-slate-600"> · </span>
-          )}
-          {(day.minutes.meeting ?? 0) > 0 && (
-            <span className="text-violet-400/90">встречи {fmtHm(day.minutes.meeting!)}</span>
-          )}
-        </div>
-      )}
+      {/* Статусы дня — в том же виде, что и на дорожке (факт, а не вычет). */}
+      {(() => {
+        const parts: React.ReactNode[] = [];
+        const push = (min: number, label: string, cls: string) => {
+          if (min <= 0) return;
+          if (parts.length > 0) parts.push(<span key={`s${label}`} className="text-slate-600"> · </span>);
+          parts.push(
+            <span key={label} className={cls}>
+              {label} {fmtHm(min)}
+            </span>,
+          );
+        };
+        push(day.minutes.lunch ?? 0, "обед", "text-yellow-400/90");
+        push(day.minutes.meeting ?? 0, "встречи", "text-violet-400/90");
+        push(day.minutes.break ?? 0, "перерыв", "text-orange-400/90");
+        return parts.length > 0 ? <div className="text-[10px]">{parts}</div> : null;
+      })()}
     </div>
   );
 }
