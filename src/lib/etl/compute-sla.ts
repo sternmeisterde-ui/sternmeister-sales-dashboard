@@ -162,12 +162,16 @@ export async function computeSla(
 
   const defaultShiftHourByManager = new Map<string, number>();
   const managerIdByName = new Map<string, string>();
+  // Отдельная карта С АЛИАСАМИ — только для b2g-ветки. В общую не кладём
+  // намеренно: у Комм 468 лидов (июнь+) записаны на «Єлизавета Трапезникова» в
+  // украинском написании, и добавление алиасов меняло бы их SLA (график вместо
+  // fallback). Вкладку Коммерсов сейчас не трогаем — решение владельца
+  // 2026-08-03. Когда дойдём до неё, карты можно будет слить в одну.
+  const managerIdByNameAliased = new Map<string, string>();
   for (const m of managerRows) {
     managerIdByName.set(m.name, m.id);
-    // Имя из analytics может расходиться с master_managers (Maksim/Максим,
-    // Є/Е) — регистрируем алиасы, иначе график менеджера молча не найдётся и
-    // расчёт свалится на fallback Пн–Сб 09–18.
-    for (const alias of NAME_ALIASES[m.name] ?? []) managerIdByName.set(alias, m.id);
+    managerIdByNameAliased.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) managerIdByNameAliased.set(alias, m.id);
     const h = parseHour(m.shiftStartTime);
     if (h !== null) defaultShiftHourByManager.set(m.name, h);
   }
@@ -556,7 +560,7 @@ export async function computeSla(
       // нет (лид открыт и тикает), автора не существует — считаем по общему
       // запасному правилу Пн–Сб 09–18, как и для дней вне файла.
       const b2gDayInterval = dayIntervalFor(
-        firstCallManager ? managerIdByName.get(firstCallManager) ?? null : null,
+        firstCallManager ? managerIdByNameAliased.get(firstCallManager) ?? null : null,
       );
       if (excluded) {
         slaOwnStatus = "excluded";                  // значение остаётся NULL
