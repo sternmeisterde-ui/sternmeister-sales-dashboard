@@ -1677,8 +1677,7 @@ export interface ManagerCallRow {
   statusName: string | null;
 }
 
-/** С этой даты analytics.dialer_call_attribution заполнена (бэкфилл dialer-sync). */
-const DIALER_ATTRIBUTION_SINCE = "2026-07-01";
+
 
 export async function getManagerCallsDetail(
   managerName: string,
@@ -1698,22 +1697,25 @@ export async function getManagerCallsDetail(
 }
 
 /**
- * Канал набора для строки детализации. Осознанно НЕ повторяем упрощение
- * дайлер-вида Активности (там всё неатрибутированное = «manual»): в
- * пер-звонковом списке это соврало бы про входящие и про историю до бэкфилла.
+ * Канал набора для строки детализации: ТОЛЬКО по строке
+ * analytics.dialer_call_attribution, без домыслов.
+ *
+ * Осознанно НЕ повторяем упрощение дайлер-вида Активности («нет строки =
+ * вручную»). Таблица содержит и явные manual-строки, поэтому отсутствие строки
+ * значит не «набрал руками», а «ещё не разобрано»: dialer-sync ходит раз в час,
+ * и если он встанет, свежие звонки молча помечались бы «вручную». В
+ * пер-звонковом списке такая ошибка дороже прочерка. Покрытие на 2026-08-03 —
+ * 100% за последние 10 дней, так что прочерк практически не встречается.
  */
 function dialerLabel(
   commId: string,
   commType: string,
-  createdAtRaw: string,
   channel: string | null,
 ): "dialer" | "manual" | null {
   if (!commId.startsWith("ct:")) return null;      // атрибуция только для CloudTalk
   if (commType === "call_in") return null;         // покрыты только исходящие
-  if (channel === "dialer") return "dialer";
-  // Нет строки атрибуции: до горизонта бэкфилла это «не знаем», после — «руками».
-  const ymd = String(createdAtRaw).slice(0, 10);
-  return ymd < DIALER_ATTRIBUTION_SINCE ? null : "manual";
+  if (channel === "dialer" || channel === "manual") return channel;
+  return null;                                      // строки нет — не знаем
 }
 
 async function fetchManagerCallsDetail(
@@ -1814,7 +1816,7 @@ async function fetchManagerCallsDetail(
     // «Дозвон» всегда по ЧИСТОМУ разговору, даже когда сумма длительности
     // фолдит гудки (b2b) — иначе гудки CallGear стали бы «принятыми».
     answered: Number(r.raw_duration ?? 0) >= 1,
-    dialer: dialerLabel(String(r.communication_id), r.communication_type, r.created_at, r.dialer_channel),
+    dialer: dialerLabel(String(r.communication_id), r.communication_type, r.dialer_channel),
     phone: r.phone,
     clientName: r.client_name,
     leadId: r.lead_id == null ? null : Number(r.lead_id),
