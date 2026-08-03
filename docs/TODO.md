@@ -236,6 +236,16 @@ drill-down works. All four merged + the "two TLT tables → one" follow-up.
 
 ## P2 — data integrity hardening
 
+- [ ] **Ростер плитки ≠ ростер её модалки (Звонки).** `/api/dashboard` берёт менеджеров
+  ЗА ПЕРИОД (`getManagersWithKommoForPeriod` — вместе с уволенными, кто тогда работал),
+  а `/api/dashboard/b2b-tile-details` — только текущих активных (`getManagersWithKommo`).
+  Модалка недосчитывает звонки уволенных: замер за июль 2026 — **b2b −725 (9%)**,
+  b2g −3 (там модалка вдобавок не фильтрует по воронке, поэтому знак другой).
+  - Лечится передачей окна в `getManagersWithKommo…ForPeriod` внутри `b2b-tile-details`.
+  - Затрагивает ОБА отдела → делать вместе с работой по Коммерсам, не раньше
+    (решение владельца 2026-08-03: сейчас правим только Госников).
+  - После правки сверить: сумма по платформам в модалке = плитка «Исходящие».
+
 - [ ] **Apply the unique-index migration** (`drizzle/analytics/0004_communications_unique.sql`) via Neon SQL editor (NOT the serverless HTTP driver — it timed out on dedup).
   - First run the dedup with `USING` self-join: `DELETE FROM analytics.communications a USING analytics.communications b WHERE a.communication_id IS NOT NULL AND a.communication_id = b.communication_id AND a.ctid > b.ctid`
   - Then create the partial unique index.

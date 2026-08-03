@@ -864,6 +864,7 @@ export default function DashboardTab({
                   icon={Gauge} label="SLA" color="blue"
                   totalValue={b2gEff.slaMin == null ? "—" : `${b2gEff.slaMin}м`}
                   totalCaption={scopeCap} rows={null} onClick={toggleSlaDetail}
+                  tipAlign="right"
                   tipWide
                   tip={
                     <div className="flex flex-col gap-1.5 text-left">
