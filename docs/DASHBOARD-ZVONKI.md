@@ -1,328 +1,302 @@
 # Dashboard → «Звонки» — как работает
 
-Last updated: 2026-04-28 (commits `cbd6355` → `6737362`)
+Last updated: 2026-08-03 (сверено с кодом: перезапись дока после спеки 25 «Звонки B2G»
+и чистки мёртвых вычислений в API).
 
-This is the operational-architecture doc for the dashboard's «Звонки» tab.
-Read alongside [`SESSION-HANDOFF.md`](./SESSION-HANDOFF.md) (current focus,
-known issues) and [`TODO.md`](./TODO.md) (next steps).
+Операционный док вкладки «Звонки». Читать вместе с
+[`SESSION-HANDOFF.md`](./SESSION-HANDOFF.md) и [`TODO.md`](./TODO.md).
 
-> Note: «Звонки» — это label сайдбара для tab id `dashboard`. Компонент — `DashboardTab.tsx`.
+> «Звонки» — label сайдбара для tab id `dashboard`. Компонент — `DashboardTab.tsx`.
+
+> **Отделы расходятся сильнее, чем кажется.** Компонент один, но почти каждый блок
+> ветвится по `isB2G`, и под одинаковыми подписями плиток лежат разные формулы
+> (длительность, атрибуция, SLA, «Потерянные»). Правя одну сторону, всегда проверяй,
+> не сломал ли вторую — см. [Где b2g и b2b считаются по-разному](#где-b2g-и-b2b-считаются-по-разному).
 
 ---
 
 ## Источники данных
 
-| DB connection | Таблица | Зачем нужна тут | Ключевые колонки |
+| DB connection | Таблица | Зачем тут | Ключевые колонки |
 |---|---|---|---|
-| **Analytics** (`ANALYTICS_DATABASE_URL`) | `analytics.communications` | KPI tiles + per-manager калы + trend chart | `communication_type` (filter `LIKE 'call%'`), `manager`, `pipeline_id` (filter `IN (dept) OR IS NULL`), `duration` (≥1 = connected), `created_at`, `lead_id`, `phone` (для CDR-row после `enrich-telephony-leads`), `communication_id` (для `COUNT(DISTINCT)`) |
-| **Analytics** | `analytics.leads_cohort` | Cohort status table («когортный срез по статусам сделок») | `lead_id`, `created_at` (cohort filter), `pipeline_id`, `status_id`, `category` |
-| **D1** (`DATABASE_URL`) | `master_managers` | Per-manager attribution (имя, линия, kommo_user_id) | `id`, `name`, `kommo_user_id`, `line`, `role`, `is_active`, `department`. Фильтр `is_active=true AND department=:dept`. ROPs (без `line`) исключаются из per-manager-таблиц но входят в KPI totals |
+| **Analytics** | `analytics.communications` | плитки, таблица менеджеров, все графики | `communication_type` (`LIKE 'call%'`), `manager`, `pipeline_id`, `duration` (≥1 = дозвон), `wait_seconds`, `line_name`, `created_at`, `communication_id` (для `COUNT(DISTINCT)`) |
+| **Analytics** | `analytics.sla` | плитка SLA + drill-down | `lead_created_at`, `pipeline_id`, `sla_own_seconds` (b2b), `sla_first_call_calendar_seconds` (b2g) |
+| **Analytics** | `analytics.leads_cohort` + `lead_status_changes` | «Потерянные» b2g (лид-based снимок) | `status_id`, `pipeline_id`, `manager`, `created_at`, `event_at`/`next_event_at` |
+| **D1** | `master_managers` | ростер, линии, роли | `name`, `line`, `role`, `department`, `is_active` |
+| **D1** | `manager_schedule` | рабочие часы для «Потерянных» b2b, серые выходные на графике | `shift_start_time`, `shift_end_time` |
 
-> **Внешний источник**: Kommo `/leads/pipelines` API дёргается параллельно для live-имён статусов (терминальные status_id 142/143 — глобальные, имена per-pipeline). Кешируется с `v8` cache-key вместе с response.
+> **Kommo API вкладкой больше не дёргается** (2026-08-03). Раньше `/api/dashboard`
+> на каждый запрос ходил в Kommo за задачами и трижды тянул снимки лидов ради
+> `funnel` / `pipelineBreakdown` / `overdueTasks` — ни одно из этих полей клиент не
+> читал с тех пор, как из UI убрали когортную таблицу. Всё удалено; рейт-лимит Kommo
+> вкладка теперь не расходует вовсе.
 
-> **Не используется** этим разделом: OKK (`calls`/`evaluations`), Roleplay (`d1_calls`/`r1_calls`), `tracking_events`, `daily_plans`, `analytics.sla`. Только три таблицы выше.
+> **Не используется** этим разделом: OKK (`calls`/`evaluations`), Roleplay, `tracking_events`,
+> `daily_plans`.
 
 ---
 
-## Layout (top → bottom)
+## Layout (сверху вниз)
 
 ```
-┌── Filter row ────────────────────────────────────────────────────┐
-│ Calendar (range/single)   ◀ date display ▶   [Сегодня] [↻]      │
-└──────────────────────────────────────────────────────────────────┘
+┌── Панель фильтров ───────────────────────────────────────────────────────┐
+│ Календарь  [Менеджеры ▼]  [⇄ Сравнить периоды] (b2b)   ◀ период ▶ [Сегодня] [↻] │
+└──────────────────────────────────────────────────────────────────────────┘
 
-┌── KPI tiles (4 in a row, responsive grid-cols-2 sm:grid-cols-4) ─┐
-│ Звонки      │ Дозвон      │ На линии    │ Пропущенные           │
-│ total       │ total       │ total       │ total                 │
-│ ─────       │ ─────       │ ─────       │ ─────                 │
-│ Квалификация│ Квалификация│ Квалификация│ Квалификация          │
-│ Бератер     │ Бератер     │ Бератер     │ Бератер               │  (B2G)
-│ Доведение   │ Доведение   │ Доведение   │ Доведение             │
-└──────────────────────────────────────────────────────────────────┘
+┌── b2g: пилюли линий ────────────────────────────────────────────────────┐
+│ [Все][Квалификация][Бератер][Доведение]                                  │
+└──────────────────────────────────────────────────────────────────────────┘
 
-┌── Per-manager call tables (3 for B2G, 1 for B2B) ───────────────┐
-│ Квалификатор (1я линия) — N человек                              │
-│   ┌────────┬──────┬──────┬──────┬──────┬─────┬─────┬─────┬─────┐│
-│   │Менеджер│Звонки│Дозвон│%дозв │Налини│Сред │Вх.вс│Прпщ │Задач││
-│   ├────────┼──────┼──────┼──────┼──────┼─────┼─────┼─────┼─────┤│
-│   │ ...    │ ...  │ ...  │ ...  │ ...  │ ... │ ... │ ... │ ... ││
-│   └────────┴──────┴──────┴──────┴──────┴─────┴─────┴─────┴─────┘│
-│ Бератер (2я линия) — …                                           │
-│ Доведение (3я линия) — …                                         │
-│ Руководители (без линии) — …                                     │
-└──────────────────────────────────────────────────────────────────┘
+┌── KPI-плитки (7 штук, lg:grid-cols-7) ──────────────────────────────────┐
+│ b2g: Звонки │ Дозвон │ На линии │ Пропущенные ║ Ожидание │ SLA │ Потерянные │
+│ b2b: Исходящие │ Принятых │ % дозвона │ Длительность │ Ожидание │ SLA │ Потерянные │
+│      ↑ скоупятся линией (b2g)          ↑ всегда по отделу                │
+└──────────────────────────────────────────────────────────────────────────┘
 
-┌── Trend chart ──────────────────────────────────────────────────┐
-│ Динамика звонков по дням             [Все линии ▼] (B2G)        │
-│ [LineChart: Звонки / Дозвон / Пропущ.]                          │
-└──────────────────────────────────────────────────────────────────┘
+┌── Таблица «Менеджеры» (одна, не три) ───────────────────────────────────┐
+│ Менеджер │ Исходящие │ Принятых │ % дозв. │ Длительность │ Ожидание │ SLA │ Всего │
+└──────────────────────────────────────────────────────────────────────────┘
+   (b2b + «Сравнить периоды» → вместо неё плоская таблица A | B | Δ)
 
-┌── Cohort status table ──────────────────────────────────────────┐
-│ Статусы сделок — когортный срез   [☑ Кв.] [☑ Бер.]  [Статусы ▼] │
-│ ┌──────────────────┬────────┬───────┬───────────────────────┐   │
-│ │ Статус           │ Воронка│ Сделок│ Доля                  │   │
-│ ├──────────────────┼────────┼───────┼───────────────────────┤   │
-│ │ Доведение        │ Бератер│   53  │ ▓▓▓▓▓░ 21.0%          │   │
-│ │ ...              │ ...    │  ...  │ ...                   │   │
-│ └──────────────────┴────────┴───────┴───────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
+┌── График «Динамика звонков по менеджерам» — ТОЛЬКО b2g ─────────────────┐
+│ линия на менеджера, метрика пилюлями, режим сравнения двух периодов      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
+Когортной таблицы «Статусы сделок» больше нет — убрана из UI вместе с серверным
+`statusBreakdown` / `pipelineBreakdown`.
+
 ---
 
-## Filters
+## Фильтры
 
-### Top-level (single calendar)
+**Один календарь правит всей вкладкой.** Состояние — `range: {start, end}` в
+`DashboardTab.tsx`, единственный запрос `/api/dashboard?department&from&to[&vertical]`.
+Ни один блок не ходит за датами сам; всё остальное — клиентские `useMemo`.
 
-- One unified date range. «День» / «Период» toggle inside `CalendarPicker`.
-- State lives in `DashboardTab.tsx` as `range: { start: Date; end: Date }`.
-- Propagates to `/api/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD` — drives **every** widget on the tab. No widget reads dates independently.
-
-### Local filters (no refetch — pure client useMemo)
-
-| Widget | Filter | Default |
+| Фильтр | Где | Что скоупит |
 |---|---|---|
-| Trend chart | Линия dropdown (B2G only): Все / 1 / 2 / 3 | Все |
-| Cohort table | Воронка checkboxes: 2 inline pills (B2G: Квалификатор + Бератер; B2B: Бух Комм + Мед Комм) | Both checked |
-| Cohort table | Статусы dropdown: checkbox per status, «Выбрать все / Снять все» | All checked |
+| Календарь (День/Период) | шапка | всё, единственный рефетч |
+| **Менеджеры** (мультиселект) | шапка, оба отдела | плитки, таблицу, детализации; b2b — ещё и график |
+| **Линия** (пилюли Все/1/2/3) | b2g, над плитками | 4 звонковые плитки, таблицу, набор серий графика |
+| **Сравнить периоды** | b2b, шапка | переключает таблицу «Менеджеры» в вид A \| B \| Δ |
+| **Вертикаль Бух/Мед/Все** | b2g, глобальный тоггл отдела | уходит параметром `vertical` в API |
 
-Status dropdown auto-narrows to statuses present in the funnel-filtered subset.
-Newly-arriving statuses (e.g. after the user expands the date range) are
-auto-included via a `null = all-selected` sentinel.
+Тонкость фильтра «Менеджеры»: при «все» плитки показывают **серверные итоги по
+отделу**, которые включают звонки, не сматченные ни с одним менеджером. Поэтому
+«все» ≠ сумма строк таблицы. Как только выбран хоть кто-то, плитки пересчитываются
+из строк (`filteredPerManager`) — суммы напрямую, «Ожидание»/SLA взвешенно.
 
 ---
 
-## KPI tiles — what each metric is
+## KPI-плитки
 
-All 4 tiles read from `analytics.communications` rows where
-`communication_type LIKE 'call%'`. The total tile-value uses
-`(pipeline_id IN (dept) OR pipeline_id IS NULL)` so telephony rows
-(NULL pipeline_id post-hard-split) are counted.
+### b2g
 
-| Tile | Total value | Per-line breakdown (B2G) |
+| Плитка | Значение | Подпись | Клик |
+|---|---|---|---|
+| **Звонки** | `callsTotal` (исх + вх) | `N↑ M↓` | drill-down по линиям × менеджерам |
+| **Дозвон** | `callsConnected / callsTotal`, дозвон = `duration >= 1` | `connected/total` | то же |
+| **На линии** | `SUM(duration)/60` мин | `ср. Nм` | то же |
+| **Пропущенные** | `call_in` с `duration < 1` | `% от входящих` | то же |
+| **Ожидание** | среднее гудков в **неотвеченных исходящих** | «по недозвонам» | модалка `b2b-tile-details` |
+| **SLA** | среднее **календарное** время создание лида → первый звонок | «по отделу» | модалка `sla-leads` |
+| **Потерянные** | лиды «Новый лид»/«Недозвон» без звонка > 24ч | «по отделу» | модалка `lost-leads` |
+
+Первые четыре скоупятся пилюлями линий, последние три — всегда по отделу.
+Drill-down первых четырёх считается **на клиенте** из `perManager` (запросов нет,
+сумма по построению равна плитке).
+
+### b2b
+
+| Плитка | Значение | Клик |
 |---|---|---|
-| **Звонки** | `COUNT(*)` filter call_in/call_out | sum of perManager.callsTotal grouped by `master_managers.line` |
-| **Дозвон** | `% = callsConnected / callsTotal` (connected = `duration >= 1`) | per-line same formula |
-| **На линии** | `SUM(duration) / 60` minutes | per-line same |
-| **Пропущенные** | `call_in WHERE duration < 1 OR NULL` | per-line same |
+| **Исходящие** | количество наборов (CloudTalk + CallGear) | разбивка по платформам и менеджерам |
+| **Принятых** | исходящие с `duration >= 1` | то же |
+| **% дозвона** | принятые ÷ исходящие (≤100%) | дозваниваемость по часам |
+| **Длительность** | сумма по формулам кабинетов телефоний, формат `16ч 37м` | — |
+| **Ожидание** | среднее гудков в неотвеченных исходящих | по платформам и менеджерам |
+| **SLA** | «своё» SLA Бух Комм по рабочему времени из графика смен | модалка `sla-leads` |
+| **Потерянные** | входящие, на которые не ответили и не перезвонили за 15 мин | модалка `lost-calls` |
 
-**B2B**: the 3 KPIs above show a single big number (no per-pipeline breakdown).
-This is intentional — see [Why B2B has no per-pipeline split](#why-b2b-has-no-per-pipeline-split).
-
-The total tile caption uses compact labels:
-- Звонки: `860↑ 93↓` (out / in)
-- Дозвон: `850/1500` (connected / total)
-- На линии: `ср. 7м` (avg dialog minutes)
-- Пропущенные: `15% от 200` (missed % of incoming)
+Плитка «Всего» (исх+вх) убрана 2026-07-20 по просьбе РОПа (спека 22 п.4).
 
 ---
 
-## Per-manager tables
+## Где b2g и b2b считаются по-разному
 
-Source: `data.perManager` from API. Each row: master_managers id + name + line +
-call metrics in [from, to] window. Filter is **client-side `.filter(r => r.line === "1")`**
-etc. — date binding happens server-side.
+| Что | b2g (Госники) | b2b (Коммерсы) |
+|---|---|---|
+| **Длительность** | чистый `duration` — только разговор | `durationExpr`: для `cg-leg:` прибавляется `wait_seconds` (как считает кабинет CallGear) |
+| **Атрибуция звонка** | по воронке: `pipeline_id IN (dept) OR IS NULL` | по агенту, фильтр воронки снят целиком (звонок b2b-мастера принадлежит b2b, в какой бы воронке ни лежал лид) |
+| **Входящие / «Всего»** | agent-based `call_in` | inbound **по номеру** (`line_name LIKE 'KOM%'`), включая звонки без агента; «Всего» = исходящие + inbound-by-line |
+| **SLA** | `GREATEST(sla_first_call_calendar_seconds, 0)` — календарный wall-clock | `sla_own_seconds` — рабочее время по графику смен |
+| **«Потерянные»** | лид-based снимок на конец периода | звонок-based, только входящие |
+| **Сравнение периодов** | внутри графика динамики | таблица «Менеджеры» A \| B \| Δ |
+| **График динамики** | есть (по менеджерам) | убран 2026-07-29 |
 
-ROPs (`role='rop'`) excluded from these tables (they're aggregated into the
-KPI totals though, since `master_managers` includes them).
+Почему SLA у Госников календарный: бизнес-часовой `sla_first_call_seconds` считает
+только Пн–Сб 09–18, а дайлер Госников звонит и вне окна — лиды, созданные и
+обзвоненные вечером или в воскресенье, давали SLA = 0, и весь свежий b2g обнулялся
+(диагностика 2026-07-27).
 
-B2G shows 4 tables (Квалификатор / Бератер / Доведение / Руководители без линии).
-B2B shows 1 table (Менеджеры — flat, no per-pipeline split).
-
----
-
-## Trend chart — `Динамика звонков по дням`
-
-Source: `data.trend` (array of `DailyCallBucket`).
-
-For B2G the line dropdown switches between 4 server-computed series:
-- Все: `data.trend` — `getAnalyticsDailyTrend(department, from, to)`. Uses `(pipeline_id IN (dept) OR pipeline_id IS NULL)` so all dept calls counted.
-- Линия 1/2/3: `data.trendByLine.line{1,2,3}` — `getAnalyticsDailyTrendByLine(department, from, to, managersByLine)`. Uses `manager IN (line-N-names)` to bucket — works even though calls have `pipeline_id=NULL` because attribution is via manager name.
-
-For B2B: no dropdown (would be flat zeros if shown — see below).
-
-**B2B — блок динамики УБРАН** (2026-07-29, решение владельца): у Коммерсов
-на вкладке больше нет ни графика, ни сменившей его 28.07 таблицы
-`TrendTableByManager` (компонент удалён). У B2G график `TrendChartByManager`
-остался без изменений. Сравнение периодов переехало в таблицу «Менеджеры»
-(см. ниже), тумблер «Сравнить периоды» — в общую панель фильтров вкладки.
-
-**B2B — сравнение периодов в таблице «Менеджеры»** (2026-07-29,
-`ManagerCompareTable`): тумблер в панели фильтров + календарь периода B
-(дефолт — предыдущее равное окно вплотную к A). Вместо обычной таблицы
-рендерится плоская сравнительная по референсу «Оценки критериев»: строки —
-менеджеры, у каждой метрики (Исходящие | Принятых | % дозв. | Длительность |
-Ожидание | SLA) тройка колонок A (синяя) | B (оранжевая) | Δ, сверху жирная
-строка «Всего» (счётчики суммируются, средние — взвешенно, как плитки).
-У «Ожидания» и «SLA» дельта инвертирована по цвету (рост = хуже). Данные
-периода B — второй запрос того же `/api/dashboard`, поэтому обе колонки
-считаются одними формулами.
-
-**Фильтр «Менеджеры» (B2B)** = ровно строки таблицы «Менеджеры»
-(`master_managers`, роли manager/teamlead). Подмешивание имён из серий
-графика убрано вместе с графиком — в фильтр больше не попадают те, кого нет
-в таблице.
-
-Trend window when single day selected: 7-day rolling. When range selected:
-exact range.
+**Фильтр дозвона всегда по чистому разговору** (`duration >= 1`), даже там, где
+сумма длительности фолдит гудки. Иначе гудки CallGear стали бы «дозвонами».
 
 ---
 
-## «Потерянные» (B2B) — только входящие
+## Таблица «Менеджеры»
 
-Определение владельца (2026-07-29, финальное): **входящий звонок клиента, на
-который никто не ответил и не перезвонил на этот номер в течение 15 минут.**
-Исходящие недозвоны в метрику НЕ входят (были до 29.07 — считали «сколько
-попыток не удалось», а нужно «сколько клиентов до нас не достучались»).
+Источник — `data.perManager` (роли `manager`/`teamlead`; ROPы в таблицу не попадают,
+но их звонки входят в итоги плиток). Колонки одинаковы для обоих отделов:
+Исходящие / Принятых / % дозв. / Длительность / Ожидание / SLA / Всего.
 
-Реализация — `getAnalyticsLostCallsDetail`, поле `kind`:
+У b2g при выбранной линии таблица одна и озаглавлена именем линии
+(Квалификация / Бератер / Доведение) — три отдельные таблицы по линиям, как было
+до спеки 25, больше не рендерятся.
 
-- **b2b** → только `in_missed`: `communication_type='call_in'`,
-  `line_name LIKE 'KOM%'`, `duration < 1` (никто не взял), нет исходящего на
-  тот же номер (последние 10 цифр) в течение 15 минут после звонка. Скоуп по
-  линии, а не по ростеру: входящие Коммерсов падают в очередь БЕЗ агента
-  (`manager IS NULL`), поэтому в drill-down они идут группой «Входящие —
-  никто не взял».
-- **b2g** → прежний `out_unanswered` (наши недозвоны). Их плитка всё равно
-  лид-based (`getB2gLostLeads`, спека 25 §2), этот запрос кормит им только
-  `perManager.lostCalls`.
-
-**Рабочие часы — из ГРАФИКА смен** (`manager_schedule`, поля
-`shift_start_time`/`shift_end_time`; helper `getShiftWindows`). Для входящего
-берётся дневное окно отдела (мин. начало … макс. конец среди тех, кто на
-линии); если в этот день никто не работал — это не потеря. Даты без графика
-(месяц не импортирован) → фолбэк 09:00–19:00, чтобы метрика не обнулилась.
-
-Порядок величин b2b (июль 2026): 0–3 потерянных в день при 3–10 входящих.
-
-## Cohort status table
-
-This is the «когортный срез по статусам сделок». Source: `data.statusBreakdown`.
-
-**Cohort = leads CREATED in [from, to]** in this department's pipelines,
-regardless of current status (active OR closed = won/lost). Lifecycle view
-of the cohort. Built server-side in `buildCohortStatusBreakdown()` from
-`cohortLeads` (separate `getAnalyticsLeads` fetch with
-`dateFilter: { field: "created_at", from, to }`).
-
-Each row: pipelineId, pipelineName, line (B2G only), statusId, statusName, count.
-
-Status names come from the **live** Kommo `/leads/pipelines` API (fetched in
-parallel with leads), keyed by `${pipelineId}:${statusId}` — Kommo's terminal
-IDs 142 (Won) and 143 (Lost) are GLOBAL across pipelines but have different
-labels per funnel ("Гутшайн одобрен" vs "Closed - won" vs "Успешно реализовано"),
-so a flat status-id map collapses them.
-
-For B2G the BERATER pipeline is split into Line 2 / Line 3 by status_id:
-the `BERATER_LINE_3_STATUS_IDS` set in `route.ts` controls the assignment.
-Both halves carry `pipelineId = 12154099` so the «Бератер» funnel checkbox
-captures all of them.
-
-**Percent base:** each row's percent = `count / sum(currently shown rows)`.
-When the user unchecks a funnel or status, that row drops out of the visible
-set, total shrinks, percentages of remaining rows re-base. Verified in code
-via `useMemo` chain: `lineFilteredRows → filtered → total → pct`.
+Колонка «Ожидание» в обоих отделах — **по недозвонам** (среднее гудков в
+неотвеченных исходящих), решение 2026-07-28. Раньше b2b показывал здесь
+`avgWaitSeconds` по отвеченным, и число расходилось с одноимённой плиткой.
 
 ---
 
-## B2B per-pipeline split (re-enabled 2026-04-28)
+## График «Динамика звонков по менеджерам» (только b2g)
 
-Earlier in 2026-04-28 the B2B tile + trend chart showed dept-wide totals
-only because every telephony row had `pipeline_id=NULL` (PBX writes CDR
-before any Kommo lead exists for the phone). Fixed today via Migration
-0005 + `enrich-telephony-leads.ts`:
+`TrendChartByManager`, источник — `data.trendByManager` (серия на менеджера).
+Метрика переключается пилюлями, набор менеджеров = глобальный фильтр ∩ выбранная
+линия. Окно: при выборе одного дня — скользящие 7 дней, при выборе периода — сам период.
 
-1. CDR row arrives at `analytics.communications` with `lead_id=NULL`,
-   `pipeline_id=NULL`, **`phone` populated**.
-2. `enrich-telephony-leads` (runs after `sync-telephony` in `runSync`):
-   - Resolves phone → contact → leads via Kommo `/api/v4/contacts?filter[query]=`.
-   - For each call, fans the row out to one row per matched lead with
-     real `pipeline_id` + `status_id` + `lead_created_at` from
-     `analytics.leads_cohort` (Pattern A, see `docs/mysql-analytics.md`).
-3. Daily/Звонки helpers use `COUNT(DISTINCT communication_id)` to keep
-   "1 call counts once" semantics (DISTINCT ON CTE in `analytics-calls.ts`).
-4. Per-pipeline helpers (`fetchTeamCallMetricsByPipeline`,
-   `getAnalyticsDailyTrendByPipeline`) intentionally double-count across
-   pipelines a contact has leads in — matches integrator's Looker.
+Режим сравнения: два независимых календаря (A и B, дефолт B = предыдущее равное
+окно), второй период догружается лёгкой ручкой `/api/dashboard/manager-trend` —
+та же форма ответа, что `trendByManager`. Выходные красятся серым по
+`manager_schedule` (id менеджеров резолвятся через `/api/daily/managers`).
 
-For phones Kommo can't resolve (deleted contacts, typos): row stays
-`lead_id=NULL`, `pipeline_id=NULL`. They surface only in dept-total tile
-(via `OR pipeline_id IS NULL` fallback), not in per-pipeline split.
-
-`/api/dashboard/route.ts` cache key bumped `v7→v8`. Re-enabled fetchers:
-`getAnalyticsTeamCallMetricsByPipeline` + `getAnalyticsDailyTrendByPipeline`.
+Оба override'а помечены сигнатурой основного окна: при смене периода вкладки они
+«протухают» и падают на дефолт — так сделано, чтобы не звать setState из эффекта.
 
 ---
 
-## Server endpoint reference
+## «Потерянные» — две разные метрики
 
-`GET /api/dashboard?department={b2g|b2b}&from=YYYY-MM-DD&to=YYYY-MM-DD`
+### b2g — лид-based снимок (спека 25 §2)
 
-Response shape (only fields the Звонки tab uses):
+`getB2gLostLeads(asOfEnd, vertical)`: лиды в «Новый лид»/«Недозвон» (Бух Гос / Мед Гос
+по вертикали), у которых последний звонок был > 24ч назад **или** звонков не было
+вовсе, а лид провисел > 24ч. Это **снимок на конец периода**, а не события внутри него.
+
+Резолв этапа гибридный: `asOfEnd` в настоящем/будущем → текущее состояние
+`leads_cohort` (= доска Kommo); историческая дата → реконструкция из
+`lead_status_changes` по интервалу `event_at ≤ t < next_event_at` плюс лиды,
+созданные сразу на этап и не имеющие ни одного события.
+
+Плитка = длина списка, drill-down (`/api/dashboard/lost-leads`) — тот же список.
+Фильтр «Менеджеры» на неё не влияет: метрика без атрибуции.
+
+### b2b — звонок-based (решение владельца 2026-07-29)
+
+Входящий звонок клиента, на который никто не ответил и не перезвонили на этот номер
+в течение 15 минут. Исходящие недозвоны не входят. Рабочие часы — из графика смен
+(`getShiftWindows`), при отсутствии импортированного месяца фолбэк 09:00–19:00.
+Порядок величин: 0–3 в день при 3–10 входящих.
+
+`perManager.lostCalls` у b2g кормится прежним `out_unanswered`-запросом — на плитку
+он не влияет, но остаётся в строках таблицы.
+
+---
+
+## Кэш
+
+Двухскоростной, in-memory (`src/lib/kommo/cache.ts`):
+
+- **5 минут** — окно целиком в прошлом, данные уже не меняются;
+- **60 секунд** — окно захватывает сегодняшний берлинский день.
+
+Второе появилось 2026-07-29: CloudTalk-синк доливает звонки каждые 10 минут, а
+drill-down-модалки ходят мимо этого кэша, и при общих 5 минутах плитка отставала
+от собственной детализации — РОП видела разные цифры в плитке и в модалке.
+
+Ключ: `dashboard-response:v15:${dept}:${vertical}:${period}:${date}:${from}:${to}`.
+**Меняешь форму ответа — бампай версию.**
+
+---
+
+## Серверные эндпоинты
+
+| Endpoint | Кто зовёт | Что отдаёт |
+|---|---|---|
+| `GET /api/dashboard` | вся вкладка, 1 запрос | форма ниже |
+| `GET /api/dashboard/manager-trend` | график, период B | `trendByManager` за произвольное окно |
+| `GET /api/dashboard/b2b-tile-details` | плитки Исходящие/Принятых/%/Ожидание (b2b) и Ожидание (b2g) | платформы, менеджер×платформа, почасовка, ожидание |
+| `GET /api/dashboard/sla-leads` | плитка SLA, оба отдела | сделки, из которых состоит среднее |
+| `GET /api/dashboard/lost-calls` | плитка «Потерянные» b2b | потерянные входящие |
+| `GET /api/dashboard/lost-leads` | плитка «Потерянные» b2g | лиды снимка |
+
+Все drill-down'ы копируют фильтры и пороги своих плиток — цифры сходятся по построению,
+а не по совпадению. Меняешь порог в плитке — меняй в паре с ней.
+
+Форма ответа `/api/dashboard` (после чистки 2026-08-03 — ровно то, что читает клиент):
 
 ```ts
 {
-  date: string;
-  department: "b2g" | "b2b";
-  todayMetrics: {                  // KPI tile totals
-    callsTotal, callsConnected, dialPercent, totalMinutes,
-    avgDialogMinutes, missedIncoming, incomingTotal, outgoingTotal,
-    overdueTasks, revenue, managersCount,
-  };
-  perManager: Array<{              // 3 tables (B2G) or 1 (B2B)
+  date, period, department, vertical,
+  todayMetrics: {
+    callsTotal, callsConnected, dialPercent, totalMinutes, avgDialogMinutes,
+    missedIncoming, incomingTotal, outgoingTotal, outgoingConnected,
+    unansweredWaitSec, slaFirstCallMin, lostCalls,
+  },
+  missedBreakdown: { incomingTotal, missedIncoming, missedPercent },
+  perManager: Array<{
     id, name, line, kommoUserId,
-    callsTotal, callsConnected, dialPercent, totalMinutes,
-    avgDialogMinutes, missedIncoming, incomingTotal, outgoingTotal,
-    overdueTasks,
-  }>;
-  trend: DailyCallBucket[];        // 7d (single day) or full range
-  trendByLine: {                   // B2G only — line-bucketed series
-    line1: DailyCallBucket[];
-    line2: DailyCallBucket[];
-    line3: DailyCallBucket[];
-  };
-  todayMetricsByPipeline: null;    // disabled — see "Why B2B" above
-  trendByPipeline: null;           // disabled — same
-  statusBreakdown: Array<{         // cohort table
-    pipelineId, pipelineName, line, statusId, statusName, count,
-  }>;
-  // legacy fields kept on the wire for non-Звонки consumers:
-  funnel, missedBreakdown, pipelineBreakdown,
+    callsTotal, callsConnected, dialPercent, totalMinutes, avgDialogMinutes,
+    missedIncoming, incomingTotal, outgoingTotal, outgoingConnected,
+    avgWaitSeconds, unansweredWaitSeconds, unansweredOutCount,
+    slaFirstCallMin, slaLeadCount, lostCalls,
+  }>,
+  trend: DailyCallBucket[],
+  trendByLine: { line1, line2, line3 },      // b2g
+  trendByManager: Record<name, DailyCallBucket[]>,
+  todayMetricsByPipeline, trendByPipeline,   // b2b (Бух Комм / Мед Комм), иначе null
 }
 ```
 
-Cache: 5-min in-memory, key `dashboard-response:v7:${dept}:${period}:${date}:${from}:${to}`.
+Поля `funnel`, `pipelineBreakdown`, `statusBreakdown`, `overdueTasks`, `revenue`,
+`managersCount` **удалены** 2026-08-03 вместе с вычислениями — их не читал никто.
 
 ---
 
-## Files
+## Файлы
 
 ```
-src/components/DashboardTab.tsx          ← UI (this whole tab in one file)
-src/app/api/dashboard/route.ts           ← API + buildCohortStatusBreakdown
-src/lib/daily/analytics-calls.ts         ← SQL helpers (per-master, per-line, per-pipeline, trend)
-src/lib/db/queries-daily.ts              ← getManagersWithKommo
-src/lib/kommo/client.ts                  ← getPipelines() — live status names
+src/components/DashboardTab.tsx           ← вся вкладка одним файлом (~2.4k строк)
+src/app/api/dashboard/route.ts            ← главный API
+src/app/api/dashboard/{manager-trend,b2b-tile-details,sla-leads,lost-calls,lost-leads}/
+src/lib/daily/analytics-calls.ts          ← ВСЕ SQL (per-master, per-line, per-manager,
+                                             SLA, потерянные, ожидание, тренды)
+src/lib/kommo/pipeline-config.ts          ← id воронок/статусов, parseVertical
+src/lib/utils/date.ts                     ← берлинские границы суток
 ```
 
-Diagnostic script:
+Диагностика:
 ```bash
-npx tsx scripts/list-kommo-statuses.ts   # dump every B2G/B2B pipeline + status
+npx tsx scripts/diag-b2b-zvonki-vs-cloudtalk.ts   # воспроизводит математику плиток b2b
 ```
 
 ---
 
-## Common gotchas
+## Ловушки
 
-- **Stale cache after schema change.** Bump the `cacheKey` version
-  (currently `v7`). Otherwise old cached responses leak the wrong shape.
-- **Status name `Status 12345`** appearing in the cohort table = pipeline
-  rename in Kommo + stale `liveStatusNames`. Re-fetch (cache TTL 5 min) or
-  manually invalidate.
-- **B2G Бератер L2 leads not appearing** in the cohort = the funnel filter is
-  by pipelineId, not line. The «Бератер» checkbox covers BOTH L2 + L3 statuses
-  by design (single Kommo pipeline). Don't confuse with the per-manager tables
-  which DO split L2/L3 (separate manager pools).
-- **fetchData infinite refetch.** If you add new state to `DashboardTab` and
-  put it in the `fetchData` useCallback deps, you'll resurrect the bug fixed
-  in commit `b56abbd`. Use a ref instead.
+- **Границы суток — всегда берлинские.** `parseDateBoundary(dateStr, "start"|"end")`.
+  UTC-полночь уводит ±1–2 часа активности в соседний день (инцидент 2026-04-29).
+- **`COUNT(DISTINCT communication_id)` в ридах.** Из-за Pattern A fanout одна CDR-строка
+  может лежать в нескольких строках `communications` (по числу сматченных лидов).
+- **Телефонные строки до обогащения** приходят с `pipeline_id = NULL`. Ридам b2g нужен
+  `OR pipeline_id IS NULL`, иначе звонки теряются до отработки `enrich-telephony-leads`.
+- **Бампай `cacheKey`** при любом изменении формы ответа — иначе живой процесс отдаст
+  старую форму.
+- **Бесконечный рефетч.** Не клади новое состояние `DashboardTab` в deps
+  `fetchData`-useCallback: `setData` → смена ref → пересоздание callback → эффект →
+  запрос по кругу. Симптом обманчивый: «таблица не обновляется при смене даты».
+  Для флага «данные уже есть» используется `useRef` (баг чинили в `b56abbd`).
+- **Правишь плитку — правь её drill-down.** Они дублируют фильтры намеренно (чтобы
+  модалка сходилась с цифрой), и молча разъезжаются, если поправить одну сторону.
