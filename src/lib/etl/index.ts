@@ -37,6 +37,7 @@ import { syncBotRoleplays, syncBotUsers } from "./sync-bot-roleplays";
 import { syncTasks, syncTasksIncremental } from "./sync-tasks";
 import { computeSla } from "./compute-sla";
 import { syncB2bSchedule } from "./sync-b2b-schedule";
+import { syncB2gSchedule } from "./sync-b2g-schedule";
 import { detectWonExports } from "./detect-won-exports";
 import { syncTelephony, type TelephonyProvider } from "./sync-telephony";
 import { syncForeignCallNotes } from "./sync-foreign-calls";
@@ -81,7 +82,7 @@ export interface SyncOptions {
   fromDate: Date;
   toDate: Date;
   /** Skip individual tables if not needed */
-  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "foreign_calls" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports" | "b2b-schedule")[];
+  skip?: ("leads" | "contacts" | "communications" | "status_changes" | "tasks" | "sla" | "telephony" | "foreign_calls" | "close_reason_changes" | "responsible_changes" | "lead_deletions" | "client_roleplays" | "bot_roleplays" | "detect-exports" | "b2b-schedule" | "b2g-schedule")[];
   /**
    * Incremental mode: fetches leads by updated_at (catches status changes / reassignments),
    * skips tasks (slow), skips status_changes (optional for speed).
@@ -462,6 +463,17 @@ export async function runSync(opts: SyncOptions): Promise<SyncResult> {
     await runStep(
       "sync-b2b-schedule",
       () => syncB2bSchedule(),
+      { months: [], monthsSkippedPast: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 },
+      stepErrors,
+    );
+  }
+
+  // То же для B2G — лист «График на месяц» другого файла. Нужен «своему» SLA
+  // Госников: рабочие часы берутся из графика того, кто сделал первое касание.
+  if (!skip.has("b2g-schedule")) {
+    await runStep(
+      "sync-b2g-schedule",
+      () => syncB2gSchedule(),
       { months: [], monthsSkippedPast: [], managersMatched: 0, managersUnmatched: [], rowsWritten: 0 },
       stepErrors,
     );

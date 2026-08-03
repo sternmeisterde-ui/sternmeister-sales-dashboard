@@ -26,6 +26,8 @@ import {
   type DayWorkInterval,
 } from "./business-hours";
 import { withDbRetry } from "@/lib/db/with-retry";
+import { NAME_ALIASES } from "@/lib/daily/name-aliases";
+import { B2B_PIPELINES, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
 
 // ─── «Свой» SLA (Бух Комм / B2B) — спека Рузанны ─────────────
 //
@@ -71,6 +73,37 @@ const OWN_SLA_EXCLUDED_LOSS_REASONS = new Set([
   "Гос. клиент",
   "Неправильный контакт",
 ]);
+// ─── «Своё» SLA (Бух Гос / B2G) — спека РОПа Госников, 2026-08-03 ───
+//
+// Формула та же, что у Комм: рабочее время от первого входа в «Новый лид» до
+// первого исходящего звонка. Отличий три, и все три принципиальные:
+//
+//   1. Воронка якоря — «Бух Гос».
+//   2. Привязка НЕ к ответственному в Kommo. У свежего лида Госников
+//      ответственным стоит РОП (проверено: 296 из 302 «Потерянных» висят на
+//      нём), поэтому и рабочие часы, и разрез по менеджерам берутся от того,
+//      КТО СДЕЛАЛ ПЕРВОЕ КАСАНИЕ — автора первого исходящего звонка из
+//      телефонии (analytics.communications.manager → first_call_manager).
+//   3. Свой список исключающих причин. Причина закрытия у Госников живёт в
+//      Kommo-поле 879824 → leads_cohort.non_qual_enum_id (стандартный
+//      loss_reason у них пуст у ВСЕХ лидов — проверено на 4835 строках за 90
+//      дней). Из «Неквал *» исключается ТОЛЬКО «Неквал АГЕНТ»: остальные
+//      (Доход / Образование / Возраст / Язык / лид) РОП просил оставить.
+const B2G_SLA_PIPELINE = "Бух Гос";
+// Лид может иметь ОБА якоря — если его переводили между Гос и Комм. Тогда обе
+// ветки писали бы в одни колонки sla_own_*, и побеждала бы последняя: у
+// исключённого по b2g лида оставалось значение, посчитанное по b2b (170 строк
+// «excluded» со средним 710 мин в проверке 2026-08-03). Поэтому каждая ветка
+// работает только со «своими» лидами — по ТЕКУЩЕЙ воронке лида, ровно той, по
+// которой плитка отдела и отбирает строки.
+const B2B_PIPELINE_IDS = new Set<number>(Object.values(B2B_PIPELINES));
+const B2G_PIPELINE_IDS = new Set<number>(Object.values(B2G_PIPELINES));
+const B2G_SLA_EXCLUDED_ENUM_IDS = new Set([
+  753840, // Дубль бух
+  753842, // Дубль мед
+  744486, // Неправильный номер
+  750386, // Неквал АГЕНТ
+]);
 // Kommo «успешно/закрыт» статусы — для корнер-кейса «звонка нет + лид закрыт».
 const CLOSED_STATUS_IDS = new Set([142, 143]);
 
@@ -102,6 +135,7 @@ export async function computeSla(
       lossReason: leadsCohort.lossReason,
       excludeFromAnalytics: leadsCohort.excludeFromAnalytics,
       b2bCloseReasonEnumId: leadsCohort.b2bCloseReasonEnumId,
+      nonQualEnumId: leadsCohort.nonQualEnumId,
       closedAt: leadsCohort.closedAt,
     })
     .from(leadsCohort)
@@ -128,8 +162,16 @@ export async function computeSla(
 
   const defaultShiftHourByManager = new Map<string, number>();
   const managerIdByName = new Map<string, string>();
+  // Отдельная карта С АЛИАСАМИ — только для b2g-ветки. В общую не кладём
+  // намеренно: у Комм 468 лидов (июнь+) записаны на «Єлизавета Трапезникова» в
+  // украинском написании, и добавление алиасов меняло бы их SLA (график вместо
+  // fallback). Вкладку Коммерсов сейчас не трогаем — решение владельца
+  // 2026-08-03. Когда дойдём до неё, карты можно будет слить в одну.
+  const managerIdByNameAliased = new Map<string, string>();
   for (const m of managerRows) {
     managerIdByName.set(m.name, m.id);
+    managerIdByNameAliased.set(m.name, m.id);
+    for (const alias of NAME_ALIASES[m.name] ?? []) managerIdByNameAliased.set(alias, m.id);
     const h = parseHour(m.shiftStartTime);
     if (h !== null) defaultShiftHourByManager.set(m.name, h);
   }
@@ -253,6 +295,42 @@ export async function computeSla(
   const ownAnchorByLead = new Map<number, Date>();
   for (const row of ownAnchorRes.rows) {
     if (row.anchor_at) ownAnchorByLead.set(Number(row.lead_id), new Date(row.anchor_at));
+  }
+
+  // Якорь «своего» SLA Госников: первый вход в «Новый лид» воронки «Бух Гос».
+  const b2gAnchorRes = await analyticsDb.execute<{
+    lead_id: number;
+    anchor_at: Date | null;
+  }>(sql`
+    SELECT lead_id,
+           MIN(event_at) AT TIME ZONE 'UTC' AS anchor_at
+    FROM analytics.lead_status_changes
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+      AND pipeline = ${B2G_SLA_PIPELINE}
+      AND status = 'Новый лид'
+    GROUP BY lead_id
+  `);
+  const b2gAnchorByLead = new Map<number, Date>();
+  for (const row of b2gAnchorRes.rows) {
+    if (row.anchor_at) b2gAnchorByLead.set(Number(row.lead_id), new Date(row.anchor_at));
+  }
+
+  // Автор ПЕРВОГО исходящего звонка по лиду — «кто сделал первое касание».
+  // Отдельным запросом, а не агрегатом в commSummaries: там MIN(created_at), а
+  // нам нужен manager ИМЕННО той строки, что дала минимум (DISTINCT ON).
+  const firstCallMgrRes = await analyticsDb.execute<{
+    lead_id: number;
+    manager: string | null;
+  }>(sql`
+    SELECT DISTINCT ON (lead_id) lead_id, manager
+    FROM analytics.communications
+    WHERE lead_id IN (${sql.raw(leadIds.join(","))})
+      AND communication_type = 'call_out'
+    ORDER BY lead_id, created_at
+  `);
+  const firstCallManagerByLead = new Map<number, string>();
+  for (const row of firstCallMgrRes.rows) {
+    if (row.manager) firstCallManagerByLead.set(Number(row.lead_id), row.manager);
   }
 
   // TLT (Time between Latest Touches): per-lead BH-difference between
@@ -433,7 +511,7 @@ export async function computeSla(
     let slaOwnSeconds: number | null = null;
     let slaOwnStatus: string | null = null;
     const ownAnchor = ownAnchorByLead.get(lead.leadId);
-    if (ownAnchor) {
+    if (ownAnchor && lead.pipelineId != null && B2B_PIPELINE_IDS.has(Number(lead.pipelineId))) {
       const excludedByReason = lead.excludeFromAnalytics === true
         || (lead.b2bCloseReasonEnumId != null
           && OWN_SLA_EXCLUDED_REASON_ENUM_IDS.has(Number(lead.b2bCloseReasonEnumId)))
@@ -462,6 +540,44 @@ export async function computeSla(
           slaOwnStatus = "closed_no_call";
         } else {
           slaOwnSeconds = scheduleBusinessSeconds(ownAnchor, nowUtc, ownDayInterval);
+          slaOwnStatus = "pending";
+        }
+      }
+    }
+
+    // ── «Своё» SLA (Бух Гос / B2G) ───────────────────────────
+    // Пишем в те же колонки sla_own_*: у лида ровно одна воронка-якорь, так что
+    // b2b- и b2g-ветки никогда не спорят за одну строку. Отличия — в шапке файла
+    // (B2G_SLA_PIPELINE): рабочие часы и атрибуция по автору первого касания,
+    // свой список причин из поля 879824.
+    const firstCallManager = firstCallManagerByLead.get(lead.leadId) ?? null;
+    const b2gAnchor = b2gAnchorByLead.get(lead.leadId);
+    if (b2gAnchor && lead.pipelineId != null && B2G_PIPELINE_IDS.has(Number(lead.pipelineId))) {
+      const excluded = lead.excludeFromAnalytics === true
+        || (lead.nonQualEnumId != null
+          && B2G_SLA_EXCLUDED_ENUM_IDS.has(Number(lead.nonQualEnumId)));
+      // Рабочее окно — по графику того, кто сделал первое касание. Пока звонка
+      // нет (лид открыт и тикает), автора не существует — считаем по общему
+      // запасному правилу Пн–Сб 09–18, как и для дней вне файла.
+      const b2gDayInterval = dayIntervalFor(
+        firstCallManager ? managerIdByNameAliased.get(firstCallManager) ?? null : null,
+      );
+      if (excluded) {
+        slaOwnStatus = "excluded";                  // значение остаётся NULL
+      } else if (comms.firstCallOutAt) {
+        if (comms.firstCallOutAt <= b2gAnchor) {
+          slaOwnSeconds = 0;                        // звонок раньше/в момент входа
+          slaOwnStatus = "instant";
+        } else {
+          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, comms.firstCallOutAt, b2gDayInterval);
+          slaOwnStatus = "measured";
+        }
+      } else {
+        const isClosed = lead.statusId != null && CLOSED_STATUS_IDS.has(lead.statusId);
+        if (isClosed) {
+          slaOwnStatus = "closed_no_call";          // закрыт без звонка — не считается
+        } else {
+          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, nowUtc, b2gDayInterval);
           slaOwnStatus = "pending";
         }
       }
@@ -503,6 +619,7 @@ export async function computeSla(
       slaStatus,
       slaOwnSeconds,
       slaOwnStatus,
+      firstCallManager,
     });
   }
 

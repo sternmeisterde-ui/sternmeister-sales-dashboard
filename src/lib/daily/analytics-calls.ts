@@ -1479,28 +1479,37 @@ export async function getAnalyticsSlaFirstCallMinutes(
   const pipelineIds = getPipelineIds(dept, vertical);
   if (pipelineIds.length === 0) return 0;
   const cacheKey = `sla-first-call-min:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}`;
-  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs, dept));
+  return cached(cacheKey, ANALYTICS_TTL, () => fetchSlaFirstCallMinutes(pipelineIds, fromTs, toTs));
 }
 
-// Источник SLA по отделу (одно выражение и для значения, и для IS NOT NULL):
-//   • b2b → «своё» SLA Бух Комм (sla_own_seconds, спека Рузанны);
-//   • b2g → КАЛЕНДАРНОЕ время до первого звонка (sla_first_call_calendar_seconds).
-//     Бизнес-часовой sla_first_call_seconds здесь НЕ годится: он считает только
-//     Пн–Сб 09–18 (business-hours.ts), а дайлер Госников звонит и по выходным/
-//     вне окна → лиды, созданные и обзвоненные в такое время, давали SLA=0
-//     (диагностика 2026-07-27: весь свежий b2g был 0). Календарное время
-//     (clamp ≥0) отражает реальный wall-clock от создания до первого звонка.
-function slaSourceSql(dept: "b2g" | "b2b") {
-  return dept === "b2b"
-    ? sql`sla_own_seconds`
-    : sql`GREATEST(sla_first_call_calendar_seconds, 0)`;
+// Источник SLA по отделу — с 2026-08-03 у ОБОИХ отделов «своё» SLA
+// (sla_own_seconds), которое считает compute-sla по спеке своего РОПа:
+//   • b2b → якорь «Новый лид» в Бух Комм, рабочие часы ответственного;
+//   • b2g → якорь «Новый лид» в Бух Гос, рабочие часы того, кто сделал первое
+//     касание (в Kommo ответственным за свежий лид Госников стоит РОП).
+//
+// Чем это лучше прежнего b2g-варианта: до 2026-08-03 Госники сидели на
+// КАЛЕНДАРНОМ времени (sla_first_call_calendar_seconds), потому что бизнес-
+// часовой sla_first_call_seconds хардкодил Пн–Сб 09–18 и обнулял всё, что
+// обзвонено вне окна (диагностика 2026-07-27). Теперь окно берётся из графика
+// смен, и календарный костыль больше не нужен.
+function slaSourceSql() {
+  return sql`sla_own_seconds`;
 }
 
-async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number, dept: "b2g" | "b2b"): Promise<number> {
+// Кому засчитан SLA: у b2b — ответственный за лид, у b2g — автор первого
+// исходящего (см. 0037_sla_first_call_manager). Разрез «SLA по менеджерам» и
+// детализация должны группироваться по одной и той же колонке, иначе плитка и
+// модалка разъедутся.
+function slaManagerSql(dept: "b2g" | "b2b") {
+  return dept === "b2b" ? sql`manager` : sql`first_call_manager`;
+}
+
+async function fetchSlaFirstCallMinutes(pipelineIds: number[], fromTs: number, toTs: number): Promise<number> {
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-  const src = slaSourceSql(dept);
+  const src = slaSourceSql();
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -1558,13 +1567,15 @@ async function fetchSlaFirstCallMinutesByManager(
   const fromDate = new Date(fromTs * 1000);
   const toDate = new Date(toTs * 1000);
   const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-  const src = slaSourceSql(dept);
+  const src = slaSourceSql();
+  // b2g группируем по автору первого касания, b2b — по ответственному.
+  const mgrCol = slaManagerSql(dept);
 
   const result = await (analyticsDb as unknown as {
     execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
   }).execute<{ manager: string | null; avg_min: string | number | null; lead_count: string | number | null }>(sql`
     SELECT
-      manager,
+      ${mgrCol} AS manager,
       AVG(${src})::float / 60.0 AS avg_min,
       COUNT(*)::int AS lead_count
     FROM analytics.sla
@@ -1572,8 +1583,8 @@ async function fetchSlaFirstCallMinutesByManager(
       AND lead_created_at <= ${toDate}
       AND pipeline_id IN (${pipelineList})
       AND ${src} IS NOT NULL
-      AND manager IS NOT NULL AND manager <> ''
-    GROUP BY manager
+      AND ${mgrCol} IS NOT NULL AND ${mgrCol} <> ''
+    GROUP BY ${mgrCol}
   `);
 
   const byName = new Map<string, ManagerSlaStat>();
@@ -1966,7 +1977,8 @@ export async function getAnalyticsSlaLeadsDetail(
     const fromDate = new Date(fromTs * 1000);
     const toDate = new Date(toTs * 1000);
     const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
-    const src = slaSourceSql(dept);
+    const src = slaSourceSql();
+    const mgrCol = slaManagerSql(dept);
 
     const result = await (analyticsDb as unknown as {
       execute: <T>(q: unknown) => Promise<{ rows: T[] }>;
@@ -1981,7 +1993,7 @@ export async function getAnalyticsSlaLeadsDetail(
     }>(sql`
       SELECT
         s.lead_id,
-        s.manager,
+        s.${mgrCol} AS manager,
         round(${src}::numeric / 60) AS sla_min,
         s.sla_own_status AS sla_status,
         ct.name AS client_name,
@@ -1999,7 +2011,7 @@ export async function getAnalyticsSlaLeadsDetail(
         AND s.lead_created_at <= ${toDate}
         AND s.pipeline_id IN (${pipelineList})
         AND ${src} IS NOT NULL
-      ORDER BY s.manager NULLS LAST, sla_min DESC
+      ORDER BY s.${mgrCol} NULLS LAST, sla_min DESC
     `);
 
     return result.rows.map((r) => ({
