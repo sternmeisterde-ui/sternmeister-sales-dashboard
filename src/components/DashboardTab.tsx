@@ -1680,6 +1680,9 @@ interface ManagerCallItem {
   durationSec: number;
   waitSec: number | null;
   answered: boolean;
+  /** Канал набора исходящих CloudTalk. null — метрика неприменима (другая
+   *  платформа, входящий) либо звонок старше горизонта атрибуции. */
+  dialer: "dialer" | "manual" | null;
   phone: string | null;
   clientName: string | null;
   leadId: number | null;
@@ -1726,7 +1729,9 @@ function ManagerCallsModal({
       switch (sortKey) {
         case "at": return r.at;
         case "direction": return r.direction;
-        case "platform": return r.platform;
+        // Канал в ключе: при сортировке по платформе дайлерные и ручные
+        // звонки CloudTalk встают отдельными группами, а не вперемешку.
+        case "platform": return `${r.platform}|${r.dialer ?? ""}`;
         case "client": return (r.clientName ?? r.phone ?? "").toLowerCase();
         case "duration": return r.durationSec;
         case "wait": return r.waitSec ?? -1;
@@ -1852,7 +1857,15 @@ function ManagerCallsModal({
                             ? <span className="text-slate-300">исходящий</span>
                             : <span className="text-amber-400/90">входящий</span>}
                         </td>
-                        <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">{r.platform}</td>
+                        <td className="py-1.5 pr-3 whitespace-nowrap">
+                          <span className="text-slate-400">{r.platform}</span>
+                          {r.dialer === "dialer" && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300">дайлер</span>
+                          )}
+                          {r.dialer === "manual" && (
+                            <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-700/40 text-slate-400">вручную</span>
+                          )}
+                        </td>
                         <td className="py-1.5 pr-3 text-slate-200 truncate max-w-[220px]">
                           {r.clientName ?? <span className="text-slate-500">{r.phone ?? "—"}</span>}
                           {r.clientName && r.phone && (
@@ -1888,8 +1901,9 @@ function ManagerCallsModal({
               )}
               <p className="text-[11px] text-slate-600 mt-2">
                 Один звонок — одна строка (склейки телефонии схлопнуты). «Гудки» есть там, где их
-                отдаёт провайдер: у звонков из WhatsApp этой метрики нет. Заголовки колонок кликабельны —
-                сортировка. Лимит выдачи — {limit} строк.
+                отдаёт провайдер: у звонков из WhatsApp этой метрики нет. Метка «дайлер»/«вручную» —
+                только для исходящих CloudTalk: атрибуция кампаний покрывает лишь их, у остальных
+                пометки нет. Заголовки колонок кликабельны — сортировка. Лимит выдачи — {limit} строк.
               </p>
             </>
           )}

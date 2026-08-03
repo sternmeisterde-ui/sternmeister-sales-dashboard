@@ -1662,12 +1662,23 @@ export interface ManagerCallRow {
   /** Гудки. NULL там, где провайдер их не отдаёт (WhatsApp-заметки Kommo). */
   waitSec: number | null;
   answered: boolean;
+  /**
+   * Канал набора для ИСХОДЯЩИХ CloudTalk: «dialer» — звонок кампании
+   * Power-Dialer, «manual» — набран руками. null = вопрос неприменим либо
+   * ответа нет: другая платформа, входящий (атрибуция покрывает только
+   * исходящие) или звонок раньше горизонта бэкфилла атрибуции. Показывать null
+   * прочерком, а не «вручную» — иначе соврём про старые звонки.
+   */
+  dialer: "dialer" | "manual" | null;
   phone: string | null;
   clientName: string | null;
   leadId: number | null;
   pipelineName: string | null;
   statusName: string | null;
 }
+
+/** С этой даты analytics.dialer_call_attribution заполнена (бэкфилл dialer-sync). */
+const DIALER_ATTRIBUTION_SINCE = "2026-07-01";
 
 export async function getManagerCallsDetail(
   managerName: string,
@@ -1684,6 +1695,25 @@ export async function getManagerCallsDetail(
   return cached(cacheKey, ANALYTICS_TTL, () =>
     fetchManagerCallsDetail(managerName, dept, pipelineIds, fromTs, toTs, includeNullPipeline(vertical), limit),
   );
+}
+
+/**
+ * Канал набора для строки детализации. Осознанно НЕ повторяем упрощение
+ * дайлер-вида Активности (там всё неатрибутированное = «manual»): в
+ * пер-звонковом списке это соврало бы про входящие и про историю до бэкфилла.
+ */
+function dialerLabel(
+  commId: string,
+  commType: string,
+  createdAtRaw: string,
+  channel: string | null,
+): "dialer" | "manual" | null {
+  if (!commId.startsWith("ct:")) return null;      // атрибуция только для CloudTalk
+  if (commType === "call_in") return null;         // покрыты только исходящие
+  if (channel === "dialer") return "dialer";
+  // Нет строки атрибуции: до горизонта бэкфилла это «не знаем», после — «руками».
+  const ymd = String(createdAtRaw).slice(0, 10);
+  return ymd < DIALER_ATTRIBUTION_SINCE ? null : "manual";
 }
 
 async function fetchManagerCallsDetail(
@@ -1723,6 +1753,7 @@ async function fetchManagerCallsDetail(
     pipeline_name: string | null;
     status_name: string | null;
     client_name: string | null;
+    dialer_channel: string | null;
     total: string | number;
   }>(sql`
     WITH scoped AS (
@@ -1740,6 +1771,7 @@ async function fetchManagerCallsDetail(
     SELECT
       s.communication_id,
       s.communication_type,
+      d.channel AS dialer_channel,
       -- Сырой naive-timestamp: parseAnalyticsTs сам добавит Z. Через
       -- AT TIME ZONE 'UTC' Postgres отдаёт зону как «+00» (без минут), а её
       -- парсер не распознаёт — получалась Invalid Date.
@@ -1755,6 +1787,12 @@ async function fetchManagerCallsDetail(
       ct.name AS client_name,
       COUNT(*) OVER () AS total
     FROM scoped s
+    -- Канал набора (дайлер / руками) — только CloudTalk-исходящие. Ключ тот же
+    -- CloudTalk-id по обе стороны: communications.communication_id = 'ct:'||cdr_id.
+    LEFT JOIN analytics.dialer_call_attribution d
+      ON s.communication_id = 'ct:' || d.cdr_id
+      AND d.started_at >= ${fromDate}::timestamptz - interval '1 day'
+      AND d.started_at <= ${toDate}::timestamptz + interval '1 day'
     LEFT JOIN LATERAL (
       SELECT c.name
       FROM analytics.lead_contact_links ll
@@ -1776,6 +1814,7 @@ async function fetchManagerCallsDetail(
     // «Дозвон» всегда по ЧИСТОМУ разговору, даже когда сумма длительности
     // фолдит гудки (b2b) — иначе гудки CallGear стали бы «принятыми».
     answered: Number(r.raw_duration ?? 0) >= 1,
+    dialer: dialerLabel(String(r.communication_id), r.communication_type, r.created_at, r.dialer_channel),
     phone: r.phone,
     clientName: r.client_name,
     leadId: r.lead_id == null ? null : Number(r.lead_id),
