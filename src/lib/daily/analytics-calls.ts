@@ -1637,6 +1637,195 @@ async function fetchSlaFirstCallMinutesByManager(
 }
 
 /**
+ * Детализация звонков ОДНОГО менеджера — drill-down по строке таблицы
+ * «Менеджеры» (Звонки, b2g). Одна строка = один звонок.
+ *
+ * Дедуп по communication_id обязателен: из-за Pattern A fanout один CDR лежит в
+ * зеркале столько раз, сколько сделок сматчилось по номеру, и без DISTINCT ON
+ * список показывал бы один звонок несколько раз. Берём строку с непустым
+ * lead_id (ORDER BY … lead_id NULLS LAST) — в ней есть сделка для ссылки.
+ *
+ * Скоуп и длительность — те же, что у плиток (deptCond + durationExpr), поэтому
+ * суммы детализации сходятся с таблицей по построению.
+ *
+ * `limit` защищает от выгрузки месяца целиком: у Госников это до ~5 тыс. строк
+ * на человека. Возвращаем ещё и total, чтобы UI честно сказал, сколько скрыто.
+ */
+export interface ManagerCallRow {
+  callId: string;
+  /** ISO UTC — клиент форматирует в берлинское время. */
+  at: string;
+  direction: "in" | "out";
+  platform: string;
+  /** Разговор (b2b: с дозвоном внутри — durationExpr отдела). */
+  durationSec: number;
+  /** Гудки. NULL там, где провайдер их не отдаёт (WhatsApp-заметки Kommo). */
+  waitSec: number | null;
+  answered: boolean;
+  /**
+   * Канал набора для ИСХОДЯЩИХ CloudTalk: «dialer» — звонок кампании
+   * Power-Dialer, «manual» — набран руками. null = вопрос неприменим либо
+   * ответа нет: другая платформа, входящий (атрибуция покрывает только
+   * исходящие) или звонок раньше горизонта бэкфилла атрибуции. Показывать null
+   * прочерком, а не «вручную» — иначе соврём про старые звонки.
+   */
+  dialer: "dialer" | "manual" | null;
+  phone: string | null;
+  clientName: string | null;
+  leadId: number | null;
+  pipelineName: string | null;
+  statusName: string | null;
+}
+
+/** С этой даты analytics.dialer_call_attribution заполнена (бэкфилл dialer-sync). */
+const DIALER_ATTRIBUTION_SINCE = "2026-07-01";
+
+export async function getManagerCallsDetail(
+  managerName: string,
+  department: "b2g" | "b2b" | string,
+  fromTs: number,
+  toTs: number,
+  vertical?: Vertical,
+  limit = 1000,
+): Promise<{ rows: ManagerCallRow[]; total: number }> {
+  const dept = department === "b2b" ? "b2b" : "b2g";
+  const pipelineIds = getPipelineIds(dept, vertical);
+  if (pipelineIds.length === 0) return { rows: [], total: 0 };
+  const cacheKey = `manager-calls:${dept}:${vertical ?? "-"}:${fromTs}:${toTs}:${managerName}:${limit}`;
+  return cached(cacheKey, ANALYTICS_TTL, () =>
+    fetchManagerCallsDetail(managerName, dept, pipelineIds, fromTs, toTs, includeNullPipeline(vertical), limit),
+  );
+}
+
+/**
+ * Канал набора для строки детализации. Осознанно НЕ повторяем упрощение
+ * дайлер-вида Активности (там всё неатрибутированное = «manual»): в
+ * пер-звонковом списке это соврало бы про входящие и про историю до бэкфилла.
+ */
+function dialerLabel(
+  commId: string,
+  commType: string,
+  createdAtRaw: string,
+  channel: string | null,
+): "dialer" | "manual" | null {
+  if (!commId.startsWith("ct:")) return null;      // атрибуция только для CloudTalk
+  if (commType === "call_in") return null;         // покрыты только исходящие
+  if (channel === "dialer") return "dialer";
+  // Нет строки атрибуции: до горизонта бэкфилла это «не знаем», после — «руками».
+  const ymd = String(createdAtRaw).slice(0, 10);
+  return ymd < DIALER_ATTRIBUTION_SINCE ? null : "manual";
+}
+
+async function fetchManagerCallsDetail(
+  managerName: string,
+  dept: "b2g" | "b2b",
+  pipelineIds: number[],
+  fromTs: number,
+  toTs: number,
+  includeNull: boolean,
+  limit: number,
+): Promise<{ rows: ManagerCallRow[]; total: number }> {
+  const fromDate = new Date(fromTs * 1000);
+  const toDate = new Date(toTs * 1000);
+  const pipelineList = sql.join(pipelineIds.map((id) => sql`${id}`), sql`, `);
+  const deptCond =
+    dept === "b2b"
+      ? sql`TRUE`
+      : includeNull
+        ? sql`(pipeline_id IN (${pipelineList}) OR pipeline_id IS NULL)`
+        : sql`pipeline_id IN (${pipelineList})`;
+
+  // Имя + алиасы: в зеркале написание может отличаться от master_managers.
+  const names = [managerName, ...(NAME_ALIASES[managerName] ?? [])];
+  const nameList = sql.join(names.map((n) => sql`${n}`), sql`, `);
+
+  const exec = analyticsDb as unknown as { execute: <T>(q: unknown) => Promise<{ rows: T[] }> };
+  const result = await exec.execute<{
+    communication_id: string;
+    communication_type: string;
+    created_at: string;
+    platform: string;
+    duration: string | number | null;
+    wait_seconds: string | number | null;
+    raw_duration: string | number | null;
+    phone: string | null;
+    lead_id: string | number | null;
+    pipeline_name: string | null;
+    status_name: string | null;
+    client_name: string | null;
+    dialer_channel: string | null;
+    total: string | number;
+  }>(sql`
+    WITH scoped AS (
+      SELECT DISTINCT ON (communication_id)
+        communication_id, communication_type, created_at, duration, wait_seconds,
+        phone, lead_id, pipeline_name, status_name, pbx_source
+      FROM analytics.communications
+      WHERE created_at >= ${fromDate}
+        AND created_at <= ${toDate}
+        AND communication_type LIKE 'call%'
+        AND manager IN (${nameList})
+        AND ${deptCond}
+      ORDER BY communication_id, lead_id NULLS LAST
+    )
+    SELECT
+      s.communication_id,
+      s.communication_type,
+      d.channel AS dialer_channel,
+      -- Сырой naive-timestamp: parseAnalyticsTs сам добавит Z. Через
+      -- AT TIME ZONE 'UTC' Postgres отдаёт зону как «+00» (без минут), а её
+      -- парсер не распознаёт — получалась Invalid Date.
+      s.created_at,
+      ${PLATFORM_EXPR} AS platform,
+      ${durationExpr(dept)} AS duration,
+      s.duration AS raw_duration,
+      s.wait_seconds,
+      s.phone,
+      s.lead_id,
+      s.pipeline_name,
+      s.status_name,
+      ct.name AS client_name,
+      COUNT(*) OVER () AS total
+    FROM scoped s
+    -- Канал набора (дайлер / руками) — только CloudTalk-исходящие. Ключ тот же
+    -- CloudTalk-id по обе стороны: communications.communication_id = 'ct:'||cdr_id.
+    LEFT JOIN analytics.dialer_call_attribution d
+      ON s.communication_id = 'ct:' || d.cdr_id
+      AND d.started_at >= ${fromDate}::timestamptz - interval '1 day'
+      AND d.started_at <= ${toDate}::timestamptz + interval '1 day'
+    LEFT JOIN LATERAL (
+      SELECT c.name
+      FROM analytics.lead_contact_links ll
+      JOIN analytics.contacts c ON c.contact_id = ll.contact_id
+      WHERE ll.lead_id = s.lead_id AND ll.is_active
+      ORDER BY ll.last_seen_at DESC LIMIT 1
+    ) ct ON TRUE
+    ORDER BY s.created_at DESC
+    LIMIT ${limit}
+  `);
+
+  const rows: ManagerCallRow[] = result.rows.map((r) => ({
+    callId: String(r.communication_id),
+    at: parseAnalyticsTs(r.created_at).toISOString(),
+    direction: r.communication_type === "call_in" ? "in" : "out",
+    platform: r.platform,
+    durationSec: Number(r.duration ?? 0),
+    waitSec: r.wait_seconds == null ? null : Number(r.wait_seconds),
+    // «Дозвон» всегда по ЧИСТОМУ разговору, даже когда сумма длительности
+    // фолдит гудки (b2b) — иначе гудки CallGear стали бы «принятыми».
+    answered: Number(r.raw_duration ?? 0) >= 1,
+    dialer: dialerLabel(String(r.communication_id), r.communication_type, r.created_at, r.dialer_channel),
+    phone: r.phone,
+    clientName: r.client_name,
+    leadId: r.lead_id == null ? null : Number(r.lead_id),
+    pipelineName: r.pipeline_name,
+    statusName: r.status_name,
+  }));
+  const total = result.rows.length > 0 ? Number(result.rows[0].total) : 0;
+  return { rows, total };
+}
+
+/**
  * Dept-wide "lost calls" count for the B2B «Потерянные» tile.
  *
  * Definition (per user spec 2026-06-23): an OUTBOUND no-answer attempt
