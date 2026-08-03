@@ -315,22 +315,33 @@ export async function computeSla(
     if (row.anchor_at) b2gAnchorByLead.set(Number(row.lead_id), new Date(row.anchor_at));
   }
 
-  // Автор ПЕРВОГО исходящего звонка по лиду — «кто сделал первое касание».
-  // Отдельным запросом, а не агрегатом в commSummaries: там MIN(created_at), а
-  // нам нужен manager ИМЕННО той строки, что дала минимум (DISTINCT ON).
-  const firstCallMgrRes = await analyticsDb.execute<{
+  // ПЕРВОЕ КАСАНИЕ по лиду: и время, и автор — из ОДНОЙ строки (DISTINCT ON).
+  //
+  // Почему не из commSummaries: там first_call_out_at «зажат снизу» датой
+  // перевода в Бух Бератер (наследие интеграторской метрики — чтобы
+  // до-трансферные звонки не портили MIN). Для «своего» SLA Госников этот пол
+  // не нужен и вреден: метрика меряет «Новый лид → ПЕРВЫЙ звонок», а с полом у
+  // лида, уехавшего в Бератер, она мерила бы время до первого звонка ПОСЛЕ
+  // перевода — завышение на порядок. Плюс автор брался бы из одного звонка, а
+  // время из другого.
+  const firstCallRes = await analyticsDb.execute<{
     lead_id: number;
     manager: string | null;
+    at: Date | null;
   }>(sql`
-    SELECT DISTINCT ON (lead_id) lead_id, manager
+    SELECT DISTINCT ON (lead_id)
+      lead_id, manager, created_at AT TIME ZONE 'UTC' AS at
     FROM analytics.communications
     WHERE lead_id IN (${sql.raw(leadIds.join(","))})
       AND communication_type = 'call_out'
     ORDER BY lead_id, created_at
   `);
   const firstCallManagerByLead = new Map<number, string>();
-  for (const row of firstCallMgrRes.rows) {
-    if (row.manager) firstCallManagerByLead.set(Number(row.lead_id), row.manager);
+  const firstCallAtByLead = new Map<number, Date>();
+  for (const row of firstCallRes.rows) {
+    const id = Number(row.lead_id);
+    if (row.manager) firstCallManagerByLead.set(id, row.manager);
+    if (row.at) firstCallAtByLead.set(id, new Date(row.at));
   }
 
   // TLT (Time between Latest Touches): per-lead BH-difference between
@@ -551,6 +562,8 @@ export async function computeSla(
     // (B2G_SLA_PIPELINE): рабочие часы и атрибуция по автору первого касания,
     // свой список причин из поля 879824.
     const firstCallManager = firstCallManagerByLead.get(lead.leadId) ?? null;
+    // Первый звонок БЕЗ бератерского пола — см. комментарий у firstCallRes.
+    const b2gFirstCallAt = firstCallAtByLead.get(lead.leadId) ?? null;
     const b2gAnchor = b2gAnchorByLead.get(lead.leadId);
     if (b2gAnchor && lead.pipelineId != null && B2G_PIPELINE_IDS.has(Number(lead.pipelineId))) {
       const excluded = lead.excludeFromAnalytics === true
@@ -564,12 +577,12 @@ export async function computeSla(
       );
       if (excluded) {
         slaOwnStatus = "excluded";                  // значение остаётся NULL
-      } else if (comms.firstCallOutAt) {
-        if (comms.firstCallOutAt <= b2gAnchor) {
+      } else if (b2gFirstCallAt) {
+        if (b2gFirstCallAt <= b2gAnchor) {
           slaOwnSeconds = 0;                        // звонок раньше/в момент входа
           slaOwnStatus = "instant";
         } else {
-          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, comms.firstCallOutAt, b2gDayInterval);
+          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, b2gFirstCallAt, b2gDayInterval);
           slaOwnStatus = "measured";
         }
       } else {

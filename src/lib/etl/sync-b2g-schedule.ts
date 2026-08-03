@@ -86,7 +86,13 @@ function currentBerlinMonth(): string {
 function inferYear(month: number, curMonth: string): number {
   const curY = Number(curMonth.slice(0, 4));
   const curM = Number(curMonth.slice(5, 7));
-  if (month < curM - 6) return curY + 1;
+  const diff = month - curM;
+  // Оба края года: январский лист, открытый в декабре, — следующий год;
+  // декабрьский, ещё не заменённый в январе, — прошлый. Без второй ветки
+  // застрявший лист писался бы декабрём СЛЕДУЮЩЕГО года: месяц «в будущем»,
+  // защита прошлого его не отсекает, и в базу уезжает мусор на год вперёд.
+  if (diff <= -6) return curY + 1;
+  if (diff >= 6) return curY - 1;
   return curY;
 }
 
