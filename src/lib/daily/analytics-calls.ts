@@ -1240,19 +1240,34 @@ export interface B2bTileDetails {
    *  (метрика плитки «Ожидание», переопределение 2026-07-20). */
   waitPlatforms: Array<{ platform: string; avgWaitSec: number; maxWaitSec: number; unanswered: number }>;
   /** То же по менеджерам (канонические имена). */
-  waitManagers: Array<{ manager: string; avgWaitSec: number; unanswered: number }>;
+  // Ожидание в разрезе менеджер × платформа. «Другое» (звонок не из ct:/cg-leg:)
+  // тоже приезжает — иначе «Всего» по менеджеру не сошлось бы с плиткой, которая
+  // считает по всем платформам.
+  waitManagers: Array<{ manager: string; platform: string; avgWaitSec: number; unanswered: number }>;
 }
 
 // B2B-звонки приходят только из двух CDR-источников (аудит 2026-07-02:
 // нот-звонков в b2b нет), поэтому категории «Другое» в срезах нет — если
 // вдруг появится строка с иным префиксом, она попадёт в почасовку/ожидание
 // (там платформа не важна), но не в платформенные карточки.
+// Канал звонка. CloudTalk/CallGear опознаются по префиксу communication_id
+// (прямой CDR-пул), остальное — по pbx_source из Kommo-заметки, которую пишет
+// sync-foreign-calls: это звонки провайдеров без CDR-выгрузки, прежде всего
+// WhatsApp через Wazzup. Раньше всё не-CDR сваливалось в «Другое» и
+// отбрасывалось из детализации — менеджеры звонят в WhatsApp (261 звонок за 30
+// дней на 2026-08, объём растёт: май 10 → июнь 84 → июль 250), и эти разговоры
+// в разбивке просто не показывались, хотя в плитки входили.
+//
+// Два написания провайдера («WhatsApp (GPT)» и «…, fallback по контакту
+// сделки») — это про способ привязки к сделке, а не про канал, поэтому
+// схлопываем в один «WhatsApp».
 const PLATFORM_EXPR = sql`(CASE
   WHEN communication_id LIKE 'ct:%' THEN 'CloudTalk'
   WHEN communication_id LIKE 'cg-leg:%' THEN 'CallGear'
+  WHEN pbx_source ILIKE '%whatsapp%' THEN 'WhatsApp'
+  WHEN pbx_source IS NOT NULL AND pbx_source <> '' THEN pbx_source
   ELSE 'Другое'
 END)`;
-const KNOWN_PLATFORMS = new Set(["CloudTalk", "CallGear"]);
 
 export async function getAnalyticsB2bTileDetails(
   managers: Array<{ id: string; name: string }>,
@@ -1306,7 +1321,8 @@ async function fetchB2bTileDetails(
   }>(sql`
     WITH deduped AS (
       SELECT DISTINCT ON (communication_id)
-        communication_id, communication_type, manager, duration, wait_seconds, created_at
+        communication_id, communication_type, manager, duration, wait_seconds, created_at,
+        pbx_source
       FROM analytics.communications
       WHERE created_at >= ${fromDate}
         AND created_at <= ${toDate}
@@ -1332,7 +1348,7 @@ async function fetchB2bTileDetails(
   const mp = new Map<string, { manager: string; platform: string; outgoing: number; connected: number }>();
   const hr = new Map<number, { outgoing: number; connected: number }>();
   const wpf = new Map<string, { sumWait: number; maxWait: number; unanswered: number }>();
-  const wmg = new Map<string, { sumWait: number; unanswered: number }>();
+  const wmg = new Map<string, { manager: string; platform: string; sumWait: number; unanswered: number }>();
 
   for (const r of result.rows) {
     const platform = r.platform;
@@ -1344,7 +1360,9 @@ async function fetchB2bTileDetails(
     const avgWait = r.avg_wait == null ? null : Number(r.avg_wait);
     const maxWait = r.max_wait == null ? null : Number(r.max_wait);
 
-    if (KNOWN_PLATFORMS.has(platform)) {
+    // Без фильтра по «известным» платформам: карточки и разбивка показывают
+    // ВСЕ каналы, иначе сумма по платформам не сходится с плиткой.
+    {
       const p = pf.get(platform) ?? { outgoing: 0, connected: 0, talkSeconds: 0 };
       p.outgoing += outgoing; p.connected += connected; p.talkSeconds += talkS;
       pf.set(platform, p);
@@ -1361,8 +1379,11 @@ async function fetchB2bTileDetails(
       hr.set(r.hour, h);
     }
 
+    // Ожидание есть только там, где провайдер отдаёт гудки: у WhatsApp-заметок
+    // Kommo wait_seconds пустой, поэтому в разбивку ожидания такие строки не
+    // попадают вовсе (avgWait === null) — колонки-пустышки не появятся.
     if (unanswered > 0 && avgWait != null) {
-      if (KNOWN_PLATFORMS.has(platform)) {
+      {
         const wp = wpf.get(platform) ?? { sumWait: 0, maxWait: 0, unanswered: 0 };
         wp.sumWait += avgWait * unanswered;
         wp.maxWait = Math.max(wp.maxWait, maxWait ?? 0);
@@ -1370,18 +1391,22 @@ async function fetchB2bTileDetails(
         wpf.set(platform, wp);
       }
 
-      const wm = wmg.get(mgr) ?? { sumWait: 0, unanswered: 0 };
+      const wmKey = `${mgr}::${platform}`;
+      const wm = wmg.get(wmKey) ?? { manager: mgr, platform, sumWait: 0, unanswered: 0 };
       wm.sumWait += avgWait * unanswered;
       wm.unanswered += unanswered;
-      wmg.set(mgr, wm);
+      wmg.set(wmKey, wm);
     }
   }
 
   return {
+    // Платформы без исходящих не показываем: модалка вся про исходящие, а
+    // канал с одними входящими давал бы карточку из нулей.
     platforms: [...pf.entries()]
       .map(([platform, v]) => ({ platform, ...v }))
+      .filter((p) => p.outgoing > 0)
       .sort((a, b) => b.outgoing - a.outgoing),
-    managerPlatforms: [...mp.values()].sort((a, b) => b.outgoing - a.outgoing),
+    managerPlatforms: [...mp.values()].filter((m) => m.outgoing > 0).sort((a, b) => b.outgoing - a.outgoing),
     hourly: [...hr.entries()]
       .map(([hour, v]) => ({ hour, ...v }))
       .sort((a, b) => a.hour - b.hour),
@@ -1393,13 +1418,14 @@ async function fetchB2bTileDetails(
         unanswered: v.unanswered,
       }))
       .sort((a, b) => b.unanswered - a.unanswered),
-    waitManagers: [...wmg.entries()]
-      .map(([manager, v]) => ({
-        manager,
+    waitManagers: [...wmg.values()]
+      .map((v) => ({
+        manager: v.manager,
+        platform: v.platform,
         avgWaitSec: v.unanswered > 0 ? Math.round(v.sumWait / v.unanswered) : 0,
         unanswered: v.unanswered,
       }))
-      .sort((a, b) => b.avgWaitSec - a.avgWaitSec),
+      .sort((a, b) => b.unanswered - a.unanswered),
   };
 }
 
