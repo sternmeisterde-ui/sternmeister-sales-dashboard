@@ -1,34 +1,22 @@
-// GET /api/dashboard?department=b2g
-// Returns aggregated Kommo CRM metrics for the Dashboard tab:
-//   - todayMetrics: summary KPI cards
-//   - perManager: per-manager breakdown
-//   - trend: last 7 days call/lead trend
-//   - funnel: pipeline funnel counts
-//   - missedBreakdown: detailed missed calls info
-//   - pipelineBreakdown: per-pipeline lead distribution (for B2G: Бух Гос + Бух Бератер)
+// GET /api/dashboard?department=b2g&from=YYYY-MM-DD&to=YYYY-MM-DD[&vertical=]
+// Питает вкладку «Звонки» (DashboardTab) — единственный её потребитель:
+//   - todayMetrics: KPI-плитки
+//   - perManager: разбивка по менеджерам (таблица + клиентский пересчёт плиток)
+//   - trend / trendByLine / trendByManager: динамика по дням
+//   - trendByPipeline / todayMetricsByPipeline: сплит Бух Комм / Мед Комм (b2b)
+//   - missedBreakdown: доля пропущенных входящих
+//
+// Всё считается из зеркала `analytics.*`. Kommo здесь НЕ дёргается: воронка,
+// pipelineBreakdown и «Задачи» ушли из UI вместе с когортной таблицей, а вместе
+// с ними и их вычисления (2026-08-03) — держать ради них живой вызов Kommo на
+// каждое открытие вкладки было чистой тратой рейт-лимита.
 
 import { NextRequest, NextResponse } from "next/server";
-import { getTasks } from "@/lib/kommo/client";
 import {
-  getAnalyticsLeads,
-} from "@/lib/daily/analytics-leads";
-import {
-  aggregateLeadFunnelMetrics,
-  aggregateTaskMetrics,
   sumCallMetrics,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
-import {
-  getPipelineIds,
-  getActiveStatusIds,
-  parseVertical,
-  type Vertical,
-  B2G_PIPELINES,
-  B2B_PIPELINES,
-  COMMERCIAL_STATUSES,
-  MEDICAL_COMM_STATUSES,
-} from "@/lib/kommo/pipeline-config";
-import type { KommoLead } from "@/lib/kommo/types";
+import { parseVertical, type Vertical } from "@/lib/kommo/pipeline-config";
 import {
   getAnalyticsCallMetricsByMaster,
   getAnalyticsDailyTrend,
@@ -149,309 +137,6 @@ function getTrendRange(period: string, from: number, to: number): { trendFrom: n
   return { trendFrom: from, trendTo: to, trendDays: days };
 }
 
-/** Build B2B-specific funnel across BOTH Бух Комм + Medical Admin Commercial. */
-function buildB2BFunnel(
-  snapshotLeads: KommoLead[],
-  wonLeads: KommoLead[],
-  lostLeads: KommoLead[],
-) {
-  const active = snapshotLeads.filter((l) => !l.is_deleted && !l.closed_at);
-
-  // Each funnel stage maps to equivalent status_ids in both pipelines —
-  // Бух Комм and Medical use disjoint status_ids for the same stage, so the
-  // count is the union across both. "Новый лид" additionally folds in the
-  // auxiliary NEW_LEAD_2/NEW_LEAD_3 stages so the funnel matches Kommo UI.
-  const inSet = (l: KommoLead, ids: readonly number[]) => ids.includes(l.status_id);
-  const countByStatuses = (ids: readonly number[]) =>
-    active.filter((l) => inSet(l, ids)).length;
-
-  const contactMade = countByStatuses([
-    COMMERCIAL_STATUSES.CONTACT_MADE,
-    MEDICAL_COMM_STATUSES.CONTACT_MADE,
-  ]);
-  const interestConfirmed = countByStatuses([
-    COMMERCIAL_STATUSES.INTEREST_CONFIRMED,
-    MEDICAL_COMM_STATUSES.INTEREST_CONFIRMED,
-  ]);
-  const invoiceSent = countByStatuses([
-    COMMERCIAL_STATUSES.INVOICE_SENT,
-    MEDICAL_COMM_STATUSES.INVOICE_SENT,
-  ]);
-  const prepayment = countByStatuses([
-    COMMERCIAL_STATUSES.PREPAYMENT,
-    MEDICAL_COMM_STATUSES.PREPAYMENT,
-  ]);
-  const installment = countByStatuses([
-    COMMERCIAL_STATUSES.INSTALLMENT,
-    MEDICAL_COMM_STATUSES.INSTALLMENT,
-  ]);
-  const noConsent = countByStatuses([
-    COMMERCIAL_STATUSES.NO_CONSENT,
-    MEDICAL_COMM_STATUSES.NO_CONSENT,
-  ]);
-  const newLead = countByStatuses([
-    COMMERCIAL_STATUSES.NEW_LEAD,
-    COMMERCIAL_STATUSES.NEW_LEAD_2,
-    COMMERCIAL_STATUSES.NEW_LEAD_3,
-    MEDICAL_COMM_STATUSES.NEW_LEAD,
-    MEDICAL_COMM_STATUSES.NEW_LEAD_2,
-    MEDICAL_COMM_STATUSES.NEW_LEAD_3,
-  ]);
-  const inProgress = countByStatuses([
-    COMMERCIAL_STATUSES.IN_PROGRESS,
-    MEDICAL_COMM_STATUSES.IN_PROGRESS,
-  ]);
-  const noAnswer = countByStatuses([
-    COMMERCIAL_STATUSES.NO_ANSWER,
-    MEDICAL_COMM_STATUSES.NO_ANSWER,
-  ]);
-
-  // Qualified = contactMade and beyond (excluding noConsent)
-  const qualLeads = contactMade + interestConfirmed + invoiceSent + prepayment + installment;
-
-  return {
-    activeDeals: active.length,
-    qualLeads,
-    totalLeads: snapshotLeads.filter((l) => !l.is_deleted).length,
-    // B2B stages (instead of a2/b1/b2plus)
-    newLead,
-    inProgress,
-    noAnswer,
-    contactMade,
-    noConsent,
-    interestConfirmed,
-    invoiceSent,
-    prepayment,
-    installment,
-    wonToday: wonLeads.length,
-    lostToday: lostLeads.length,
-  };
-}
-
-// ==================== Pipeline distribution helper ====================
-
-interface PipelineStats {
-  pipelineId: number;
-  pipelineName: string;
-  activeDeals: number;
-  statuses: Array<{ statusId: number; name: string; count: number }>;
-}
-
-// BERATER statuses that belong to "Линия 3 — Доведение" (follow-through stages).
-// Anything in BERATER not in this set is counted as Линия 2. Kept as an id Set
-// instead of a name match so status renames don't silently re-bucket rows.
-const BERATER_LINE_3_STATUS_IDS = new Set<number>([
-  102183931, // Доведение
-  102183935, // Консультация перед термином ДЦ
-  102183939, // Конс. перед ДЦ проведена
-  102183943, // Консультация перед термином АА
-  102183947, // Конс. перед АА проведена
-  93860875,  // Термин ДЦ отмен./перенес.
-  93886075,  // Термин ДЦ состоялся
-  93860883,  // Термин АА отмен./перенес.
-  93860891,  // Апелляция
-]);
-
-function buildPipelineBreakdown(
-  leads: KommoLead[],
-  department: string,
-  vertical?: Vertical,
-): PipelineStats[] {
-  // Department-scoped name maps. Cross-dept labels are NEVER visible from the
-  // other tab — even if a lead with a foreign pipeline_id somehow slipped past
-  // the inArray filter, it would hit the `|| "Pipeline X"` fallback below
-  // instead of rendering the other department's funnel name.
-  //
-  // Для b2g набор плиток зависит от вертикали: Бух → Бух Гос/Бератер, Мед →
-  // Мед Гос/Мед Бератер, Все — обе пары. (spec 21)
-  const b2gBuhNames = {
-    [B2G_PIPELINES.FIRST_LINE]: "Бух Гос (1я линия)",
-    [B2G_PIPELINES.BERATER]: "Бух Бератер (2я линия)",
-  };
-  const b2gMedNames = {
-    [B2G_PIPELINES.MEDICAL_GOV]: "Мед Гос (квалификатор)",
-    [B2G_PIPELINES.MED_BERATER]: "Мед Бератер (2-3 линия)",
-  };
-  const pipelineNames: Record<number, string> =
-    department === "b2b"
-      ? {
-          [B2B_PIPELINES.COMMERCIAL]: "Бух Комм (Бух 1 + Бух 2)",
-          [B2B_PIPELINES.MEDICAL_COMM]: "Мед 1 — Medical Admin",
-        }
-      : vertical === "buh"
-        ? b2gBuhNames
-        : vertical === "med"
-          ? b2gMedNames
-          : { ...b2gBuhNames, ...b2gMedNames }; // 'all' / legacy
-
-  // Pipeline status names (synced 2026-04-22 from Kommo API)
-  const statusNames: Record<number, string> = {
-    // Бух Гос (pipeline 10935879)
-    83873487: "Incoming leads",
-    93485479: "База",
-    83873491: "Новый лид",
-    90367079: "Взято в работу",
-    90367083: "Недозвон",
-    90367087: "Контакт установлен",
-    104211575: "Принимает решение",
-    95514983: "Консультация проведена",
-    101935919: "Док-ты отправлены в ДЦ",
-    95514987: "Отложенный старт",
-    // Бух Бератер (pipeline 12154099)
-    93860327: "Incoming leads",
-    93860331: "Принято от 1й линии",
-    93860335: "Взято в работу",
-    93860339: "Недозвон",
-    93860863: "Контакт установлен",
-    93860879: "Термин АА",
-    102183931: "Доведение",
-    102183935: "Консультация перед термином ДЦ",
-    102183939: "Конс. перед ДЦ проведена",
-    93860875: "Термин ДЦ отмен./перенес.",
-    93886075: "Термин ДЦ состоялся",
-    102183943: "Консультация перед термином АА",
-    102183947: "Конс. перед АА проведена",
-    93860883: "Термин АА отмен./перенес.",
-    93860887: "На рассмотрении бератера",
-    95515895: "Отложенный старт",
-    93860891: "Апелляция",
-    // Бух Комм (pipeline 10631243)
-    81523499: "Incoming leads",
-    83364011: "Tech",
-    81523503: "Новый лид",
-    104076579: "Новый лид 2",
-    104076583: "Новый лид 3",
-    81523507: "Взят в работу",
-    82883595: "Недозвон",
-    81523515: "Контакт установлен",
-    88519479: "Нет предв. согласия",
-    82661915: "Интерес подтверждён",
-    82661919: "Счёт выставлен",
-    82946495: "Предоплата получена",
-    82946499: "Рассрочка",
-    // Medical Admin Commercial (pipeline 13209983)
-    101858011: "Incoming leads",
-    101858015: "Tech",
-    101858019: "Новый лид",
-    104076587: "Новый лид 2",
-    104076591: "Новый лид 3",
-    101858023: "Взят в работу",
-    101858255: "Недозвон",
-    101858259: "Контакт установлен",
-    101858263: "Нет предв. согласия",
-    101858267: "Интерес подтверждён",
-    101858271: "Счёт выставлен",
-    101858275: "Предоплата получена",
-    101858279: "Рассрочка",
-    // Мед Гос (pipeline 13209991)
-    101858059: "Новый лид",
-    101858063: "Взято в работу",
-    101858423: "Недозвон",
-    101858427: "Контакт установлен",
-    108064559: "Принимает решение",
-    101858431: "Консультация проведена",
-    101858435: "Отложенный старт",
-    108064563: "Док-ты отправлены в ДЦ",
-    // Мед Бератер (pipeline 14001515) — Kommo-сверено (без фантомных дублей)
-    108064611: "Принято от 1й линии",
-    108064615: "Доведение",
-    108064619: "Консультация перед термином ДЦ",
-    108066243: "Конс. перед ДЦ проведена",
-    108066251: "Термин ДЦ состоялся",
-    108066247: "Термин ДЦ отмен./перенес.",
-    108066267: "Консультация перед термином АА",
-    108066271: "Конс. перед АА проведена",
-    108322459: "Термин АА отмен./перенес.",
-    108066275: "На рассмотрении бератера",
-    108066279: "Отложенный старт",
-    108066283: "Апелляция",
-  };
-
-  // Only render cards for pipelines with a registered label in the active
-  // department. Anything else (e.g. B2G Medical Gov = 13209991) is aggregated
-  // elsewhere but intentionally hidden from this breakdown — no "Pipeline X"
-  // fallback card is ever emitted.
-  const namedPipelineIds = Object.keys(pipelineNames).map(Number);
-  const byPipeline = new Map<number, KommoLead[]>();
-
-  for (const pid of namedPipelineIds) {
-    byPipeline.set(pid, []);
-  }
-
-  for (const lead of leads) {
-    if (lead.is_deleted) continue;
-    const bucket = byPipeline.get(lead.pipeline_id);
-    if (bucket) bucket.push(lead);
-  }
-
-  const result: PipelineStats[] = [];
-
-  for (const [pipelineId, pLeads] of byPipeline) {
-    const active = pLeads.filter((l) => !l.closed_at);
-
-    // For B2G BERATER: split into "Линия 2" and "Линия 3 — Доведение" so the
-    // user sees the Доведение funnel as its own card (status-id split, not a
-    // separate Kommo pipeline).
-    if (department === "b2g" && pipelineId === B2G_PIPELINES.BERATER) {
-      const line2Leads: KommoLead[] = [];
-      const line3Leads: KommoLead[] = [];
-      for (const lead of active) {
-        if (BERATER_LINE_3_STATUS_IDS.has(lead.status_id)) line3Leads.push(lead);
-        else line2Leads.push(lead);
-      }
-
-      for (const [cardName, cardLeads] of [
-        ["Бух Бератер (2я линия)", line2Leads] as const,
-        ["Линия 3 — Доведение", line3Leads] as const,
-      ]) {
-        const statusCounts = new Map<number, number>();
-        for (const lead of cardLeads) {
-          statusCounts.set(lead.status_id, (statusCounts.get(lead.status_id) ?? 0) + 1);
-        }
-        const statuses = Array.from(statusCounts.entries())
-          .map(([sid, count]) => ({
-            statusId: sid,
-            name: statusNames[sid] || `Status ${sid}`,
-            count,
-          }))
-          .sort((a, b) => b.count - a.count);
-        result.push({
-          pipelineId,
-          pipelineName: cardName,
-          activeDeals: cardLeads.length,
-          statuses,
-        });
-      }
-      continue;
-    }
-
-    // Count by status
-    const statusCounts = new Map<number, number>();
-    for (const lead of active) {
-      statusCounts.set(lead.status_id, (statusCounts.get(lead.status_id) ?? 0) + 1);
-    }
-
-    const statuses = Array.from(statusCounts.entries())
-      .map(([sid, count]) => ({
-        statusId: sid,
-        name: statusNames[sid] || `Status ${sid}`,
-        count,
-      }))
-      .sort((a, b) => b.count - a.count);
-
-    // pipelineNames[pipelineId] is guaranteed to exist — byPipeline was seeded
-    // from namedPipelineIds = Object.keys(pipelineNames).
-    result.push({
-      pipelineId,
-      pipelineName: pipelineNames[pipelineId],
-      activeDeals: active.length,
-      statuses,
-    });
-  }
-
-  return result;
-}
-
 // ==================== MAIN HANDLER ====================
 
 // Прошедшие дни уже не меняются — их ответ держим 5 минут.
@@ -481,12 +166,15 @@ export async function GET(req: NextRequest) {
     const fromStr = url.searchParams.get("from");
     const toStr = url.searchParams.get("to");
 
+    // v15 (2026-08-03): из ответа убраны funnel / pipelineBreakdown /
+    // overdueTasks / revenue / managersCount — их никто не читал. Бамп, чтобы
+    // после деплоя не отдать старую форму из живого процесса.
     // v13 cache-key bump (2026-07-14): perManager rows grew slaLeadCount +
     // lostCalls (веса для клиентского фильтра «Менеджеры») — v12-кэш отдавал
     // бы строки без этих полей. (v12, 2026-04-29: Berlin boundaries.)
     // v14 (2026-07-20): avgWaitSeconds → avgWaitCloudtalkSec/avgWaitCallgearSec
     // (формулы кабинетов телефоний) — v13-кэш отдавал бы старый shape.
-    const cacheKey = `dashboard-response:v14:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
+    const cacheKey = `dashboard-response:v15:${department}:${vertical ?? "-"}:${period}:${dateStr}:${fromStr || ""}:${toStr || ""}`;
     // Окно захватывает сегодняшний берлинский день → короткий TTL (см. выше).
     const today = todayCivil();
     const isLiveWindow = (toStr ?? dateStr) >= today;
@@ -536,15 +224,9 @@ async function buildDashboardResponse(
     }
     const { trendFrom, trendTo } = getTrendRange(effectivePeriod, from, to);
 
-    const pipelineIds = getPipelineIds(department, vertical);
-    const activeStatusIds = getActiveStatusIds(department, vertical);
-
     // Komm: soft-deleted менеджеры не выпадают из статистики за периоды, когда
     // работали (единый ростер за период; для b2g = только активные).
     const allManagers = await getManagersWithKommoForPeriod(department, from, to, vertical);
-    const managerKommoIds = allManagers
-      .map((m) => m.kommoUserId)
-      .filter((id): id is number => id != null);
 
     // Manager → line lookup for the per-line trend SQL. Pulls names from
     // master_managers (filtered to the active department by getManagersWithKommo)
@@ -556,22 +238,10 @@ async function buildDashboardResponse(
       line3: allManagers.filter((m) => m.line === "3").map((m) => m.name),
     };
 
-    // All external calls in parallel. Calls (and trend) come from the analytics
-    // DB mirror — much more accurate than Kommo's paginated notes API. Leads,
-    // tasks, and won/lost still come from Kommo (those aren't in the mirror).
-    const closedDateFilter = { field: "closed_at" as const, from, to };
-    const [snapshotLeads, tasks, wonLeads, lostLeads, todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw, b2gLostLeads] = await Promise.all([
-      // All lead snapshots/filters go through analytics.leads_cohort (local
-      // mirror) instead of Kommo API — ~20x faster, deterministic results.
-      getAnalyticsLeads({ pipelineIds, statusIds: activeStatusIds, activeOnly: true }).catch(() => [] as KommoLead[]),
-      // Tasks are filtered server-side by responsible_user_id so we pull only
-      // our 16-or-so managers' open tasks instead of every task in the
-      // account. Big win on department switch latency — the prior account-
-      // wide fetch was running through 5–20 pages of unrelated tasks for
-      // every dashboard load.
-      getTasks(false, managerKommoIds).catch(() => []),
-      getAnalyticsLeads({ pipelineIds, statusIds: [142], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
-      getAnalyticsLeads({ pipelineIds, statusIds: [143], dateFilter: closedDateFilter }).catch(() => [] as KommoLead[]),
+    // Всё параллельно и всё — из зеркала `analytics.*`. Ни одного обращения к
+    // Kommo API: снимки лидов, воронка и задачи отсюда удалены вместе с
+    // блоками, которые их показывали (2026-08-03).
+    const [todayCallMap, trendBuckets, trendByLineRaw, byPipelineRaw, trendByPipelineRaw, unansweredWaitSec, slaFirstCallMin, lostCallsRes, slaByManager, inboundByLine, trendByManagerRaw, b2gLostLeads] = await Promise.all([
       getAnalyticsCallMetricsByMaster(allManagers, department, from, to, vertical).catch((e) => {
         console.error("[Dashboard] analytics calls failed:", e);
         return new Map<string, UserCallMetrics>();
@@ -667,51 +337,8 @@ async function buildDashboardResponse(
     // Summary = sum of all per-manager metrics for the period
     const todaySummary = sumCallMetrics(Array.from(todayCallMap.values()));
 
-    // Step 4: Aggregate lead funnel.
-    // Kommo doesn't store historical pipeline snapshots, so the funnel and
-    // pipeline breakdown always reflect the CURRENT active state (regardless
-    // of the selected date range). Calls/revenue/won-lost DO respect the
-    // range — they're derived from timestamped events, not live state.
-    let funnel: Record<string, unknown>;
-
-    if (department === "b2b") {
-      funnel = buildB2BFunnel(snapshotLeads, wonLeads, lostLeads);
-    } else {
-      // B2G funnel with qualification stages. "Flow" metrics (a2/b1/b2+) still
-      // use the from/to range since they track movement, not snapshot state.
-      const snapshotLeadsAll = [...snapshotLeads, ...wonLeads, ...lostLeads];
-      const flowActive = snapshotLeads.filter(
-        (l) => l.updated_at >= from && l.updated_at <= to,
-      );
-      const flowLeads = [...flowActive, ...wonLeads, ...lostLeads];
-      const fc = aggregateLeadFunnelMetrics(snapshotLeadsAll, flowLeads, from, to, department, vertical);
-      funnel = {
-        activeDeals: fc.activeDeals,
-        qualLeads: fc.qualLeads,
-        totalLeads: fc.totalLeads,
-        a2: fc.a2,
-        b1: fc.b1,
-        b2plus: fc.b2plus,
-        wonToday: wonLeads.length,
-        lostToday: lostLeads.length,
-      };
-    }
-
-    // Step 5: Aggregate tasks (Kommo — keyed by kommoUserId)
-    const taskMap = aggregateTaskMetrics(tasks);
-    let totalOverdue = 0;
-    for (const m of allManagers) {
-      if (m.kommoUserId != null) {
-        totalOverdue += taskMap.get(m.kommoUserId)?.overdueTasks ?? 0;
-      }
-    }
-
-    // Step 6: WON revenue from today
-    const todayRevenue = wonLeads.reduce((sum, l) => sum + (l.price || 0), 0);
-
-    // Step 7: Per-manager breakdown. Include ALL active managers+rops from the
-    // master table; analytics matches by name so kommoUserId is no longer required.
-    // Managers without a kommoUserId get 0 overdue tasks but still show calls.
+    // Per-manager breakdown. Include ALL active managers+rops from the master
+    // table; analytics matches by name so kommoUserId is no longer required.
     // Only role='manager'/'teamlead' per user policy — ROPs/admins don't appear
     // in the per-manager tables even if they were carrying calls (teamleads work
     // the line, so they do).
@@ -719,7 +346,6 @@ async function buildDashboardResponse(
       .filter((m) => m.role === "manager" || m.role === "teamlead")
       .map((mgr) => {
         const cm = todayCallMap.get(mgr.id);
-        const tm = mgr.kommoUserId ? taskMap.get(mgr.kommoUserId) : undefined;
         return {
           id: mgr.id,
           name: mgr.name,
@@ -745,15 +371,14 @@ async function buildDashboardResponse(
           // SLA — взвешенное среднее по числу лидов, Потерянные — сумма.
           slaLeadCount: slaByManager.get(mgr.id)?.leadCount ?? 0,
           lostCalls: lostCallsRes.byManager.get(mgr.id) ?? 0,
-          overdueTasks: tm?.overdueTasks ?? 0,
         };
       })
       .sort((a, b) => b.callsTotal - a.callsTotal);
 
-    // Step 8: Trend line (already per-day buckets from analytics)
+    // Trend line (already per-day buckets from analytics)
     const trend = trendBuckets;
 
-    // Step 9: Missed calls breakdown (today)
+    // Missed calls breakdown
     const missedBreakdown = {
       incomingTotal: todaySummary.incomingTotal,
       missedIncoming: todaySummary.missedIncoming,
@@ -761,23 +386,6 @@ async function buildDashboardResponse(
         ? Math.round((todaySummary.missedIncoming / todaySummary.incomingTotal) * 100)
         : 0,
     };
-
-    // Step 10: Per-pipeline breakdown
-    // Pipeline breakdown reflects current active pipeline state. Kommo has no
-    // historical snapshots to reconstruct what the pipeline looked like on a
-    // past date, so tying this to from/to would make past-date views empty.
-    const rawPipelineBreakdown = buildPipelineBreakdown(snapshotLeads, department, vertical);
-
-    // Belt-and-suspenders whitelist: drop any card whose pipelineId isn't in
-    // the active department's pipeline list. Even though buildPipelineBreakdown
-    // is already department-scoped, this guarantees no B2G label (e.g.
-    // "Бух Бератер (2я линия)") can ever appear on the B2B tab, regardless of
-    // upstream bugs or cache drift. Split-cards from the BERATER line-3 split
-    // use pipelineId = B2G_PIPELINES.BERATER, so they're covered too.
-    const allowedPipelineIds = new Set(getPipelineIds(department, vertical));
-    const pipelineBreakdown = rawPipelineBreakdown.filter((c) =>
-      allowedPipelineIds.has(c.pipelineId),
-    );
 
     // Empty per-line trends for B2B (or when query failed) — keeps the
     // response shape uniform so the client doesn't need null guards.
@@ -838,11 +446,7 @@ async function buildDashboardResponse(
         // b2b — call-based (недозвон без перезвона); b2g — лид-based снимок
         // (лиды «Новый лид»/«Недозвон» без звонка > 24ч), спека 25 §2.
         lostCalls: isB2B ? lostCallsRes.total : b2gLostLeads.length,
-        overdueTasks: totalOverdue,
-        revenue: todayRevenue,
-        managersCount: allManagers.length,
       },
-      funnel,
       missedBreakdown,
       perManager,
       trend,
@@ -850,6 +454,5 @@ async function buildDashboardResponse(
       trendByManager: trendByManagerRaw,
       todayMetricsByPipeline,
       trendByPipeline,
-      pipelineBreakdown,
     };
 }

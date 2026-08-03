@@ -51,9 +51,6 @@ interface TodayMetrics {
   unansweredWaitSec?: number | null;
   slaFirstCallMin?: number;
   lostCalls?: number;
-  overdueTasks: number;
-  revenue: number;
-  managersCount: number;
 }
 
 interface DailyBucket {
@@ -90,7 +87,6 @@ interface PerManagerRow {
   // SLA — взвешенное среднее по slaLeadCount, Потерянные — сумма lostCalls.
   slaLeadCount: number;
   lostCalls: number;
-  overdueTasks: number;
 }
 
 interface DashboardData {
@@ -2304,7 +2300,6 @@ function ManagerCompareTable({ rowsA, rowsB, selected, labelA, labelB, loading }
         : 0,
       slaLeadCount: slaWeight,
       lostCalls: acc.reduce((s, r) => s + r.lostCalls, 0),
-      overdueTasks: 0,
     };
   };
 
