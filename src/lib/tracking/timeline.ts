@@ -114,11 +114,16 @@ export interface TimelineResult {
   // dialer; `idle` in the dialer view = no CloudTalk calls at all.
   // `talk` — general view only: чистое время в диалоге; `call` там = total
   // время в телефоне (разговор + дозвон исходящих, если события несут waitSec).
-  // `lunch` / `meeting` — минуты в ручных статусах (general view, b2g).
+  // `lunch` / `meeting` / `break` — ФАКТИЧЕСКИЕ минуты статусов (general view,
+  // b2g): ровно столько, сколько закрашено на дорожке присутствия. Это НЕ то,
+  // что вычитается из простоя (вычет считается только по минутам без работы) —
+  // см. deductible в buildPresenceTrack. Цифры в таблице должны сходиться с
+  // картинкой, иначе отмеченная встреча пропадает из отчёта, если менеджер
+  // успел в неё поработать.
   pct: { call: number; crm: number; idle: number; dialer?: number; manual?: number };
   minutes: {
     call: number; crm: number; idle: number;
-    talk?: number; lunch?: number; meeting?: number;
+    talk?: number; lunch?: number; meeting?: number; break?: number;
     dialer?: number; manual?: number;
   };
   // Dialer view only: how many calls of each channel landed that day (counted
@@ -650,12 +655,9 @@ export function buildTimeline(params: {
   // простои) — остаются ручные отметки: иначе переключение источника обнулило
   // бы вычеты задним числом и утилизация за прошлые месяцы просела бы.
   const useCloudTalk = cloudTalkTrack?.hasData ?? false;
-  const meetingMin = useCloudTalk
+  const deductMeetingMin = useCloudTalk
     ? cloudTalkTrack!.deductible.meeting + cloudTalkTrack!.deductible.training
     : manualMeetingMin;
-  // Обед показываем фактический (сколько реально стоял статус), но на вычет он
-  // не влияет — см. ниже.
-  const lunchMin = useCloudTalk ? cloudTalkTrack!.deductible.lunch : manualLunchMin;
 
   // За дни без данных CloudTalk рисуем на дорожке ручные отметки. Иначе
   // отмеченная встреча пропадала с экрана совсем: нижняя полоска показывает
@@ -689,8 +691,20 @@ export function buildTimeline(params: {
   const LUNCH_ALLOWANCE_MIN = 60;
   const idleMin = Math.max(
     0,
-    SHIFT_NORM_MIN - callMin - crmMin - meetingMin - LUNCH_ALLOWANCE_MIN,
+    SHIFT_NORM_MIN - callMin - crmMin - deductMeetingMin - LUNCH_ALLOWANCE_MIN,
   );
+  // Отчётные минуты статусов = ровно то, что закрашено на дорожке. Раньше сюда
+  // шли вычитаемые минуты (только те, где не было ни звонка, ни CRM), и колонки
+  // расходились с картинкой: у менеджера на дорожке 14 минут «Встречи», а в
+  // таблице прочерк, потому что всю встречу он параллельно щёлкал карточки.
+  // Вычет из простоя это НЕ меняет — он посчитан выше по deductible.
+  const trackIdle = presenceTrack?.minutes?.byIdle;
+  const lunchMin = trackIdle ? trackIdle["Обед"] ?? 0 : manualLunchMin;
+  const meetingMin = trackIdle
+    ? (trackIdle["Встреча"] ?? 0) + (trackIdle["Обучение"] ?? 0)
+    : manualMeetingMin;
+  const breakMin = trackIdle ? trackIdle["Перерыв"] ?? 0 : 0;
+
   const denom = callMin + crmMin + idleMin;
   const pct = {
     call: denom > 0 ? Math.round((callMin / denom) * 100) : 0,
@@ -707,7 +721,7 @@ export function buildTimeline(params: {
     pct,
     minutes: {
       call: callMin, talk: talkMin, crm: crmMin, idle: idleMin,
-      lunch: lunchMin, meeting: meetingMin,
+      lunch: lunchMin, meeting: meetingMin, break: breakMin,
     },
     presence: presenceTrack?.segments,
     presenceMinutes: presenceTrack?.minutes,
