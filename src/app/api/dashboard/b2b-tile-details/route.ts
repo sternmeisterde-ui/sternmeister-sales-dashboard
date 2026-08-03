@@ -1,4 +1,4 @@
-// GET /api/dashboard/b2b-tile-details?department=b2b|b2g&from=YYYY-MM-DD&to=YYYY-MM-DD
+// GET /api/dashboard/b2b-tile-details?department=b2b|b2g&from=YYYY-MM-DD&to=YYYY-MM-DD[&line=1|2|3]
 //
 // Детализация KPI-плиток (Исходящие / Принятых / % дозвона / Ожидание):
 // разбивка по платформам (CloudTalk/CallGear по префиксу communication_id),
@@ -10,6 +10,11 @@
 //
 // Работает для обоих отделов: платформы (ct:/cg-leg:) общие, отличается только
 // durationExpr (b2b фолдит wait в cg-leg, b2g — чистый разговор) — по dept.
+//
+// `line` (только b2g) сужает РОСТЕР до менеджеров этой линии — ровно то же, что
+// делают пилюли-переключатель на вкладке. Скоуп задаётся ростером, а не
+// фильтром поверх результата, поэтому и платформы, и почасовка, и ожидание
+// пересчитываются по линии целиком, а не «шапка от отдела, строки от линии».
 
 import { type NextRequest, NextResponse } from "next/server";
 import { getAnalyticsB2bTileDetails } from "@/lib/daily/analytics-calls";
@@ -35,8 +40,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     // Тот же ростер, что у плиток (/api/dashboard) — единое множество агентов.
     const allManagers = await getManagersWithKommo(department);
+    const lineParam = sp.get("line");
+    const line = lineParam === "1" || lineParam === "2" || lineParam === "3" ? lineParam : null;
+    const scopedManagers = line ? allManagers.filter((m) => m.line === line) : allManagers;
     const details = await getAnalyticsB2bTileDetails(
-      allManagers,
+      scopedManagers,
       department,
       Math.floor(fromDate.getTime() / 1000),
       Math.floor(toDate.getTime() / 1000),

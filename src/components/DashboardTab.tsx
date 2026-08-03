@@ -15,6 +15,7 @@ import {
   ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
 import CalendarPicker from "@/components/CalendarPicker";
+import { NAME_ALIASES } from "@/lib/daily/name-aliases";
 import DinoLoader from "@/components/DinoLoader";
 import { kommoLeadUrl } from "@/components/TerminLeadDrillModal";
 import {
@@ -338,7 +339,9 @@ export default function DashboardTab({
     return () => ac.abort();
   }, [compareOn, department, vertical, compareFrom, compareTo]);
 
-  // Смена периода/отдела инвалидирует детализации.
+  // Смена периода/отдела/линии инвалидирует детализации. Линия здесь потому,
+  // что скоуп детализации «Ожидание» задаётся ростером на сервере: без сброса
+  // модалка отдала бы данные прошлой линии из своего кэша.
   useEffect(() => {
     setLostOpen(false);
     setLostItems(null);
@@ -353,7 +356,7 @@ export default function DashboardTab({
     setLostLeadsOpen(false);
     setLostLeadsItems(null);
     setLostLeadsError(null);
-  }, [department, range.start, range.end]);
+  }, [department, range.start, range.end, b2gLine]);
 
   // ESC закрывает открытую модалку детализации.
   useEffect(() => {
@@ -397,8 +400,12 @@ export default function DashboardTab({
     setTileLoading(true);
     setTileError(null);
     try {
+      // Линия сужает ростер на сервере — детализация считается по той же
+      // выборке, что и плитка. Кэш ответа сбрасывается при смене линии
+      // (см. useEffect ниже), иначе модалка показывала бы прошлый скоуп.
+      const lineParam = department === "b2g" && b2gLine !== "all" ? `&line=${b2gLine}` : "";
       const res = await fetch(
-        `/api/dashboard/b2b-tile-details?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}`,
+        `/api/dashboard/b2b-tile-details?department=${department}&from=${formatDate(range.start)}&to=${formatDate(range.end)}${lineParam}`,
       );
       if (!res.ok) throw new Error(`API error ${res.status}`);
       setTileData((await res.json()) as B2bTileDetails);
@@ -407,7 +414,7 @@ export default function DashboardTab({
     } finally {
       setTileLoading(false);
     }
-  }, [tileData, tileLoading, department, range.start, range.end]);
+  }, [tileData, tileLoading, department, range.start, range.end, b2gLine]);
 
   // «Потерянные» b2g: снимок на конец периода — грузим список лидов лениво.
   const toggleLostLeadsDetail = useCallback(async () => {
@@ -479,6 +486,22 @@ export default function DashboardTab({
   const missed = data.missedBreakdown;
   const isB2G = department === "b2g";
 
+  // Имена менеджеров выбранной линии (b2g): по ним сужается список в фильтре
+  // «Менеджеры» и фильтруется SLA-детализация, чтобы модалка показывала ровно
+  // тот скоуп, что и плитка над ней.
+  const lineRoster = (() => {
+    if (!isB2G || b2gLine === "all") return null;
+    // С алиасами: в analytics имя может быть записано иначе, чем в
+    // master_managers (Maksim/Максим, Є/Е). Без них модалка недосчитывалась бы
+    // строк и расходилась с плиткой.
+    const set = new Set<string>();
+    for (const r of data.perManager) {
+      if (r.line !== b2gLine) continue;
+      set.add(r.name);
+      for (const alias of NAME_ALIASES[r.name] ?? []) set.add(alias);
+    }
+    return set;
+  })();
   // Ростер глобального фильтра «Менеджеры» (B2B): имена таблицы ∪ серии
   // графика (график включает РОПов со звонками, которых нет в таблице).
   // Ростер глобального фильтра «Менеджеры» — для обоих отделов. Имена таблицы
@@ -489,13 +512,18 @@ export default function DashboardTab({
   // (analytics.communications) — график убран 2026-07-29, а вместе с ним и
   // риск показать в фильтре того, кого нет в таблице (РОПы, старые имена).
   // b2g: график остался — там прежнее объединение.
+  // При выбранной линии (b2g) список сужается до её менеджеров: иначе можно
+  // было выбрать человека с другой линии и получить пустое пересечение —
+  // вкладка обнулялась без видимой причины.
   const managerNames = Array.from(
     new Set(
       isB2G
         ? [...data.perManager.map((r) => r.name), ...Object.keys(data.trendByManager ?? {})]
         : data.perManager.map((r) => r.name),
     ),
-  ).sort((a, b) => a.localeCompare(b, "ru"));
+  )
+    .filter((name) => lineRoster == null || lineRoster.has(name))
+    .sort((a, b) => a.localeCompare(b, "ru"));
   // Строки таблицы под фильтром. selectedManagers === null («все») → плитки
   // показывают серверные dept-итоги: они включают и звонки, которые не
   // сматчились ни с одним менеджером, поэтому «все» ≠ сумма по строкам.
@@ -503,19 +531,26 @@ export default function DashboardTab({
     selectedManagers === null
       ? data.perManager
       : data.perManager.filter((r) => selectedManagers.has(r.name));
-  // Детализации «Потерянные»/«SLA» под тем же фильтром — матч по имени
-  // менеджера (сервер атрибутирует строки так же, поэтому суммы в модалке
-  // сходятся с плитками). Строки «Без менеджера» при активном фильтре скрыты.
+  // Детализация «Потерянных» b2b — под фильтром «Менеджеры» (сервер
+  // атрибутирует строки так же, поэтому сумма в модалке сходится с плиткой).
+  // Строки «Без менеджера» при активном фильтре скрыты.
   const visibleLostItems =
     lostItems && selectedManagers !== null
       ? lostItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : lostItems;
-  // b2b — SLA drill-down под фильтром «Менеджеры»; b2g — SLA dept-level
-  // (звонит дайлер, не ответственный), поэтому фильтр по менеджеру не применяем.
-  const visibleSlaItems =
-    !isB2G && slaItems && selectedManagers !== null
+  // SLA drill-down: b2b — под фильтром «Менеджеры»; b2g — только под линией.
+  // Пер-менеджерный фильтр у Госников к SLA не применяем: звонит ДАЙЛЕР, а не
+  // ответственный, поэтому «SLA этого МОПа» ввело бы в заблуждение. Линия —
+  // другое дело: это скоуп лидов, а не заслуга конкретного человека.
+  const visibleSlaItems = (() => {
+    if (!slaItems) return slaItems;
+    if (isB2G) {
+      return lineRoster ? slaItems.filter((it) => it.manager != null && lineRoster.has(it.manager)) : slaItems;
+    }
+    return selectedManagers !== null
       ? slaItems.filter((it) => it.manager != null && selectedManagers.has(it.manager))
       : slaItems;
+  })();
 
   const isSingleDay =
     range.start.getTime() === range.end.getTime() ||
@@ -583,21 +618,53 @@ export default function DashboardTab({
   // null → серверные dept-итоги `m` (включают звонки, не сматченные ни с одним
   // менеджером, поэтому «все» ≠ сумма строк). При выборе — пересчёт из
   // отфильтрованных строк, как в b2b-ветке.
+  //
+  // Переключатель линий скоупит шесть плиток из семи (2026-08-03). Раньше
+  // Ожидание / SLA / Потерянные оставались по отделу — пилюли выглядели как
+  // фильтр всей вкладки, а половину цифр не трогали.
   const b2gEff = (() => {
     if (!isB2G) return null;
-    // Всегда dept-итог, фильтр «Менеджеры» НЕ влияет:
-    //   • «Потерянные» — лид-based снимок без атрибуции (спека 25 §2);
-    //   • SLA — время до первого звонка, а звонит ДАЙЛЕР, не ответственный
-    //     менеджер, поэтому пер-менеджерная атрибуция некорректна (2026-07-27).
+    const lineSel = b2gLine !== "all";
+    // Скоуп правых плиток = «Менеджеры» ∩ выбранная линия.
+    const scope = lineSel
+      ? filteredPerManager.filter((r) => r.line === b2gLine)
+      : filteredPerManager;
+    // Пересчитываем из строк, только если хоть один фильтр активен: иначе
+    // серверные dept-итоги точнее (в них входит и то, что не сматчилось ни с
+    // одним менеджером).
+    const useScoped = lineSel || selectedManagers !== null;
+
+    // «Потерянные» — по-прежнему по всему отделу, ни один фильтр её не трогает.
+    // Разрез по линиям отложен (2026-08-03): 296 из 302 таких лидов висят на
+    // РОПе, а не на линейных менеджерах, поэтому разбивка по ответственному
+    // обнуляла бы плитку. Вернуться к этому отдельной задачей.
     const lost = m.lostCalls ?? 0;
-    const slaMin = m.slaFirstCallMin ?? 0;
+
+    // Ожидание — взвешенное по недозвонам (звонок атрибутируется тому, кто его
+    // сделал). SLA — взвешенное по числу лидов, атрибуция по ОТВЕТСТВЕННОМУ за
+    // лид: звонит-то дайлер, поэтому в разрезе линии это «сколько ждали лиды
+    // этой линии», а не «как быстро звонили эти люди» (см. тултип плитки).
+    const unansWeight = scope.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
+    const scopedWait = unansWeight > 0
+      ? Math.round(scope.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
+      : null;
+    const slaWeight = scope.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
+    // null, а не 0: у линии может не быть ни одного подходящего лида (бератеры
+    // редко бывают ответственными за новые), и «0м» читалось бы как «звоним
+    // мгновенно» вместо «считать не из чего».
+    const scopedSla = slaWeight > 0
+      ? Math.round(scope.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
+      : null;
+    const waitSec = useScoped ? scopedWait : m.unansweredWaitSec ?? null;
+    const slaMin: number | null = useScoped ? scopedSla : m.slaFirstCallMin ?? 0;
+
     if (selectedManagers === null) {
       return {
         callsTotal: m.callsTotal, callsConnected: m.callsConnected, dialPercent: m.dialPercent,
         totalMinutes: m.totalMinutes, avgDialogMinutes: m.avgDialogMinutes,
         missedIncoming: m.missedIncoming, incomingTotal: m.incomingTotal,
         outgoingTotal: m.outgoingTotal, missedPercent: missed.missedPercent,
-        waitSec: m.unansweredWaitSec ?? null, slaMin, lost,
+        waitSec, slaMin, lost,
       };
     }
     const sub = filteredPerManager;
@@ -607,12 +674,6 @@ export default function DashboardTab({
     const incomingTotal = sub.reduce((s, r) => s + r.incomingTotal, 0);
     const outgoingTotal = sub.reduce((s, r) => s + r.outgoingTotal, 0);
     const missedIncoming = sub.reduce((s, r) => s + r.missedIncoming, 0);
-    // Ожидание — взвешенное по недозвонам (звонок атрибутируется тому, кто
-    // его сделал, — это ок). SLA — dept-level (см. выше), фильтр не трогает.
-    const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
-    const waitSec = unansWeight > 0
-      ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
-      : null;
     return {
       callsTotal, callsConnected,
       dialPercent: callsTotal > 0 ? Math.round((callsConnected / callsTotal) * 100) : 0,
@@ -727,7 +788,9 @@ export default function DashboardTab({
       {/* ============ KPI tiles ============ */}
       {isB2G && b2gEff ? (
         // B2G — как у Комм: одиночные плитки. Переключатель направления (линии)
-        // скоупит 4 звонковые плитки; Ожидание/SLA/Потерянные — по отделу.
+        // скоупит шесть из семи: четыре звонковые — из строк своей линии,
+        // Ожидание/SLA — взвешенным средним по ней же. «Потерянные» остаются
+        // по отделу (см. комментарий в b2gEff).
         (() => {
           const cv = b2gLine === "all"
             ? b2gEff
@@ -741,7 +804,11 @@ export default function DashboardTab({
                   outgoingTotal: v.outgoingTotal, missedPercent: v.missedPercent,
                 };
               })();
-          const deptCap = b2gLine === "all" ? undefined : "по отделу";
+          // Подпись скоупа: без выбора — по отделу, иначе имя линии. Раньше
+          // тут стояло «по отделу» именно при выбранной линии — эти плитки
+          // фильтр игнорировали.
+          const scopeCap = b2gLine === "all" ? undefined : LINE_SHORT[b2gLine];
+          const scopeWord = b2gLine === "all" ? "по всему отделу" : `по линии «${LINE_SHORT[b2gLine]}»`;
           const LINE_PILLS = [
             ["all", "Все"], ["1", LINE_SHORT["1"]], ["2", LINE_SHORT["2"]], ["3", LINE_SHORT["3"]],
           ] as const;
@@ -789,21 +856,22 @@ export default function DashboardTab({
                 <CallMetricTile
                   icon={Timer} label="Ожидание" color="blue"
                   totalValue={b2gEff.waitSec == null ? "—" : `${b2gEff.waitSec}с`}
-                  totalCaption={b2gLine === "all" ? "по недозвонам" : "отдел · недозвоны"} rows={null}
+                  totalCaption={b2gLine === "all" ? "по недозвонам" : `${scopeCap} · недозвоны`} rows={null}
                   onClick={() => openTileDetail("wait")}
-                  tip="Среднее время гудков в неотвеченных исходящих (от набора до сброса), по всему отделу. Обе платформы (CloudTalk + CallGear). Клик — разбивка по платформам и менеджерам."
+                  tip={`Среднее время гудков в неотвеченных исходящих (от набора до сброса), ${scopeWord}. Обе платформы (CloudTalk + CallGear). Клик — разбивка по платформам и менеджерам.`}
                 />
                 <CallMetricTile
-                  icon={Gauge} label="SLA" color="blue" totalValue={`${b2gEff.slaMin}м`}
-                  totalCaption={deptCap} rows={null} onClick={toggleSlaDetail}
-                  tip="Среднее календарное время от создания лида до первого звонка по нему (реальный wall-clock, вкл. вечер/выходные — дайлер звонит и вне будних 9–18), по всему отделу. Клик — детализация по сделкам."
+                  icon={Gauge} label="SLA" color="blue"
+                  totalValue={b2gEff.slaMin == null ? "—" : `${b2gEff.slaMin}м`}
+                  totalCaption={scopeCap} rows={null} onClick={toggleSlaDetail}
+                  tip={`Среднее календарное время от создания лида до первого звонка по нему (реальный wall-clock, вкл. вечер/выходные — дайлер звонит и вне будних 9–18), ${scopeWord}.${b2gLine === "all" ? "" : " В разрезе линии это лиды, за которые отвечают её менеджеры: звонит дайлер, поэтому цифра говорит о скорости обработки этих лидов, а не о работе конкретных людей."} Клик — детализация по сделкам.`}
                 />
                 <CallMetricTile
                   icon={PhoneOff} label="Потерянные"
                   color={b2gEff.lost === 0 ? "emerald" : "rose"}
-                  totalValue={b2gEff.lost} totalCaption={deptCap} rows={null}
+                  totalValue={b2gEff.lost} totalCaption={b2gLine === "all" ? undefined : "по отделу"} rows={null}
                   tipAlign="right"
-                  tip="Лиды на этапе «Новый лид»/«Недозвон», по которым последний звонок был больше 24 часов назад (или звонков не было вовсе), по всему отделу. Снимок на конец периода. Клик — список лидов."
+                  tip="Лиды на этапе «Новый лид»/«Недозвон», по которым последний звонок был больше 24 часов назад (или звонков не было вовсе), по всему отделу. Переключатель линий на эту плитку не влияет. Снимок на конец периода. Клик — список лидов."
                   onClick={toggleLostLeadsDetail}
                 />
               </div>
