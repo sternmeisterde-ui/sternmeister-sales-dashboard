@@ -329,6 +329,11 @@ export const sla = analyticsSchema.table(
     // compute-sla.ts заполняет; карточка «SLA» (Звонки, B2B) читает. Added 0027.
     slaOwnSeconds: bigint("sla_own_seconds", { mode: "number" }),
     slaOwnStatus: text("sla_own_status"),
+    // Автор ПЕРВОГО исходящего звонка по лиду (communications.manager). Кому
+    // засчитано «своё» SLA Госников: в Kommo ответственным за свежий лид стоит
+    // РОП, поэтому разрез по sla.manager у b2g бессмыслен. NULL = звонка не
+    // было. У Комм не используется (там привязка к ответственному). Added 0037.
+    firstCallManager: text("first_call_manager"),
   },
   (t) => [
     index().on(t.leadId),

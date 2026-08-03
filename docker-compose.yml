@@ -114,6 +114,13 @@ services:
       - GOOGLE_OAUTH_JSON=${GOOGLE_OAUTH_JSON}
       - ENPS_SPREADSHEET_ID=${ENPS_SPREADSHEET_ID}
       - ENPS_SHEET_RANGE=${ENPS_SHEET_RANGE}
+      # Графики смен из файлов РОПов (тот же сервис-аккаунт) → manager_schedule,
+      # оттуда рабочие часы для SLA обоих отделов. Id таблиц захардкожены
+      # дефолтами в sync-b2b-schedule / sync-b2g-schedule — переменные нужны,
+      # только если файл переедет. Без GOOGLE_OAUTH_JSON синки молчат, а SLA
+      # считается по запасному правилу Пн–Сб 09:00–18:00.
+      - B2B_SCHEDULE_SPREADSHEET_ID=${B2B_SCHEDULE_SPREADSHEET_ID}
+      - B2G_SCHEDULE_SPREADSHEET_ID=${B2G_SCHEDULE_SPREADSHEET_ID}
 
       # Telegram — MTProto for username→id resolution in manager sync,
       # plus Bot API tokens for /login resolution (at least one required).
