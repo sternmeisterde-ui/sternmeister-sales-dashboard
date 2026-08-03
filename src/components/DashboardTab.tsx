@@ -1524,7 +1524,15 @@ export default function DashboardTab({
                     <th className="text-right py-2 px-2 font-medium">Длительность</th>
                     <th className="text-right py-2 px-2 font-medium" title="Среднее время гудков в неотвеченных исходящих — как плитка «Ожидание» (по недозвонам)">Ожидание</th>
                     <th className="text-right py-2 px-2 font-medium">SLA</th>
-                    <th className="text-right py-2 px-2 font-medium">Всего</th>
+                    {/* «Всего» (исх+вх) у Госников убрана 2026-08-03 по просьбе
+                        РОПа: в дневном окне она почти всегда повторяет
+                        «Исходящие». NB: это не строгий дубль — входящие у
+                        Госников есть, просто их мало (июль: 7–13 на человека,
+                        0.2–2% от объёма у 8 менеджеров из 14). Вместе с
+                        колонкой из таблицы пропадают и они: если понадобится
+                        вернуть — лучше отдельной колонкой «Входящие».
+                        У Комм оставлена: их вкладку сейчас не трогаем. */}
+                    {!isB2G && <th className="text-right py-2 px-2 font-medium">Всего</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -1560,7 +1568,7 @@ export default function DashboardTab({
                         {mgr.unansweredWaitSeconds ? `${mgr.unansweredWaitSeconds} с` : "—"}
                       </td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.slaFirstCallMin} мин</td>
-                      <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>
+                      {!isB2G && <td className="py-2 px-2 text-right text-slate-300">{mgr.callsTotal}</td>}
                     </tr>
                     );
                   })}
