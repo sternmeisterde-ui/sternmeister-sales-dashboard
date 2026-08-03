@@ -258,6 +258,12 @@ export default function DashboardTab({
   // разбивка метрики по линиям × менеджерам. Строится client-side из
   // filteredPerManager — сумма всегда равна плитке, запросов к БД нет.
   const [lineTileDetail, setLineTileDetail] = useState<"calls" | "dial" | "minutes" | "missed" | null>(null);
+  // Детализация звонков одного менеджера (b2g): клик по строке таблицы
+  // «Менеджеры». Список грузится лениво и живёт до смены периода/отдела/линии.
+  const [mgrCallsFor, setMgrCallsFor] = useState<string | null>(null);
+  const [mgrCalls, setMgrCalls] = useState<{ rows: ManagerCallItem[]; total: number; limit: number } | null>(null);
+  const [mgrCallsLoading, setMgrCallsLoading] = useState(false);
+  const [mgrCallsError, setMgrCallsError] = useState<string | null>(null);
   // Drill-down «Потерянных» b2g (лиды, не звонки) — своя форма (B2gLostLeadItem),
   // отдельно от b2b lostItems (звонки). Ленивый фетч по клику.
   const [lostLeadsOpen, setLostLeadsOpen] = useState(false);
@@ -356,11 +362,14 @@ export default function DashboardTab({
     setLostLeadsOpen(false);
     setLostLeadsItems(null);
     setLostLeadsError(null);
+    setMgrCallsFor(null);
+    setMgrCalls(null);
+    setMgrCallsError(null);
   }, [department, range.start, range.end, b2gLine]);
 
   // ESC закрывает открытую модалку детализации.
   useEffect(() => {
-    if (!lostOpen && !slaOpen && !tileDetail && !lineTileDetail && !lostLeadsOpen) return;
+    if (!lostOpen && !slaOpen && !tileDetail && !lineTileDetail && !lostLeadsOpen && !mgrCallsFor) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setLostOpen(false);
@@ -368,11 +377,12 @@ export default function DashboardTab({
         setTileDetail(null);
         setLineTileDetail(null);
         setLostLeadsOpen(false);
+        setMgrCallsFor(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [lostOpen, slaOpen, tileDetail, lineTileDetail, lostLeadsOpen]);
+  }, [lostOpen, slaOpen, tileDetail, lineTileDetail, lostLeadsOpen, mgrCallsFor]);
 
   const toggleLostDetail = useCallback(async () => {
     const next = !lostOpen;
@@ -437,6 +447,27 @@ export default function DashboardTab({
       setLostLeadsLoading(false);
     }
   }, [lostLeadsOpen, lostLeadsItems, lostLeadsLoading, department, vertical, range.end]);
+
+  const openManagerCalls = useCallback(async (name: string) => {
+    setMgrCallsFor(name);
+    setMgrCalls(null);
+    setMgrCallsError(null);
+    setMgrCallsLoading(true);
+    try {
+      const verticalParam = vertical ? `&vertical=${vertical}` : "";
+      const res = await fetch(
+        `/api/dashboard/manager-calls?department=${department}&manager=${encodeURIComponent(name)}` +
+          `&from=${formatDate(range.start)}&to=${formatDate(range.end)}${verticalParam}`,
+      );
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const json = (await res.json()) as { rows: ManagerCallItem[]; total: number; limit: number };
+      setMgrCalls({ rows: json.rows, total: json.total, limit: json.limit });
+    } catch (e) {
+      setMgrCallsError(String(e));
+    } finally {
+      setMgrCallsLoading(false);
+    }
+  }, [department, vertical, range.start, range.end]);
 
   const toggleSlaDetail = useCallback(async () => {
     const next = !slaOpen;
@@ -1415,6 +1446,20 @@ export default function DashboardTab({
         document.body,
       )}
 
+      {/* ====== ДЕТАЛИЗАЦИЯ ЗВОНКОВ МЕНЕДЖЕРА (b2g) — клик по строке таблицы ====== */}
+      {isB2G && mgrCallsFor && typeof document !== "undefined" && createPortal(
+        <ManagerCallsModal
+          manager={mgrCallsFor}
+          rows={mgrCalls?.rows ?? null}
+          total={mgrCalls?.total ?? 0}
+          limit={mgrCalls?.limit ?? 0}
+          loading={mgrCallsLoading}
+          error={mgrCallsError}
+          onClose={() => setMgrCallsFor(null)}
+        />,
+        document.body,
+      )}
+
       {/* ====== «ПОТЕРЯННЫЕ» (b2g) — DRILL-DOWN: список лидов (спека 25 §2) ====== */}
       {isB2G && lostLeadsOpen && typeof document !== "undefined" && createPortal(
         <div
@@ -1509,9 +1554,14 @@ export default function DashboardTab({
         const tableTitle = isB2G && b2gLine !== "all" ? LINE_SHORT[b2gLine] : "Менеджеры";
         return (
           <div className="glass-panel rounded-2xl p-5 border border-white/5">
-            <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4">
+            <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4 flex items-baseline gap-2 flex-wrap">
               <span className="text-blue-400">{tableTitle}</span>
-              <span className="text-slate-500 ml-2">({tableManagers.length} чел.)</span>
+              <span className="text-slate-500">({tableManagers.length} чел.)</span>
+              {isB2G && (
+                <span className="text-[10px] normal-case tracking-normal text-slate-500 font-normal">
+                  · нажми на менеджера — все его звонки за период
+                </span>
+              )}
             </h3>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -1542,8 +1592,16 @@ export default function DashboardTab({
                       ? Math.round((mgr.outgoingConnected / mgr.outgoingTotal) * 100)
                       : 0;
                     return (
-                    <tr key={mgr.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                      <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">{mgr.name}</td>
+                    <tr
+                      key={mgr.id}
+                      onClick={isB2G ? () => openManagerCalls(mgr.name) : undefined}
+                      title={isB2G ? "Показать все звонки менеджера за период" : undefined}
+                      className={`border-b border-white/[0.03] transition-colors ${isB2G ? "cursor-pointer hover:bg-blue-500/[0.07]" : "hover:bg-white/[0.02]"}`}
+                    >
+                      <td className="py-2 px-2 text-white font-medium truncate max-w-[140px]">
+                        {mgr.name}
+                        {isB2G && <span className="text-slate-600 ml-1.5">›</span>}
+                      </td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingTotal}</td>
                       <td className="py-2 px-2 text-right text-slate-300">{mgr.outgoingConnected}</td>
                       <td className="py-2 px-2 text-right">
@@ -1604,6 +1662,239 @@ export default function DashboardTab({
           />
         );
       })()}
+    </div>
+  );
+}
+
+// ==================== Детализация звонков одного менеджера (b2g) ====================
+//
+// Открывается кликом по строке таблицы «Менеджеры». Фильтр платформ и сортировка
+// — целиком на клиенте: список уже загружен (до 1000 строк), гонять сервер на
+// каждый чих незачем, а мгновенная реакция тут важнее.
+
+interface ManagerCallItem {
+  callId: string;
+  at: string;
+  direction: "in" | "out";
+  platform: string;
+  durationSec: number;
+  waitSec: number | null;
+  answered: boolean;
+  phone: string | null;
+  clientName: string | null;
+  leadId: number | null;
+  pipelineName: string | null;
+  statusName: string | null;
+}
+
+type CallSortKey = "at" | "direction" | "platform" | "client" | "duration" | "wait" | "result";
+
+/** Берлинское время звонка: «02.08, 19:44». */
+function fmtCallAt(iso: string): string {
+  return new Date(iso).toLocaleString("ru-RU", {
+    timeZone: "Europe/Berlin",
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function ManagerCallsModal({
+  manager, rows, total, limit, loading, error, onClose,
+}: {
+  manager: string;
+  rows: ManagerCallItem[] | null;
+  total: number;
+  limit: number;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  const [platform, setPlatform] = useState<string>("all");
+  const [sortKey, setSortKey] = useState<CallSortKey>("at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  // Набор платформ — из самих строк: показываем только те, что реально были.
+  const platforms = useMemo(() => {
+    const set = new Map<string, number>();
+    for (const r of rows ?? []) set.set(r.platform, (set.get(r.platform) ?? 0) + 1);
+    return [...set.entries()].sort((a, b) => b[1] - a[1]);
+  }, [rows]);
+
+  const visible = useMemo(() => {
+    const base = (rows ?? []).filter((r) => platform === "all" || r.platform === platform);
+    const dir = sortDir === "asc" ? 1 : -1;
+    const val = (r: ManagerCallItem): string | number => {
+      switch (sortKey) {
+        case "at": return r.at;
+        case "direction": return r.direction;
+        case "platform": return r.platform;
+        case "client": return (r.clientName ?? r.phone ?? "").toLowerCase();
+        case "duration": return r.durationSec;
+        case "wait": return r.waitSec ?? -1;
+        case "result": return r.answered ? 1 : 0;
+      }
+    };
+    return [...base].sort((a, b) => {
+      const va = val(a);
+      const vb = val(b);
+      // Тай-брейк по времени вниз — иначе строки с равным значением
+      // перескакивают между рендерами.
+      if (va === vb) return a.at < b.at ? 1 : -1;
+      return (va > vb ? 1 : -1) * dir;
+    });
+  }, [rows, platform, sortKey, sortDir]);
+
+  const onSort = (key: CallSortKey) => {
+    if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir(key === "at" ? "desc" : "asc");
+    }
+  };
+
+  // Функция, а не компонент: <Th/>, объявленный внутри рендера, пересоздаётся
+  // на каждый рендер и сбрасывал бы своё состояние (react-hooks/static-components).
+  const th = (k: CallSortKey, label: string, align: "left" | "right" = "left") => (
+    <th
+      key={k}
+      onClick={() => onSort(k)}
+      className={`py-1.5 pr-3 font-medium cursor-pointer select-none hover:text-slate-300 transition-colors ${align === "right" ? "text-right" : "text-left"}`}
+      title="Сортировать"
+    >
+      {label}
+      <span className={`ml-1 ${sortKey === k ? "text-blue-400" : "text-slate-700"}`}>
+        {sortKey === k ? (sortDir === "asc" ? "▲" : "▼") : "↕"}
+      </span>
+    </th>
+  );
+
+  const totalTalk = visible.reduce((a, r) => a + r.durationSec, 0);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center pt-12 px-4 bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+    >
+      <div
+        className="w-full max-w-5xl max-h-[85vh] overflow-hidden flex flex-col rounded-2xl bg-slate-900 border border-white/10 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        role="document"
+      >
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/5 bg-slate-950/60">
+          <h3 className="text-sm font-bold text-blue-400 flex items-center gap-2 min-w-0">
+            <Phone className="w-4 h-4 shrink-0" />
+            <span className="truncate">Звонки — {manager}</span>
+            {rows && <span className="text-slate-500 font-normal shrink-0">({visible.length})</span>}
+          </h3>
+          <button onClick={onClose} className="text-xs text-slate-500 hover:text-slate-300 transition-colors shrink-0">Закрыть ✕</button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-4">
+          {loading && (
+            <div className="flex items-center gap-2 text-slate-400 text-sm py-4">
+              <Loader2 className="w-4 h-4 animate-spin" /> Загружаю…
+            </div>
+          )}
+          {error && <p className="text-rose-400 text-sm py-2">{error}</p>}
+
+          {rows && rows.length === 0 && (
+            <p className="text-slate-400 text-sm py-2">За период звонков нет.</p>
+          )}
+
+          {rows && rows.length > 0 && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap mb-3">
+                <span className="text-[11px] uppercase tracking-wider text-slate-500 mr-1">Платформа</span>
+                <div className="flex items-center gap-0.5 bg-slate-950/60 border border-white/10 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setPlatform("all")}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${platform === "all" ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+                  >
+                    Все <span className="text-slate-500">{rows.length}</span>
+                  </button>
+                  {platforms.map(([p, n]) => (
+                    <button
+                      key={p}
+                      onClick={() => setPlatform(p)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${platform === p ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"}`}
+                    >
+                      {p} <span className="text-slate-500">{n}</span>
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[11px] text-slate-500 ml-auto">
+                  суммарно в разговоре {fmtHoursMinutes(Math.round(totalTalk / 60))}
+                </span>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
+                      {th("at", "Время")}
+                      {th("direction", "Направление")}
+                      {th("platform", "Платформа")}
+                      {th("client", "Клиент")}
+                      {th("result", "Результат")}
+                      {th("duration", "Разговор", "right")}
+                      {th("wait", "Гудки", "right")}
+                      <th className="py-1.5 font-medium text-right">Сделка</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((r) => (
+                      <tr key={r.callId} className="border-b border-white/5 hover:bg-white/[0.02]">
+                        <td className="py-1.5 pr-3 text-slate-300 whitespace-nowrap tabular-nums">{fmtCallAt(r.at)}</td>
+                        <td className="py-1.5 pr-3 whitespace-nowrap">
+                          {r.direction === "out"
+                            ? <span className="text-slate-300">исходящий</span>
+                            : <span className="text-amber-400/90">входящий</span>}
+                        </td>
+                        <td className="py-1.5 pr-3 text-slate-400 whitespace-nowrap">{r.platform}</td>
+                        <td className="py-1.5 pr-3 text-slate-200 truncate max-w-[220px]">
+                          {r.clientName ?? <span className="text-slate-500">{r.phone ?? "—"}</span>}
+                          {r.clientName && r.phone && (
+                            <span className="text-slate-600 text-[11px] ml-1.5">{r.phone}</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 whitespace-nowrap">
+                          {r.answered
+                            ? <span className="text-emerald-400">принят</span>
+                            : <span className="text-slate-500">без ответа</span>}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums text-slate-300">
+                          {r.durationSec > 0 ? fmtSec(r.durationSec) : <span className="text-slate-600">—</span>}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right tabular-nums text-slate-400">
+                          {r.waitSec == null ? <span className="text-slate-600">—</span> : `${r.waitSec}с`}
+                        </td>
+                        <td className="py-1.5 text-right whitespace-nowrap">
+                          {r.leadId
+                            ? <a href={kommoLeadUrl(r.leadId)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 hover:underline">#{r.leadId} ↗</a>
+                            : <span className="text-slate-600">—</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {total > rows.length && (
+                <p className="text-[11px] text-amber-400/80 mt-3">
+                  Показаны первые {rows.length} звонков из {total} — сузь период, чтобы увидеть остальные.
+                </p>
+              )}
+              <p className="text-[11px] text-slate-600 mt-2">
+                Один звонок — одна строка (склейки телефонии схлопнуты). «Гудки» есть там, где их
+                отдаёт провайдер: у звонков из WhatsApp этой метрики нет. Заголовки колонок кликабельны —
+                сортировка. Лимит выдачи — {limit} строк.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
