@@ -1027,7 +1027,7 @@ export default function DashboardTab({
                 </div>
               )}
               {tileError && <p className="text-rose-400 text-sm py-2">{tileError}</p>}
-              {tileData && <TileDetailContent kind={tileDetail} d={tileData} />}
+              {tileData && <TileDetailContent kind={tileDetail} d={tileData} department={department} />}
             </div>
           </div>
         </div>,
@@ -1589,7 +1589,17 @@ function dialPctCls(pct: number): string {
   return pct >= 50 ? "text-emerald-400" : pct >= 30 ? "text-amber-400" : "text-rose-400";
 }
 
-function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetails }) {
+// department — временный гейт (2026-08-03): разбивку по каналам (WhatsApp) и
+// ожидание в разрезе платформ пока показываем ТОЛЬКО Госникам. Модалка общая, а
+// у Коммерсов сейчас ничего не меняем по решению владельца — вернуться к этому,
+// когда дойдём до их вкладки, и гейт снять (см. TODO P2).
+function TileDetailContent({ kind, d, department }: { kind: TileDetailKind; d: B2bTileDetails; department: string }) {
+  const isB2G = department === "b2g";
+  // У Коммерсов оставляем прежний вид: только две телефонии в карточках.
+  const platforms = isB2G ? d.platforms : d.platforms.filter((p) => p.platform === "CloudTalk" || p.platform === "CallGear");
+  const managerPlatforms = isB2G
+    ? d.managerPlatforms
+    : d.managerPlatforms.filter((m) => m.platform === "CloudTalk" || m.platform === "CallGear");
   if (kind === "hourly") {
     const maxOut = Math.max(1, ...d.hourly.map((h) => h.outgoing));
     return (
@@ -1655,23 +1665,26 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
           </div>
         </div>
         <div>
-          <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Менеджер × платформа</h4>
+          <h4 className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">
+            {isB2G ? "Менеджер × платформа" : "По менеджерам"}
+          </h4>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-white/10">
                   <th className="py-1.5 pr-3 font-medium">Менеджер</th>
-                  {waitPlatformNames.map((p) => (
+                  {isB2G && waitPlatformNames.map((p) => (
                     <th key={p} className="py-1.5 pr-3 font-medium text-right">{p}</th>
                   ))}
-                  <th className="py-1.5 font-medium text-right">Всего</th>
+                  <th className="py-1.5 font-medium text-right">{isB2G ? "Всего" : "Ср. ожидание"}</th>
+                  {!isB2G && <th className="py-1.5 font-medium text-right">Недозвонов</th>}
                 </tr>
               </thead>
               <tbody>
                 {waitMgrRows.map((r) => (
                   <tr key={r.manager} className="border-b border-white/5">
                     <td className="py-1.5 pr-3 text-slate-200">{r.manager}</td>
-                    {waitPlatformNames.map((p) => {
+                    {isB2G && waitPlatformNames.map((p) => {
                       const v = r.inner.get(p);
                       return (
                         <td key={p} className="py-1.5 pr-3 text-right tabular-nums text-slate-300 whitespace-nowrap">
@@ -1687,20 +1700,29 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
                         </td>
                       );
                     })}
-                    <td className="py-1.5 text-right tabular-nums whitespace-nowrap">
-                      <span className="font-bold text-slate-200">{fmtSec(r.avgWaitSec)}</span>
-                      <span className="text-slate-600"> · </span>
-                      <span className="text-slate-500">{r.unanswered}</span>
-                    </td>
+                    {isB2G ? (
+                      <td className="py-1.5 text-right tabular-nums whitespace-nowrap">
+                        <span className="font-bold text-slate-200">{fmtSec(r.avgWaitSec)}</span>
+                        <span className="text-slate-600"> · </span>
+                        <span className="text-slate-500">{r.unanswered}</span>
+                      </td>
+                    ) : (
+                      <>
+                        <td className="py-1.5 pr-3 text-right tabular-nums text-slate-300">{fmtSec(r.avgWaitSec)}</td>
+                        <td className="py-1.5 text-right tabular-nums text-slate-400">{r.unanswered}</td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <p className="text-[11px] text-slate-600 mt-2">
-            в ячейке: среднее ожидание · сколько недозвонов. «Всего» — среднее по обеим
-            платформам, взвешенное по числу недозвонов.
-          </p>
+          {isB2G && (
+            <p className="text-[11px] text-slate-600 mt-2">
+              в ячейке: среднее ожидание · сколько недозвонов. «Всего» — среднее по обеим
+              платформам, взвешенное по числу недозвонов.
+            </p>
+          )}
         </div>
         <p className="text-[11px] text-slate-600">
           Ожидание недозвона: CloudTalk — поле waiting_time; CallGear — вся длительность
@@ -1713,9 +1735,9 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
 
   // outgoing / answered — платформенные карточки + менеджер × платформа.
   const answeredMode = kind === "answered";
-  const platformNames = d.platforms.map((p) => p.platform);
+  const platformNames = platforms.map((p) => p.platform);
   const byMgr = new Map<string, Map<string, { outgoing: number; connected: number }>>();
-  for (const row of d.managerPlatforms) {
+  for (const row of managerPlatforms) {
     const inner = byMgr.get(row.manager) ?? new Map<string, { outgoing: number; connected: number }>();
     inner.set(row.platform, { outgoing: row.outgoing, connected: row.connected });
     byMgr.set(row.manager, inner);
@@ -1733,7 +1755,7 @@ function TileDetailContent({ kind, d }: { kind: TileDetailKind; d: B2bTileDetail
   return (
     <div className="flex flex-col gap-5">
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {d.platforms.map((p) => {
+        {platforms.map((p) => {
           const pct = p.outgoing > 0 ? Math.round((p.connected / p.outgoing) * 100) : 0;
           return (
             <div key={p.platform} className="rounded-xl border border-white/5 bg-slate-950/50 p-3">
