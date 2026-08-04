@@ -8,7 +8,7 @@
 // admin — весь отдел + фильтры по статусу/менеджерам.
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Loader2, MessageSquareWarning, Pencil, RefreshCw, X } from "lucide-react";
+import { Check, ChevronDown, Loader2, MessageSquareWarning, RefreshCw, X } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import { EvalDetailView, type EvalDetailBlock, type CallMeta } from "@/components/eval/EvalDetail";
@@ -243,94 +243,12 @@ function ScoreCell({ score, hasEval, onOpen }: {
   );
 }
 
-// Инлайн-редактор решения (только canModerate = admin/rop): статус + вердикт +
-// текст решения → PATCH /api/complaints/[id]. Дата решения и снимок «после»
-// проставляются на сервере при первом переходе в Рассмотрена/Отклонена.
-function ResolutionEditor({ row, onSaved, onCancel }: {
-  row: ComplaintRow;
-  onSaved: () => void;
-  onCancel: () => void;
-}) {
-  const [status, setStatus] = useState<string>(row.status);
-  const [verdict, setVerdict] = useState<string>(row.verdict ?? "");
-  const [decision, setDecision] = useState<string>(row.decision ?? "");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/complaints/${row.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status, verdict, decision }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
-      onSaved();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setSaving(false);
-    }
-  };
-
-  const selectCls = "bg-slate-800/70 border border-white/10 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50";
-  return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-[11px] text-slate-400">Статус:</label>
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className={selectCls}>
-          <option value="new">Новая</option>
-          <option value="in_review">В работе</option>
-          <option value="resolved">Рассмотрена</option>
-          <option value="rejected">Отклонена</option>
-          <option value="not_complaint">Не жалоба</option>
-        </select>
-        <label className="text-[11px] text-slate-400 ml-2">Вердикт:</label>
-        <select value={verdict} onChange={(e) => setVerdict(e.target.value)} className={selectCls}>
-          <option value="">—</option>
-          <option value="valid">Обоснована</option>
-          <option value="partial">Частично</option>
-          <option value="invalid">Не обоснована</option>
-        </select>
-      </div>
-      <textarea
-        value={decision}
-        onChange={(e) => setDecision(e.target.value)}
-        placeholder="Решение по жалобе («оценка пересмотрена: 42→67», «сделка изъята», …)"
-        rows={3}
-        className="w-full bg-slate-800/70 border border-white/10 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500/50 resize-y"
-      />
-      {error && <div className="text-[11px] text-rose-400">Не удалось сохранить: {error}</div>}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={save}
-          disabled={saving}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500/20 border border-blue-500/40 px-3 py-1.5 text-xs font-semibold text-blue-300 hover:bg-blue-500/30 disabled:opacity-50"
-        >
-          {saving && <Loader2 className="w-3 h-3 animate-spin" />}
-          Сохранить
-        </button>
-        <button
-          onClick={onCancel}
-          disabled={saving}
-          className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-400 hover:border-white/20 disabled:opacity-50"
-        >
-          Отмена
-        </button>
-        <span className="text-[10px] text-slate-500 ml-auto">
-          Дата решения и оценка «после» зафиксируются автоматически при первом переходе в Рассмотрена/Отклонена
-        </span>
-      </div>
-    </div>
-  );
-}
-
-export default function ComplaintsTab({ department, isAdmin, canModerate }: {
+// Ручного редактирования решений в UI нет намеренно: жалобы разбирает
+// Claude-адъюдикатор в OKK-репо и постит итоги batch'ем в
+// POST /api/complaints/resolve — вкладка только отображает.
+export default function ComplaintsTab({ department, isAdmin }: {
   department: "b2g" | "b2b";
   isAdmin: boolean;
-  canModerate: boolean;
 }) {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -339,7 +257,6 @@ export default function ComplaintsTab({ department, isAdmin, canModerate }: {
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ id: string; phase: "before" | "after"; title: string } | null>(null);
 
   const load = useCallback(async (r: DateRange, status: string | null, mgrs: string[]) => {
@@ -505,18 +422,7 @@ export default function ComplaintsTab({ department, isAdmin, canModerate }: {
                       />
                     </td>
                     <td className="px-3 py-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-semibold whitespace-nowrap ${st.cls}`}>{st.label}</span>
-                        {canModerate && (
-                          <button
-                            onClick={() => setEditingId(editingId === row.id ? null : row.id)}
-                            className="p-1 rounded text-slate-500 hover:text-blue-300 hover:bg-white/5"
-                            title="Изменить статус / решение"
-                          >
-                            <Pencil className="w-3 h-3" />
-                          </button>
-                        )}
-                      </div>
+                      <span className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-semibold whitespace-nowrap ${st.cls}`}>{st.label}</span>
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-400">
                       {row.resolvedAt ? fmtDateTime(row.resolvedAt) : "—"}
@@ -538,20 +444,6 @@ export default function ComplaintsTab({ department, isAdmin, canModerate }: {
                       />
                     </td>
                   </tr>
-                  {editingId === row.id && (
-                    <tr className="border-b border-white/5">
-                      <td colSpan={8} className="px-3 py-2">
-                        <ResolutionEditor
-                          row={row}
-                          onSaved={() => {
-                            setEditingId(null);
-                            load(range, statusFilter, managerIds);
-                          }}
-                          onCancel={() => setEditingId(null)}
-                        />
-                      </td>
-                    </tr>
-                  )}
                   </Fragment>
                 );
               })
