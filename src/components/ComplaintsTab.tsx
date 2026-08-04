@@ -13,6 +13,7 @@ import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import { EvalDetailView, type EvalDetailBlock, type CallMeta } from "@/components/eval/EvalDetail";
 import { berlinCivilDate, fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
+import { getLines } from "@/lib/config/tenant";
 
 interface ComplaintRow {
   id: string;
@@ -42,14 +43,21 @@ interface ApiResponse {
   allManagers: { id: string; name: string; line: string | null }[];
 }
 
-// Направления Госников = линии master_managers.line (группы линий из
-// src/lib/config/tenant.ts: 2a/2b у менеджеров коллапсированы в «2»).
-const B2G_LINE_CHIPS: Array<{ key: string | null; label: string }> = [
-  { key: null, label: "Все линии" },
-  { key: "1", label: "1 — Квалификатор" },
-  { key: "2", label: "2 — Бератеры" },
-  { key: "3", label: "3 — Доведение" },
-];
+// Направления Госников — тогл-пилюли линий, как во вкладке ОКК (page.tsx):
+// опции из tenant-конфига, дедуп по group (2a/2b у менеджеров коллапсированы
+// в «2» — master_managers.line хранит группу).
+function lineToggleOptions(department: "b2g" | "b2b") {
+  const seen = new Set<string>();
+  const groups = getLines(department).filter((l) => {
+    if (seen.has(l.group)) return false;
+    seen.add(l.group);
+    return true;
+  });
+  return [
+    { id: "all", label: "Все" },
+    ...groups.map((l) => ({ id: l.group, label: l.shortLabel ?? l.label })),
+  ];
+}
 
 // Замороженный снимок (FrozenEvalPayload из src/lib/eval/snapshot.ts) —
 // ровно props EvalDetailView.
@@ -398,7 +406,7 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<DateRange>(defaultRange);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
-  const [lineFilter, setLineFilter] = useState<string | null>(null); // только b2g
+  const [lineFilter, setLineFilter] = useState<string>("all"); // только b2g
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ id: string; phase: "before" | "after"; title: string } | null>(null);
@@ -435,15 +443,13 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
   };
 
   // Фильтр направлений — клиентский (реестр мал): линия менеджера-субъекта.
+  const lineActive = department === "b2g" && lineFilter !== "all";
   const allRows = data?.complaints ?? [];
-  const rows =
-    department === "b2g" && lineFilter
-      ? allRows.filter((r) => r.managerLine === lineFilter)
-      : allRows;
+  const rows = lineActive ? allRows.filter((r) => r.managerLine === lineFilter) : allRows;
 
   // Дропдаун менеджеров сужается выбранной линией.
   const managerOptions = (data?.allManagers ?? []).filter(
-    (m) => !(department === "b2g" && lineFilter) || m.line === lineFilter,
+    (m) => !lineActive || m.line === lineFilter,
   );
 
   const statusChips: Array<{ key: string | null; label: string }> = [
@@ -478,6 +484,27 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
           maxDate={todayBerlinDate()}
         />
 
+        {/* Тогл линий (b2g) — тот же вид, что во вкладке ОКК: опции из
+            tenant-конфига, активная — синяя заливка. */}
+        {department === "b2g" && (
+          <div className="flex gap-1 ml-2">
+            {lineToggleOptions(department).map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  setLineFilter(opt.id);
+                  // Выбранные менеджеры могут не входить в новую линию —
+                  // сбрасываем, чтобы фильтры не противоречили друг другу.
+                  setManagerIds([]);
+                }}
+                className={`px-2 py-1 text-[10px] rounded-lg transition-all ${lineFilter === opt.id ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {isAdmin && (
           <ManagerMultiSelect
             managers={managerOptions}
@@ -496,7 +523,7 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
         </button>
       </div>
 
-      {/* Статус-чипы + (b2g) чипы направлений */}
+      {/* Статус-чипы */}
       <div className="flex flex-wrap items-center gap-1.5">
         {statusChips.map((c) => (
           <button
@@ -511,29 +538,6 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
             {c.label}
           </button>
         ))}
-        {department === "b2g" && (
-          <>
-            <span className="mx-1.5 h-4 w-px bg-white/10" />
-            {B2G_LINE_CHIPS.map((c) => (
-              <button
-                key={c.key ?? "all-lines"}
-                onClick={() => {
-                  setLineFilter(c.key);
-                  // Выбранные менеджеры могут не входить в новую линию —
-                  // сбрасываем, чтобы фильтры не противоречили друг другу.
-                  setManagerIds([]);
-                }}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
-                  lineFilter === c.key
-                    ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
-                    : "bg-slate-900/40 text-slate-400 border-white/10 hover:border-white/20"
-                }`}
-              >
-                {c.label}
-              </button>
-            ))}
-          </>
-        )}
         <span className="ml-auto text-[11px] text-slate-500">{rows.length} жалоб</span>
       </div>
 
