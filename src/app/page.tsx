@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import {
   LayoutDashboard, Phone, Bot, Play, Pause, FileText, Activity, Users,
   X, Menu, Search, Calendar, Filter, ChevronRight, ChevronDown, BarChart3, ClipboardList, Loader2, ListChecks, BookText, Database, Bug,
-  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase, Tags, Timer,
+  CalendarClock, Workflow, Package, Megaphone, Mic, HeartPulse, ShieldCheck, Briefcase, Tags, Timer, MessageSquareWarning,
 } from "lucide-react";
 import Image from "next/image";
 // recharts moved to DashboardTab component
@@ -26,6 +26,7 @@ import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
 import BroadcastTab from "@/components/BroadcastTab";
 import EnpsTab from "@/components/EnpsTab";
+import ComplaintsTab from "@/components/ComplaintsTab";
 import ReglamentTab from "@/components/ReglamentTab";
 import DocflowTab from "@/components/DocflowTab";
 import { getLines, DEPARTMENTS, type DepartmentId } from "@/lib/config/tenant";
@@ -119,7 +120,7 @@ interface SessionUser {
   kommoUserId: number | null;
 }
 
-type TabId = "dashboard" | "daily" | "category_dynamics" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps" | "reglament" | "docflow";
+type TabId = "dashboard" | "daily" | "category_dynamics" | "analytics" | "tracking" | "real_calls" | "ai_calls" | "complaints" | "managers" | "criteria" | "scripts" | "call_analysis" | "looker" | "termins" | "audit" | "funnel" | "broadcast" | "artifacts" | "enps" | "reglament" | "docflow";
 // Единый источник правды по вкладкам сайдбара. Порядок = порядок пунктов меню.
 // "audit" здесь НЕТ намеренно: вкладка убрана из навигации (не актуальна), но её
 // компонент/render-блок/API сохранены для возможного переиспользования (§6.2).
@@ -170,6 +171,10 @@ const NAV_ITEMS: NavItem[] = [
   // Только Госники: у Коммерсов ролевки разбираются внутри «Оценки критериев»
   // (toggle OKK/Ролевки в analytics), отдельная вкладка не нужна — убрана 2026-06-19.
   { id: "ai_calls", icon: Bot, label: "AI Ролевки", adminOnly: false, departments: ["b2g"] },
+  // Реестр жалоб на оценки (агрегат «Отправить жалобу» + менеджерских
+  // баг-репортов). Оба отдела; менеджеры видят только свои (гейт в
+  // /api/complaints). Подробности: docs/DASHBOARD-ZHALOBY.md.
+  { id: "complaints", icon: MessageSquareWarning, label: "Жалобы", adminOnly: false },
   { id: "managers", icon: Users, label: "Менеджеры", adminOnly: true },
   { id: "call_analysis", icon: Search, label: "Транскрибация", adminOnly: true },
   // У Коммерсов Критерии/Скрипты — не отдельные вкладки, а переключатель внутри
@@ -1368,6 +1373,10 @@ export default function Dashboard() {
 
         {activeTab === "enps" && tabAllowedInDept("enps", activeDepartment) && (
           <EnpsTab department={activeDepartment} />
+        )}
+
+        {activeTab === "complaints" && (
+          <ComplaintsTab department={activeDepartment} isAdmin={isAdmin} />
         )}
 
         {activeTab === "reglament" && tabAllowedInDept("reglament", activeDepartment) && (

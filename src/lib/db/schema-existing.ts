@@ -181,6 +181,38 @@ export const bugReports = pgTable("bug_reports", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
+// Реестр жалоб менеджеров на оценки (вкладка «Жалобы», обе линии).
+// Агрегат: evaluation_error_reports (daily-БД) + bug_reports (менеджерские).
+// Снимки оценок «до/после» заморожены в jsonb (FrozenEvalPayload из
+// src/lib/eval/snapshot.ts) — переоценка/удаление звонка их не меняет.
+// Миграция: drizzle/d1/0004_complaints.sql.
+export const complaints = pgTable("complaints", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  source: text("source").notNull(),                   // 'error_report' | 'bug_report'
+  sourceId: text("source_id").notNull(),              // id строки в исходной таблице (текстом)
+  department: text("department").notNull(),           // 'b2g' | 'b2b'
+  managerName: text("manager_name"),
+  managerTelegram: text("manager_telegram"),
+  masterManagerId: uuid("master_manager_id"),         // resolved master_managers.id, NULL = не смэтчили
+  callId: uuid("call_id"),                            // NULL у bug_report
+  callSource: text("call_source"),                    // 'okk' | 'ai'
+  text: text("text").notNull(),
+  filedAt: timestamp("filed_at", { withTimezone: true }).notNull(), // created_at исходной строки
+  scoreBefore: integer("score_before"),               // балл на момент подачи
+  evalBefore: jsonb("eval_before").$type<Record<string, unknown>>(), // FrozenEvalPayload
+  status: text("status").notNull().default("new"),    // 'new' | 'in_review' | 'resolved' | 'rejected' | 'not_complaint'
+  verdict: text("verdict"),                           // 'valid' | 'partial' | 'invalid'
+  decision: text("decision"),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: text("resolved_by"),
+  scoreAfter: integer("score_after"),
+  evalAfter: jsonb("eval_after").$type<Record<string, unknown>>(), // FrozenEvalPayload, замораживается один раз
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("complaints_source_uq").on(t.source, t.sourceId), // идемпотентный ingest
+]);
+
 export const dailyPlans = pgTable("daily_plans", {
   id: serial("id").primaryKey(),
   department: text("department").notNull(),          // 'b2g' | 'b2b'
