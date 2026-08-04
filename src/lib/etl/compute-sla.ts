@@ -17,7 +17,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { db } from "@/lib/db";
 import { masterManagers, managerSchedule } from "@/lib/db/schema-existing";
 import { leadsCohort, sla } from "@/lib/db/schema-analytics";
-import { and, gte, lte, sql, inArray } from "drizzle-orm";
+import { and, eq, gte, lte, sql, inArray } from "drizzle-orm";
 import {
   businessHoursSeconds,
   secondsFromShiftStart,
@@ -28,6 +28,13 @@ import {
 import { withDbRetry } from "@/lib/db/with-retry";
 import { NAME_ALIASES } from "@/lib/daily/name-aliases";
 import { B2B_PIPELINES, B2G_PIPELINES } from "@/lib/kommo/pipeline-config";
+import { trackingDb } from "@/lib/db/tracking-db";
+import { cloudtalkStatusIntervals } from "@/lib/db/schema-tracking";
+import {
+  scheduleBusinessWindows,
+  workingSecondsMinusBusy,
+  type BusyInterval,
+} from "./business-hours";
 
 // ─── «Свой» SLA (Бух Комм / B2B) — спека Рузанны ─────────────
 //
@@ -98,6 +105,14 @@ const B2G_SLA_PIPELINE = "Бух Гос";
 // которой плитка отдела и отбирает строки.
 const B2B_PIPELINE_IDS = new Set<number>(Object.values(B2B_PIPELINES));
 const B2G_PIPELINE_IDS = new Set<number>(Object.values(B2G_PIPELINES));
+// Из рабочего времени SLA Госников вычитается ЛИЧНАЯ занятость того, кто сделал
+// первое касание (решение РОПа 2026-08-04, вариант «А»):
+//   • отмеченные им статусы «Обед» / «Встреча» / «Обучение» — те же, что рисует
+//     дорожка в «Активности»;
+//   • разговоры с ДРУГИМИ клиентами — пока он на линии, взять этот лид он не мог.
+// «Перерыв» и «Занят» НЕ вычитаются: в «Активности» они считаются простоем, и
+// разъезжаться между вкладками нельзя.
+const B2G_SLA_DEDUCTED_IDLE = new Set(["Обед", "Встреча", "Обучение"]);
 const B2G_SLA_EXCLUDED_ENUM_IDS = new Set([
   753840, // Дубль бух
   753842, // Дубль мед
@@ -344,6 +359,85 @@ export async function computeSla(
     if (row.at) firstCallAtByLead.set(id, new Date(row.at));
   }
 
+  // ── Личная занятость менеджеров для «своего» SLA Госников ──────────────
+  // Окно грузим по фактическому разбросу якорей: расчёт вызывается и по
+  // диапазону дат, и по списку id (инкрементальный тик), поэтому границы
+  // берём из самих данных, а не из аргументов функции.
+  const busyByManager = new Map<string, BusyInterval[]>();
+  {
+    const anchors = [...b2gAnchorByLead.values()].map((d) => d.getTime());
+    if (anchors.length > 0) {
+      const windowFrom = new Date(Math.min(...anchors));
+      const windowTo = new Date(); // конец окна занятости = сейчас
+      const b2gManagerIds = new Set(managerRows.map((m) => m.id));
+
+      // 1) Статусы «Обед» / «Встреча» / «Обучение» из ленты присутствия
+      //    CloudTalk (её же рисует «Активность»). Конец открытого интервала —
+      //    last_seen_at, а не «сейчас»: за пределами подтверждённого поллером
+      //    времени статуса мы не знаем и вычитать не имеем права.
+      try {
+        const presence = await trackingDb
+          .select({
+            managerId: cloudtalkStatusIntervals.managerId,
+            idleName: cloudtalkStatusIntervals.idleName,
+            startedAt: cloudtalkStatusIntervals.startedAt,
+            endedAt: cloudtalkStatusIntervals.endedAt,
+            lastSeenAt: cloudtalkStatusIntervals.lastSeenAt,
+          })
+          .from(cloudtalkStatusIntervals)
+          .where(
+            and(
+              eq(cloudtalkStatusIntervals.department, "b2g"),
+              eq(cloudtalkStatusIntervals.status, "idle"),
+              gte(cloudtalkStatusIntervals.startedAt, windowFrom),
+              lte(cloudtalkStatusIntervals.startedAt, windowTo),
+            ),
+          );
+        for (const p of presence) {
+          if (!p.idleName || !B2G_SLA_DEDUCTED_IDLE.has(p.idleName)) continue;
+          const endAt = p.endedAt ?? p.lastSeenAt;
+          if (!p.startedAt || !endAt) continue;
+          const list = busyByManager.get(p.managerId) ?? [];
+          list.push({ startMs: p.startedAt.getTime(), endMs: endAt.getTime() });
+          busyByManager.set(p.managerId, list);
+        }
+      } catch (e) {
+        // Tracking-БД недоступна — SLA считается без вычета занятости, а не падает.
+        console.error("[compute-sla] presence load failed (SLA без вычета статусов):", e);
+      }
+
+      // 2) Разговоры с другими клиентами: занят от начала набора до конца
+      //    разговора (гудки + разговор), как «в телефоне» в «Активности».
+      const callsRes = await analyticsDb.execute<{
+        manager: string | null;
+        started: Date | null;
+        busy_sec: string | number | null;
+      }>(sql`
+        SELECT DISTINCT ON (communication_id)
+          manager,
+          created_at AT TIME ZONE 'UTC' AS started,
+          (COALESCE(duration, 0) + COALESCE(wait_seconds, 0)) AS busy_sec
+        FROM analytics.communications
+        WHERE communication_type LIKE 'call%'
+          AND manager IS NOT NULL AND manager <> ''
+          AND created_at >= ${windowFrom}
+          AND created_at <= ${windowTo}
+        ORDER BY communication_id, lead_id NULLS LAST
+      `);
+      for (const row of callsRes.rows) {
+        if (!row.manager || !row.started) continue;
+        const id = managerIdByNameAliased.get(row.manager);
+        if (!id || !b2gManagerIds.has(id)) continue;
+        const startMs = new Date(row.started).getTime();
+        const sec = Number(row.busy_sec ?? 0);
+        if (sec <= 0) continue;
+        const list = busyByManager.get(id) ?? [];
+        list.push({ startMs, endMs: startMs + sec * 1000 });
+        busyByManager.set(id, list);
+      }
+    }
+  }
+
   // TLT (Time between Latest Touches): per-lead BH-difference between
   // the two most recent call_out events made by the lead's responsible
   // manager. NULL when the manager has fewer than 2 calls. Computed in
@@ -572,9 +666,17 @@ export async function computeSla(
       // Рабочее окно — по графику того, кто сделал первое касание. Пока звонка
       // нет (лид открыт и тикает), автора не существует — считаем по общему
       // запасному правилу Пн–Сб 09–18, как и для дней вне файла.
-      const b2gDayInterval = dayIntervalFor(
-        firstCallManager ? managerIdByNameAliased.get(firstCallManager) ?? null : null,
-      );
+      const b2gManagerId = firstCallManager
+        ? managerIdByNameAliased.get(firstCallManager) ?? null
+        : null;
+      const b2gDayInterval = dayIntervalFor(b2gManagerId);
+      // Личная занятость автора первого касания: обед/встреча/обучение + его
+      // разговоры с другими клиентами. Вычитается ТОЛЬКО пересечение с рабочим
+      // окном — обед за пределами смены не должен срезать время дважды.
+      const b2gBusy = b2gManagerId ? busyByManager.get(b2gManagerId) ?? [] : [];
+      /** Рабочие секунды между двумя моментами за вычетом занятости. */
+      const b2gWorkSeconds = (from: Date, to: Date): number =>
+        workingSecondsMinusBusy(scheduleBusinessWindows(from, to, b2gDayInterval), b2gBusy);
       if (excluded) {
         slaOwnStatus = "excluded";                  // значение остаётся NULL
       } else if (b2gFirstCallAt) {
@@ -582,7 +684,7 @@ export async function computeSla(
           slaOwnSeconds = 0;                        // звонок раньше/в момент входа
           slaOwnStatus = "instant";
         } else {
-          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, b2gFirstCallAt, b2gDayInterval);
+          slaOwnSeconds = b2gWorkSeconds(b2gAnchor, b2gFirstCallAt);
           slaOwnStatus = "measured";
         }
       } else {
@@ -590,7 +692,7 @@ export async function computeSla(
         if (isClosed) {
           slaOwnStatus = "closed_no_call";          // закрыт без звонка — не считается
         } else {
-          slaOwnSeconds = scheduleBusinessSeconds(b2gAnchor, nowUtc, b2gDayInterval);
+          slaOwnSeconds = b2gWorkSeconds(b2gAnchor, nowUtc);
           slaOwnStatus = "pending";
         }
       }

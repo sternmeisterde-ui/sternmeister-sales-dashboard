@@ -136,6 +136,96 @@ export function scheduleBusinessSeconds(
   return total;
 }
 
+
+/** Полуинтервал занятости в миллисекундах UTC. */
+export interface BusyInterval {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Рабочие ОКНА (а не сумма) между двумя моментами по тому же дневному графику,
+ * что и scheduleBusinessSeconds. Нужны там, где из рабочего времени надо ещё
+ * что-то вычесть — вычитать можно только пересечение с рабочим окном, иначе
+ * обед, попавший за пределы смены, срезал бы время дважды.
+ */
+export function scheduleBusinessWindows(
+  startUtc: Date,
+  endUtc: Date,
+  dayInterval: (ymd: string, isSunday: boolean) => DayWorkInterval | null,
+): BusyInterval[] {
+  if (endUtc <= startUtc) return [];
+
+  const out: BusyInterval[] = [];
+  const startYMD = berlinYMD(startUtc);
+  const endYMD = berlinYMD(endUtc);
+
+  let cur = new Date(startUtc);
+  let lastDay = "";
+  let guard = 1500;
+
+  while (guard-- > 0) {
+    const dayYMD = berlinYMD(cur);
+    if (dayYMD > endYMD) break;
+
+    if (dayYMD !== lastDay) {
+      lastDay = dayYMD;
+      const interval = dayInterval(dayYMD, !berlinIsWorkday(cur));
+      if (interval) {
+        const lo = dayYMD === startYMD ? berlinSecondOfDay(startUtc) : 0;
+        const hi = dayYMD === endYMD ? berlinSecondOfDay(endUtc) : 86400;
+        const s = Math.max(lo, interval.startSec);
+        const e = Math.min(hi, interval.endSec);
+        if (s < e) {
+          // Полночь этого берлинского дня в UTC = момент дня минус его секунды.
+          const midnightMs = cur.getTime() - berlinSecondOfDay(cur) * 1000;
+          out.push({ startMs: midnightMs + s * 1000, endMs: midnightMs + e * 1000 });
+        }
+      }
+    }
+
+    cur = new Date(cur.getTime() + 24 * 3600 * 1000);
+  }
+
+  return out;
+}
+
+/** Слить пересекающиеся/смежные интервалы — иначе двойной вычет. */
+export function mergeIntervals(intervals: BusyInterval[]): BusyInterval[] {
+  if (intervals.length === 0) return [];
+  const sorted = [...intervals].sort((a, b) => a.startMs - b.startMs);
+  const out: BusyInterval[] = [{ ...sorted[0] }];
+  for (const iv of sorted.slice(1)) {
+    const last = out[out.length - 1];
+    if (iv.startMs <= last.endMs) last.endMs = Math.max(last.endMs, iv.endMs);
+    else out.push({ ...iv });
+  }
+  return out;
+}
+
+/**
+ * Секунды рабочих окон за вычетом занятости (обед / встреча / обучение и
+ * разговоры с другими клиентами). Оба набора приводятся к непересекающимся
+ * интервалам, затем считается разность.
+ */
+export function workingSecondsMinusBusy(
+  windows: BusyInterval[],
+  busy: BusyInterval[],
+): number {
+  const merged = mergeIntervals(busy);
+  let total = 0;
+  for (const w of windows) {
+    let free = w.endMs - w.startMs;
+    for (const b of merged) {
+      if (b.endMs <= w.startMs) continue;
+      if (b.startMs >= w.endMs) break;
+      free -= Math.min(b.endMs, w.endMs) - Math.max(b.startMs, w.startMs);
+    }
+    total += Math.max(0, free);
+  }
+  return Math.floor(total / 1000);
+}
+
 /**
  * Returns the UTC timestamp of `startHour`:00 Berlin on the Berlin calendar date of `d`.
  * Handles DST automatically (CEST=UTC+2, CET=UTC+1).
