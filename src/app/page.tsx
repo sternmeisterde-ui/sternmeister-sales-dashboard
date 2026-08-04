@@ -1376,7 +1376,13 @@ export default function Dashboard() {
         )}
 
         {activeTab === "complaints" && (
-          <ComplaintsTab department={activeDepartment} isAdmin={isAdmin} />
+          <ComplaintsTab
+            department={activeDepartment}
+            isAdmin={isAdmin}
+            // Как MODERATOR_ROLES в api/complaints/[id] и analytics/exclude:
+            // менять статус/решение могут только админ и РОП (teamlead — нет).
+            canModerate={session?.masterRole === "admin" || session?.masterRole === "rop"}
+          />
         )}
 
         {activeTab === "reglament" && tabAllowedInDept("reglament", activeDepartment) && (

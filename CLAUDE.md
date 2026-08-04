@@ -128,6 +128,7 @@ Lock-таблица в Analytics DB. Имена: `cron` (CloudTalk) и `callgear
 | `funnel` | Воронка | admin | `FunnelTab.tsx` | `/api/funnel/cohorts`, `/api/funnel/cohorts/[id]/[week]/leads`, `/api/funnel/conversions/[id]/target-level`, `/api/funnel/filter-options` | `leads_cohort`, `lead_status_changes`, `lead_close_reason_changes`, `lead_contact_links`, `funnel_target_levels` |
 | `real_calls` | ОКК | manager+admin | inline `page.tsx` | `/api/okk/calls` | D2/R2 `calls`+`evaluations` (orphan-фильтр) |
 | `ai_calls` | AI Ролевки | manager+admin | inline `page.tsx` | `/api/calls` | D1/R1 `d1_calls` / `r1_calls` |
+| `complaints` | Жалобы | manager(свои)+admin | `ComplaintsTab.tsx` | `/api/complaints` | D1 `complaints` (агрегат `evaluation_error_reports` daily-БД + `bug_reports`); снимки оценок заморожены в jsonb. Решения — admin/rop в UI или batch `/api/complaints/resolve` (Bearer) от OKK-адъюдикатора. См. `docs/DASHBOARD-ZHALOBY.md` |
 | `managers` | Менеджеры | admin | `ManagersTab.tsx` | `/api/managers` | `master_managers` + sync targets D2/R2/D1/R1 |
 | `call_analysis` | Анализ | admin | `AnalysisTab.tsx` | `/api/analysis` | `call_analyses`, `call_analysis_files` + xAI/ElevenLabs |
 | `criteria` | Критерии | session(R, свой отдел), admin | `CriteriaTab.tsx` | `/api/criteria` | **D2 OKK БД `criteria_configs`** (jsonb). FS `src/criteria/*.json` — image backup для OKK FS fallback. Read-only: POST → 405, критерии редактируются в OKK-репо и синкаются в D2 на деплое. OKK reads same table via `loadCriteriaConfigCached`. У Коммерсов рендерится внутри вкладки «Артефакты» (см. `artifacts` в NAV_ITEMS), открытой менеджерам b2b на чтение. |
@@ -200,6 +201,7 @@ ELEVENLABS_API_KEY=
 
 # Cron + MCP
 CRON_SECRET=                 # for /api/analytics/sync/*
+COMPLAINTS_API_TOKEN=        # Bearer для POST /api/complaints/resolve (OKK-адъюдикатор); не задан = endpoint выключен
 MCP_BEARER_TOKENS=           # JSON-массив для MCP-server
 MCP_D1_RO_URL=               # read-only Postgres role для MCP
 # и аналогичные _RO_URL для R1/D2/R2/Analytics

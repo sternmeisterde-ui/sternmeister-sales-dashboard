@@ -19,6 +19,7 @@ Last updated: 2026-04-30
 | `looker` | Looker | admin | `LookerTab.tsx` | [`DASHBOARD-LOOKER.md`](./DASHBOARD-LOOKER.md) |
 | `real_calls` | ОКК | manager + admin | inline в `page.tsx` | [`DASHBOARD-OKK.md`](./DASHBOARD-OKK.md) |
 | `ai_calls` | AI Ролевки | manager + admin | inline в `page.tsx` | [`DASHBOARD-AI-ROLEVKI.md`](./DASHBOARD-AI-ROLEVKI.md) |
+| `complaints` | Жалобы | manager (свои) + admin | `ComplaintsTab.tsx` | [`DASHBOARD-ZHALOBY.md`](./DASHBOARD-ZHALOBY.md) |
 | `managers` | Менеджеры | admin | `ManagersTab.tsx` | [`DASHBOARD-MANAGERS.md`](./DASHBOARD-MANAGERS.md) |
 | `call_analysis` | Анализ | admin | `AnalysisTab.tsx` | [`DASHBOARD-ANALIZ.md`](./DASHBOARD-ANALIZ.md) |
 | `criteria` | Критерии | admin | `CriteriaTab.tsx` | [`DASHBOARD-KRITERII.md`](./DASHBOARD-KRITERII.md) |
