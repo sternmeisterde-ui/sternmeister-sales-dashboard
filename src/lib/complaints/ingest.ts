@@ -16,10 +16,12 @@
 // регистрации: переоценка в ОКК перезаписывает строку evaluations, ждать
 // нельзя. Ошибка снимка не блокирует вставку жалобы.
 
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { complaints, bugReports, masterManagers } from "@/lib/db/schema-existing";
 import { getDailyDb } from "@/lib/db/daily-db";
+import { getOkkDbForDepartment } from "@/lib/db/okk";
+import { okkCalls, okkEvaluations } from "@/lib/db/schema-okk";
 import { snapshotEval, type Department } from "@/lib/eval/snapshot";
 
 // Реестр ведём с 1 августа 2026 (решение владельца: глубокий бэкфилл не нужен,
@@ -141,6 +143,27 @@ export async function ingestErrorReport(row: ErrorReportRow): Promise<void> {
     .onConflictDoNothing({ target: [complaints.source, complaints.sourceId] });
 }
 
+// В bug_report-жалобах менеджеры обычно дают ссылку на сделку Kommo
+// («…kommo.com/leads/detail/22527766 короткий звонок не должен…») — по ней
+// находим самый свежеоценённый звонок сделки в OKK-базе отдела: это даёт
+// оценку «до» и детализацию для жалоб второго источника.
+const KOMMO_LEAD_URL_RE = /kommo\.com\/leads\/detail\/(\d+)/i;
+
+async function findEvaluatedCallByLead(
+  department: Department,
+  kommoLeadId: string,
+): Promise<string | null> {
+  const okkDb = getOkkDbForDepartment(department);
+  const rows = await okkDb
+    .select({ id: okkCalls.id })
+    .from(okkCalls)
+    .innerJoin(okkEvaluations, eq(okkCalls.id, okkEvaluations.callId))
+    .where(and(eq(okkCalls.kommoLeadId, kommoLeadId), isNotNull(okkEvaluations.totalScore)))
+    .orderBy(desc(okkEvaluations.createdAt))
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
 export interface BugReportRow {
   id: string;
   reporterName: string;
@@ -161,6 +184,28 @@ export async function ingestBugReport(row: BugReportRow): Promise<boolean> {
   const managers = await getManagersForDept(department);
   const master = matchMasterManager(managers, { name: row.reporterName });
 
+  // Привязка к звонку по ссылке на сделку из текста + снимок «до» —
+  // best-effort: жалоба без ссылки/без оценённого звонка всё равно попадает
+  // в реестр, просто без баллов.
+  let callId: string | null = null;
+  let evalBefore: Record<string, unknown> | null = null;
+  let scoreBefore: number | null = null;
+  const leadMatch = row.description.match(KOMMO_LEAD_URL_RE);
+  if (leadMatch) {
+    try {
+      callId = await findEvaluatedCallByLead(department, leadMatch[1]);
+      if (callId) {
+        const snap = await snapshotEval({ callSource: "okk", callId, department });
+        if (snap) {
+          evalBefore = snap.payload as unknown as Record<string, unknown>;
+          scoreBefore = snap.score;
+        }
+      }
+    } catch (e) {
+      console.error(`[complaints] lead link failed for bug_report ${row.id}:`, e);
+    }
+  }
+
   await db
     .insert(complaints)
     .values({
@@ -170,12 +215,12 @@ export async function ingestBugReport(row: BugReportRow): Promise<boolean> {
       managerName: row.reporterName,
       managerTelegram: normTg(master?.telegramUsername),
       masterManagerId: master?.id ?? null,
-      callId: null,
-      callSource: null,
+      callId,
+      callSource: callId ? "okk" : null,
       text: row.description,
       filedAt: row.createdAt ? new Date(row.createdAt) : new Date(),
-      scoreBefore: null,
-      evalBefore: null,
+      scoreBefore,
+      evalBefore,
     })
     .onConflictDoNothing({ target: [complaints.source, complaints.sourceId] });
   return true;
@@ -250,6 +295,43 @@ export async function syncComplaints(): Promise<void> {
     }
   } catch (e) {
     console.error("[complaints] bug_report catch-up failed:", e);
+  }
+
+  // 3) Дострой привязки: bug_report-жалобы без call_id, в тексте которых есть
+  //    ссылка на сделку (строка попала в реестр до появления линковки, либо
+  //    звонок был оценён позже подачи). Идемпотентно: успешная линковка
+  //    выводит строку из выборки; без ссылки/без оценённого звонка строка
+  //    перепроверяется в следующих прогонах (их мало, запросы дешёвые).
+  try {
+    const unlinked = await db
+      .select({ id: complaints.id, department: complaints.department, text: complaints.text })
+      .from(complaints)
+      .where(and(eq(complaints.source, "bug_report"), isNull(complaints.callId)))
+      .limit(20);
+    for (const row of unlinked) {
+      const m = row.text.match(KOMMO_LEAD_URL_RE);
+      if (!m) continue;
+      const department = row.department as Department;
+      const callId = await findEvaluatedCallByLead(department, m[1]);
+      if (!callId) continue;
+      let evalBefore: Record<string, unknown> | null = null;
+      let scoreBefore: number | null = null;
+      try {
+        const snap = await snapshotEval({ callSource: "okk", callId, department });
+        if (snap) {
+          evalBefore = snap.payload as unknown as Record<string, unknown>;
+          scoreBefore = snap.score;
+        }
+      } catch (e) {
+        console.error(`[complaints] relink snapshot failed for ${row.id}:`, e);
+      }
+      await db
+        .update(complaints)
+        .set({ callId, callSource: "okk", scoreBefore, evalBefore, updatedAt: new Date() })
+        .where(and(eq(complaints.id, row.id), isNull(complaints.callId)));
+    }
+  } catch (e) {
+    console.error("[complaints] bug_report relink failed:", e);
   }
 }
 

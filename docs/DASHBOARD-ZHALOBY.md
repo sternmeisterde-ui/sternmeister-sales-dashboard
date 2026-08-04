@@ -9,9 +9,10 @@ Last updated: 2026-08-05
 
 Доступ: `adminOnly: false` — вкладку видят менеджеры обоих отделов, но
 **менеджер видит только свои жалобы** (server-гейт в `/api/complaints`);
-admin — весь отдел + фильтры по статусу/менеджерам/датам. Менять
-статус/решение могут только admin и РОП (`masterRole`), как в модерации
-analytics/exclude.
+admin — весь отдел + фильтры по статусу/менеджерам/датам. **Вкладка
+read-only для всех**: ручного редактирования решений в UI нет намеренно —
+жалобы разбирает Claude-адъюдикатор в OKK-репо и постит итоги batch'ем в
+`POST /api/complaints/resolve` (единственный канал записи решений).
 
 Реестр ведётся **с 1 августа 2026** (`COMPLAINTS_SINCE`) — решение владельца:
 глубокий бэкфилл не нужен, августовские жалобы на момент запуска ещё не
@@ -25,6 +26,13 @@ analytics/exclude.
 |---|---|---|---|
 | `error_report` | форма «Отправить жалобу» в попапе звонка (вкладки ОКК / AI Ролевки) | `evaluation_error_reports` в Neon-базе **«daily»** (`DAILY_DATABASE_URL`, drizzle-модели нет — raw SQL) | b2g (все ~700 строк на июль-2026) |
 | `bug_report` | попап «Сообщить об ошибке» (`ReportBugPopup`) | `bug_reports` в D1 | b2b; берём только `reporter_role IN ('manager','teamlead')` — строки admin/rop это настоящие баг-репорты |
+
+У `bug_report` нет прямой привязки к звонку, но менеджеры обычно дают в
+тексте ссылку на сделку Kommo — ingest парсит `…/leads/detail/<id>` и ищет
+в OKK-базе отдела **самый свежеоценённый звонок этой сделки**
+(`calls.kommo_lead_id` + evaluations): он становится `call_id` жалобы и даёт
+оценку «до». Шаг 3 догоняющего синка достраивает привязку у старых строк и
+у жалоб, чей звонок был оценён позже подачи.
 
 Наполнение реестра (`public.complaints` в D1, миграция `drizzle/d1/0004_complaints.sql`):
 
@@ -75,8 +83,7 @@ analytics/exclude.
 |---|---|---|---|
 | GET | `/api/complaints?department&status=csv&managers=csv&from&to` | сессия; менеджер — только свой отдел и свои строки | Лёгкий список без jsonb (`hasEvalBefore/After` флагами) + `allManagers` для фильтра |
 | GET | `/api/complaints/[id]/eval?phase=before\|after` | сессия; менеджер — только свои | `FrozenEvalPayload` для модалки |
-| PATCH | `/api/complaints/[id]` | сессия, `masterRole` admin\|rop | `{status, decision?, verdict?}` — семантика `applyResolution` |
-| POST | `/api/complaints/resolve` | **Bearer `COMPLAINTS_API_TOKEN`** | Batch-приём решений от OKK-адъюдикатора (см. контракт ниже) |
+| POST | `/api/complaints/resolve` | **Bearer `COMPLAINTS_API_TOKEN`** | Batch-приём решений от OKK-адъюдикатора — единственный канал записи решений (см. контракт ниже). Принимает и `not_complaint` для триажа |
 
 Владение менеджера: resolved `master_manager_id` (матч telegram → имя к
 `master_managers`) ЛИБО telegram/имя на самой строке жалобы — страховка от
@@ -128,29 +135,32 @@ Content-Type: application/json
 ## Файлы
 
 ```
-src/components/ComplaintsTab.tsx        ← вкладка (таблица, фильтры, модалка снимка, редактор решения)
+src/components/ComplaintsTab.tsx        ← вкладка (таблица, фильтры, модалка снимка; read-only)
 src/components/eval/EvalDetail.tsx      ← общий EvalDetailView (вынесен из AnalyticsTab)
 src/lib/eval/snapshot.ts                ← fetch*CallDetail + snapshotEval (общее с detail-роутами)
-src/lib/complaints/ingest.ts            ← dual-write + догоняющий синк + матч менеджеров
-src/lib/complaints/resolve.ts           ← applyResolution (общая семантика PATCH и batch)
+src/lib/complaints/ingest.ts            ← dual-write + догоняющий синк + матч менеджеров + линковка bug_report → звонок
+src/lib/complaints/resolve.ts           ← applyResolution (семантика batch-resolve)
 src/app/api/complaints/route.ts         ← GET список
-src/app/api/complaints/[id]/route.ts    ← PATCH статус/решение (admin/rop)
 src/app/api/complaints/[id]/eval/route.ts ← GET снимок для модалки
-src/app/api/complaints/resolve/route.ts ← POST batch (Bearer, для OKK-репо)
-drizzle/d1/0004_complaints.sql          ← миграция (применять в Neon SQL editor, D1)
+src/app/api/complaints/resolve/route.ts ← POST batch (Bearer, для OKK-репо) — единственный канал записи решений
+drizzle/d1/0004_complaints.sql          ← миграция (применена 2026-08-05)
 ```
 
 ## Ловушки
 
 1. **Снимок ≠ живая оценка.** Модалка «Оценка до/после» рендерит jsonb-снимок;
    живая оценка могла быть с тех пор перезаписана или удалена — это фича.
-2. **bug_report без call_id** — балл/детализация недоступны в принципе
-   («—» в обеих колонках); жалоба всё равно проходит полный цикл статусов.
+2. **bug_report без привязки** — если в тексте нет ссылки на сделку или у
+   сделки нет оценённого звонка в OKK-базе, балл/детализация недоступны
+   («—»); жалоба всё равно проходит полный цикл статусов. Оценка «до» у
+   bug_report снимается в момент линковки (не подачи) — для дособранных
+   строк может отражать уже пересмотренную оценку.
 3. **`evaluation_error_reports` живёт в 7-й БД** («daily» Neon,
    `DAILY_DATABASE_URL`) без drizzle-модели — читаем raw SQL. Недоступность
    daily-БД не валит вкладку: реестр отдаётся из D1, синк просто пропустит тик.
 4. **Снимок «до» для догнанных строк** (catch-up, а не dual-write) может
    отражать уже пересмотренную оценку — `score_before` при этом всегда
    исходный (из `call_score`). Для dual-write пути расхождения нет.
-5. **teamlead** видит вкладку как админ (gate role admin), но карандаша
-   редактирования не имеет (`canModerate` = masterRole admin|rop).
+5. **Ручного редактирования в UI нет намеренно** — решения пишутся только
+   batch-endpoint'ом адъюдикатора. Если понадобится ручной fallback,
+   семантика уже готова в `applyResolution`.
