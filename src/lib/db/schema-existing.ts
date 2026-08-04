@@ -200,9 +200,10 @@ export const complaints = pgTable("complaints", {
   filedAt: timestamp("filed_at", { withTimezone: true }).notNull(), // created_at исходной строки
   scoreBefore: integer("score_before"),               // балл на момент подачи
   evalBefore: jsonb("eval_before").$type<Record<string, unknown>>(), // FrozenEvalPayload
-  status: text("status").notNull().default("new"),    // 'new' | 'in_review' | 'resolved' | 'rejected' | 'not_complaint'
+  status: text("status").notNull().default("new"),    // 'new' | 'resolved' | 'rejected' (упрощены миграцией 0005)
   verdict: text("verdict"),                           // 'valid' | 'partial' | 'invalid'
   decision: text("decision"),
+  comment: text("comment"),                           // ручной комментарий (админ/РОП из вкладки)
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   resolvedBy: text("resolved_by"),
   scoreAfter: integer("score_after"),

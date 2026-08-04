@@ -18,7 +18,9 @@ import { db } from "@/lib/db";
 import { complaints } from "@/lib/db/schema-existing";
 import { snapshotEval, type Department } from "@/lib/eval/snapshot";
 
-export const RESOLVE_STATUSES = new Set(["new", "in_review", "resolved", "rejected", "not_complaint"]);
+// Статусы упрощены (0005): new → resolved | rejected. «new» принимается для
+// переоткрытия ошибочно закрытой жалобы.
+export const RESOLVE_STATUSES = new Set(["new", "resolved", "rejected"]);
 export const RESOLVE_VERDICTS = new Set(["valid", "partial", "invalid"]);
 
 export interface ResolutionInput {

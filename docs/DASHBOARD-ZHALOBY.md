@@ -69,13 +69,14 @@ read-only для всех**: ручного редактирования реш�
 
 ## Статусы
 
-`new` (Новая) → `in_review` (В работе) → `resolved` (Рассмотрена) |
-`rejected` (Отклонена). Плюс `not_complaint` (Не жалоба) — триаж-статус для
-строк bug_reports, оказавшихся обычными багами дашборда: скрыт от
-менеджеров и из дефолтного списка (у админа — отдельный чип фильтра).
+`new` (Новая) → `resolved` (Рассмотрена) | `rejected` (Отклонена).
+Упрощены миграцией 0005 (решение владельца 2026-08-05: «В работе» и
+«Не жалоба» убраны как лишние — DB CHECK пересоздан под три статуса).
 
 `verdict` (`valid`/`partial`/`invalid`) — вердикт адъюдикатора, опционален.
-`decision` — решение свободным текстом.
+`decision` — решение свободным текстом. `comment` — ручной комментарий
+(единственное редактируемое из UI поле, права admin/РОП); не путать с
+decision — итогом разбора.
 
 ## API
 
@@ -83,7 +84,8 @@ read-only для всех**: ручного редактирования реш�
 |---|---|---|---|
 | GET | `/api/complaints?department&status=csv&managers=csv&from&to` | сессия; менеджер — только свой отдел и свои строки | Лёгкий список без jsonb (`hasEvalBefore/After` флагами) + `allManagers` для фильтра |
 | GET | `/api/complaints/[id]/eval?phase=before\|after` | сессия; менеджер — только свои | `FrozenEvalPayload` для модалки |
-| POST | `/api/complaints/resolve` | **Bearer `COMPLAINTS_API_TOKEN`** | Batch-приём решений от OKK-адъюдикатора — единственный канал записи решений (см. контракт ниже). Принимает и `not_complaint` для триажа |
+| PATCH | `/api/complaints/[id]/comment` | сессия, `masterRole` admin\|rop | `{comment}` — ручной комментарий (пустая строка = очистить) |
+| POST | `/api/complaints/resolve` | **Bearer `COMPLAINTS_API_TOKEN`** | Batch-приём решений от OKK-адъюдикатора — единственный канал записи решений (см. контракт ниже) |
 
 Владение менеджера: resolved `master_manager_id` (матч telegram → имя к
 `master_managers`) ЛИБО telegram/имя на самой строке жалобы — страховка от
@@ -142,8 +144,10 @@ src/lib/complaints/ingest.ts            ← dual-write + догоняющий с
 src/lib/complaints/resolve.ts           ← applyResolution (семантика batch-resolve)
 src/app/api/complaints/route.ts         ← GET список
 src/app/api/complaints/[id]/eval/route.ts ← GET снимок для модалки
+src/app/api/complaints/[id]/comment/route.ts ← PATCH ручной комментарий (admin/rop)
 src/app/api/complaints/resolve/route.ts ← POST batch (Bearer, для OKK-репо) — единственный канал записи решений
 drizzle/d1/0004_complaints.sql          ← миграция (применена 2026-08-05)
+drizzle/d1/0005_complaints_comment.sql  ← comment + упрощение статусов (применена 2026-08-05)
 ```
 
 ## Ловушки

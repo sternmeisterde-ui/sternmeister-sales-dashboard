@@ -1376,7 +1376,13 @@ export default function Dashboard() {
         )}
 
         {activeTab === "complaints" && (
-          <ComplaintsTab department={activeDepartment} isAdmin={isAdmin} />
+          <ComplaintsTab
+            department={activeDepartment}
+            isAdmin={isAdmin}
+            // Комментарий — единственное ручное поле; права как у модерации
+            // (analytics/exclude): admin и РОП, teamlead — нет.
+            canComment={session?.masterRole === "admin" || session?.masterRole === "rop"}
+          />
         )}
 
         {activeTab === "reglament" && tabAllowedInDept("reglament", activeDepartment) && (

@@ -47,7 +47,7 @@ export async function GET(
     // Менеджер: только свой отдел и только собственные жалобы — тот же
     // предикат владения, что в списке (master-id ЛИБО telegram/имя строки).
     if (session.role !== "admin") {
-      if (row.department !== session.department || row.status === "not_complaint") {
+      if (row.department !== session.department) {
         return NextResponse.json({ error: "forbidden" }, { status: 403 });
       }
       const managers = await getManagersForDept(session.department);
