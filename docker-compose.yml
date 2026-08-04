@@ -52,6 +52,10 @@ services:
       # ETL cron secret — protects /api/analytics/sync/cron from unauthorized calls
       - CRON_SECRET=${CRON_SECRET}
 
+      # Bearer-токен batch-приёма решений по жалобам (/api/complaints/resolve)
+      # от Claude-адъюдикатора из OKK-репо. Не задан → endpoint отвечает 401.
+      - COMPLAINTS_API_TOKEN=${COMPLAINTS_API_TOKEN}
+
       # Call-analysis worker: soft time-box per chunk (ms). The pipeline
       # checkpoints and yields at this deadline; the analysis-cron tick
       # resumes it. Default 20 min (set in code) — override only for testing.

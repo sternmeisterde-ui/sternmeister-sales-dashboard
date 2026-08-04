@@ -54,6 +54,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Batch-приём решений по жалобам от адъюдикатора OKK-репо — Bearer
+  // COMPLAINTS_API_TOKEN, без сессии. Exact match: остальной /api/complaints/**
+  // остаётся session-protected. Без whitelist токенный запрос 307-ится в
+  // /login (класс бага d9079c6).
+  if (pathname === "/api/complaints/resolve") {
+    return NextResponse.next();
+  }
+
   // Always allow the login page
   if (pathname === "/login") {
     return noStore(NextResponse.next(), pathname);
