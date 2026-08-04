@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { bugReports } from "@/lib/db/schema-existing";
+import { ingestBugReport } from "@/lib/complaints/ingest";
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_BUG_REPORT_WEBHOOK_URL;
 
@@ -93,6 +94,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         reportDate,
       })
       .returning({ id: bugReports.id, createdAt: bugReports.createdAt });
+
+    // Dual-write в реестр жалоб (вкладка «Жалобы»): менеджерские/тимлидские
+    // обращения на практике — жалобы на оценки. Сбой НЕ роняет legacy-запись —
+    // догоняющий синк (syncComplaints) дорегистрирует строку позже.
+    if (saved) {
+      try {
+        await ingestBugReport({
+          id: saved.id,
+          reporterName: session.name,
+          reporterRole,
+          reporterDepartment: session.department,
+          description,
+          createdAt: saved.createdAt,
+        });
+      } catch (e) {
+        console.error("[bug-reports] complaints ingest failed:", e);
+      }
+    }
 
     // Discord notification — fire-and-forget; a webhook outage must not break
     // the UX since the row is already stored.
