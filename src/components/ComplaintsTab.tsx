@@ -8,7 +8,7 @@
 // admin — весь отдел + фильтры по статусу/менеджерам.
 
 import { Fragment, useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Loader2, MessageSquareWarning, RefreshCw, X } from "lucide-react";
+import { Check, ChevronDown, Eye, Loader2, MessageSquareWarning, Pencil, RefreshCw, X } from "lucide-react";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
 import { EvalDetailView, type EvalDetailBlock, type CallMeta } from "@/components/eval/EvalDetail";
@@ -26,9 +26,10 @@ interface ComplaintRow {
   filedAt: string;
   scoreBefore: number | null;
   hasEvalBefore: boolean;
-  status: "new" | "in_review" | "resolved" | "rejected" | "not_complaint";
+  status: "new" | "resolved" | "rejected";
   verdict: "valid" | "partial" | "invalid" | null;
   decision: string | null;
+  comment: string | null;
   resolvedAt: string | null;
   resolvedBy: string | null;
   scoreAfter: number | null;
@@ -55,12 +56,11 @@ interface FrozenPayload {
   snapshotAt: string;
 }
 
-const STATUS_META: Record<ComplaintRow["status"], { label: string; cls: string }> = {
+// Статусы упрощены (миграция 0005): new → resolved | rejected.
+const STATUS_META: Record<string, { label: string; cls: string }> = {
   new: { label: "Новая", cls: "bg-slate-500/20 text-slate-300" },
-  in_review: { label: "В работе", cls: "bg-blue-500/20 text-blue-300" },
   resolved: { label: "Рассмотрена", cls: "bg-emerald-500/20 text-emerald-300" },
   rejected: { label: "Отклонена", cls: "bg-rose-500/20 text-rose-300" },
-  not_complaint: { label: "Не жалоба", cls: "bg-slate-700/40 text-slate-500" },
 };
 
 // Пороги как в бейдже модалки звонка (CallMediaModal): ≥66 зелёный, ≥41 жёлтый.
@@ -221,34 +221,167 @@ function FrozenEvalModal({ complaintId, phase, title, onClose }: {
   );
 }
 
-// Бейдж оценки в таблице: кликабелен, только если есть снимок детализации.
+// Текст с кликабельными URL (жалобы обычно содержат ссылку на сделку Kommo).
+// Ссылка останавливает всплытие, чтобы клик по ней не разворачивал строку.
+const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
+function Linkified({ text }: { text: string }) {
+  const parts = text.split(URL_RE);
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^https?:\/\//.test(part) ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-blue-400 hover:text-blue-300 underline underline-offset-2 break-all"
+          >
+            {part}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+// Оценка в таблице: явная кнопка «балл + глаз» — по клику модалка с
+// замороженным снимком детализации критериев.
 function ScoreCell({ score, hasEval, onOpen }: {
   score: number | null;
   hasEval: boolean;
   onOpen: () => void;
 }) {
   if (score == null && !hasEval) return <span className="text-slate-600">—</span>;
-  const badge = (
-    <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-bold ${score != null ? scoreBadgeCls(score) : "bg-slate-700/40 text-slate-400"}`}>
-      {score != null ? `${score}%` : "…"}
-    </span>
-  );
+  const scoreCls = score != null ? scoreBadgeCls(score) : "bg-slate-700/40 text-slate-400";
   if (!hasEval) {
-    return <span title="Детализация недоступна (звонок удалён или оценки ещё не было)">{badge}</span>;
+    return (
+      <span title="Детализация недоступна (звонок удалён или оценки ещё не было)">
+        <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-bold ${scoreCls}`}>
+          {score != null ? `${score}%` : "…"}
+        </span>
+      </span>
+    );
   }
   return (
-    <button onClick={onOpen} className="hover:opacity-75 transition-opacity" title="Открыть детализацию оценки">
-      {badge}
+    <button
+      onClick={onOpen}
+      className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 pl-1 pr-1.5 py-0.5 hover:border-blue-500/50 hover:bg-blue-500/10 transition-colors"
+      title="Открыть детализацию оценки по критериям"
+    >
+      <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-bold ${scoreCls}`}>
+        {score != null ? `${score}%` : "…"}
+      </span>
+      <Eye className="w-3.5 h-3.5 text-slate-500 group-hover:text-blue-300" />
     </button>
+  );
+}
+
+// Ручной комментарий (единственное редактируемое поле вкладки; права —
+// admin/РОП). Статусы/решения пишет только batch-endpoint адъюдикатора.
+function CommentCell({ row, canComment, onSaved }: {
+  row: ComplaintRow;
+  canComment: boolean;
+  onSaved: (comment: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(row.comment ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/complaints/${row.id}/comment`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ comment: value }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      onSaved(j.comment ?? null);
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-1.5 min-w-[200px]">
+        <textarea
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          rows={3}
+          autoFocus
+          className="w-full bg-slate-800/70 border border-white/10 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500/50 resize-y"
+        />
+        {error && <span className="text-[10px] text-rose-400">{error}</span>}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={save}
+            disabled={saving}
+            className="inline-flex items-center gap-1 rounded bg-blue-500/20 border border-blue-500/40 px-2 py-1 text-[11px] font-semibold text-blue-300 hover:bg-blue-500/30 disabled:opacity-50"
+          >
+            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            Сохранить
+          </button>
+          <button
+            onClick={() => { setEditing(false); setValue(row.comment ?? ""); setError(null); }}
+            disabled={saving}
+            className="rounded border border-white/10 px-2 py-1 text-[11px] text-slate-400 hover:border-white/20 disabled:opacity-50"
+          >
+            Отмена
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!row.comment) {
+    if (!canComment) return <span className="text-slate-600">—</span>;
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-300"
+        title="Добавить комментарий"
+      >
+        <Pencil className="w-3 h-3" /> добавить
+      </button>
+    );
+  }
+  return (
+    <div className="group/comment flex items-start gap-1.5">
+      <span className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
+        <Linkified text={row.comment} />
+      </span>
+      {canComment && (
+        <button
+          onClick={() => { setValue(row.comment ?? ""); setEditing(true); }}
+          className="shrink-0 p-0.5 rounded text-slate-600 hover:text-blue-300 opacity-0 group-hover/comment:opacity-100 transition-opacity"
+          title="Изменить комментарий"
+        >
+          <Pencil className="w-3 h-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
 // Ручного редактирования решений в UI нет намеренно: жалобы разбирает
 // Claude-адъюдикатор в OKK-репо и постит итоги batch'ем в
-// POST /api/complaints/resolve — вкладка только отображает.
-export default function ComplaintsTab({ department, isAdmin }: {
+// POST /api/complaints/resolve — вкладка отображает. Единственное ручное
+// поле — «Комментарий» (canComment = admin/РОП).
+export default function ComplaintsTab({ department, isAdmin, canComment }: {
   department: "b2g" | "b2b";
   isAdmin: boolean;
+  canComment: boolean;
 }) {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -295,10 +428,8 @@ export default function ComplaintsTab({ department, isAdmin }: {
   const statusChips: Array<{ key: string | null; label: string }> = [
     { key: null, label: "Все" },
     { key: "new", label: "Новая" },
-    { key: "in_review", label: "В работе" },
     { key: "resolved", label: "Рассмотрена" },
     { key: "rejected", label: "Отклонена" },
-    ...(isAdmin ? [{ key: "not_complaint" as string | null, label: "Не жалоба" }] : []),
   ];
 
   if (loading && !data) {
@@ -384,12 +515,13 @@ export default function ComplaintsTab({ department, isAdmin }: {
               <th className="px-3 py-2 font-medium whitespace-nowrap">Рассмотрена</th>
               <th className="px-3 py-2 font-medium min-w-[220px]">Решение</th>
               <th className="px-3 py-2 font-medium whitespace-nowrap" title="Оценка ОКК после рассмотрения (заморожена в момент решения)">Оценка после</th>
+              <th className="px-3 py-2 font-medium min-w-[180px]">Комментарий</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-3 py-8 text-center text-xs text-slate-500">
+                <td colSpan={9} className="px-3 py-8 text-center text-xs text-slate-500">
                   Жалоб за период нет.
                 </td>
               </tr>
@@ -406,13 +538,16 @@ export default function ComplaintsTab({ department, isAdmin }: {
                       <div className="text-[10px] text-slate-500">{sourceLabel(row)}</div>
                     </td>
                     <td className="px-3 py-2">
-                      <button
+                      {/* span с onClick (не button): внутри кликабельные
+                          ссылки на Kommo — вложенные интерактивы в button
+                          невалидны; ссылка стопит всплытие сама. */}
+                      <span
                         onClick={() => setExpandedId(expanded ? null : row.id)}
-                        className={`text-left text-xs text-slate-300 leading-relaxed whitespace-pre-wrap ${expanded ? "" : "line-clamp-2"}`}
+                        className={`block cursor-pointer text-left text-xs text-slate-300 leading-relaxed whitespace-pre-wrap ${expanded ? "" : "line-clamp-2"}`}
                         title={expanded ? "Свернуть" : "Развернуть"}
                       >
-                        {row.text}
-                      </button>
+                        <Linkified text={row.text} />
+                      </span>
                     </td>
                     <td className="px-3 py-2">
                       <ScoreCell
@@ -430,7 +565,7 @@ export default function ComplaintsTab({ department, isAdmin }: {
                     <td className="px-3 py-2">
                       {row.decision ? (
                         <span className={`block text-xs text-slate-300 leading-relaxed whitespace-pre-wrap ${expanded ? "" : "line-clamp-2"}`}>
-                          {row.decision}
+                          <Linkified text={row.decision} />
                         </span>
                       ) : (
                         <span className="text-slate-600">—</span>
@@ -441,6 +576,24 @@ export default function ComplaintsTab({ department, isAdmin }: {
                         score={row.scoreAfter}
                         hasEval={row.hasEvalAfter}
                         onOpen={() => setModal({ id: row.id, phase: "after", title: "Оценка после рассмотрения" })}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <CommentCell
+                        row={row}
+                        canComment={canComment}
+                        onSaved={(comment) =>
+                          setData((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  complaints: prev.complaints.map((c) =>
+                                    c.id === row.id ? { ...c, comment } : c,
+                                  ),
+                                }
+                              : prev,
+                          )
+                        }
                       />
                     </td>
                   </tr>

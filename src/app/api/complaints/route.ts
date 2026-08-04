@@ -23,7 +23,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const VALID_STATUSES = new Set(["new", "in_review", "resolved", "rejected", "not_complaint"]);
+const VALID_STATUSES = new Set(["new", "resolved", "rejected"]);
 
 export async function GET(req: NextRequest) {
   const session = await getSession();
@@ -91,12 +91,8 @@ export async function GET(req: NextRequest) {
       }
       own.push(eq(complaints.managerName, session.name));
       conds.push(or(...own)!);
-      // Триаж-статус (обычные баг-репорты) менеджерам не показываем; статус-
-      // фильтр применяем поверх.
       if (statusFilter.length) {
-        conds.push(inArray(complaints.status, statusFilter.filter((s) => s !== "not_complaint")));
-      } else {
-        conds.push(sql`${complaints.status} <> 'not_complaint'`);
+        conds.push(inArray(complaints.status, statusFilter));
       }
     }
 
@@ -116,6 +112,7 @@ export async function GET(req: NextRequest) {
         status: complaints.status,
         verdict: complaints.verdict,
         decision: complaints.decision,
+        comment: complaints.comment,
         resolvedAt: complaints.resolvedAt,
         resolvedBy: complaints.resolvedBy,
         scoreAfter: complaints.scoreAfter,

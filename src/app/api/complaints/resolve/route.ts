@@ -9,7 +9,7 @@
 //     complaint_id?: string;   // приоритетный таргет — id строки реестра
 //     source_id?:    string;   // либо id строки evaluation_error_reports
 //     call_id?:      string;   // либо звонок → самая свежая открытая жалоба
-//     status: "resolved" | "rejected" | "in_review";
+//     status: "resolved" | "rejected";  // + "new" для переоткрытия
 //     verdict?: "valid" | "partial" | "invalid";
 //     decision: string;        // итог свободным текстом (summary + action)
 //     resolved_by?: string;    // default "okk-adjudicator"
@@ -22,7 +22,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { complaints } from "@/lib/db/schema-existing";
 import { applyResolution } from "@/lib/complaints/resolve";
@@ -67,7 +67,7 @@ async function findComplaintId(item: ResolveItem): Promise<string | null> {
     const open = await db
       .select({ id: complaints.id })
       .from(complaints)
-      .where(and(eq(complaints.callId, item.call_id), inArray(complaints.status, ["new", "in_review"])))
+      .where(and(eq(complaints.callId, item.call_id), eq(complaints.status, "new")))
       .orderBy(desc(complaints.filedAt))
       .limit(1);
     if (open[0]) return open[0].id;
