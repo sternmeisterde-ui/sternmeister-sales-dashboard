@@ -43,6 +43,7 @@ export interface ManagerRow {
   name: string;
   telegramUsername: string | null;
   isActive: boolean | null;
+  line: string | null; // master_managers.line: '1' | '2' | '3' (b2g-линии)
 }
 
 export async function getManagersForDept(department: Department): Promise<ManagerRow[]> {
@@ -52,6 +53,7 @@ export async function getManagersForDept(department: Department): Promise<Manage
       name: masterManagers.name,
       telegramUsername: masterManagers.telegramUsername,
       isActive: masterManagers.isActive,
+      line: masterManagers.line,
     })
     .from(masterManagers)
     .where(eq(masterManagers.department, department));

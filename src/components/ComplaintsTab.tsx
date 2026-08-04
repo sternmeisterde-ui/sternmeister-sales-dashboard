@@ -22,6 +22,7 @@ interface ComplaintRow {
   masterManagerId: string | null;
   callId: string | null;
   callSource: "okk" | "ai" | null;
+  managerLine: string | null; // линия менеджера-субъекта ('1'|'2'|'3'), null = не смэтчен
   text: string;
   filedAt: string;
   scoreBefore: number | null;
@@ -38,8 +39,17 @@ interface ComplaintRow {
 
 interface ApiResponse {
   complaints: ComplaintRow[];
-  allManagers: { id: string; name: string }[];
+  allManagers: { id: string; name: string; line: string | null }[];
 }
+
+// Направления Госников = линии master_managers.line (группы линий из
+// src/lib/config/tenant.ts: 2a/2b у менеджеров коллапсированы в «2»).
+const B2G_LINE_CHIPS: Array<{ key: string | null; label: string }> = [
+  { key: null, label: "Все линии" },
+  { key: "1", label: "1 — Квалификатор" },
+  { key: "2", label: "2 — Бератеры" },
+  { key: "3", label: "3 — Доведение" },
+];
 
 // Замороженный снимок (FrozenEvalPayload из src/lib/eval/snapshot.ts) —
 // ровно props EvalDetailView.
@@ -388,6 +398,7 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
   const [error, setError] = useState<string | null>(null);
   const [range, setRange] = useState<DateRange>(defaultRange);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [lineFilter, setLineFilter] = useState<string | null>(null); // только b2g
   const [managerIds, setManagerIds] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [modal, setModal] = useState<{ id: string; phase: "before" | "after"; title: string } | null>(null);
@@ -423,7 +434,17 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
     if (r.start && r.end) load(r, statusFilter, managerIds);
   };
 
-  const rows = data?.complaints ?? [];
+  // Фильтр направлений — клиентский (реестр мал): линия менеджера-субъекта.
+  const allRows = data?.complaints ?? [];
+  const rows =
+    department === "b2g" && lineFilter
+      ? allRows.filter((r) => r.managerLine === lineFilter)
+      : allRows;
+
+  // Дропдаун менеджеров сужается выбранной линией.
+  const managerOptions = (data?.allManagers ?? []).filter(
+    (m) => !(department === "b2g" && lineFilter) || m.line === lineFilter,
+  );
 
   const statusChips: Array<{ key: string | null; label: string }> = [
     { key: null, label: "Все" },
@@ -459,7 +480,7 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
 
         {isAdmin && (
           <ManagerMultiSelect
-            managers={data?.allManagers ?? []}
+            managers={managerOptions}
             selected={managerIds}
             onChange={setManagerIds}
           />
@@ -475,7 +496,7 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
         </button>
       </div>
 
-      {/* Статус-чипы */}
+      {/* Статус-чипы + (b2g) чипы направлений */}
       <div className="flex flex-wrap items-center gap-1.5">
         {statusChips.map((c) => (
           <button
@@ -490,6 +511,29 @@ export default function ComplaintsTab({ department, isAdmin, canComment }: {
             {c.label}
           </button>
         ))}
+        {department === "b2g" && (
+          <>
+            <span className="mx-1.5 h-4 w-px bg-white/10" />
+            {B2G_LINE_CHIPS.map((c) => (
+              <button
+                key={c.key ?? "all-lines"}
+                onClick={() => {
+                  setLineFilter(c.key);
+                  // Выбранные менеджеры могут не входить в новую линию —
+                  // сбрасываем, чтобы фильтры не противоречили друг другу.
+                  setManagerIds([]);
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                  lineFilter === c.key
+                    ? "bg-violet-500/20 text-violet-300 border-violet-500/40"
+                    : "bg-slate-900/40 text-slate-400 border-white/10 hover:border-white/20"
+                }`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </>
+        )}
         <span className="ml-auto text-[11px] text-slate-500">{rows.length} жалоб</span>
       </div>
 

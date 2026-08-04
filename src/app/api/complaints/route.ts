@@ -123,12 +123,23 @@ export async function GET(req: NextRequest) {
       .orderBy(desc(complaints.filedAt))
       .limit(1000);
 
+    // Линия менеджера (b2g: 1=Квалификатор / 2=Бератеры / 3=Доведение) — для
+    // фильтра направлений во вкладке. Берём текущую линию из master_managers
+    // по resolved master_manager_id; не смэтчили → null (видна только в «Все»).
+    const lineById = new Map(managers.map((m) => [m.id, m.line]));
+    const withLine = rows.map((r) => ({
+      ...r,
+      managerLine: (r.masterManagerId && lineById.get(r.masterManagerId)) || null,
+    }));
+
     return NextResponse.json(
       {
-        complaints: rows,
+        complaints: withLine,
         // Для дропдауна фильтра у админа; менеджеру список не нужен.
         allManagers: isAdmin
-          ? managers.filter((m) => m.isActive !== false).map((m) => ({ id: m.id, name: m.name }))
+          ? managers
+              .filter((m) => m.isActive !== false)
+              .map((m) => ({ id: m.id, name: m.name, line: m.line }))
           : [],
       },
       { headers: { "Cache-Control": "no-store" } },
