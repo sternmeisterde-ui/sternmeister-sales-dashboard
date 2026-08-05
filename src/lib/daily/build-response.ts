@@ -944,7 +944,11 @@ export async function buildDailyResponse(department: string, period: string, dat
     // B2G: дефолтные планы первой линии, заданы В ДЕНЬ (2026-08-06).
     // Умножаем на daysInMonth до месячной шкалы, чтобы каскад planDivisor
     // ниже дал ровно дневное значение в дне и ×7 в неделе.
-    if (val === undefined && department === "b2g") {
+    // Только Бух (и legacy без вертикали): в «Мед» дефолт не подставляем,
+    // а в «Все» (сумма вертикалей) он сработает лишь когда планов нет ни
+    // в одной — что равно «дефолт Бух + пустой Мед». Иначе ломался
+    // инвариант «Все = Бух + Мед» (например, Бух=50 → Все=50, но Мед=44).
+    if (val === undefined && department === "b2g" && v !== "med") {
       const defDaily = B2G_DAILY_PLAN_DEFAULTS[metricKey];
       if (defDaily != null) val = String(defDaily * daysInMonth);
     }

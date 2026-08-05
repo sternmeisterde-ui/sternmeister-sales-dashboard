@@ -69,13 +69,19 @@ export async function GET(req: NextRequest) {
       }
       const today = getBusinessToday();
       const DATA_START_STR = "2026-01-01";
+      // Клампим границы ДО итерации: иначе cap в 92 дня съедали календарные
+      // дни вне [DATA_START..today] и валидный хвост диапазона молча терялся
+      // (например from=2025-09-01&to=2026-01-31 давал пустой ответ).
+      const startStr = fromParam < DATA_START_STR ? DATA_START_STR : fromParam;
+      const endStr = toParam > today ? today : toParam;
       const dates: string[] = [];
-      const cur = new Date(`${fromParam}T00:00:00Z`);
-      const end = new Date(`${toParam}T00:00:00Z`);
-      // Cap: 92 дня (квартал) — каждый день = ~10 Neon-запросов на билд.
-      for (let i = 0; cur <= end && i < 92; cur.setUTCDate(cur.getUTCDate() + 1), i++) {
-        const dateStr = cur.toISOString().slice(0, 10);
-        if (dateStr >= DATA_START_STR && dateStr <= today) dates.push(dateStr);
+      if (startStr <= endStr) {
+        const cur = new Date(`${startStr}T00:00:00Z`);
+        const end = new Date(`${endStr}T00:00:00Z`);
+        // Cap: 92 дня (квартал) — каждый день = ~10 Neon-запросов на билд.
+        for (let i = 0; cur <= end && i < 92; cur.setUTCDate(cur.getUTCDate() + 1), i++) {
+          dates.push(cur.toISOString().slice(0, 10));
+        }
       }
 
       const monthOfFrom = fromParam.slice(0, 7);

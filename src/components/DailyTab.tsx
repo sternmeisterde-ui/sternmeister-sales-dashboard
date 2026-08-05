@@ -434,7 +434,18 @@ function applyManagerFilterToSnapshot(snap: DailySnapshot, selected: Set<string>
   return {
     ...snap,
     sections: snap.sections.map((sec) => {
-      if (!sec.perManager || sec.managers.length === 0) return sec;
+      if (!sec.perManager) return sec;
+      if (sec.managers.length === 0) {
+        // Нет per-manager данных (пустое расписание дня / старый снапшот) —
+        // честнее «—», чем показать в этой колонке нефильтрованные итоги
+        // всей линии рядом с пересчитанными соседними колонками.
+        return {
+          ...sec,
+          metrics: sec.metrics.map((m) =>
+            MANAGER_AGG_RULES[m.key] && !m.isGroupHeader ? { ...m, fact: null, percent: null } : m,
+          ),
+        };
+      }
       const chosen = sec.managers.filter((m) => selected.has(m.id));
       // mgr.metrics выровнены позиционно с non-header метриками секции
       // (см. getManagerMetricFact) — строим индекс key → позиция.
@@ -583,6 +594,9 @@ function SummaryTimeTable({
 
   const commitEdit = async (m: FlatMetric) => {
     if (!onPlanSave || !referenceSnapshot) return;
+    // Пустой ввод не сохраняем: Number("") === 0, и в БД ушёл бы «0»,
+    // который навсегда перекрывает дефолты (B2G_DAILY_PLAN_DEFAULTS).
+    if (editValue.trim() === "") { cancelEdit(); return; }
     const periodType = "month";
     // Use stable month periodDate (e.g. "2026-04"), not individual day snapshot date
     const periodDate = monthPeriodDate || referenceSnapshot.periodDate.slice(0, 7);
@@ -1174,6 +1188,13 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
   const planMonthPeriodDate = customRange && mode === "days"
     ? fmtYmdBerlin(customRange.start).slice(0, 7)
     : `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
+  // Подпись месяца для «Рейтинга»/«Отказов»: при customRange из другого
+  // месяца monthlySummary строится для месяца НАЧАЛА диапазона — подписи
+  // и run-rate должны считаться от него же, не от selectedMonth.
+  const planMonthLabel = (() => {
+    const [py, pm] = planMonthPeriodDate.split("-").map(Number);
+    return `${MONTH_NAMES[(pm || 1) - 1]} ${py}`;
+  })();
 
   return (
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
@@ -1365,7 +1386,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
       {department === "b2g" && subTab === "rating" && data && !loading && (
         <RatingFirstLineView
           monthlySnapshot={monthlySnapshot ?? selectedDaySnapshot}
-          monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
+          monthPeriodDate={planMonthPeriodDate}
         />
       )}
 
@@ -1374,7 +1395,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           monthly={monthlySnapshot?.refusals}
           daily={selectedDaySnapshot?.refusals}
           daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
-          monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
+          monthLabel={planMonthLabel}
         />
       )}
 
@@ -1428,12 +1449,14 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
                 const patchSnap = (s: DailySnapshot): DailySnapshot => (
                   { ...s, sections: s.sections.map(patchSection) }
                 );
+                // Патчим только снапшоты ТЕКУЩЕГО режима: введённое число —
+                // в его шкале (день/неделя/месяц). Остальные шкалы (включая
+                // monthlySummary) подтянет фоновый рефетч в верной шкале.
                 return {
                   ...prev,
-                  days: prev.days?.map(patchSnap),
-                  weeks: prev.weeks?.map(patchSnap),
-                  months: prev.months?.map(patchSnap),
-                  monthlySummary: prev.monthlySummary ? patchSnap(prev.monthlySummary) : prev.monthlySummary,
+                  days: mode === "days" ? prev.days?.map(patchSnap) : prev.days,
+                  weeks: mode === "weeks" ? prev.weeks?.map(patchSnap) : prev.weeks,
+                  months: mode === "months" ? prev.months?.map(patchSnap) : prev.months,
                 };
               });
               setSaving(true);
@@ -1478,6 +1501,14 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             }}
           />
         </>
+      )}
+
+      {/* Пустой период (диапазон в будущем / до старта данных 2026-01-01):
+          без этого блока экран оставался просто пустым без объяснения. */}
+      {data && !loading && snapshots.length === 0 && (
+        <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+          Нет данных за выбранный период
+        </div>
       )}
 
       {/* B2G per-manager tables and refusal cards are now in separate sub-tabs
