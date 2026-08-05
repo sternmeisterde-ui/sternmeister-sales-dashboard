@@ -767,7 +767,7 @@ function SummaryTimeTable({
                       return (
                         <td
                           key={colIdx}
-                          onClick={() => isEditable && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
+                          onClick={() => isEditable ? startEdit(m, val) : onSelectCol(colIdx)}
                           className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
                           } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
