@@ -1085,6 +1085,20 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
       ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
       : `${selectedMonth.getFullYear()} год`;
 
+  // Бейдж календаря никогда не пустует словом «Календарь» (в «Звонках»
+  // период выбран всегда — держим то же поведение): показываем выбранный
+  // диапазон, а без фильтра — границы отображаемого месяца/года.
+  const calendarValue: DateRange = useMemo(() => {
+    if (customRange) return customRange;
+    const { y, m } = berlinCivilComponents(selectedMonth);
+    const p2 = (n: number) => String(n).padStart(2, "0");
+    if (mode === "months") {
+      return { start: berlinCivilDate(`${y}-01-01`), end: berlinCivilDate(`${y}-12-31`) };
+    }
+    const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return { start: berlinCivilDate(`${y}-${p2(m)}-01`), end: berlinCivilDate(`${y}-${p2(m)}-${p2(dim)}`) };
+  }, [customRange, selectedMonth, mode]);
+
   // «Сегодня» — как в «Звонках»: видна только когда вид ушёл от текущего
   // периода (выбран диапазон, другой месяц или другой год).
   const showTodayButton = (() => {
@@ -1118,7 +1132,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             <CalendarPicker
               mode="range"
               allowModeToggle
-              value={{ start: customRange?.start ?? null, end: customRange?.end ?? null }}
+              value={calendarValue}
               onChange={(r: DateRange) => {
                 if (!r.start) return;
                 setMode("days");
