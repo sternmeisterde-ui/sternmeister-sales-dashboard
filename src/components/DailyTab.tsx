@@ -1078,10 +1078,21 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
   );
 
   const dateDisplay = customRange && mode === "days"
-    ? `${fmtDisplayBerlin(customRange.start)} – ${fmtDisplayBerlin(customRange.end)}`
+    ? (fmtYmdBerlin(customRange.start) === fmtYmdBerlin(customRange.end)
+        ? fmtDisplayBerlin(customRange.start)
+        : `${fmtDisplayBerlin(customRange.start)} – ${fmtDisplayBerlin(customRange.end)}`)
     : mode === "days"
       ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
       : `${selectedMonth.getFullYear()} год`;
+
+  // «Сегодня» — как в «Звонках»: видна только когда вид ушёл от текущего
+  // периода (выбран диапазон, другой месяц или другой год).
+  const showTodayButton = (() => {
+    if (customRange) return true;
+    const cur = berlinCivilComponents(selectedMonth);
+    const now = berlinCivilComponents(todayBerlinDate());
+    return cur.y !== now.y || (mode !== "months" && cur.m !== now.m);
+  })();
 
   // Планы редактируются помесячно: при диапазоне через границу месяцев
   // непонятно, в какой месяц писать — правку выключаем. При фильтре
@@ -1097,34 +1108,16 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
 
   return (
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
-      {/* Controls */}
+      {/* ── Filters: структура и стили шапки — как во вкладке «Звонки» ── */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Mode toggle */}
-          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
-            {([
-              { id: "days" as const, label: "Месяц (по дням)" },
-              { id: "weeks" as const, label: "Недели" },
-              { id: "months" as const, label: "Год (по месяцам)" },
-            ]).map((f) => (
-              <button
-                key={f.id}
-                onClick={() => { setMode(f.id); setSelectedDayIdx(null); setCustomRange(null); }}
-                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
-                  mode === f.id
-                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-          {/* Фильтр «Период» (b2g): произвольный диапазон дат. Выбор диапазона
-              переключает вид в «по дням»; очистка возвращает месяц. */}
+          {/* Календарь — тот же пикер, что в «Звонках» (тогл «День/Период»
+              внутри). Выбор даты/диапазона переключает вид в «по дням»;
+              крестик/«Сбросить» возвращает обычный месяц. */}
           {department === "b2g" && (
             <CalendarPicker
               mode="range"
+              allowModeToggle
               value={{ start: customRange?.start ?? null, end: customRange?.end ?? null }}
               onChange={(r: DateRange) => {
                 if (!r.start) return;
@@ -1135,7 +1128,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
               onClear={() => { setCustomRange(null); setSelectedDayIdx(null); }}
             />
           )}
-          {/* Глобальный фильтр «Менеджеры» (b2g) — пересчитывает сводную */}
+          {/* Глобальный фильтр «Менеджеры» — пересчитывает сводную */}
           {department === "b2g" && managerRoster.length > 0 && (
             <DailyManagerMultiSelect
               managers={managerRoster}
@@ -1143,11 +1136,31 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
               onChange={setSelectedManagers}
             />
           )}
+          {/* Гранулярность колонок — компактные пилюли (стиль LINE_PILLS
+              из «Звонков»: p-0.5 контейнер, px-2.5 py-1 кнопки) */}
+          <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
+            {([
+              { id: "days" as const, label: "Месяц (по дням)" },
+              { id: "weeks" as const, label: "Недели" },
+              { id: "months" as const, label: "Год (по месяцам)" },
+            ]).map((f) => (
+              <button
+                key={f.id}
+                onClick={() => { setMode(f.id); setSelectedDayIdx(null); setCustomRange(null); }}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                  mode === f.id ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Date navigator */}
+        {/* Date navigator — копия правого кластера «Звонков» */}
         <div className="flex items-center gap-2">
           <button
+            aria-label="Предыдущий период"
             onClick={() => shiftMonth(-1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
@@ -1157,17 +1170,20 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             {dateDisplay}
           </span>
           <button
+            aria-label="Следующий период"
             onClick={() => shiftMonth(1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
-          <button
-            onClick={() => { setSelectedMonth(todayBerlinDate()); setSelectedDayIdx(null); setCustomRange(null); }}
-            className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
-          >
-            Сейчас
-          </button>
+          {showTodayButton && (
+            <button
+              onClick={() => { setSelectedMonth(todayBerlinDate()); setSelectedDayIdx(null); setCustomRange(null); }}
+              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
+            >
+              Сегодня
+            </button>
+          )}
           <button
             onClick={() => fetchData()}
             disabled={loading}
@@ -1209,8 +1225,9 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
 
       {/* Active Managers Panel removed — replaced by SchedulePopup */}
 
-      {/* Sub-tabs: [Показатели] + per-department extras */}
-      <div className="flex gap-1 p-1 rounded-xl bg-slate-800/40 border border-white/5 w-fit">
+      {/* Sub-tabs: [Показатели] + per-department extras — компактные пилюли
+          в стилистике «Звонков» (emerald-акцент сохранён за суб-табами) */}
+      <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5 w-fit">
         {(
           department === "b2b"
             ? ([
@@ -1226,10 +1243,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           <button
             key={t.id}
             onClick={() => setSubTab(t.id)}
-            className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
               subTab === t.id
-                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                : "text-slate-400 hover:text-white border border-transparent"
+                ? "bg-emerald-500/20 text-emerald-300"
+                : "text-slate-400 hover:text-slate-200"
             }`}
           >
             {t.label}
