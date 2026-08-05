@@ -325,6 +325,29 @@ const MONTH_NAMES = [
   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ];
 
+// План хранится ПОМЕСЯЧНО и каскадится вниз (день = месяц/дней, неделя =
+// месяц/(дней/7)). Ячейка редактирования — в шкале ТЕКУЩЕГО вида, поэтому
+// перед сохранением масштабируем введённое число вверх: без этого «44 в
+// день» записывались как 44/месяц и в ячейке дня превращались в «1».
+// Константные ключи (проценты, NON_CUMULATIVE на сервере) не каскадятся.
+const PLAN_KEYS_NOT_SCALED = new Set<string>(["regulationPercent"]);
+
+function scalePlanForStorage(
+  metricKey: string,
+  value: string,
+  mode: "days" | "weeks" | "months",
+  monthPeriodDate: string,
+): string {
+  if (PLAN_KEYS_NOT_SCALED.has(metricKey)) return value;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return value;
+  const [y, m] = monthPeriodDate.split("-").map(Number);
+  if (!y || !m) return value;
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const factor = mode === "days" ? daysInMonth : mode === "weeks" ? daysInMonth / 7 : 1;
+  return String(Math.round(n * factor));
+}
+
 // Get fact value for a metric from a snapshot's section
 function getMetricFact(snapshot: DailySnapshot | undefined, sectionKey: string, metricKey: string): string | null {
   if (!snapshot) return null;
@@ -674,7 +697,10 @@ function SummaryTimeTable({
               }
 
               const isPlan = m.isPlanRow;
-              const isEditable = m.isEditable;
+              // Карандаш и клик-редактирование только когда сохранение
+              // реально доступно (onPlanSave скрывается при фильтре
+              // «Менеджеры» и диапазоне через границу месяцев).
+              const isEditable = m.isEditable && !!onPlanSave;
               const cellId = `${m.sectionKey}:${m.metricKey}`;
               const isEditing = editingCell === cellId;
 
@@ -1411,7 +1437,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
                     line: dbLine,
                     userId: null,
                     metricKey,
-                    planValue: value,
+                    // Ввод — в шкале текущего вида; в БД — месячная шкала.
+                    // Оптимистичный патч выше остаётся с введённым числом:
+                    // именно его и должны показать ячейки после рефетча.
+                    planValue: scalePlanForStorage(metricKey, value, mode, periodDate),
                     periodType,
                     periodDate,
                     // b2g: план пишется в текущую вертикаль (buh/med);

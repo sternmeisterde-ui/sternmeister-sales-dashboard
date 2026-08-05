@@ -11,7 +11,7 @@ import {
 } from "@/lib/kommo/metrics";
 import { getAnalyticsCallMetricsByMaster, getFrozenLeadsCombined, getOverdueTasksByManager, getManagersWithKommoForPeriod, getAnalyticsUnansweredWaitSeconds, getAnalyticsSlaFirstCallMinutes, getAnalyticsSlaFirstCallMinutesByManager, type ManagerSlaStat } from "@/lib/daily/analytics-calls";
 import { getPlans, getScheduleForDate, getUniqueOnLineManagerCount } from "@/lib/db/queries-daily";
-import { getDailySections } from "@/lib/daily/metrics-config";
+import { getDailySections, B2G_DAILY_PLAN_DEFAULTS } from "@/lib/daily/metrics-config";
 import {
   getPipelineIds,
   getActiveStatusIds,
@@ -940,6 +940,13 @@ export async function buildDailyResponse(department: string, period: string, dat
     if (val === undefined && department === "b2b") {
       const def = B2B_FIXED_PLAN_DEFAULTS[metricKey];
       if (def != null) val = String(def);
+    }
+    // B2G: дефолтные планы первой линии, заданы В ДЕНЬ (2026-08-06).
+    // Умножаем на daysInMonth до месячной шкалы, чтобы каскад planDivisor
+    // ниже дал ровно дневное значение в дне и ×7 в неделе.
+    if (val === undefined && department === "b2g") {
+      const defDaily = B2G_DAILY_PLAN_DEFAULTS[metricKey];
+      if (defDaily != null) val = String(defDaily * daysInMonth);
     }
     if (val === undefined) return null;
     // Skip division for non-cumulative metrics.
