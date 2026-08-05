@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   Phone, Clock, AlertTriangle,
@@ -189,6 +189,45 @@ const LINE_SHORT: Record<Exclude<LineFilter, "all">, string> = {
   "2": "Бератер",
   "3": "Доведение",
 };
+
+// Итоги вкладки B2B одним объектом: без фильтра «Менеджеры» — серверные
+// dept-итоги (в них входят и звонки, не сматченные ни с одним менеджером),
+// с фильтром — пересчёт из per-manager строк (средние — взвешенно). Одна
+// функция на KPI-плитки и таблицу сравнения периодов, чтобы цифры в них
+// никогда не расходились.
+interface B2bAgg {
+  outgoing: number;
+  answeredOut: number;
+  dialPct: number;
+  totalMinutes: number;
+  waitSec: number | null;
+  slaMin: number;
+  lost: number;
+}
+
+function aggB2bMetrics(data: DashboardData, sub: PerManagerRow[] | null): B2bAgg {
+  const m = data.todayMetrics;
+  const outgoing = sub === null ? m.outgoingTotal : sub.reduce((s, r) => s + r.outgoingTotal, 0);
+  const answeredOut = sub === null ? m.outgoingConnected ?? 0 : sub.reduce((s, r) => s + r.outgoingConnected, 0);
+  const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
+  const totalMinutes = sub === null ? m.totalMinutes : sub.reduce((s, r) => s + r.totalMinutes, 0);
+  // «Ожидание» = среднее гудков в неотвеченных исходящих. При фильтре —
+  // взвешенное среднее по выбранным (вес = количество их недозвонов).
+  let waitSec: number | null = m.unansweredWaitSec ?? null;
+  let slaMin = m.slaFirstCallMin ?? 0;
+  if (sub !== null) {
+    const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
+    waitSec = unansWeight > 0
+      ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
+      : null;
+    const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
+    slaMin = slaWeight > 0
+      ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
+      : 0;
+  }
+  const lost = sub === null ? m.lostCalls ?? 0 : sub.reduce((s, r) => s + (r.lostCalls ?? 0), 0);
+  return { outgoing, answeredOut, dialPct, totalMinutes, waitSec, slaMin, lost };
+}
 
 // ==================== Component ====================
 
@@ -974,29 +1013,10 @@ export default function DashboardTab({
         (() => {
           // При активном фильтре «Менеджеры» плитки пересчитываются из
           // perManager-строк: суммы напрямую, Ожидание/SLA — взвешенные
-          // средние (веса: отвеченные звонки / slaLeadCount). Без фильтра —
+          // средние (веса: недозвоны / slaLeadCount). Без фильтра —
           // серверные dept-итоги (включают несматченные звонки), как раньше.
-          const sub = selectedManagers === null ? null : filteredPerManager;
-          const outgoing = sub === null ? m.outgoingTotal : sub.reduce((s, r) => s + r.outgoingTotal, 0);
-          const answeredOut = sub === null ? m.outgoingConnected ?? 0 : sub.reduce((s, r) => s + r.outgoingConnected, 0);
-          const dialPct = outgoing > 0 ? Math.round((answeredOut / outgoing) * 100) : 0;
-          const totalMinutes = sub === null ? m.totalMinutes : sub.reduce((s, r) => s + r.totalMinutes, 0);
-          // «Ожидание» = среднее гудков в неотвеченных исходящих. При фильтре
-          // «Менеджеры» — взвешенное среднее по выбранным (вес = количество
-          // их недозвонов).
-          let waitSec: number | null = m.unansweredWaitSec ?? null;
-          let slaMin = m.slaFirstCallMin ?? 0;
-          if (sub !== null) {
-            const unansWeight = sub.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
-            waitSec = unansWeight > 0
-              ? Math.round(sub.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
-              : null;
-            const slaWeight = sub.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
-            slaMin = slaWeight > 0
-              ? Math.round(sub.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
-              : 0;
-          }
-          const lost = sub === null ? m.lostCalls ?? 0 : sub.reduce((s, r) => s + (r.lostCalls ?? 0), 0);
+          const { outgoing, answeredOut, dialPct, totalMinutes, waitSec, slaMin, lost } =
+            aggB2bMetrics(data, selectedManagers === null ? null : filteredPerManager);
           return (
             // 7 колонок под 7 плиток — после удаления «Всего» (спека 22 п.4)
             // 8-колоночная сетка оставляла дыру справа.
@@ -1554,18 +1574,27 @@ export default function DashboardTab({
         document.body,
       )}
 
-      {/* ============ PER-MANAGER TABLE — режим СРАВНЕНИЯ (Коммерсы) ============
-           Плоско, по референсу «Оценки критериев»: строки — менеджеры, у
-           каждой метрики тройка колонок A | B | Δ, сверху жирная строка
-           «Всего». Тумблеров-раскрывашек нет намеренно — все значения должны
-           читаться одним взглядом (фидбек 2026-07-28). */}
+      {/* ============ СРАВНЕНИЕ ПЕРИОДОВ (Коммерсы) ============
+           Точно по референсу «Оценки критериев» (решение 2026-08-05): метрики
+           строками слева, две колонки периодов с числом звонков в шапке и Δ.
+           Разбивки по менеджерам нет намеренно — чтобы посмотреть конкретного
+           человека, достаточно выбрать его в фильтре «Менеджеры»: он скоупит
+           обе колонки одинаково. */}
       {!isB2G && compareOn && (
-        <ManagerCompareTable
-          rowsA={filteredPerManager}
-          rowsB={compareData?.perManager ?? null}
-          selected={selectedManagers}
-          labelA={`${fmtCmpRange(formatDate(range.start), formatDate(range.end))}`}
-          labelB={`${fmtCmpRange(compareFrom, compareTo)}`}
+        <MetricsCompareTable
+          aggA={aggB2bMetrics(data, selectedManagers === null ? null : filteredPerManager)}
+          aggB={
+            compareData
+              ? aggB2bMetrics(
+                  compareData,
+                  selectedManagers === null
+                    ? null
+                    : compareData.perManager.filter((r) => selectedManagers.has(r.name)),
+                )
+              : null
+          }
+          labelA={fmtCmpRange(formatDate(range.start), formatDate(range.end))}
+          labelB={fmtCmpRange(compareFrom, compareTo)}
           loading={compareLoading}
         />
       )}
@@ -2708,12 +2737,14 @@ function TrendChartByManager({ trendByManager, department, vertical, selected }:
 }
 
 
-// ==================== Сравнение периодов: таблица «Менеджеры» (Коммерсы) ====================
+// ==================== Сравнение периодов (Коммерсы) ====================
 //
-// Референс — сравнение в «Оценке критериев»: строки-сущности, у каждой метрики
-// колонки A (синяя) | B (оранжевая) | Δ. Плоско, без раскрывашек: все значения
-// видны одним взглядом (фидбек 2026-07-28). Данные периода B — второй ответ
-// того же /api/dashboard, поэтому обе колонки считаются одними формулами.
+// Точно по референсу сравнения в «Оценке критериев» (решение 2026-08-05):
+// метрики строками слева, колонка периода A (синяя) | периода B (оранжевая)
+// | Δ = A − B. Разбивки по менеджерам нет — конкретный человек смотрится
+// через общий фильтр «Менеджеры», который скоупит обе колонки одинаково.
+// Данные периода B — второй ответ того же /api/dashboard, поэтому обе
+// колонки считаются одними формулами (aggB2bMetrics, как KPI-плитки).
 
 /** Короткая подпись периода «дд.мм–дд.мм». */
 function fmtCmpRange(from: string, to: string): string {
@@ -2721,173 +2752,123 @@ function fmtCmpRange(from: string, to: string): string {
   return from === to ? dm(from) : `${dm(from)}–${dm(to)}`;
 }
 
-/** Метрики сравнения. invert=true → рост это ухудшение (Ожидание, SLA). */
+/** Метрики сравнения — те же семь, что KPI-плитки, в том же порядке.
+ *  invert=true → рост это ухудшение (SLA, Потерянные). «Ожидание» НЕ
+ *  инвертировано: это среднее гудков в недозвонах — чем дольше ждали,
+ *  тем лучше (маленькое значение = слишком рано бросают трубку). */
 const CMP_METRICS: Array<{
   key: string;
   label: string;
   invert: boolean;
-  /** Значение метрики у строки; null — считать не из чего (нет базы среднего). */
-  value: (r: PerManagerRow) => number | null;
+  /** Значение метрики; null — считать не из чего (нет базы среднего). */
+  value: (a: B2bAgg) => number | null;
   fmt: (v: number) => string;
-  /** Единица дельты («% дозв.» меряется в п.п.). */
+  /** Единица дельты (у процентных метрик — «%», просьба 2026-08-05). */
   deltaUnit: string;
+  /** Окраска значения — как у одноимённой плитки; без неё значение нейтральное. */
+  color?: (v: number) => string;
 }> = [
-  { key: "out", label: "Исходящие", invert: false, value: (r) => r.outgoingTotal, fmt: (v) => String(v), deltaUnit: "" },
-  { key: "conn", label: "Принятых", invert: false, value: (r) => r.outgoingConnected, fmt: (v) => String(v), deltaUnit: "" },
+  { key: "out", label: "Исходящие", invert: false, value: (a) => a.outgoing, fmt: (v) => String(v), deltaUnit: "" },
+  { key: "conn", label: "Принятых", invert: false, value: (a) => a.answeredOut, fmt: (v) => String(v), deltaUnit: "" },
   {
-    key: "dial", label: "% дозв.", invert: false,
-    value: (r) => (r.outgoingTotal > 0 ? Math.round((r.outgoingConnected / r.outgoingTotal) * 100) : null),
-    fmt: (v) => `${v}%`, deltaUnit: " п.п.",
+    key: "dial", label: "% дозвона", invert: false,
+    value: (a) => (a.outgoing > 0 ? a.dialPct : null),
+    fmt: (v) => `${v}%`, deltaUnit: "%",
+    color: (v) => (v >= 50 ? "text-emerald-400" : v >= 30 ? "text-amber-400" : "text-rose-400"),
   },
-  { key: "min", label: "Длительность", invert: false, value: (r) => r.totalMinutes, fmt: (v) => fmtHoursMinutes(v), deltaUnit: " мин" },
+  { key: "min", label: "Длительность", invert: false, value: (a) => a.totalMinutes, fmt: (v) => fmtHoursMinutes(v), deltaUnit: " мин" },
+  { key: "wait", label: "Ожидание", invert: false, value: (a) => a.waitSec, fmt: (v) => `${v} с`, deltaUnit: " с" },
+  { key: "sla", label: "SLA", invert: true, value: (a) => a.slaMin, fmt: (v) => `${v} мин`, deltaUnit: " мин" },
   {
-    key: "wait", label: "Ожидание", invert: true,
-    value: (r) => (r.unansweredWaitSeconds ? r.unansweredWaitSeconds : null),
-    fmt: (v) => `${v} с`, deltaUnit: " с",
-  },
-  {
-    key: "sla", label: "SLA", invert: true,
-    value: (r) => (r.slaFirstCallMin ? r.slaFirstCallMin : null),
-    fmt: (v) => `${v} мин`, deltaUnit: " мин",
+    key: "lost", label: "Потерянные", invert: true, value: (a) => a.lost, fmt: (v) => String(v), deltaUnit: "",
+    color: (v) => (v === 0 ? "text-emerald-400" : "text-rose-400"),
   },
 ];
 
-function cmpDeltaCls(a: number | null, b: number | null, invert: boolean): string {
-  if (a == null || b == null) return "text-slate-600";
-  const d = a - b;
-  if (d === 0) return "text-slate-500";
+/** Цвет дельты Δ = A − B (текущий период минус сравниваемый);
+ *  у инвертированных метрик рост = хуже. */
+function cmpDeltaCls(va: number | null, vb: number | null, invert: boolean): string {
+  if (va == null || vb == null) return "text-slate-600";
+  const d = va - vb;
+  if (d === 0) return "text-slate-400";
   return (d > 0) !== invert ? "text-emerald-400" : "text-rose-400";
 }
 
-function cmpDeltaText(a: number | null, b: number | null, unit: string): string {
-  if (a == null || b == null) return "—";
-  const d = Math.round((a - b) * 10) / 10;
+function cmpDeltaText(va: number | null, vb: number | null, unit: string): string {
+  if (va == null || vb == null) return "—";
+  const d = Math.round((va - vb) * 10) / 10;
   return `${d > 0 ? "+" : ""}${d}${unit}`;
 }
 
-function ManagerCompareTable({ rowsA, rowsB, selected, labelA, labelB, loading }: {
-  rowsA: PerManagerRow[];
-  rowsB: PerManagerRow[] | null;
-  selected: Set<string> | null;
+function MetricsCompareTable({ aggA, aggB, labelA, labelB, loading }: {
+  aggA: B2bAgg;
+  aggB: B2bAgg | null;
   labelA: string;
   labelB: string;
   loading: boolean;
 }) {
-  // Объединение менеджеров обоих периодов (в B мог работать уже уволенный, в
-  // A — новичок), под тем же глобальным фильтром «Менеджеры».
-  const byNameA = new Map(rowsA.map((r) => [r.name, r]));
-  const byNameB = new Map((rowsB ?? []).map((r) => [r.name, r]));
-  const names = Array.from(new Set([...rowsA.map((r) => r.name), ...(rowsB ?? []).map((r) => r.name)]))
-    .filter((n) => selected === null || selected.has(n))
-    .sort((a, b) => (byNameA.get(b)?.outgoingTotal ?? 0) - (byNameA.get(a)?.outgoingTotal ?? 0) || a.localeCompare(b, "ru"));
-
-  /** Итог столбца: счётчики суммируем, средние — взвешенно (как плитки). */
-  const totals = (rows: PerManagerRow[]): PerManagerRow => {
-    const acc = rows.filter((r) => selected === null || selected.has(r.name));
-    const unansWeight = acc.reduce((s, r) => s + (r.unansweredOutCount ?? 0), 0);
-    const slaWeight = acc.reduce((s, r) => s + (r.slaLeadCount ?? 0), 0);
-    return {
-      id: "__total__", name: "Всего", line: null, kommoUserId: null,
-      callsTotal: acc.reduce((s, r) => s + r.callsTotal, 0),
-      callsConnected: acc.reduce((s, r) => s + r.callsConnected, 0),
-      dialPercent: 0,
-      totalMinutes: acc.reduce((s, r) => s + r.totalMinutes, 0),
-      avgDialogMinutes: 0,
-      missedIncoming: 0,
-      incomingTotal: 0,
-      outgoingTotal: acc.reduce((s, r) => s + r.outgoingTotal, 0),
-      outgoingConnected: acc.reduce((s, r) => s + r.outgoingConnected, 0),
-      avgWaitSeconds: 0,
-      unansweredWaitSeconds: unansWeight > 0
-        ? Math.round(acc.reduce((s, r) => s + (r.unansweredWaitSeconds ?? 0) * (r.unansweredOutCount ?? 0), 0) / unansWeight)
-        : 0,
-      unansweredOutCount: unansWeight,
-      slaFirstCallMin: slaWeight > 0
-        ? Math.round(acc.reduce((s, r) => s + r.slaFirstCallMin * (r.slaLeadCount ?? 0), 0) / slaWeight)
-        : 0,
-      slaLeadCount: slaWeight,
-      lostCalls: acc.reduce((s, r) => s + r.lostCalls, 0),
-    };
-  };
-
-  const rowCells = (a: PerManagerRow | undefined, b: PerManagerRow | undefined, bold: boolean) =>
-    CMP_METRICS.map((mm) => {
-      const va = a ? mm.value(a) : null;
-      const vb = b ? mm.value(b) : null;
-      const cls = `py-2 px-3 text-right tabular-nums text-[12px] ${bold ? "font-semibold text-white" : "text-slate-300"}`;
-      return (
-        <Fragment key={mm.key}>
-          <td title={labelA} className={`${cls} border-l border-white/10`}>{va == null ? "—" : mm.fmt(va)}</td>
-          <td title={labelB} className={cls}>{vb == null ? "—" : mm.fmt(vb)}</td>
-          <td
-            title={`A − B${mm.invert ? " (рост = хуже)" : ""}`}
-            className={`py-2 px-3 text-right tabular-nums text-[12px] ${bold ? "font-semibold" : ""} ${cmpDeltaCls(va, vb, mm.invert)}`}
-          >
-            {cmpDeltaText(va, vb, mm.deltaUnit)}
-          </td>
-        </Fragment>
-      );
-    });
-
-  const tA = totals(rowsA);
-  const tB = rowsB ? totals(rowsB) : undefined;
-
   return (
-    <div className="glass-panel rounded-2xl p-5 border border-white/5">
-      <h3 className="text-slate-300 font-semibold tracking-wide text-xs uppercase mb-4 flex items-baseline gap-x-3 gap-y-1 flex-wrap">
-        <span className="text-blue-400">Менеджеры — сравнение периодов</span>
-        <span className="text-blue-400">A · {labelA}</span>
-        <span className="text-orange-400">B · {labelB}</span>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-widest font-bold text-slate-500">
+        Сравнение периодов
         {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-orange-400" />}
-      </h3>
-      {!rowsB && !loading && (
-        <p className="text-slate-500 text-sm py-2">Период B не загрузился — обновите страницу.</p>
-      )}
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm border-collapse">
-          <thead>
-            <tr>
-              <th className="sticky left-0 z-10 bg-slate-900 min-w-[170px] py-2 px-2" />
-              {CMP_METRICS.map((mm) => (
-                <th
-                  key={mm.key}
-                  colSpan={3}
-                  className="py-2 px-3 text-center text-[10px] uppercase tracking-wider font-semibold text-slate-200 border-l border-white/10 bg-white/[0.03] whitespace-nowrap"
-                >
-                  {mm.label}
-                </th>
-              ))}
-            </tr>
-            <tr className="border-b border-white/10">
-              <th className="sticky left-0 z-10 bg-slate-900 text-left py-1.5 px-2 text-[10px] uppercase tracking-widest text-slate-500 font-semibold">
-                Менеджер
-              </th>
-              {CMP_METRICS.map((mm) => (
-                <Fragment key={mm.key}>
-                  <th title={labelA} className="py-1.5 px-3 text-right text-[9px] uppercase tracking-wider font-bold text-blue-400 border-l border-white/10">A</th>
-                  <th title={labelB} className="py-1.5 px-3 text-right text-[9px] uppercase tracking-wider font-bold text-orange-400">B</th>
-                  <th title="A − B" className="py-1.5 px-3 text-right text-[9px] uppercase tracking-wider font-bold text-slate-500">Δ</th>
-                </Fragment>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-t border-white/10 bg-blue-500/[0.05]">
-              <td className="sticky left-0 z-10 bg-slate-900 py-2 px-2 text-[11px] font-bold text-white">Всего</td>
-              {rowCells(tA, tB, true)}
-            </tr>
-            {names.map((n) => (
-              <tr key={n} className="border-t border-white/[0.06] hover:bg-white/[0.02] transition-colors">
-                <td className="sticky left-0 z-10 bg-slate-900 py-2 px-2 text-[11px] text-slate-200 whitespace-nowrap">{n}</td>
-                {rowCells(byNameA.get(n), byNameB.get(n), false)}
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
-      <p className="text-[10px] text-slate-600 mt-2">
-        Δ = A − B. У «Ожидания» и «SLA» рост означает ухудшение — цвет там инвертирован.
+      <div className="glass-panel text-slate-200 rounded-2xl border border-white/5 shadow-2xl">
+        <div className="w-full rounded-2xl" style={{ overflowX: "auto" }}>
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="light-panel-header border-b border-white/10">
+                <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold min-w-[220px]">
+                  Метрика
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[110px]">
+                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">{labelA}</div>
+                  <div className="text-[10px] text-white font-bold">{aggA.outgoing} исх.</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[110px]">
+                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">{labelB}</div>
+                  <div className="text-[10px] text-white font-bold">{aggB ? `${aggB.outgoing} исх.` : "…"}</div>
+                </th>
+                <th className="px-3 py-2.5 text-center min-w-[70px]">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Δ</div>
+                </th>
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {CMP_METRICS.map((mm) => {
+                const va = mm.value(aggA);
+                const vb = aggB ? mm.value(aggB) : null;
+                const valCls = (v: number | null) =>
+                  v != null && mm.color ? mm.color(v) : "text-slate-200";
+                return (
+                  <tr key={mm.key} className="border-t border-white/[0.06] hover:bg-white/[0.02] transition-colors">
+                    <td className="px-4 py-2 text-[12px] font-medium text-slate-300">{mm.label}</td>
+                    <td title={labelA} className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${valCls(va)}`}>
+                      {va == null ? "—" : mm.fmt(va)}
+                    </td>
+                    <td title={labelB} className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${valCls(vb)}`}>
+                      {vb == null ? "—" : mm.fmt(vb)}
+                    </td>
+                    <td
+                      title={`A − B${mm.invert ? " (рост = хуже)" : ""}`}
+                      className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${cmpDeltaCls(va, vb, mm.invert)}`}
+                    >
+                      {cmpDeltaText(va, vb, mm.deltaUnit)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {!aggB && !loading && (
+        <p className="text-slate-500 text-sm">Период B не загрузился — обновите страницу.</p>
+      )}
+      <p className="text-[10px] text-slate-600">
+        Δ = A − B (текущий период минус сравниваемый). У «SLA» и «Потерянных» рост означает ухудшение — цвет там инвертирован.
         «—» в «Ожидании» значит, что в периоде не было недозвонов и среднее считать не из чего.
+        Фильтр «Менеджеры» действует на обе колонки.
       </p>
     </div>
   );
