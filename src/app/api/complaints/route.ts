@@ -136,9 +136,20 @@ export async function GET(req: NextRequest) {
       {
         complaints: withLine,
         // Для дропдауна фильтра у админа; менеджеру список не нужен.
+        // Тот же предикат «звонящих», что в /api/daily/managers (вкладка
+        // Звонки): активные manager/teamlead + РОПы с линией (двойной
+        // статус). Админы, продления и «чистые» РОПы — не в списке.
+        // Матчинг владения жалоб выше идёт по ПОЛНОМУ списку отдела.
         allManagers: isAdmin
           ? managers
-              .filter((m) => m.isActive !== false)
+              .filter(
+                (m) =>
+                  m.isActive !== false &&
+                  (m.role === "manager" ||
+                    m.role === "teamlead" ||
+                    (m.role === "rop" && m.line != null)),
+              )
+              .sort((a, b) => a.name.localeCompare(b.name, "ru"))
               .map((m) => ({ id: m.id, name: m.name, line: m.line }))
           : [],
       },
