@@ -210,6 +210,15 @@ export const dailySections: SectionDef[] = [
   },
 ];
 
+/** Дефолтные планы первой линии B2G, В ДЕНЬ (запрос РОПа 2026-08-06).
+ *  Применяются в getPlan, когда в daily_plans нет введённого значения;
+ *  build-response умножает на daysInMonth до месячной шкалы хранения,
+ *  чтобы каскад дал ровно эти числа в дневном виде и ×7 в неделях. */
+export const B2G_DAILY_PLAN_DEFAULTS: Record<string, number> = {
+  totalLeads_p: 44,
+  qualLeads_p: 25,
+};
+
 /** Get all metric keys that have hasPlan=true across all sections */
 export function getEditableMetricKeys(): { section: string; key: string; label: string }[] {
   const result: { section: string; key: string; label: string }[] = [];

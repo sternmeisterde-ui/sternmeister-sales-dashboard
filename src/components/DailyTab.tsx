@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
+import { createPortal } from "react-dom";
 import {
   TrendingUp,
   Users,
@@ -17,6 +18,7 @@ import {
   Megaphone,
   Globe,
   Pencil,
+  Check,
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
@@ -24,6 +26,8 @@ import {
   todayBerlinDate,
   berlinCivilComponents,
   berlinCivilDate,
+  addDaysCivil,
+  diffDaysCivil,
 } from "@/lib/utils/date";
 
 // ====================== TYPES ======================
@@ -294,6 +298,18 @@ function formatDayLabel(dateStr: string): string {
   return `D${Number(dd)}`;
 }
 
+/** Berlin civil YYYY-MM-DD инстанта — для URL-параметров from/to. */
+function fmtYmdBerlin(d: Date): string {
+  const c = berlinCivilComponents(d);
+  return `${c.y}-${String(c.m).padStart(2, "0")}-${String(c.d).padStart(2, "0")}`;
+}
+
+/** DD.MM.YYYY для подписи выбранного диапазона в шапке. */
+function fmtDisplayBerlin(d: Date): string {
+  const c = berlinCivilComponents(d);
+  return `${String(c.d).padStart(2, "0")}.${String(c.m).padStart(2, "0")}.${c.y}`;
+}
+
 function formatDaySubLabel(dateStr: string): string {
   const [, mm, dd] = dateStr.split("-");
   return `${dd}.${mm}`;
@@ -308,6 +324,29 @@ const MONTH_NAMES = [
   "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ];
+
+// План хранится ПОМЕСЯЧНО и каскадится вниз (день = месяц/дней, неделя =
+// месяц/(дней/7)). Ячейка редактирования — в шкале ТЕКУЩЕГО вида, поэтому
+// перед сохранением масштабируем введённое число вверх: без этого «44 в
+// день» записывались как 44/месяц и в ячейке дня превращались в «1».
+// Константные ключи (проценты, NON_CUMULATIVE на сервере) не каскадятся.
+const PLAN_KEYS_NOT_SCALED = new Set<string>(["regulationPercent"]);
+
+function scalePlanForStorage(
+  metricKey: string,
+  value: string,
+  mode: "days" | "weeks" | "months",
+  monthPeriodDate: string,
+): string {
+  if (PLAN_KEYS_NOT_SCALED.has(metricKey)) return value;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return value;
+  const [y, m] = monthPeriodDate.split("-").map(Number);
+  if (!y || !m) return value;
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const factor = mode === "days" ? daysInMonth : mode === "weeks" ? daysInMonth / 7 : 1;
+  return String(Math.round(n * factor));
+}
 
 // Get fact value for a metric from a snapshot's section
 function getMetricFact(snapshot: DailySnapshot | undefined, sectionKey: string, metricKey: string): string | null {
@@ -349,6 +388,112 @@ function collectManagers(snapshot: DailySnapshot | undefined): ManagerData[] {
     }
   }
   return result;
+}
+
+// ============ Пересчёт сводной под фильтр «Менеджеры» (b2g) ============
+// Итог линии собирается заново из per-manager строк выбранных менеджеров:
+// счётчики складываются, производные (% дозвона, ср. диалог) выводятся из
+// сумм, средние (SLA, ОКК, ролевки) — среднее по менеджерам с данными.
+// Ключи вне карты (константные планы, метрики без per-manager разбивки,
+// вся секция «Воронка») остаются серверными — по всей линии/отделу.
+type AggRule =
+  | { kind: "sum" }
+  | { kind: "mean"; decimals: number }
+  | { kind: "ratioPct"; num: string; den: string }
+  | { kind: "divide"; num: string; den: string };
+
+const MANAGER_AGG_RULES: Record<string, AggRule> = {
+  staffCount: { kind: "sum" }, // per-manager fact = "1" → сумма = кол-во выбранных на линии
+  callsTotal_p: { kind: "sum" }, // 160/чел — план масштабируется под выборку
+  callsTotal: { kind: "sum" },
+  callsConnected: { kind: "sum" },
+  dialPercent: { kind: "ratioPct", num: "callsConnected", den: "callsTotal" },
+  missedIncoming: { kind: "sum" },
+  totalMinutes_p: { kind: "sum" }, // 240/чел
+  totalMinutes: { kind: "sum" },
+  avgDialogMinutes: { kind: "divide", num: "totalMinutes", den: "callsConnected" },
+  // per-manager fact здесь = минуты диалога менеджера → среднее по выборке
+  avgDialogPerEmployee: { kind: "mean", decimals: 1 },
+  overdueTasks: { kind: "sum" },
+  frozenLeads: { kind: "sum" },
+  avgCallsPerLead: { kind: "mean", decimals: 1 },
+  // Секунды; среднее по менеджерам с данными (веса-по-лидам в снапшоте нет)
+  sla_f: { kind: "mean", decimals: 0 },
+  sla_shift_f: { kind: "mean", decimals: 0 },
+  tlt_f: { kind: "mean", decimals: 0 },
+  okk_f: { kind: "mean", decimals: 0 },
+  roleplay_f: { kind: "mean", decimals: 0 },
+};
+
+function roundTo(n: number, decimals: number): number {
+  const k = 10 ** decimals;
+  return Math.round(n * k) / k;
+}
+
+function applyManagerFilterToSnapshot(snap: DailySnapshot, selected: Set<string>): DailySnapshot {
+  return {
+    ...snap,
+    sections: snap.sections.map((sec) => {
+      if (!sec.perManager) return sec;
+      if (sec.managers.length === 0) {
+        // Нет per-manager данных (пустое расписание дня / старый снапшот) —
+        // честнее «—», чем показать в этой колонке нефильтрованные итоги
+        // всей линии рядом с пересчитанными соседними колонками.
+        return {
+          ...sec,
+          metrics: sec.metrics.map((m) =>
+            MANAGER_AGG_RULES[m.key] && !m.isGroupHeader ? { ...m, fact: null, percent: null } : m,
+          ),
+        };
+      }
+      const chosen = sec.managers.filter((m) => selected.has(m.id));
+      // mgr.metrics выровнены позиционно с non-header метриками секции
+      // (см. getManagerMetricFact) — строим индекс key → позиция.
+      const nonHeader = sec.metrics.filter((m) => !m.isGroupHeader);
+      const keyIdx = new Map(nonHeader.map((m, i) => [m.key, i]));
+      const valOf = (mgr: ManagerData, key: string): number | null => {
+        const idx = keyIdx.get(key);
+        if (idx === undefined) return null;
+        const f = mgr.metrics[idx]?.fact;
+        if (f == null || f === "" || f === "—") return null;
+        const n = Number(f);
+        return Number.isFinite(n) ? n : null;
+      };
+      const sum = (key: string) => chosen.reduce((acc, m) => acc + (valOf(m, key) ?? 0), 0);
+      const metrics = sec.metrics.map((m) => {
+        const rule = MANAGER_AGG_RULES[m.key];
+        if (!rule || m.isGroupHeader) return m;
+        let fact: string | null;
+        switch (rule.kind) {
+          case "sum":
+            fact = String(sum(m.key));
+            break;
+          case "ratioPct": {
+            const den = sum(rule.den);
+            fact = den > 0 ? String(Math.round((sum(rule.num) / den) * 100)) : null;
+            break;
+          }
+          case "divide": {
+            const den = sum(rule.den);
+            fact = den > 0 ? String(roundTo(sum(rule.num) / den, 1)) : null;
+            break;
+          }
+          case "mean": {
+            const vals = chosen
+              .map((mg) => valOf(mg, m.key))
+              .filter((v): v is number => v != null);
+            fact = vals.length
+              ? String(roundTo(vals.reduce((a, b) => a + b, 0) / vals.length, rule.decimals))
+              : null;
+            break;
+          }
+        }
+        // percent обнуляем: серверный считался от полного состава линии.
+        return { ...m, fact, percent: null };
+      });
+      return { ...sec, metrics, managers: chosen };
+    }),
+  };
 }
 
 // Get all non-header metrics across all sections (flat list with section info)
@@ -449,6 +594,9 @@ function SummaryTimeTable({
 
   const commitEdit = async (m: FlatMetric) => {
     if (!onPlanSave || !referenceSnapshot) return;
+    // Пустой ввод не сохраняем: Number("") === 0, и в БД ушёл бы «0»,
+    // который навсегда перекрывает дефолты (B2G_DAILY_PLAN_DEFAULTS).
+    if (editValue.trim() === "") { cancelEdit(); return; }
     const periodType = "month";
     // Use stable month periodDate (e.g. "2026-04"), not individual day snapshot date
     const periodDate = monthPeriodDate || referenceSnapshot.periodDate.slice(0, 7);
@@ -563,7 +711,10 @@ function SummaryTimeTable({
               }
 
               const isPlan = m.isPlanRow;
-              const isEditable = m.isEditable;
+              // Карандаш и клик-редактирование только когда сохранение
+              // реально доступно (onPlanSave скрывается при фильтре
+              // «Менеджеры» и диапазоне через границу месяцев).
+              const isEditable = m.isEditable && !!onPlanSave;
               const cellId = `${m.sectionKey}:${m.metricKey}`;
               const isEditing = editingCell === cellId;
 
@@ -630,7 +781,7 @@ function SummaryTimeTable({
                       return (
                         <td
                           key={colIdx}
-                          onClick={() => isEditable && onPlanSave ? startEdit(m, val) : onSelectCol(colIdx)}
+                          onClick={() => isEditable ? startEdit(m, val) : onSelectCol(colIdx)}
                           className={`px-2 py-2 text-right font-mono text-[12px] cursor-pointer transition-colors ${
                             selectedCol === colIdx ? "bg-blue-500/10" : ""
                           } ${isPlan ? "text-blue-300 hover:bg-blue-500/10" : getCellColor(val)} ${trafficCls}`}
@@ -652,6 +803,118 @@ function SummaryTimeTable({
 
 // ManagerMetricsTable removed (superseded by ManagersCompareView).
 // ActiveManagersPanel removed — replaced by SchedulePopup.
+
+// ============ Глобальный фильтр «Менеджеры» (шапка вкладки, b2g) ============
+// Копия ManagerMultiSelect из DashboardTab, но по id (имена в Дейли могут
+// дрейфовать между снапшотами, id из master_managers стабилен).
+function DailyManagerMultiSelect({ managers, selected, onChange }: {
+  managers: Array<{ id: string; name: string; line: string | null }>;
+  selected: Set<string> | null;
+  onChange: (next: Set<string> | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  // Портал в body (как поповер CalendarPicker): absolute-дропдаун с z-30
+  // уходил ПОД липкую шапку сводной таблицы (thead z-40, левая колонка z-50).
+  const [popupStyle, setPopupStyle] = useState<React.CSSProperties>({});
+  const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setMounted(true); }, []);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || popupRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const isAll = selected === null;
+  const count = isAll ? managers.length : selected.size;
+  const toggle = (id: string) => {
+    const base = isAll ? new Set(managers.map((m) => m.id)) : new Set(selected);
+    if (base.has(id)) base.delete(id);
+    else base.add(id);
+    // Снова выбраны все → null (=«все»), чтобы новые менеджеры в следующих
+    // периодах тоже попадали в выборку.
+    onChange(base.size === managers.length ? null : base);
+  };
+
+  const buttonLabel = isAll
+    ? `Все (${managers.length})`
+    : count === 0
+      ? "никто"
+      : `${count}/${managers.length}`;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        ref={triggerRef}
+        onClick={() => {
+          if (!open && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            const POPUP_W = 288; // w-72
+            const GAP = 4;
+            let left = rect.left;
+            if (left + POPUP_W > window.innerWidth - GAP) {
+              left = Math.max(GAP, window.innerWidth - POPUP_W - GAP);
+            }
+            setPopupStyle({ position: "fixed", top: rect.bottom + GAP, left, zIndex: 9999 });
+          }
+          setOpen((o) => !o);
+        }}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 border border-white/5 hover:bg-slate-800 text-xs text-slate-300 transition-all"
+      >
+        <Users className="w-3.5 h-3.5" />
+        Менеджеры
+        <span className="text-slate-500">{buttonLabel}</span>
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && mounted && createPortal(
+        <div ref={popupRef} style={popupStyle} className="w-72 max-h-72 bg-slate-900 rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-950">
+            <span className="text-xs font-semibold text-white">Менеджеры</span>
+            <span className="text-[11px] text-slate-400 ml-auto">{count}/{managers.length}</span>
+            <button type="button" onClick={() => onChange(null)} className="text-[11px] text-blue-400 hover:text-blue-300 px-1.5">
+              Все
+            </button>
+            <button type="button" onClick={() => onChange(new Set())} className="text-[11px] text-rose-400 hover:text-rose-300 px-1.5">
+              Снять
+            </button>
+          </div>
+          <div className="overflow-y-auto flex-1 px-2 py-2 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+            {managers.map((m) => {
+              const checked = isAll || selected.has(m.id);
+              return (
+                <label
+                  key={m.id}
+                  className="flex items-center gap-2 px-2 py-1 rounded-md text-xs cursor-pointer hover:bg-white/5"
+                >
+                  <span
+                    className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
+                      checked ? "bg-blue-500 border-blue-500" : "border-slate-600"
+                    }`}
+                  >
+                    {checked && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
+                  </span>
+                  <input type="checkbox" checked={checked} onChange={() => toggle(m.id)} className="sr-only" />
+                  <span className="text-slate-200 truncate">{m.name}</span>
+                  {m.line && (
+                    <span className="ml-auto text-[10px] text-slate-500 shrink-0">Л{m.line}</span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
 
 // ====================== MAIN COMPONENT ======================
 
@@ -680,6 +943,13 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
   // Per-manager таблицы и refusal cards вынесены в отдельные табы чтобы
   // Показатели страница не была перегружена.
   const [subTab, setSubTab] = useState<"metrics" | "managers" | "refusals" | "rating">("metrics");
+  // Фильтр «Период» (b2g): произвольный диапазон дат календарём, как в
+  // «Звонках». null = обычная навигация по месяцу. Активен только в режиме
+  // «по дням» — выбор диапазона принудительно переключает mode в "days".
+  const [customRange, setCustomRange] = useState<{ start: Date; end: Date } | null>(null);
+  // Глобальный фильтр «Менеджеры» (b2g): null = все. Пересчитывает итоги
+  // линий в сводной таблице из per-manager данных выбранных менеджеров.
+  const [selectedManagers, setSelectedManagers] = useState<Set<string> | null>(null);
 
   // Parallel fetch: months-of-year for Managers tab "По датам" dropdown.
   // Runs when department or year changes — independent of mode.
@@ -714,7 +984,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
         // crossed the month boundary at midnight in non-Berlin zones.
         const sel = berlinCivilComponents(selectedMonth);
         const monthStr = `${sel.y}-${String(sel.m).padStart(2, "0")}`;
-        if (mode === "days") {
+        if (mode === "days" && customRange && department === "b2g") {
+          // Фильтр «Период»: произвольный диапазон вместо целого месяца.
+          url = `/api/daily/range?department=${department}&mode=days&from=${fmtYmdBerlin(customRange.start)}&to=${fmtYmdBerlin(customRange.end)}${vParam}`;
+        } else if (mode === "days") {
           url = `/api/daily/range?department=${department}&mode=days&month=${monthStr}${vParam}`;
         } else if (mode === "weeks") {
           // Weeks-of-selected-month (4–5 Mon-Sun weeks that touch the month)
@@ -723,7 +996,12 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           url = `/api/daily/range?department=${department}&mode=months&year=${sel.y}${vParam}`;
         }
 
-        const res = await fetch(url, { signal });
+        // no-store: роут отдаёт Cache-Control max-age=30, и браузер отвечал
+        // на рефетч после сохранения плана СТАРОЙ копией из HTTP-кеша —
+        // свежие значения появлялись только через 30–60 секунд. Серверный
+        // 30s-кеш остаётся (PUT /plans его чистит), так что бурсты всё ещё
+        // поглощаются на сервере.
+        const res = await fetch(url, { signal, cache: "no-store" });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API error ${res.status}: ${text}`);
@@ -732,14 +1010,12 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
         setData(json);
         hasLoadedRef.current = true;
 
-        // Auto-select today if in current month — Berlin civil comparison.
+        // Auto-select today when present — по дате снапшота, не по индексу:
+        // при произвольном диапазоне (customRange) индекс ≠ день месяца.
         if (mode === "days" && json.days) {
-          const today = berlinCivilComponents(todayBerlinDate());
-          if (today.y === sel.y && today.m === sel.m) {
-            setSelectedDayIdx(today.d - 1);
-          } else {
-            setSelectedDayIdx(null);
-          }
+          const todayStr = fmtYmdBerlin(todayBerlinDate());
+          const idx = (json.days as DailySnapshot[]).findIndex((s) => s.date === todayStr);
+          setSelectedDayIdx(idx >= 0 ? idx : null);
         }
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return;
@@ -750,7 +1026,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
         setLoading(false);
       }
     },
-    [department, mode, selectedMonth, vParam]
+    [department, mode, selectedMonth, vParam, customRange]
   );
 
   useEffect(() => {
@@ -763,6 +1039,19 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
   // user east of Berlin clicking "previous month" near midnight doesn't skip
   // a month (the old `setMonth(getMonth() − 1)` ran browser-local).
   const shiftMonth = (dir: -1 | 1) => {
+    // При активном фильтре «Период» стрелки сдвигают диапазон на его длину
+    // (как shiftDate в «Звонках»), а не месяц.
+    if (customRange && mode === "days") {
+      const startStr = fmtYmdBerlin(customRange.start);
+      const endStr = fmtYmdBerlin(customRange.end);
+      const len = diffDaysCivil(endStr, startStr) + 1;
+      setCustomRange({
+        start: berlinCivilDate(addDaysCivil(startStr, dir * len)),
+        end: berlinCivilDate(addDaysCivil(endStr, dir * len)),
+      });
+      setSelectedDayIdx(null);
+      return;
+    }
     const { y, m } = berlinCivilComponents(selectedMonth);
     let nextY = y;
     let nextM = m;
@@ -821,17 +1110,126 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
   // todaySchedule lookup removed — SchedulePopup queries the schedule
   // directly via /api/managers/schedule, no need to derive from snapshots.
 
-  const dateDisplay = mode === "days"
-    ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
-    : `${selectedMonth.getFullYear()} год`;
+  // Ростер фильтра «Менеджеры» — объединение по всем снапшотам периода
+  // (в отдельных днях состав меняется из-за расписания смен).
+  const managerRoster = useMemo(() => {
+    if (department !== "b2g" || !data) return [];
+    const seen = new Map<string, { id: string; name: string; line: string | null }>();
+    const allSnaps: DailySnapshot[] = [
+      ...(data.days ?? []),
+      ...(data.weeks ?? []),
+      ...(data.months ?? []),
+      ...(data.monthlySummary ? [data.monthlySummary] : []),
+    ];
+    for (const s of allSnaps) {
+      for (const sec of s.sections) {
+        for (const mgr of sec.managers) {
+          if (!seen.has(mgr.id)) {
+            seen.set(mgr.id, { id: mgr.id, name: mgr.name, line: mgr.line ?? sec.dbLine });
+          }
+        }
+      }
+    }
+    return [...seen.values()].sort(
+      (a, b) => (a.line ?? "9").localeCompare(b.line ?? "9") || a.name.localeCompare(b.name, "ru"),
+    );
+  }, [data, department]);
+
+  const managerFilterActive = department === "b2g" && selectedManagers !== null;
+
+  // Сводная таблица под фильтром «Менеджеры»: итоги линий пересобираются из
+  // per-manager строк выбранных (см. applyManagerFilterToSnapshot).
+  const displaySnapshots = useMemo(
+    () => (managerFilterActive && selectedManagers
+      ? snapshots.map((s) => applyManagerFilterToSnapshot(s, selectedManagers))
+      : snapshots),
+    [snapshots, managerFilterActive, selectedManagers],
+  );
+
+  const dateDisplay = customRange && mode === "days"
+    ? (fmtYmdBerlin(customRange.start) === fmtYmdBerlin(customRange.end)
+        ? fmtDisplayBerlin(customRange.start)
+        : `${fmtDisplayBerlin(customRange.start)} – ${fmtDisplayBerlin(customRange.end)}`)
+    : mode === "days"
+      ? `${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`
+      : `${selectedMonth.getFullYear()} год`;
+
+  // Бейдж календаря никогда не пустует словом «Календарь» (в «Звонках»
+  // период выбран всегда — держим то же поведение): показываем выбранный
+  // диапазон, а без фильтра — границы отображаемого месяца/года.
+  const calendarValue: DateRange = useMemo(() => {
+    if (customRange) return customRange;
+    const { y, m } = berlinCivilComponents(selectedMonth);
+    const p2 = (n: number) => String(n).padStart(2, "0");
+    if (mode === "months") {
+      return { start: berlinCivilDate(`${y}-01-01`), end: berlinCivilDate(`${y}-12-31`) };
+    }
+    const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return { start: berlinCivilDate(`${y}-${p2(m)}-01`), end: berlinCivilDate(`${y}-${p2(m)}-${p2(dim)}`) };
+  }, [customRange, selectedMonth, mode]);
+
+  // «Сегодня» — как в «Звонках»: видна только когда вид ушёл от текущего
+  // периода (выбран диапазон, другой месяц или другой год).
+  const showTodayButton = (() => {
+    if (customRange) return true;
+    const cur = berlinCivilComponents(selectedMonth);
+    const now = berlinCivilComponents(todayBerlinDate());
+    return cur.y !== now.y || (mode !== "months" && cur.m !== now.m);
+  })();
+
+  // Планы редактируются помесячно: при диапазоне через границу месяцев
+  // непонятно, в какой месяц писать — правку выключаем. При фильтре
+  // «Менеджеры» сводная показывает пересчитанные значения — тоже выключаем,
+  // чтобы не переписать линейный план, глядя на цифры выборки.
+  const rangeCrossesMonths = customRange && mode === "days"
+    ? fmtYmdBerlin(customRange.start).slice(0, 7) !== fmtYmdBerlin(customRange.end).slice(0, 7)
+    : false;
+  const canEditPlans = plansEditable && !managerFilterActive && !rangeCrossesMonths;
+  const planMonthPeriodDate = customRange && mode === "days"
+    ? fmtYmdBerlin(customRange.start).slice(0, 7)
+    : `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`;
+  // Подпись месяца для «Рейтинга»/«Отказов»: при customRange из другого
+  // месяца monthlySummary строится для месяца НАЧАЛА диапазона — подписи
+  // и run-rate должны считаться от него же, не от selectedMonth.
+  const planMonthLabel = (() => {
+    const [py, pm] = planMonthPeriodDate.split("-").map(Number);
+    return `${MONTH_NAMES[(pm || 1) - 1]} ${py}`;
+  })();
 
   return (
     <div className="flex flex-col gap-6 fade-in flex-1 overflow-y-auto pb-6 scrollbar-hide">
-      {/* Controls */}
+      {/* ── Filters: структура и стили шапки — как во вкладке «Звонки» ── */}
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Mode toggle */}
-          <div className="flex bg-slate-800/50 p-1.5 rounded-xl border border-white/5 shadow-inner">
+          {/* Календарь — тот же пикер, что в «Звонках» (тогл «День/Период»
+              внутри). Выбор даты/диапазона переключает вид в «по дням»;
+              крестик/«Сбросить» возвращает обычный месяц. */}
+          {department === "b2g" && (
+            <CalendarPicker
+              mode="range"
+              allowModeToggle
+              defaultToggleMode="range"
+              value={calendarValue}
+              onChange={(r: DateRange) => {
+                if (!r.start) return;
+                setMode("days");
+                setCustomRange({ start: r.start, end: r.end ?? r.start });
+                setSelectedDayIdx(null);
+              }}
+              onClear={() => { setCustomRange(null); setSelectedDayIdx(null); }}
+            />
+          )}
+          {/* Глобальный фильтр «Менеджеры» — пересчитывает сводную */}
+          {department === "b2g" && managerRoster.length > 0 && (
+            <DailyManagerMultiSelect
+              managers={managerRoster}
+              selected={selectedManagers}
+              onChange={setSelectedManagers}
+            />
+          )}
+          {/* Гранулярность колонок — компактные пилюли (стиль LINE_PILLS
+              из «Звонков»: p-0.5 контейнер, px-2.5 py-1 кнопки) */}
+          <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5">
             {([
               { id: "days" as const, label: "Месяц (по дням)" },
               { id: "weeks" as const, label: "Недели" },
@@ -839,11 +1237,9 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             ]).map((f) => (
               <button
                 key={f.id}
-                onClick={() => { setMode(f.id); setSelectedDayIdx(null); }}
-                className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all duration-300 flex-shrink-0 ${
-                  mode === f.id
-                    ? "bg-blue-500/20 text-blue-400 border border-blue-500/30 shadow-md"
-                    : "text-slate-400 hover:text-white"
+                onClick={() => { setMode(f.id); setSelectedDayIdx(null); setCustomRange(null); }}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                  mode === f.id ? "bg-blue-500/20 text-blue-300" : "text-slate-400 hover:text-slate-200"
                 }`}
               >
                 {f.label}
@@ -852,9 +1248,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           </div>
         </div>
 
-        {/* Date navigator */}
+        {/* Date navigator — копия правого кластера «Звонков» */}
         <div className="flex items-center gap-2">
           <button
+            aria-label="Предыдущий период"
             onClick={() => shiftMonth(-1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
@@ -864,17 +1261,20 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             {dateDisplay}
           </span>
           <button
+            aria-label="Следующий период"
             onClick={() => shiftMonth(1)}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
-          <button
-            onClick={() => { setSelectedMonth(todayBerlinDate()); setSelectedDayIdx(null); }}
-            className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
-          >
-            Сейчас
-          </button>
+          {showTodayButton && (
+            <button
+              onClick={() => { setSelectedMonth(todayBerlinDate()); setSelectedDayIdx(null); setCustomRange(null); }}
+              className="text-[10px] uppercase tracking-wider px-3 py-1.5 rounded-lg text-blue-400 hover:text-white bg-blue-500/10 hover:bg-blue-500/20 transition-colors border border-blue-500/20"
+            >
+              Сегодня
+            </button>
+          )}
           <button
             onClick={() => fetchData()}
             disabled={loading}
@@ -916,8 +1316,9 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
 
       {/* Active Managers Panel removed — replaced by SchedulePopup */}
 
-      {/* Sub-tabs: [Показатели] + per-department extras */}
-      <div className="flex gap-1 p-1 rounded-xl bg-slate-800/40 border border-white/5 w-fit">
+      {/* Sub-tabs: [Показатели] + per-department extras — компактные пилюли
+          в стилистике «Звонков» (emerald-акцент сохранён за суб-табами) */}
+      <div className="flex items-center gap-0.5 bg-slate-900/60 border border-white/10 rounded-lg p-0.5 w-fit">
         {(
           department === "b2b"
             ? ([
@@ -933,10 +1334,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           <button
             key={t.id}
             onClick={() => setSubTab(t.id)}
-            className={`px-4 py-2 rounded-lg text-[11px] uppercase tracking-widest font-bold transition-all ${
+            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
               subTab === t.id
-                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                : "text-slate-400 hover:text-white border border-transparent"
+                ? "bg-emerald-500/20 text-emerald-300"
+                : "text-slate-400 hover:text-slate-200"
             }`}
           >
             {t.label}
@@ -985,7 +1386,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
       {department === "b2g" && subTab === "rating" && data && !loading && (
         <RatingFirstLineView
           monthlySnapshot={monthlySnapshot ?? selectedDaySnapshot}
-          monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
+          monthPeriodDate={planMonthPeriodDate}
         />
       )}
 
@@ -994,7 +1395,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           monthly={monthlySnapshot?.refusals}
           daily={selectedDaySnapshot?.refusals}
           daySubLabel={selectedDaySnapshot ? formatDaySubLabel(selectedDaySnapshot.date) : ""}
-          monthLabel={`${MONTH_NAMES[selectedMonth.getMonth()]} ${selectedMonth.getFullYear()}`}
+          monthLabel={planMonthLabel}
         />
       )}
 
@@ -1014,15 +1415,20 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
                 — выбран {formatDaySubLabel(data.days[selectedDayIdx].date)}
               </span>
             )}
+            {managerFilterActive && (
+              <span className="ml-2 text-amber-400 normal-case tracking-normal font-medium">
+                — по выбранным менеджерам ({selectedManagers?.size ?? 0}); метрики без разбивки по менеджерам — по всей линии
+              </span>
+            )}
           </div>
           <SummaryTimeTable
-            snapshots={snapshots}
+            snapshots={displaySnapshots}
             columnLabels={columnLabels}
             columnSubLabels={columnSubLabels}
             selectedCol={selectedDayIdx}
             onSelectCol={setSelectedDayIdx}
-            monthPeriodDate={`${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, "0")}`}
-            onPlanSave={!plansEditable ? undefined : async (dbLine, metricKey, value, periodType, periodDate) => {
+            monthPeriodDate={planMonthPeriodDate}
+            onPlanSave={!canEditPlans ? undefined : async (dbLine, metricKey, value, periodType, periodDate) => {
               // Optimistic UI — flip the edited metric's plan value in place
               // across every snapshot (monthly save affects all days), then
               // fire the PUT. Refetch runs in the background for derived
@@ -1031,20 +1437,26 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
               // every keystroke save.
               setData((prev) => {
                 if (!prev) return prev;
+                // Патчим и plan, И fact: ячейки сводной рендерят metric.fact
+                // (для plan-строк сервер кладёт туда план). Раньше патчился
+                // только plan — введённое число не появлялось на экране до
+                // рефетча, что выглядело как «не сохранилось».
                 const patchSection = (sec: Section): Section => (
                   sec.dbLine === dbLine
-                    ? { ...sec, metrics: sec.metrics.map((m) => m.key === metricKey ? { ...m, plan: value } : m) }
+                    ? { ...sec, metrics: sec.metrics.map((m) => m.key === metricKey ? { ...m, plan: value, fact: value } : m) }
                     : sec
                 );
                 const patchSnap = (s: DailySnapshot): DailySnapshot => (
                   { ...s, sections: s.sections.map(patchSection) }
                 );
+                // Патчим только снапшоты ТЕКУЩЕГО режима: введённое число —
+                // в его шкале (день/неделя/месяц). Остальные шкалы (включая
+                // monthlySummary) подтянет фоновый рефетч в верной шкале.
                 return {
                   ...prev,
-                  days: prev.days?.map(patchSnap),
-                  weeks: prev.weeks?.map(patchSnap),
-                  months: prev.months?.map(patchSnap),
-                  monthlySummary: prev.monthlySummary ? patchSnap(prev.monthlySummary) : prev.monthlySummary,
+                  days: mode === "days" ? prev.days?.map(patchSnap) : prev.days,
+                  weeks: mode === "weeks" ? prev.weeks?.map(patchSnap) : prev.weeks,
+                  months: mode === "months" ? prev.months?.map(patchSnap) : prev.months,
                 };
               });
               setSaving(true);
@@ -1057,7 +1469,10 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
                     line: dbLine,
                     userId: null,
                     metricKey,
-                    planValue: value,
+                    // Ввод — в шкале текущего вида; в БД — месячная шкала.
+                    // Оптимистичный патч выше остаётся с введённым числом:
+                    // именно его и должны показать ячейки после рефетча.
+                    planValue: scalePlanForStorage(metricKey, value, mode, periodDate),
                     periodType,
                     periodDate,
                     // b2g: план пишется в текущую вертикаль (buh/med);
@@ -1086,6 +1501,14 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             }}
           />
         </>
+      )}
+
+      {/* Пустой период (диапазон в будущем / до старта данных 2026-01-01):
+          без этого блока экран оставался просто пустым без объяснения. */}
+      {data && !loading && snapshots.length === 0 && (
+        <div className="glass-panel rounded-2xl p-6 border border-white/5 text-slate-500 text-sm text-center">
+          Нет данных за выбранный период
+        </div>
       )}
 
       {/* B2G per-manager tables and refusal cards are now in separate sub-tabs

@@ -1,4 +1,5 @@
 // GET /api/daily/range?department=b2g&month=2026-03&mode=days[&vertical=buh|med|all]
+// GET /api/daily/range?department=b2g&mode=days&from=2026-08-05&to=2026-08-12 — произвольный диапазон дат
 // Returns array of daily snapshots for every day in a month (or every month in a year)
 import { NextRequest, NextResponse } from "next/server";
 import { buildDailyResponseCached, getBusinessToday } from "@/lib/daily/build-response";
@@ -56,6 +57,51 @@ export async function GET(req: NextRequest) {
       department === "b2g" && (rawVertical === "buh" || rawVertical === "med" || rawVertical === "all")
         ? rawVertical
         : undefined;
+
+    // Произвольный диапазон дат (фильтр «Период» в Дейли): mode=days без month.
+    // Дни строятся тем же buildDailyResponseCached — просто список дат другой.
+    const fromParam = url.searchParams.get("from");
+    const toParam = url.searchParams.get("to");
+    if (mode === "days" && fromParam && toParam) {
+      const YMD = /^\d{4}-\d{2}-\d{2}$/;
+      if (!YMD.test(fromParam) || !YMD.test(toParam) || fromParam > toParam) {
+        return NextResponse.json({ error: "Invalid from/to params, expected YYYY-MM-DD, from <= to" }, { status: 400 });
+      }
+      const today = getBusinessToday();
+      const DATA_START_STR = "2026-01-01";
+      // Клампим границы ДО итерации: иначе cap в 92 дня съедали календарные
+      // дни вне [DATA_START..today] и валидный хвост диапазона молча терялся
+      // (например from=2025-09-01&to=2026-01-31 давал пустой ответ).
+      const startStr = fromParam < DATA_START_STR ? DATA_START_STR : fromParam;
+      const endStr = toParam > today ? today : toParam;
+      const dates: string[] = [];
+      if (startStr <= endStr) {
+        const cur = new Date(`${startStr}T00:00:00Z`);
+        const end = new Date(`${endStr}T00:00:00Z`);
+        // Cap: 92 дня (квартал) — каждый день = ~10 Neon-запросов на билд.
+        for (let i = 0; cur <= end && i < 92; cur.setUTCDate(cur.getUTCDate() + 1), i++) {
+          dates.push(cur.toISOString().slice(0, 10));
+        }
+      }
+
+      const monthOfFrom = fromParam.slice(0, 7);
+      if (dates.length === 0) {
+        return jsonOk({ mode: "days", month: monthOfFrom, days: [], monthlySummary: null });
+      }
+
+      // monthlySummary месяца начала диапазона — его ждут суб-табы
+      // «Менеджеры»/«Рейтинг»/«Отказы» как дефолтный снапшот.
+      const [results, monthlySummary] = await Promise.all([
+        fetchWithConcurrency(
+          dates,
+          (dateStr) => buildDailyResponseCached(department, "day", dateStr, vertical),
+          4,
+        ),
+        buildDailyResponseCached(department, "month", `${monthOfFrom}-01`, vertical),
+      ]);
+
+      return jsonOk({ mode: "days", month: monthOfFrom, days: results, monthlySummary });
+    }
 
     if (mode === "days") {
       const [yearStr, monthStr] = monthParam.split("-");
