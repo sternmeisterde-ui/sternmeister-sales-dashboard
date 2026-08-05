@@ -1132,6 +1132,7 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
             <CalendarPicker
               mode="range"
               allowModeToggle
+              defaultToggleMode="range"
               value={calendarValue}
               onChange={(r: DateRange) => {
                 if (!r.start) return;

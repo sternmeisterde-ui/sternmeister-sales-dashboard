@@ -70,6 +70,11 @@ interface CalendarPickerProps {
    * switch between single-click day selection and two-click range selection
    * without the parent needing to rerender with a different mode prop. */
   allowModeToggle?: boolean;
+  /** Starting position of the "День / Период" toggle (only meaningful with
+   * allowModeToggle). Default "single" — the historical behaviour of the
+   * «Звонки» header. Pass "range" where the view is period-based (Дейли),
+   * so the popover opens matching what the badge displays. */
+  defaultToggleMode?: "range" | "single";
 }
 
 // ─── component ─────────────────────────────────────────────
@@ -82,11 +87,11 @@ export default function CalendarPicker({
   maxDate,
   className = "",
   allowModeToggle = false,
+  defaultToggleMode = "single",
 }: CalendarPickerProps) {
-  // Internal mode shadows the prop when allowModeToggle is true. Default to
-  // "single" for toggleable pickers since that's the most common intent.
+  // Internal mode shadows the prop when allowModeToggle is true.
   const [internalMode, setInternalMode] = useState<"range" | "single">(
-    allowModeToggle ? "single" : mode,
+    allowModeToggle ? defaultToggleMode : mode,
   );
   const effectiveMode = allowModeToggle ? internalMode : mode;
   const [open, setOpen] = useState(false);
