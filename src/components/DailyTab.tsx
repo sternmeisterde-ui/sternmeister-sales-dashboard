@@ -982,7 +982,12 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
           url = `/api/daily/range?department=${department}&mode=months&year=${sel.y}${vParam}`;
         }
 
-        const res = await fetch(url, { signal });
+        // no-store: роут отдаёт Cache-Control max-age=30, и браузер отвечал
+        // на рефетч после сохранения плана СТАРОЙ копией из HTTP-кеша —
+        // свежие значения появлялись только через 30–60 секунд. Серверный
+        // 30s-кеш остаётся (PUT /plans его чистит), так что бурсты всё ещё
+        // поглощаются на сервере.
+        const res = await fetch(url, { signal, cache: "no-store" });
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API error ${res.status}: ${text}`);
@@ -1411,9 +1416,13 @@ export default function DailyTab({ department, vertical }: { department: "b2g" |
               // every keystroke save.
               setData((prev) => {
                 if (!prev) return prev;
+                // Патчим и plan, И fact: ячейки сводной рендерят metric.fact
+                // (для plan-строк сервер кладёт туда план). Раньше патчился
+                // только plan — введённое число не появлялось на экране до
+                // рефетча, что выглядело как «не сохранилось».
                 const patchSection = (sec: Section): Section => (
                   sec.dbLine === dbLine
-                    ? { ...sec, metrics: sec.metrics.map((m) => m.key === metricKey ? { ...m, plan: value } : m) }
+                    ? { ...sec, metrics: sec.metrics.map((m) => m.key === metricKey ? { ...m, plan: value, fact: value } : m) }
                     : sec
                 );
                 const patchSnap = (s: DailySnapshot): DailySnapshot => (
