@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
+import { createPortal } from "react-dom";
 import {
   TrendingUp,
   Users,
@@ -772,11 +773,20 @@ function DailyManagerMultiSelect({ managers, selected, onChange }: {
   onChange: (next: Set<string> | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  // Портал в body (как поповер CalendarPicker): absolute-дропдаун с z-30
+  // уходил ПОД липкую шапку сводной таблицы (thead z-40, левая колонка z-50).
+  const [popupStyle, setPopupStyle] = useState<React.CSSProperties>({});
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setMounted(true); }, []);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || popupRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -802,7 +812,20 @@ function DailyManagerMultiSelect({ managers, selected, onChange }: {
   return (
     <div className="relative" ref={ref}>
       <button
-        onClick={() => setOpen((o) => !o)}
+        ref={triggerRef}
+        onClick={() => {
+          if (!open && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            const POPUP_W = 288; // w-72
+            const GAP = 4;
+            let left = rect.left;
+            if (left + POPUP_W > window.innerWidth - GAP) {
+              left = Math.max(GAP, window.innerWidth - POPUP_W - GAP);
+            }
+            setPopupStyle({ position: "fixed", top: rect.bottom + GAP, left, zIndex: 9999 });
+          }
+          setOpen((o) => !o);
+        }}
         className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/50 border border-white/5 hover:bg-slate-800 text-xs text-slate-300 transition-all"
       >
         <Users className="w-3.5 h-3.5" />
@@ -810,8 +833,8 @@ function DailyManagerMultiSelect({ managers, selected, onChange }: {
         <span className="text-slate-500">{buttonLabel}</span>
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      {open && (
-        <div className="absolute left-0 mt-1 z-30 w-72 max-h-72 bg-slate-900 rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col">
+      {open && mounted && createPortal(
+        <div ref={popupRef} style={popupStyle} className="w-72 max-h-72 bg-slate-900 rounded-xl border border-white/10 shadow-2xl overflow-hidden flex flex-col">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-slate-950">
             <span className="text-xs font-semibold text-white">Менеджеры</span>
             <span className="text-[11px] text-slate-400 ml-auto">{count}/{managers.length}</span>
@@ -846,7 +869,8 @@ function DailyManagerMultiSelect({ managers, selected, onChange }: {
               );
             })}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
