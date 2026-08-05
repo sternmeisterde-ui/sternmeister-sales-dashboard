@@ -194,16 +194,21 @@ function avgScores(scores: Record<string, number>): number | null {
   return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
 }
 
-function fmtDelta(a: number | null | undefined, b: number | null | undefined): string {
+// Δ = A − B: текущий период минус сравниваемый. Раньше считали наоборот
+// (B − A), и при росте показателя дельта уходила в минус и краснела —
+// поправлено 2026-08-05 вместе с таким же фиксом во вкладке «Звонки».
+// unit: дельта процентов подписывается «%» (просьба 2026-08-05); для сырых
+// баллов (скоринг клиента) вызывающий передаёт пустую строку.
+function fmtDelta(a: number | null | undefined, b: number | null | undefined, unit = "%"): string {
   if (a == null || b == null) return "—";
-  const d = b - a;
+  const d = a - b;
   if (d === 0) return "0";
-  return d > 0 ? `+${d}` : `${d}`;
+  return `${d > 0 ? "+" : ""}${d}${unit}`;
 }
 
 function getDeltaColor(a: number | null | undefined, b: number | null | undefined): string {
   if (a == null || b == null) return "text-slate-600";
-  const d = b - a;
+  const d = a - b;
   if (d > 0) return "text-emerald-400";
   if (d < 0) return "text-rose-400";
   return "text-slate-400";
@@ -1994,7 +1999,7 @@ function CompareBlockRows({ blockName, scoreA, scoreB, blockA, blockB, criteriaN
             <td className="px-4 py-1.5 text-[11px] text-slate-400 sticky left-0 bg-slate-900/90 backdrop-blur-sm z-10 pl-10">{cName}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cA, spellitView)} ${getCriteriaBgFor(cName, cA, spellitView)}`}>{fmtScoreFor(cName, cA)}</td>
             <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${getCriteriaColorFor(cName, cB, spellitView)} ${getCriteriaBgFor(cName, cB, spellitView)}`}>{fmtScoreFor(cName, cB)}</td>
-            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${deltaColor}`}>{fmtDelta(cA, cB)}</td>
+            <td className={`px-3 py-1.5 text-center font-mono text-[11px] ${deltaColor}`}>{fmtDelta(cA, cB, isClientScore(cName) ? "" : "%")}</td>
           </tr>
         );
       })}

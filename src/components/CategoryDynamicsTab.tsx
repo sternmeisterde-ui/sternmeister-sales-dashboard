@@ -24,7 +24,7 @@
 // «Правильное количество лидов» и «продажа» определены на сервере — сверено
 // 1в1 с выгрузками Kommo за июнь (459/27) и март (500/24).
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeftRight, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Undo2, X } from "lucide-react";
 import CalendarPicker from "@/components/CalendarPicker";
 import DinoLoader from "@/components/DinoLoader";
@@ -346,12 +346,13 @@ function pctDelta(cur: number, ref: number): { text: string; good: boolean } | n
   return { text: `${pct >= 0 ? "+" : ""}${pct}%`, good: pct >= 0 };
 }
 
-/** Дельта конверсии в процентных пунктах. */
+/** Дельта конверсии (в процентных пунктах, подписывается «%» —
+ *  просьба 2026-08-05). */
 function ppDelta(curNum: number, curDen: number, refNum: number, refDen: number): { text: string; good: boolean } | null {
   if (curDen <= 0 || refDen <= 0) return null;
   const pp = (curNum / curDen - refNum / refDen) * 100;
   const rounded = Math.round(pp * 10) / 10;
-  return { text: `${rounded >= 0 ? "+" : ""}${rounded} п.п.`, good: rounded >= 0 };
+  return { text: `${rounded >= 0 ? "+" : ""}${rounded}%`, good: rounded >= 0 };
 }
 
 // ==================== Excel-калька: группы колонок = периоды, внутри — корзины ====================
@@ -533,12 +534,13 @@ function GroupsTable({ title, dim, days, from, to, onZoom, onBreakdown }: {
 
 // ==================== Сравнение периодов (референс — «Оценка критериев») ====================
 
-// Макет 1в1 как ComparisonManagerTable вкладки «Оценка критериев»: узкая
-// таблица «Лиды | период A | Лиды | период B | Δ», строки — корзины
-// измерения (раскрываются в Продажи / Конверсии кликом, как менеджер —
-// в блоки критериев), сверху жирная группа «Всего лидов». Главное число
-// периода — % от общего (доля корзины); Δ = A − B (доли — в п.п.,
-// счётчики — в штуках), рост зелёный / падение красное.
+// Макет 1в1 как сравнение вкладки «Оценка критериев»: узкая таблица
+// «Корзина | период A | период B | Δ», по ОДНОЙ колонке на период
+// (просьба 2026-08-05 — лиды не выносить в отдельную колонку): в ячейке
+// корзины количество лидов и доля от общего вместе («14 · 28%»). Строки
+// раскрываются в Продажи / Конверсии кликом, сверху жирная группа «Всего
+// лидов». Δ = A − B (доли — в %, счётчики — в штуках), рост зелёный /
+// падение красное.
 
 type DeltaVal = { text: string; tone: "up" | "down" | "flat" } | null;
 
@@ -554,11 +556,12 @@ function intDelta(a: number, b: number): DeltaVal {
   return { text: d > 0 ? `+${d}` : String(d), tone: d > 0 ? "up" : d < 0 ? "down" : "flat" };
 }
 
-/** Дельта долей в п.п.: A − B. null, когда какой-то из знаменателей пуст. */
+/** Дельта долей: A − B, со знаком «%» (просьба 2026-08-05). null, когда
+ *  какой-то из знаменателей пуст. */
 function ppDeltaVal(aNum: number, aDen: number, bNum: number, bDen: number): DeltaVal {
   if (aDen <= 0 || bDen <= 0) return null;
   const pp = Math.round((aNum / aDen - bNum / bDen) * 1000) / 10;
-  return { text: `${pp > 0 ? "+" : ""}${pp}`, tone: pp > 0 ? "up" : pp < 0 ? "down" : "flat" };
+  return { text: `${pp > 0 ? "+" : ""}${pp}%`, tone: pp > 0 ? "up" : pp < 0 ? "down" : "flat" };
 }
 
 function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, onBreakdown }: {
@@ -597,7 +600,7 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
   const stickyStyle = { backgroundColor: "rgb(15, 23, 42)" };
 
   /** Кликабельная ячейка периода (drill-down по написаниям Kommo). */
-  const periodCell = (b: BucketDef, agg: RangeAgg, from: string, to: string, text: string, cls: string) => {
+  const periodCell = (b: BucketDef, agg: RangeAgg, from: string, to: string, text: ReactNode, cls: string) => {
     const clickable = agg.byBucket[b.key].leads > 0;
     return (
       <td
@@ -614,9 +617,7 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
   const subRow = (key: string, label: string, valA: string, valB: string, d: DeltaVal, deltaTitle: string) => (
     <tr key={key} className="hover:bg-white/[0.02] border-b border-white/[0.03]">
       <td className="px-4 py-1.5 text-[10px] text-slate-500 sticky left-0 z-10 pl-10" style={stickyStyle}>{label}</td>
-      <td />
       <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{valA}</td>
-      <td />
       <td className="px-3 py-1.5 text-center font-mono text-[10px] text-slate-300">{valB}</td>
       <td title={deltaTitle} className={`px-3 py-1.5 text-center font-mono text-[10px] ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>
     </tr>
@@ -635,21 +636,15 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
                 <th className="px-4 py-2.5 text-[10px] uppercase tracking-widest text-slate-500 font-semibold sticky left-0 z-50 min-w-[200px]" style={stickyStyle}>
                   Корзина
                 </th>
-                <th className="px-2 py-2.5 text-center min-w-[55px]">
-                  <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">Лиды</div>
-                </th>
-                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                <th className="px-3 py-2.5 text-center min-w-[110px]">
                   <div className="text-[9px] uppercase tracking-wider text-blue-400 font-bold">{fmtRange(fromA, toA)}</div>
-                  <div className="text-[9px] text-slate-500">% от общего</div>
+                  <div className="text-[9px] text-slate-500">лиды · % от общего</div>
                 </th>
-                <th className="px-2 py-2.5 text-center min-w-[55px]">
-                  <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">Лиды</div>
-                </th>
-                <th className="px-3 py-2.5 text-center min-w-[90px]">
+                <th className="px-3 py-2.5 text-center min-w-[110px]">
                   <div className="text-[9px] uppercase tracking-wider text-orange-400 font-bold">{fmtRange(fromB, toB)}</div>
-                  <div className="text-[9px] text-slate-500">% от общего</div>
+                  <div className="text-[9px] text-slate-500">лиды · % от общего</div>
                 </th>
-                <th className="px-3 py-2.5 text-center min-w-[60px]" title="A − B: доли в п.п., счётчики в штуках">
+                <th className="px-3 py-2.5 text-center min-w-[60px]" title="A − B: доли в %, счётчики в штуках">
                   <div className="text-[9px] uppercase tracking-wider text-slate-500 font-bold">Δ</div>
                 </th>
               </tr>
@@ -663,10 +658,12 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
                     <span className="text-[11px] font-bold text-white">Всего лидов</span>
                   </div>
                 </td>
-                <td className="px-2 py-2 text-center text-[11px] text-white font-bold">{aggA.totalLeads}</td>
-                <td className="px-3 py-2 text-center font-mono text-[12px] text-slate-500">100%</td>
-                <td className="px-2 py-2 text-center text-[11px] text-white font-bold">{aggB.totalLeads}</td>
-                <td className="px-3 py-2 text-center font-mono text-[12px] text-slate-500">100%</td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">
+                  {aggA.totalLeads}<span className="text-slate-500 font-normal"> · 100%</span>
+                </td>
+                <td className="px-3 py-2 text-center font-mono text-[12px] font-bold text-white">
+                  {aggB.totalLeads}<span className="text-slate-500 font-normal"> · 100%</span>
+                </td>
                 {(() => {
                   const d = intDelta(aggA.totalLeads, aggB.totalLeads);
                   return <td title="Δ лидов, шт (A − B)" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${d ? DELTA_CLS[d.tone] : "text-slate-600"}`}>{d ? d.text : "—"}</td>;
@@ -680,7 +677,7 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
               {totalOpen && subRow(
                 "__total__conv", "Конверсия в продажу",
                 fmtPct(aggA.totalSales, aggA.totalLeads), fmtPct(aggB.totalSales, aggB.totalLeads),
-                ppDeltaVal(aggA.totalSales, aggA.totalLeads, aggB.totalSales, aggB.totalLeads), "Δ конверсии, п.п. (A − B)",
+                ppDeltaVal(aggA.totalSales, aggA.totalLeads, aggB.totalSales, aggB.totalLeads), "Δ конверсии (A − B)",
               )}
 
               {/* Корзины: главное число — доля от общего; внутри — продажи и конверсии. */}
@@ -700,11 +697,27 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
                           <span className="text-[11px] font-bold text-white">{b.label}</span>
                         </div>
                       </td>
-                      {periodCell(b, aggA, fromA, toA, String(vA.leads), `px-2 py-2 text-center text-[11px] font-bold ${vA.leads === 0 ? "text-slate-600" : "text-white"}`)}
-                      {periodCell(b, aggA, fromA, toA, fmtPct(vA.leads, aggA.totalLeads), `px-3 py-2 text-center font-mono text-[12px] font-bold ${vA.leads === 0 ? "text-slate-600" : "text-slate-200"}`)}
-                      {periodCell(b, aggB, fromB, toB, String(vB.leads), `px-2 py-2 text-center text-[11px] font-bold ${vB.leads === 0 ? "text-slate-600" : "text-white"}`)}
-                      {periodCell(b, aggB, fromB, toB, fmtPct(vB.leads, aggB.totalLeads), `px-3 py-2 text-center font-mono text-[12px] font-bold ${vB.leads === 0 ? "text-slate-600" : "text-slate-200"}`)}
-                      <td title="Δ доли от общего, п.п. (A − B)" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${shareDelta ? DELTA_CLS[shareDelta.tone] : "text-slate-600"}`}>
+                      {periodCell(
+                        b, aggA, fromA, toA,
+                        vA.leads === 0 ? "0" : (
+                          <>
+                            {vA.leads}
+                            <span className="text-slate-500 font-normal"> · {fmtPct(vA.leads, aggA.totalLeads)}</span>
+                          </>
+                        ),
+                        `px-3 py-2 text-center font-mono text-[12px] font-bold ${vA.leads === 0 ? "text-slate-600" : "text-white"}`,
+                      )}
+                      {periodCell(
+                        b, aggB, fromB, toB,
+                        vB.leads === 0 ? "0" : (
+                          <>
+                            {vB.leads}
+                            <span className="text-slate-500 font-normal"> · {fmtPct(vB.leads, aggB.totalLeads)}</span>
+                          </>
+                        ),
+                        `px-3 py-2 text-center font-mono text-[12px] font-bold ${vB.leads === 0 ? "text-slate-600" : "text-white"}`,
+                      )}
+                      <td title="Δ доли от общего (A − B)" className={`px-3 py-2 text-center font-mono text-[12px] font-bold ${shareDelta ? DELTA_CLS[shareDelta.tone] : "text-slate-600"}`}>
                         {shareDelta ? shareDelta.text : "—"}
                       </td>
                     </tr>
@@ -716,12 +729,12 @@ function ComparisonDimTable({ title, dim, daysA, daysB, fromA, toA, fromB, toB, 
                     {open && subRow(
                       `${k}-convTotal`, "Конверсия от общего",
                       fmtPct(vA.sales, aggA.totalLeads), fmtPct(vB.sales, aggB.totalLeads),
-                      ppDeltaVal(vA.sales, aggA.totalLeads, vB.sales, aggB.totalLeads), "Δ конверсии, п.п. (A − B)",
+                      ppDeltaVal(vA.sales, aggA.totalLeads, vB.sales, aggB.totalLeads), "Δ конверсии (A − B)",
                     )}
                     {open && subRow(
                       `${k}-convCat`, "Конверсия категории",
                       fmtPct(vA.sales, vA.leads), fmtPct(vB.sales, vB.leads),
-                      ppDeltaVal(vA.sales, vA.leads, vB.sales, vB.leads), "Δ конверсии, п.п. (A − B)",
+                      ppDeltaVal(vA.sales, vA.leads, vB.sales, vB.leads), "Δ конверсии (A − B)",
                     )}
                   </Fragment>
                 );
