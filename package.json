@@ -25,8 +25,7 @@
     "docker:logs": "docker-compose logs -f",
     "analytics:backfill": "tsx scripts/backfill-analytics.ts",
     "analytics:backfill:range": "tsx scripts/backfill-analytics.ts",
-    "analytics:backfill:comms": "tsx scripts/backfill-comms.ts",
-    "scripts:sync-b2g-line1-v3": "node scripts/sync-b2g-line1-v3.mjs"
+    "analytics:backfill:comms": "tsx scripts/backfill-comms.ts"
   },
   "dependencies": {
     "@googleapis/drive": "^20.2.0",
