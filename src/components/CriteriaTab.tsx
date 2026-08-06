@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Loader2, ChevronDown, ChevronRight, AlertTriangle, Hash, FileText,
-  BarChart3, Filter, Target, CalendarClock, Lock,
+  BarChart3, Filter, Target, CalendarClock, Lock, Archive,
 } from "lucide-react";
 import { getLines, isValidLineId } from "@/lib/config/tenant";
 
@@ -12,7 +12,8 @@ import { getLines, isValidLineId } from "@/lib/config/tenant";
 // OKK repo (src/criteria/*.json) and synced to the D2 `criteria_configs` table
 // on deploy — the Dashboard API is GET-only (POST → 405). We therefore render
 // the config verbatim, including the v5.1 scoring fields the engine actually
-// uses: `weight` (criticality tier), `objective` (goal rubric), `effective_from`.
+// uses: `weight` (criticality tier), `objective` (goal rubric), and the
+// date window (`effective_from` / `effective_until`).
 
 interface CriterionRaw {
   id: number;
@@ -29,6 +30,8 @@ interface CriterionRaw {
   objective?: string;
   /** ISO date (YYYY-MM-DD): criterion only scores calls on/after this date. */
   effective_from?: string;
+  /** ISO date (YYYY-MM-DD), exclusive: criterion is retired on this date. */
+  effective_until?: string;
 }
 
 interface StageRaw { name: string; criteria: CriterionRaw[]; }
@@ -74,6 +77,25 @@ function formatDateRu(iso: string): string {
   // iso = "2026-06-23" → "23.06.2026" (no TZ math — it's a plain calendar date).
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
   return m ? `${m[3]}.${m[2]}.${m[1]}` : iso;
+}
+
+type TemporalStatus = "active" | "archived" | "scheduled";
+
+function berlinTodayIso(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function temporalStatus(c: CriterionRaw, asOfDate: string): TemporalStatus {
+  if (c.effective_from && asOfDate < c.effective_from) return "scheduled";
+  if (c.effective_until && asOfDate >= c.effective_until) return "archived";
+  return "active";
 }
 
 // Score-type display (analytical / filter / binary / scale).
@@ -123,7 +145,7 @@ function getWeightInfo(weight: number): { label: string; color: string; bg: stri
 
 // ─── Criterion Card (read-only) ─────────────────────────────────
 
-function CriterionCard({ c }: { c: CriterionRaw }) {
+function CriterionCard({ c, status }: { c: CriterionRaw; status: TemporalStatus }) {
   const scores = typeof c.scoring === "boolean" ? c.scoring : true;
   const info = getScoreInfo(c.type, scores);
   const Icon = info.icon;
@@ -134,7 +156,9 @@ function CriterionCard({ c }: { c: CriterionRaw }) {
       : null;
 
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-slate-900/40 overflow-hidden">
+    <div className={`rounded-xl border bg-slate-900/40 overflow-hidden ${
+      status === "active" ? "border-white/[0.06]" : "border-slate-600/20 opacity-65"
+    }`}>
       {/* Header bar with number + badges */}
       <div className="flex items-center justify-between gap-2 px-5 py-3 bg-slate-800/40 border-b border-white/[0.04] flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
@@ -160,6 +184,21 @@ function CriterionCard({ c }: { c: CriterionRaw }) {
           {c.effective_from && (
             <span className="flex items-center gap-1 text-[10px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-md">
               <CalendarClock className="w-3 h-3" /> с {formatDateRu(c.effective_from)}
+            </span>
+          )}
+          {c.effective_until && (
+            <span className="flex items-center gap-1 text-[10px] text-rose-300 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-md">
+              <Archive className="w-3 h-3" /> до {formatDateRu(c.effective_until)}
+            </span>
+          )}
+          {status === "scheduled" && (
+            <span className="text-[10px] text-sky-300 bg-sky-500/10 border border-sky-500/20 px-2 py-0.5 rounded-md">
+              Ещё не действует
+            </span>
+          )}
+          {status === "archived" && (
+            <span className="text-[10px] text-slate-300 bg-slate-500/10 border border-slate-500/20 px-2 py-0.5 rounded-md">
+              Архивный
             </span>
           )}
         </div>
@@ -200,7 +239,7 @@ function CriterionCard({ c }: { c: CriterionRaw }) {
 
 // ─── Stage Section ──────────────────────────────────────────────
 
-function StageSection({ stage }: { stage: StageRaw }) {
+function StageSection({ stage, asOfDate }: { stage: StageRaw; asOfDate: string }) {
   const [open, setOpen] = useState(true);
   const scored = stage.criteria.filter(isScoringBinary).length;
   const total = stage.criteria.length;
@@ -231,7 +270,7 @@ function StageSection({ stage }: { stage: StageRaw }) {
       {open && (
         <div className="grid gap-3 pb-6 pl-8">
           {stage.criteria.map((c) => (
-            <CriterionCard key={c.id} c={c} />
+            <CriterionCard key={c.id} c={c} status={temporalStatus(c, asOfDate)} />
           ))}
         </div>
       )}
@@ -269,6 +308,8 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
   const [version, setVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [asOfDate, setAsOfDate] = useState(berlinTodayIso);
+  const [showInactive, setShowInactive] = useState(false);
 
   // Reset config when department changes
   useEffect(() => {
@@ -284,6 +325,7 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
       if (!json.success) throw new Error(json.error ?? "Unknown error");
       setConfig(json.data as CriteriaConfig);
       setVersion(json.version ?? (json.data as CriteriaConfig).version ?? null);
+      setShowInactive(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setConfig(null);
@@ -296,14 +338,31 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
     loadCriteria(activeConfig);
   }, [activeConfig, loadCriteria]);
 
-  const stages = config?.stages ?? [];
-  const totalCriteria = stages.reduce((sum, s) => sum + s.criteria.length, 0);
-  const scoredCriteria = stages.reduce((sum, s) => sum + s.criteria.filter(isScoringBinary).length, 0);
+  const allStages = config?.stages ?? [];
+  const activeStages = allStages
+    .map((stage) => ({
+      ...stage,
+      criteria: stage.criteria.filter((c) => temporalStatus(c, asOfDate) === "active"),
+    }))
+    .filter((stage) => stage.criteria.length > 0);
+  const stages = showInactive ? allStages : activeStages;
+  const totalStoredCriteria = allStages.reduce((sum, s) => sum + s.criteria.length, 0);
+  const totalCriteria = activeStages.reduce((sum, s) => sum + s.criteria.length, 0);
+  const scoredCriteria = activeStages.reduce((sum, s) => sum + s.criteria.filter(isScoringBinary).length, 0);
+  const inactiveCriteria = totalStoredCriteria - totalCriteria;
+  const expectedVersion = activeConfig === "d2_qualifier"
+    ? "4.0"
+    : activeConfig === "d2_med_qualifier"
+      ? "2.0"
+      : null;
+  const sourceScript = expectedVersion && version === expectedVersion
+    ? "Скрипт первой линии v3.0"
+    : null;
 
   // Weights actually used in THIS config (scoring binary criteria only). The
   // legend renders only when the rubric genuinely weights criteria — flat
   // configs (all weight 1 / unset, e.g. berater / все r2_*) get no legend.
-  const usedWeights = stages
+  const usedWeights = activeStages
     .flatMap((s) => s.criteria)
     .filter((c) => isScoringBinary(c) && c.type === "binary")
     .map((c) => c.weight)
@@ -322,6 +381,14 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
               {department === "b2b" ? "Коммерсы" : "Госники"} — {options.find((o) => o.promptType === activeConfig)?.label}
               {version && <span className="text-slate-500"> · v{version}</span>}
             </p>
+            {sourceScript && (
+              <p className="text-xs text-blue-300/80 mt-1">Основано на документе: {sourceScript}</p>
+            )}
+            {expectedVersion && version && version !== expectedVersion && (
+              <p className="text-xs text-amber-300 mt-1">
+                Внимание: для нового скрипта ожидается конфигурация v{expectedVersion}, сейчас загружена v{version}.
+              </p>
+            )}
           </div>
           <span className="flex items-center gap-1.5 text-xs text-slate-400 bg-slate-700/40 px-3 py-1.5 rounded-lg border border-white/[0.06]">
             <Lock className="w-3.5 h-3.5 text-slate-500" /> Только просмотр
@@ -347,13 +414,46 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
           </div>
         )}
 
+        {!loading && allStages.length > 0 && (
+          <div className="mt-4 flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-2 text-xs text-slate-400">
+              <CalendarClock className="w-3.5 h-3.5 text-blue-400" />
+              Критерии на дату
+              <input
+                type="date"
+                value={asOfDate}
+                onChange={(event) => {
+                  if (!event.target.value) return;
+                  setAsOfDate(event.target.value);
+                  setShowInactive(false);
+                }}
+                className="rounded-lg border border-white/[0.08] bg-slate-800/70 px-2.5 py-1.5 text-xs text-slate-200 focus:border-blue-500/40 focus:outline-none"
+              />
+            </label>
+            {inactiveCriteria > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowInactive((value) => !value)}
+                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                  showInactive
+                    ? "border-slate-500/30 bg-slate-500/15 text-slate-200"
+                    : "border-white/[0.08] bg-slate-800/50 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Archive className="w-3.5 h-3.5" />
+                {showInactive ? "Скрыть архивные" : `Показать архивные (${inactiveCriteria})`}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Stats + legend */}
         {!loading && stages.length > 0 && (
           <div className="mt-4 pt-4 border-t border-white/[0.06] flex flex-col gap-4">
             <div className="flex items-center gap-6">
               <div>
                 <span className="text-2xl font-bold text-white">{totalCriteria}</span>
-                <span className="text-xs text-slate-500 ml-1.5">критериев</span>
+                <span className="text-xs text-slate-500 ml-1.5">действующих</span>
               </div>
               <div>
                 <span className="text-2xl font-bold text-emerald-400">{scoredCriteria}</span>
@@ -388,7 +488,7 @@ export default function CriteriaTab({ department, lineFilter }: CriteriaTabProps
       {!loading && (
         <div className="flex flex-col gap-2">
           {stages.map((stage, si) => (
-            <StageSection key={`${activeConfig}-${si}`} stage={stage} />
+            <StageSection key={`${activeConfig}-${si}`} stage={stage} asOfDate={asOfDate} />
           ))}
         </div>
       )}
