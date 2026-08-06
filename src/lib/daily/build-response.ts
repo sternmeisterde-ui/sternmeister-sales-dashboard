@@ -7,6 +7,7 @@ import {
   aggregateTaskMetrics,
   sumCallMetrics,
   hasCategoryLetter,
+  languageLevelBucket,
   type UserCallMetrics,
 } from "@/lib/kommo/metrics";
 import { getAnalyticsCallMetricsByMaster, getFrozenLeadsCombined, getOverdueTasksByManager, getManagersWithKommoForPeriod, getAnalyticsUnansweredWaitSeconds, getAnalyticsSlaFirstCallMinutes, getAnalyticsSlaFirstCallMinutesByManager, type ManagerSlaStat } from "@/lib/daily/analytics-calls";
@@ -1565,16 +1566,17 @@ export async function buildDailyResponse(department: string, period: string, dat
                   fact = String(mgrGut);
                   break;
                 }
-                case "a2": {
-                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.a2.has(l.status_id)).length);
-                  break;
-                }
-                case "b1": {
-                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.b1.has(l.status_id)).length);
-                  break;
-                }
+                case "a2":
+                case "b1":
                 case "b2plus": {
-                  fact = String(mgrActiveLeads.filter((l) => flPipes.has(l.pipeline_id) && qualTiers.b2plus.has(l.status_id)).length);
+                  // Уровень языка (CFV 869928) — та же когорта, что totalLeads
+                  // менеджера (созданные за период, без Неразобранное/База).
+                  const want = metric.key === "a2" ? "A2" : metric.key === "b1" ? "B1" : "B2PLUS";
+                  fact = String(mgrNewLeads.filter((l) =>
+                    !flStatus.unsorted.has(l.status_id)
+                    && !flStatus.base.has(l.status_id)
+                    && languageLevelBucket(l) === want,
+                  ).length);
                   break;
                 }
                 case "tasksTotal": {
@@ -2091,7 +2093,8 @@ const SNAPSHOT_ONLY_METRICS = new Set([
   "awaitTermTotal", "awaitTermNew",
   "termDCCancelled", "termDCDone", "termAACount",
   "beraterReview", "delayedStart", "appeal",
-  "a2", "b1", "b2plus",
+  // a2/b1/b2plus сняты 2026-08-06: теперь это разбивка СОЗДАННЫХ за период
+  // лидов по уровню языка (CFV 869928), date-filtered — работает и для истории.
   // tasks/consult per-manager filter mgrActiveLeads (live snapshot) — for
   // historical dates without a stored snapshot the numbers would leak today's
   // state. Gate them the same way as the other snapshot-derived metrics.
@@ -2165,11 +2168,18 @@ function getFunnelFact(
       return String(qualCount);
     }
     case "a2":
-      return String(fc.a2);
     case "b1":
-      return String(fc.b1);
-    case "b2plus":
-      return String(fc.b2plus);
+    case "b2plus": {
+      // Уровень языка (CFV 869928 → leads_cohort.language_level), а НЕ этапы
+      // воронки (старое поведение до 2026-08-06 давало «B2 и выше» ≈ 1650 —
+      // снапшот всех активных лидов бератерских стадий). Когорта = созданные
+      // за период без Неразобранное/База — та же, что totalLeads; сверено 1в1
+      // с выгрузкой РОПа за 01.08.2026 (A2 = 10). «B2 и выше» = B2, C1, C2.
+      const excl = new Set<number>([...flS.unsorted, ...flS.base]);
+      const cohort = (newLeadsInPeriod || []).filter((l) => !l.is_deleted && !excl.has(l.status_id));
+      const want = key === "a2" ? "A2" : key === "b1" ? "B1" : "B2PLUS";
+      return String(cohort.filter((l) => languageLevelBucket(l) === want).length);
+    }
     case "avgPortfolio": {
       // Portfolio excludes won/lost + База + Отложенный старт (staging).
       const excludeStatuses = new Set<number>([

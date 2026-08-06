@@ -39,7 +39,8 @@ const funnelMetrics: MetricDef[] = [
   { key: "qualLeads_p", label: "Всего квал лидов план", hasPlan: true, hasFact: false, unit: "шт", factSource: "manual" },
   { key: "qualLeads", label: "Всего квал лидов факт", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "qualLeadsPercent", label: "% квал. лидов", hasPlan: false, hasFact: true, unit: "%", factSource: "computed" },
-  // Квал. разбивка A2 / B1 / B2+ — снапшот по статусам первой линии (формула из Excel)
+  // Разбивка созданных за период лидов по УРОВНЮ ЯЗЫКА (CFV 869928,
+  // «B2 и выше» = B2/C1/C2); когорта = как totalLeads (2026-08-06).
   { key: "a2", label: "A2", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "b1", label: "B1", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
   { key: "b2plus", label: "B2 и выше", hasPlan: false, hasFact: true, unit: "шт", factSource: "db" },
