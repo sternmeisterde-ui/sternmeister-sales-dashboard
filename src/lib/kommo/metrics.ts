@@ -92,6 +92,35 @@ export function isQualLead(lead: KommoLead): boolean {
  *  should prefer `isQualLead`. Both now share the same implementation. */
 export const hasCategoryLetter = isQualLead;
 
+/** Kommo CFV 869928 «LANGUAGE_LEVEL» — уровень немецкого из квиза/анкеты.
+ *  Зеркалится в analytics.leads_cohort.language_level (миграция 0019). */
+export const LANGUAGE_LEVEL_FIELD_ID = 869928;
+
+/** Корзина уровня языка для строк Дейли A2 / B1 / «B2 и выше» (2026-08-06):
+ *  «B2 и выше» = B2, C1, C2. Значения поля — свободный текст
+ *  («A2 (Базовый уровень) — …», встречается кириллическое «В1»), поэтому
+ *  нормализуем первые два символа с транслитом кириллических АВС → ABC —
+ *  тот же приём, что category-dynamics/data.ts. A1 и пустые значения не
+ *  попадают ни в одну корзину. */
+export function languageLevelBucket(lead: KommoLead): "A2" | "B1" | "B2PLUS" | null {
+  const f = (lead.custom_fields_values || []).find(
+    (x) => x.field_id === LANGUAGE_LEVEL_FIELD_ID,
+  );
+  const raw = f?.values?.[0]?.value;
+  if (typeof raw !== "string") return null;
+  const head = raw
+    .trim()
+    .slice(0, 2)
+    .toUpperCase()
+    .replace(/А/g, "A")
+    .replace(/В/g, "B")
+    .replace(/С/g, "C");
+  if (head === "A2") return "A2";
+  if (head === "B1") return "B1";
+  if (head === "B2" || head === "C1" || head === "C2") return "B2PLUS";
+  return null;
+}
+
 export interface UserCallMetrics {
   kommoUserId: number;
   callsTotal: number;          // total outgoing calls

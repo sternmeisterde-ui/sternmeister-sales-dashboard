@@ -12,7 +12,7 @@ import { analyticsDb } from "@/lib/db/analytics";
 import { leadsCohort } from "@/lib/db/schema-analytics";
 import { and, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { KommoLead } from "@/lib/kommo/types";
-import { SYNTH_LOSS_REASON_FIELD_ID } from "@/lib/kommo/metrics";
+import { SYNTH_LOSS_REASON_FIELD_ID, LANGUAGE_LEVEL_FIELD_ID } from "@/lib/kommo/metrics";
 import { cached } from "@/lib/kommo/cache";
 
 export interface AnalyticsLeadsFilter {
@@ -103,6 +103,17 @@ async function fetchAnalyticsLeads(opts: AnalyticsLeadsFilter): Promise<KommoLea
         field_code: null,
         field_type: "select",
         values: [{ value: "", enum_id: Number(r.nonQualEnumId) }],
+      });
+    }
+    // Synth: language level (CFV 869928) — строки Дейли A2/B1/«B2 и выше»
+    // считают по languageLevelBucket() из этого поля.
+    if (r.languageLevel && r.languageLevel.trim() !== "") {
+      customFields.push({
+        field_id: LANGUAGE_LEVEL_FIELD_ID,
+        field_name: "LANGUAGE_LEVEL",
+        field_code: null,
+        field_type: "text",
+        values: [{ value: r.languageLevel }],
       });
     }
     // Synth: carry system-level loss_reason text so isQualLead can match

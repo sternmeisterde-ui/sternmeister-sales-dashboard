@@ -188,11 +188,11 @@ export const MED_BERATER_STATUSES = {
 // B1 = "Консультация проведена" — consultation done, ready for docs
 // B2+ = "Документы отправлены в ДЦ" and beyond — advanced stage
 //
-// TODO(2026-04-24): User asked to tie A2/B1/B2+ to Kommo CFV[869928]
-// ("технически поля") instead of status IDs. That requires (1) adding CFV
-// 869928 to the analytics.leads_cohort ETL mirror and (2) rewriting the
-// status-membership logic below into a CFV value lookup. Status-based
-// fallback stays in place until the CFV mirror exists.
+// DONE(2026-08-06): Дейли-строки A2/B1/«B2 и выше» переведены на CFV 869928
+// (языковой уровень, зеркало leads_cohort.language_level) — см.
+// languageLevelBucket() в kommo/metrics.ts и getFunnelFact в build-response.
+// Статусные наборы ниже остаются для computeFunnelCounts (LeadFunnelCounts
+// a2/b1/b2plus) — Дейли их больше не читает.
 
 /** Status IDs that count as "A2" (contact made, not yet consulted) */
 export const A2_STATUSES: Set<number> = new Set([
