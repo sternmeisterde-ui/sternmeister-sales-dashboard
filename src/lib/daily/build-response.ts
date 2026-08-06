@@ -28,6 +28,7 @@ import { resolveByAlias } from "@/lib/daily/name-aliases";
 import { getB2BPipelineStatsSQL, getB2BPerManagerStatsSQL, type B2BPipelineStats as B2BStatsSQL } from "@/lib/daily/analytics-b2b";
 import { B2B_FIXED_PLAN_DEFAULTS } from "@/lib/daily/metrics-config-b2b";
 import { getAnalyticsLeads, getAnalyticsStatusChangeCount } from "@/lib/daily/analytics-leads";
+import { getActiveByActivityCount } from "@/lib/daily/activity-online-fallback";
 import { reconstructSnapshotAt, type HistoricalSnapshot } from "@/lib/daily/historical-snapshot";
 import { parseDateBoundary } from "@/lib/utils/date";
 
@@ -979,11 +980,20 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   // "Менеджеров на линии факт": для month/week — unique managers from schedule
   // (not just active master_managers). Для day — СТРОГО по графику (лист
-  // «График на месяц»): только явные смены; fallback на managers.length
-  // лишь когда на дату нет ни одной строки отдела в manager_schedule.
+  // «График на месяц»): только явные смены. Если на дату нет ни одной строки
+  // отдела — резерв (2026-08-06, b2g): менеджер «на линии», когда его
+  // активность за день > 2ч (минуты звонков + CRM, как во вкладке
+  // «Активность»). Последний рубеж — прежний managers.length.
   let managersOnLineCount: number;
   if (period === "day") {
-    managersOnLineCount = explicitOnLineCount ?? managers.length;
+    if (explicitOnLineCount !== null) {
+      managersOnLineCount = explicitOnLineCount;
+    } else {
+      const activityCount = department === "b2g"
+        ? await getActiveByActivityCount("b2g", dateStr, allManagers.map((m) => ({ id: m.id, name: m.name })))
+        : null;
+      managersOnLineCount = activityCount ?? managers.length;
+    }
   } else {
     const fromDayStr = new Date(from * 1000).toISOString().slice(0, 10);
     const toDayStr = new Date(to * 1000).toISOString().slice(0, 10);
