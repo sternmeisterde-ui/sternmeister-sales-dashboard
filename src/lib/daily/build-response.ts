@@ -668,16 +668,29 @@ export async function buildDailyResponse(department: string, period: string, dat
 
   const plans = monthlyPlans;
 
-  // Schedule-driven: when any schedule rows exist for the date, managers WITHOUT
-  // a row are treated as off (not on shift). Only when the day is entirely
-  // unscheduled (scheduleMap === null) do we fall back to counting everyone.
-  // Schedule values "8" (полный) and "4" (неполный) → isOnLine = true; "-" / "о" → false.
+  // Schedule-driven day filter. scheduleMap === null (дата вообще без строк)
+  // → все работают. Менеджер БЕЗ строки на дату тоже считается работающим:
+  // лист «График на месяц» (sync-b2g-schedule) пока ведёт только часть
+  // отдела (авг-2026 — 4 человека 1-й линии), и прежнее правило
+  // «нет строки → выходной» молча выкидывало линии 2/3 из всех дневных
+  // разрезов (а заодно весь b2b, у которого строк на эти даты нет).
+  // Выходной — только ЯВНАЯ отметка в графике (is_on_line=false).
   const isManagerOnLine = (managerId: string): boolean => {
     if (scheduleMap === null) return true;
     const entry = scheduleMap.get(managerId);
-    if (entry === undefined) return false;
+    if (entry === undefined) return true;
     return entry;
   };
+
+  // Строго по графику (листу): количество ЯВНЫХ смен на дату среди
+  // менеджеров отдела. null — на дату нет ни одной строки отдела.
+  const explicitOnLineCount = scheduleMap === null
+    ? null
+    : (() => {
+        const n = allManagers.filter((m) => scheduleMap.get(m.id) === true).length;
+        const hasDeptRows = allManagers.some((m) => scheduleMap.has(m.id));
+        return hasDeptRows ? n : null;
+      })();
 
   const managers = period === "day"
     ? allManagers.filter((m) => isManagerOnLine(m.id))
@@ -965,11 +978,12 @@ export async function buildDailyResponse(department: string, period: string, dat
   };
 
   // "Менеджеров на линии факт": для month/week — unique managers from schedule
-  // (not just active master_managers). Для day — используется schedule filter
-  // в `managers` фильтр выше; здесь fallback на managers.length.
+  // (not just active master_managers). Для day — СТРОГО по графику (лист
+  // «График на месяц»): только явные смены; fallback на managers.length
+  // лишь когда на дату нет ни одной строки отдела в manager_schedule.
   let managersOnLineCount: number;
   if (period === "day") {
-    managersOnLineCount = managers.length;
+    managersOnLineCount = explicitOnLineCount ?? managers.length;
   } else {
     const fromDayStr = new Date(from * 1000).toISOString().slice(0, 10);
     const toDayStr = new Date(to * 1000).toISOString().slice(0, 10);
