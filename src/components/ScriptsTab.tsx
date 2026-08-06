@@ -41,6 +41,10 @@ interface ScriptSection {
 
 interface ScriptContent {
   sections: ScriptSection[];
+  sourceVersion?: string;
+  sourceDocument?: string;
+  sourceSheets?: string[];
+  effectiveFrom?: string;
 }
 
 interface ScriptData {
@@ -469,6 +473,18 @@ function normalizeContent(content: unknown): ScriptContent {
   const c = content as { sections?: unknown };
   if (!Array.isArray(c.sections)) return { sections: [] };
   return {
+    sourceVersion: typeof (c as { sourceVersion?: unknown }).sourceVersion === "string"
+      ? (c as { sourceVersion: string }).sourceVersion
+      : undefined,
+    sourceDocument: typeof (c as { sourceDocument?: unknown }).sourceDocument === "string"
+      ? (c as { sourceDocument: string }).sourceDocument
+      : undefined,
+    sourceSheets: Array.isArray((c as { sourceSheets?: unknown }).sourceSheets)
+      ? (c as { sourceSheets: string[] }).sourceSheets
+      : undefined,
+    effectiveFrom: typeof (c as { effectiveFrom?: unknown }).effectiveFrom === "string"
+      ? (c as { effectiveFrom: string }).effectiveFrom
+      : undefined,
     sections: c.sections.map((s, sIdx) => {
       const sec = s as Partial<ScriptSection> | null;
       if (!sec || typeof sec !== "object") return { id: `s${sIdx}`, title: null, items: [] };
@@ -505,6 +521,7 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
   const [content, setContent] = useState<ScriptContent>({ sections: [] });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [syncingV3, setSyncingV3] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -647,6 +664,25 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
     }
   };
 
+  const handleSyncV3 = async () => {
+    if (!isAdmin || department !== "b2g" || activeLine !== "1") return;
+    if (!window.confirm("Заменить скрипт квалификатора на канонический v3.0 из репозитория?")) return;
+    setSyncingV3(true);
+    setError(null);
+    setSaveSuccess(false);
+    try {
+      const res = await fetch("/api/scripts/sync-b2g-line1-v3", { method: "POST" });
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(json.error ?? "Ошибка синхронизации");
+      await load(department, activeLine);
+      setSaveSuccess(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingV3(false);
+    }
+  };
+
   const totalBlocks = content.sections.reduce((s, sec) => s + sec.items.length, 0);
   const hasMultipleSections = content.sections.length > 1;
 
@@ -665,6 +701,17 @@ export default function ScriptsTab({ department, lineFilter, isAdmin }: ScriptsT
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {isAdmin && department === "b2g" && activeLine === "1" && content.sourceVersion !== "3.0" && (
+              <button
+                type="button"
+                onClick={handleSyncV3}
+                disabled={syncingV3}
+                className="flex items-center gap-1.5 text-xs text-blue-200 bg-blue-500/15 hover:bg-blue-500/25 px-3 py-1.5 rounded-lg border border-blue-500/25 transition-colors disabled:opacity-50"
+              >
+                {syncingV3 ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                Загрузить скрипт v3.0
+              </button>
+            )}
             {data?.notionUrl && (
               <a
                 href={data.notionUrl}
