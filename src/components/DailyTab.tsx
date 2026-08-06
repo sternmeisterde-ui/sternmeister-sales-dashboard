@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import DinoLoader from "@/components/DinoLoader";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
+import { dailySections } from "@/lib/daily/metrics-config";
 import {
   todayBerlinDate,
   berlinCivilComponents,
@@ -186,6 +187,12 @@ const DURATION_MIN_KEYS = new Set<string>([
   "sla_p",
 ]);
 
+// Процентные метрики — в ячейке дописывается знак «%». Множество берётся
+// из конфига метрик (unit === "%"), чтобы не дублировать список руками.
+const PERCENT_KEYS = new Set<string>(
+  dailySections.flatMap((s) => s.metrics.filter((m) => m.unit === "%").map((m) => m.key)),
+);
+
 function formatDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "—";
   const rounded = Math.round(totalSeconds);
@@ -203,6 +210,7 @@ function formatCell(value: string | number | null | undefined, metricKey: string
   if (!Number.isFinite(n)) return String(value);
   if (DURATION_MIN_KEYS.has(metricKey)) return formatDuration(n * 60);
   if (DURATION_SEC_KEYS.has(metricKey)) return formatDuration(n);
+  if (PERCENT_KEYS.has(metricKey)) return `${formatCellNumber(value)}%`;
   return formatCellNumber(value);
 }
 
