@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { getBotRoleplaysOnDay } from "@/lib/funnel/bot-roleplays";
 import { getLeadNames } from "@/lib/funnel/clients";
+import { canAccessFunnel } from "@/lib/funnel/access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,12 +12,12 @@ const KOMMO_BASE = "https://sternmeister.kommo.com/leads/detail";
 /**
  * GET /api/funnel/bot-roleplay-day?day=YYYY-MM-DD
  * Кто и сколько тренировался с ботом в этот день (drill по точке графика).
- * Только admin. Без BERATER_BOT_DATABASE_URL — пустой список (graceful).
+ * Admin + точечный ограниченный доступ. Без БД бота — пустой список (graceful).
  */
 export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (session.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (!canAccessFunnel(session)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
   const day = req.nextUrl.searchParams.get("day");
   if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {

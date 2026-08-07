@@ -88,10 +88,13 @@ interface RealCohortRow {
 export default function FunnelTab({
   department: _department,
   vertical,
+  limitedToClients = false,
 }: {
   department: Department;
   /** Вертикаль b2g (Бух/Мед/Все) из глобального тоггла. Без неё — бух (legacy). */
   vertical?: "buh" | "med" | "all";
+  /** Точечный доступ менеджеров: только верхняя часть режима «Клиенты». */
+  limitedToClients?: boolean;
 }) {
   const defaultFilters = useMemo(() => buildDefaultFilters(), []);
   const [filters, setFilters] = useState<FunnelFiltersState>(defaultFilters);
@@ -252,12 +255,13 @@ export default function FunnelTab({
   // Когорты⇄Клиенты не перезапрашивает данные — когорты остаются в state и
   // отрисовываются мгновенно при возврате.
   useEffect(() => {
+    if (limitedToClients) return;
     const id = setTimeout(() => {
       fetchCohorts(filters);
       fetchOverview(filters);
     }, 250);
     return () => clearTimeout(id);
-  }, [filters, fetchCohorts, fetchOverview]);
+  }, [filters, fetchCohorts, fetchOverview, limitedToClients]);
 
   // ── Фетч динамических фильтр-опций при смене дат (debounce 150ms) ──
   const fetchFilterOptions = useCallback(
@@ -309,12 +313,13 @@ export default function FunnelTab({
   );
 
   useEffect(() => {
+    if (limitedToClients) return;
     if (!filters.dateRange.start || !filters.dateRange.end) return;
     const start = filters.dateRange.start;
     const end = filters.dateRange.end;
     const id = setTimeout(() => fetchFilterOptions(start, end), 150);
     return () => clearTimeout(id);
-  }, [filters.dateRange.start, filters.dateRange.end, fetchFilterOptions]);
+  }, [filters.dateRange.start, filters.dateRange.end, fetchFilterOptions, limitedToClients]);
 
   // Моки нужны как fallback для C3/C4 (этап I подключит real).
   const mockCohorts = useMemo(() => generateAllMockCohorts(), []);
@@ -467,6 +472,19 @@ export default function FunnelTab({
   }, [filters, vertical]);
 
   const activeBundle = conversionBundles[activeId];
+
+  if (limitedToClients) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-3 px-1">
+          <Workflow className="w-5 h-5 text-blue-400" />
+          <h2 className="text-lg font-semibold text-white">Клиенты</h2>
+          <span className="text-xs text-slate-400">Тренировки и уровни языка</span>
+        </div>
+        <ClientsView filters={defaultFilters} vertical={vertical} limited />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">

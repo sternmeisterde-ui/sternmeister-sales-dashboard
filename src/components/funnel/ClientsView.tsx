@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Users, Loader2, TriangleAlert, ArrowUp, ArrowDown, ArrowLeftRight, Trophy, ChartPie, Languages, X, TrendingUp } from "lucide-react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Line, CartesianGrid, ReferenceLine, LabelList } from "recharts";
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, ComposedChart, Area, Line, CartesianGrid, ReferenceLine, LabelList } from "recharts";
 import { addDaysCivil, berlinCivilDate, fmtLocalDate, todayBerlinDate } from "@/lib/utils/date";
 import CalendarPicker, { type DateRange } from "@/components/CalendarPicker";
 import type { FunnelFiltersState } from "@/lib/funnel/types";
@@ -33,6 +33,8 @@ interface Props {
   filters: FunnelFiltersState;
   /** Вертикаль b2g (Бух/Мед/Все) из глобального тоггла. Без неё — бух (legacy). */
   vertical?: "buh" | "med" | "all";
+  /** Скрыть корреляции, готовность и клиентские таблицы для точечного доступа. */
+  limited?: boolean;
 }
 
 const CATEGORY = {
@@ -701,6 +703,104 @@ function TrainingCompareTooltip({ active, payload, metric, cumulative }: {
   );
 }
 
+/** Обычный режим без сравнения: оба показателя одного дня в одной подсказке. */
+function TrainingCombinedTooltip({ active, payload, cumulative }: {
+  active?: boolean;
+  payload?: Array<{ payload?: TrainingChartPoint }>;
+  cumulative: boolean;
+}) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point || !point.aDate) return null;
+  return (
+    <div style={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, padding: "7px 10px" }}>
+      <div style={{ color: "#94a3b8", marginBottom: 4 }}>
+        {shortTrainingDate(point.aDate)}{cumulative ? " · нарастающим итогом" : ""}
+      </div>
+      <div style={{ color: "#e2e8f0" }}>
+        Тренировок: <b>{point.totalA ?? 0}</b>{" "}
+        <span style={{ color: "#64748b" }}>(Ур.1 {point.lvl1A ?? 0} · Ур.2 {point.lvl2A ?? 0})</span>
+      </div>
+      <div style={{ color: "#e2e8f0" }}>
+        Уникальных клиентов: <b>{point.usersA ?? 0}</b>
+      </div>
+    </div>
+  );
+}
+
+/** Единый график из прежней версии: область = тренировки, линия = уникальные. */
+function TrainingCombinedChart({
+  data,
+  cumulative,
+  range,
+  onPointClick,
+}: {
+  data: TrainingChartPoint[];
+  cumulative: boolean;
+  range: string;
+  onPointClick: (point: TrainingChartPoint) => void;
+}) {
+  return (
+    <div className="glass-panel rounded-2xl border border-white/5 p-4 min-w-0">
+      <div className="flex items-start justify-between gap-2 mb-2 flex-wrap">
+        <div>
+          <div className="text-sm font-medium text-slate-200">Тренировки и уникальные клиенты</div>
+          <div className="text-[11px] text-slate-500">
+            {cumulative ? "нарастающим итогом" : "по дням"} · клик по точке — список клиентов
+          </div>
+        </div>
+        <span className="text-[10px] text-slate-500">{range}</span>
+      </div>
+      <div className="h-56">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart
+            data={data}
+            margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
+            onClick={(state) => {
+              const event = state as unknown as {
+                activePayload?: Array<{ payload?: TrainingChartPoint }>;
+              };
+              const point = event.activePayload?.[0]?.payload;
+              if (point) onPointClick(point);
+            }}
+            className="cursor-pointer"
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis
+              dataKey="label"
+              tick={{ fill: "#94a3b8", fontSize: 11 }}
+              axisLine={false}
+              tickLine={false}
+              minTickGap={24}
+            />
+            <YAxis allowDecimals={false} tick={{ fill: "#94a3b8", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <Tooltip content={<TrainingCombinedTooltip cumulative={cumulative} />} />
+            <Legend wrapperStyle={{ fontSize: 12, color: "#cbd5e1" }} />
+            <Area
+              type="linear"
+              dataKey="totalA"
+              stroke="#60a5fa"
+              fill="rgba(96,165,250,0.28)"
+              name="Тренировки"
+              activeDot={{ r: 5 }}
+              isAnimationActive={false}
+            />
+            <Line
+              type="linear"
+              dataKey="usersA"
+              stroke="#f0b63d"
+              strokeWidth={2.5}
+              dot={false}
+              activeDot={{ r: 5 }}
+              name="Уникальные клиенты"
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
 function TrainingMetricChart({
   metric,
   data,
@@ -896,9 +996,9 @@ function TrainingComparisonTable({ pointsA, pointsB, summaryA, summaryB, labelA,
 // тренировки — активность практики и не зависят от даты термина клиента.
 function TrainingChart({ onDrill, vertical }: { onDrill: DrillFn; vertical?: "buh" | "med" | "all" }) {
   const [rangeA, setRangeA] = useState<TrainingRange>(defaultTrainingRange);
-  // Сравнение включено сразу: таблица A/B/Δ — самостоятельная часть раздела
-  // «Клиенты», поэтому не должна быть спрятана за первым кликом по переключателю.
-  const [compareOn, setCompareOn] = useState(true);
+  // По умолчанию показываем привычный единый график. Сравнение пользователь
+  // включает явно — тогда появляются период B, таблица A/B/Δ и два графика.
+  const [compareOn, setCompareOn] = useState(false);
   const [cumulative, setCumulative] = useState(false);
   const [rangeBOverride, setRangeBOverride] = useState<{ sig: string; start: Date; end: Date } | null>(null);
   const [loadedA, setLoadedA] = useState<{ key: string; data: TrainingApiResponse } | null>(null);
@@ -1100,6 +1200,13 @@ function TrainingChart({ onDrill, vertical }: { onDrill: DrillFn; vertical?: "bu
             <div className="glass-panel rounded-2xl border border-white/5 px-4 py-12 text-center text-sm text-slate-500">
               За выбранные периоды завершённых ролевок нет.
             </div>
+          ) : !compareOn ? (
+            <TrainingCombinedChart
+              data={chartData}
+              cumulative={cumulative}
+              range={trainingRangeLabel(aFrom, aTo)}
+              onPointClick={openTrainingDay}
+            />
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
               <TrainingMetricChart
@@ -1592,7 +1699,7 @@ function ReadinessSummaryWidget({
   );
 }
 
-export default function ClientsView({ filters: _filters, vertical }: Props) {
+export default function ClientsView({ filters: _filters, vertical, limited = false }: Props) {
   const [data, setData] = useState<ClientsResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1844,37 +1951,41 @@ export default function ClientsView({ filters: _filters, vertical }: Props) {
             <RoleplayDistribution clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
             <LanguageLevels clients={chartClients} onDrill={(title, rows) => setDrill({ title, rows })} />
           </div>
-          <CorrelationPanel vertical={vertical} />
-          <ReadinessSummaryWidget
-            summary={data.summary}
-            compareSummary={compareData?.summary ?? null}
-            compareTermin={compareTermin}
-            onCompareChange={setCompareTermin}
-            compareLoading={compareLoading}
-          />
-          <ClientTable
-            group={filterGroup(data.active, manager, stage)}
-            title="Клиенты в работе"
-            icon={<Users className="w-4 h-4 text-blue-400" />}
-            onRowClick={setSelected}
-            onFilterManager={setManager}
-            onFilterStage={setStage}
-          />
-          <ClientTable
-            group={filterGroup(data.won, manager, stage)}
-            title="Гутшайн одобрен"
-            icon={<Trophy className="w-4 h-4 text-emerald-400" />}
-            onRowClick={setSelected}
-            onFilterManager={setManager}
-            onFilterStage={setStage}
-          />
-          {/* Внизу и со своим периодом: тренировки не привязаны к дате термина. */}
+          {/* Тренировки не привязаны к дате термина и используют свой период. */}
           <TrainingChart onDrill={(title, rows) => setDrill({ title, rows })} vertical={vertical} />
+          {!limited && (
+            <>
+              <CorrelationPanel vertical={vertical} />
+              <ReadinessSummaryWidget
+                summary={data.summary}
+                compareSummary={compareData?.summary ?? null}
+                compareTermin={compareTermin}
+                onCompareChange={setCompareTermin}
+                compareLoading={compareLoading}
+              />
+              <ClientTable
+                group={filterGroup(data.active, manager, stage)}
+                title="Клиенты в работе"
+                icon={<Users className="w-4 h-4 text-blue-400" />}
+                onRowClick={setSelected}
+                onFilterManager={setManager}
+                onFilterStage={setStage}
+              />
+              <ClientTable
+                group={filterGroup(data.won, manager, stage)}
+                title="Гутшайн одобрен"
+                icon={<Trophy className="w-4 h-4 text-emerald-400" />}
+                onRowClick={setSelected}
+                onFilterManager={setManager}
+                onFilterStage={setStage}
+              />
+            </>
+          )}
         </>
       )}
 
       {drill && <DrillModal title={drill.title} rows={drill.rows} onClose={() => setDrill(null)} />}
-      {selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
+      {!limited && selected && <ClientDrawer client={selected} onClose={() => setSelected(null)} />}
     </div>
   );
 }

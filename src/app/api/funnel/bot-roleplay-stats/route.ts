@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { getBotTrainingStats } from "@/lib/funnel/bot-roleplays";
+import { canAccessFunnel } from "@/lib/funnel/access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,13 +9,13 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/funnel/bot-roleplay-stats?from=YYYY-MM-DD&to=YYYY-MM-DD
  * Дневная статистика тренировок и целевой пул для сравнительной таблицы.
- * Только admin; данные тренировок читаются из analytics-зеркала.
+ * Admin + точечный ограниченный доступ; данные читаются из analytics-зеркала.
  * Ответ больше не зависит от модуля рассылок.
  */
 export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (session.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (!canAccessFunnel(session)) return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
   const sp = req.nextUrl.searchParams;
   const re = /^\d{4}-\d{2}-\d{2}$/;

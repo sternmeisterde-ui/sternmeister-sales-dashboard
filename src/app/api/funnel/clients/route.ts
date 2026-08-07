@@ -4,6 +4,7 @@ import { computeClients } from "@/lib/funnel/clients";
 import { parseLangBuckets } from "@/lib/funnel/compute";
 import { todayBerlinDate, fmtLocalDate } from "@/lib/utils/date";
 import type { Vertical } from "@/lib/kommo/pipeline-config";
+import { canAccessFunnel } from "@/lib/funnel/access";
 
 /** Вертикаль b2g из query (buh/med/all). Иначе undefined = буховая (legacy). */
 function parseVerticalParam(raw: string | null): Vertical | undefined {
@@ -16,14 +17,14 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/funnel/clients?termin_from=YYYY-MM-DD&termin_to=YYYY-MM-DD&limit=
  * Таблица клиентов со score «готовности» (ТЗ §5.4), фильтр — по дате термина.
- * По умолчанию — сегодня (Berlin). Только admin.
+ * По умолчанию — сегодня (Berlin). Admin + точечный ограниченный доступ.
  */
 export async function GET(req: NextRequest) {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  if (session.role !== "admin") {
+  if (!canAccessFunnel(session)) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 

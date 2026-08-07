@@ -24,6 +24,7 @@ import AnalysisTab from "@/components/AnalysisTab";
 import LookerTab from "@/components/LookerTab";
 import TerminTab from "@/components/TerminTab";
 import FunnelTab from "@/components/FunnelTab";
+import { canAccessFunnel, hasLimitedFunnelClientsAccess } from "@/lib/funnel/access";
 import BroadcastTab from "@/components/BroadcastTab";
 import EnpsTab from "@/components/EnpsTab";
 import ComplaintsTab from "@/components/ComplaintsTab";
@@ -457,7 +458,8 @@ export default function Dashboard() {
             // Пробуем сохранить таб из URL hash. Если он admin-only или не задан —
             // fallback на домашнюю вкладку менеджера (см. defaultManagerTab).
             const fromHash = readTabFromHash();
-            if (!fromHash || tabAdminOnly(fromHash, data.department) || !tabContentAllowed(fromHash, data.department)) {
+            const funnelAllowed = fromHash === "funnel" && canAccessFunnel(data);
+            if (!fromHash || (tabAdminOnly(fromHash, data.department) && !funnelAllowed) || !tabContentAllowed(fromHash, data.department)) {
               setActiveTab(defaultManagerTab(data.department));
             }
           } else {
@@ -508,14 +510,15 @@ export default function Dashboard() {
     const onHashChange = () => {
       const tab = readTabFromHash();
       if (tab && tab !== activeTab) {
-        if (!isAdmin && tabAdminOnly(tab, activeDepartment)) return; // запрещаем manager-у admin-таб
+        const funnelAllowed = tab === "funnel" && session != null && canAccessFunnel(session);
+        if (!isAdmin && tabAdminOnly(tab, activeDepartment) && !funnelAllowed) return; // запрещаем manager-у admin-таб
         if (!tabContentAllowed(tab, activeDepartment)) return; // напр. #real_calls у Коммерсов
         setActiveTab(tab);
       }
     };
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [activeTab, isAdmin, activeDepartment]);
+  }, [activeTab, isAdmin, activeDepartment, session]);
 
   // Safety net: если активная вкладка недоступна в текущем отделе (deep-link
   // #funnel при B2B-сессии, ручная правка hash, смена отдела) — сбрасываем на
@@ -1054,7 +1057,11 @@ export default function Dashboard() {
   // Навигация: пункты по роли и отделу. У Коммерсов Критерии/Скрипты живут внутри
   // вкладки «Артефакты», поэтому отдельных пунктов для них нет (см. NAV_ITEMS).
   const visibleNavItems = NAV_ITEMS
-    .filter((item) => isAdmin || !tabAdminOnly(item.id, activeDepartment))
+    .filter((item) =>
+      isAdmin ||
+      !tabAdminOnly(item.id, activeDepartment) ||
+      (item.id === "funnel" && session != null && canAccessFunnel(session))
+    )
     .filter((item) => tabAllowedInDept(item.id, activeDepartment));
 
   // У Коммерсов «ОКК» (real_calls) — раскрываемая группа; её подпункты:
@@ -1360,10 +1367,11 @@ export default function Dashboard() {
         {/* Render-гейт по отделу — детерминированно, не зависит от порядка эффектов:
             funnel/termins (только Бух Гос) никогда не рендерятся под Коммерсами,
             даже на кадр до сброса вкладки safety-net эффектом. См. §6.1. */}
-        {activeTab === "funnel" && tabAllowedInDept("funnel", activeDepartment) && (
+        {activeTab === "funnel" && tabAllowedInDept("funnel", activeDepartment) && session != null && canAccessFunnel(session) && (
           <FunnelTab
             department={activeDepartment}
             vertical={activeDepartment === "b2g" ? activeVertical : undefined}
+            limitedToClients={hasLimitedFunnelClientsAccess(session)}
           />
         )}
 
