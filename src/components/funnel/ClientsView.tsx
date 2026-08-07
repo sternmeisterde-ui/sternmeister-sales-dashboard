@@ -756,10 +756,12 @@ function TrainingCombinedChart({
             data={data}
             margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
             onClick={(state) => {
-              const event = state as unknown as {
-                activePayload?: Array<{ payload?: TrainingChartPoint }>;
-              };
-              const point = event.activePayload?.[0]?.payload;
+              // Возвращаем рабочую механику прежнего графика: Recharts 3
+              // стабильно отдаёт activeLabel, но не activePayload при клике.
+              const label = (state as { activeLabel?: string | number } | null)?.activeLabel;
+              const point = label == null
+                ? undefined
+                : data.find((item) => String(item.label) === String(label));
               if (point) onPointClick(point);
             }}
             className="cursor-pointer"
@@ -844,10 +846,10 @@ function TrainingMetricChart({
             data={data}
             margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
             onClick={(state) => {
-              const event = state as unknown as {
-                activePayload?: Array<{ payload?: TrainingChartPoint }>;
-              };
-              const point = event.activePayload?.[0]?.payload;
+              const label = (state as { activeLabel?: string | number } | null)?.activeLabel;
+              const point = label == null
+                ? undefined
+                : data.find((item) => String(item.label) === String(label));
               if (point) onPointClick(point);
             }}
             className="cursor-pointer"
@@ -1102,12 +1104,16 @@ function TrainingChart({ onDrill, vertical }: { onDrill: DrillFn; vertical?: "bu
       .then((groups) => {
         const rows: DrillRow[] = groups.flatMap(({ period, clients }) =>
           clients.map((client) => ({
-            key: `${period.key}:${client.leadId}`,
+            key: compareOn ? `${period.key}:${client.leadId}` : client.leadId,
             name: client.name,
             kommoUrl: client.kommoUrl,
             primary: `${compareOn ? `${period.key} · ` : ""}${client.count} рол.`,
           })),
         );
+        if (!compareOn && periods[0]) {
+          onDrill(`Тренировки ${periods[0].day} — кто сколько прошёл`, rows);
+          return;
+        }
         const dates = periods.map((p) => `${p.key} ${shortTrainingDate(p.day)}`).join(" · ");
         onDrill(`Тренировки — ${dates}`, rows);
       })
